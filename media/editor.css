@@ -145,10 +145,18 @@ body[data-toc-enabled="false"] #editor.toc-visible + #editor-scrollbar-indicator
     cursor: ns-resize;
 }
 
+body[data-platform="mac"] #editor-scrollbar-thumb {
+    cursor: default;
+}
+
 body.scrollbar-dragging #editor-scrollbar-thumb {
     cursor: grabbing;
     background: var(--vscode-scrollbarSlider-hoverBackground, var(--vscode-scrollbarSlider-background, rgba(121, 121, 121, 0.55)));
     opacity: 1;
+}
+
+body[data-platform="mac"].scrollbar-dragging #editor-scrollbar-thumb {
+    cursor: default;
 }
 
 #editor.toc-visible {

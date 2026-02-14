@@ -113,6 +113,7 @@ import { SearchManager } from './modules/SearchManager.js';
         document.body.dataset.toolbarVisible = settingsState.toolbarVisible ? 'true' : 'false';
         document.body.dataset.tocEnabled = settingsState.tocEnabled ? 'true' : 'false';
         document.body.dataset.listDashStyle = settingsState.listDashStyle ? 'true' : 'false';
+        document.body.dataset.platform = isMac ? 'mac' : 'other';
     };
     syncBodySettings();
 
