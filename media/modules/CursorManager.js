@@ -979,7 +979,11 @@ export class CursorManager {
 
         if (container.nodeType === Node.TEXT_NODE) {
             const text = container.textContent || '';
-            if (offset < text.length) {
+            let probeOffset = Math.max(0, Math.min(offset, text.length));
+            while (probeOffset < text.length && this._isInlineBoundaryChar(text[probeOffset])) {
+                probeOffset++;
+            }
+            if (probeOffset < text.length) {
                 return null;
             }
             const sibling = this._getNextSiblingForNavigation(container);
@@ -2607,6 +2611,52 @@ export class CursorManager {
             }
         }
 
+        // 画像左エッジ（画像直前）からの↑は、画像選択に入らず前ブロック末尾へ移動する。
+        // 上行 <-> 画像左エッジ の往復を安定化する。
+        if (range.collapsed) {
+            const imageAhead = this._getImageAheadFromCollapsedRange(range);
+            if (imageAhead) {
+                let imageBlock = imageAhead.nodeType === Node.ELEMENT_NODE ? imageAhead : imageAhead.parentElement;
+                while (imageBlock && imageBlock !== this.editor && !this.domUtils.isBlockElement(imageBlock)) {
+                    imageBlock = imageBlock.parentElement;
+                }
+                const boundaryNode = (imageBlock && imageBlock !== this.editor) ? imageBlock : imageAhead;
+                const leadingImage = (imageBlock && imageBlock !== this.editor)
+                    ? this._getLeadingImageInBlock(imageBlock)
+                    : (imageAhead.parentElement === this.editor ? imageAhead : null);
+                const isAtImageLeftEdge =
+                    leadingImage === imageAhead &&
+                    this._isCollapsedRangeAtNodeBoundary(range, imageAhead, 'before');
+
+                if (isAtImageLeftEdge) {
+                    const prevElement = this._getPrevNavigableElementInDocument(boundaryNode);
+                    if (prevElement) {
+                        if (prevElement.tagName === 'PRE' && this._selectCodeBlockLanguageLabel(prevElement, selection)) {
+                            return;
+                        }
+                        if (prevElement.tagName === 'HR') {
+                            const hrRange = document.createRange();
+                            hrRange.selectNode(prevElement);
+                            selection.removeAllRanges();
+                            selection.addRange(hrRange);
+                            return;
+                        }
+                        const newRange = document.createRange();
+                        const firstNode = this._getFirstNavigableTextNode(prevElement);
+                        if (firstNode) {
+                            newRange.setStart(firstNode, 0);
+                        } else {
+                            newRange.setStart(prevElement, 0);
+                        }
+                        newRange.collapse(true);
+                        selection.removeAllRanges();
+                        selection.addRange(newRange);
+                    }
+                    return;
+                }
+            }
+        }
+
         {
             const isEffectivelyEmptyBlock = (block) => {
                 if (!block) return false;
@@ -3661,6 +3711,15 @@ export class CursorManager {
                 selection.addRange(hrRange);
                 return true;
             }
+            const leadingImage = this._getLeadingImageInBlock(block);
+            if (leadingImage) {
+                const imageRange = document.createRange();
+                if (this._collapseRangeBeforeNode(imageRange, leadingImage)) {
+                    selection.removeAllRanges();
+                    selection.addRange(imageRange);
+                    return true;
+                }
+            }
             const newRange = document.createRange();
             const firstNode = this._getFirstNavigableTextNode(block);
             if (firstNode) {
@@ -3680,6 +3739,81 @@ export class CursorManager {
             selection.addRange(newRange);
             return true;
         };
+
+        // 画像右エッジ（画像直後）からの↓は、次ブロック先頭へ移動する。
+        // 空行が続くケースで視覚プローブが不安定になってもカーソルを見失わないようにする。
+        if (range.collapsed) {
+            const imageBehind = this._getImageBehindFromCollapsedRange(range);
+            if (imageBehind && this._isCollapsedRangeAtNodeBoundary(range, imageBehind, 'after')) {
+                const imageBlock = getBlockFromContainer(imageBehind);
+                const trailingImage = imageBlock
+                    ? this._getTrailingImageInBlock(imageBlock)
+                    : (imageBehind.parentElement === this.editor ? imageBehind : null);
+                if (trailingImage === imageBehind) {
+                    const boundaryNode = imageBlock || imageBehind;
+                    const nextAfterImage = this._getNextNavigableElementInDocument(boundaryNode);
+                    if (nextAfterImage && moveToBlockStart(nextAfterImage)) {
+                        return;
+                    }
+                    if (!nextAfterImage && boundaryNode && boundaryNode.parentElement) {
+                        const newP = document.createElement('p');
+                        newP.appendChild(document.createElement('br'));
+                        if (boundaryNode.nextSibling) {
+                            boundaryNode.parentElement.insertBefore(newP, boundaryNode.nextSibling);
+                        } else {
+                            boundaryNode.parentElement.appendChild(newP);
+                        }
+                        const newRange = document.createRange();
+                        newRange.setStart(newP, 0);
+                        newRange.collapse(true);
+                        selection.removeAllRanges();
+                        selection.addRange(newRange);
+                        if (notifyCallback) notifyCallback();
+                        return;
+                    }
+                }
+            }
+        }
+
+        // 画像左エッジ（画像直前）からの↓は、画像選択へ入らず次ブロックへ進む。
+        // 上行 -> 画像左エッジ -> 下行 の1ステップ移動を保証する。
+        if (range.collapsed) {
+            const imageAhead = this._getImageAheadFromCollapsedRange(range);
+            if (imageAhead) {
+                const imageBlock = getBlockFromContainer(imageAhead);
+                const imageBoundary = imageBlock || imageAhead;
+                const leadingImage = imageBlock
+                    ? this._getLeadingImageInBlock(imageBlock)
+                    : (imageAhead.parentElement === this.editor ? imageAhead : null);
+                const isAtImageLeftEdge =
+                    leadingImage === imageAhead &&
+                    this._isCollapsedRangeAtNodeBoundary(range, imageAhead, 'before');
+
+                if (isAtImageLeftEdge) {
+                    const nextAfterImage = this._getNextNavigableElementInDocument(imageBoundary);
+                    if (nextAfterImage && moveToBlockStart(nextAfterImage)) {
+                        return;
+                    }
+
+                    if (imageBoundary && imageBoundary.parentElement) {
+                        const newP = document.createElement('p');
+                        newP.appendChild(document.createElement('br'));
+                        if (imageBoundary.nextSibling) {
+                            imageBoundary.parentElement.insertBefore(newP, imageBoundary.nextSibling);
+                        } else {
+                            imageBoundary.parentElement.appendChild(newP);
+                        }
+                        const newRange = document.createRange();
+                        newRange.setStart(newP, 0);
+                        newRange.collapse(true);
+                        selection.removeAllRanges();
+                        selection.addRange(newRange);
+                        if (notifyCallback) notifyCallback();
+                        return;
+                    }
+                }
+            }
+        }
 
         const moveDownFromListBoundary = (listItem, currentX) => {
             if (!listItem) {
@@ -3836,13 +3970,22 @@ export class CursorManager {
         const originBlock = getBlockFromContainer(container);
         if (originBlock) {
             const nextBlock = this._getNextNavigableElementSibling(originBlock);
+            const caretRect = this._getCaretRect(range);
+            const blockRect = originBlock.getBoundingClientRect ? originBlock.getBoundingClientRect() : null;
+            const nearBottom = !caretRect || !blockRect
+                ? true
+                : (caretRect.bottom + 4 >= blockRect.bottom ||
+                    (blockRect.bottom - caretRect.bottom) <= Math.max(4, (caretRect.height || 16) * 0.6));
+            const nextLeadingImage = nextBlock ? this._getLeadingImageInBlock(nextBlock) : null;
+            if (nextLeadingImage && nearBottom) {
+                const imageRange = document.createRange();
+                if (this._collapseRangeBeforeNode(imageRange, nextLeadingImage)) {
+                    selection.removeAllRanges();
+                    selection.addRange(imageRange);
+                    return;
+                }
+            }
             if (nextBlock && isEffectivelyEmptyBlock(nextBlock)) {
-                const caretRect = this._getCaretRect(range);
-                const blockRect = originBlock.getBoundingClientRect ? originBlock.getBoundingClientRect() : null;
-                const nearBottom = !caretRect || !blockRect
-                    ? true
-                    : (caretRect.bottom + 4 >= blockRect.bottom ||
-                        (blockRect.bottom - caretRect.bottom) <= Math.max(4, (caretRect.height || 16) * 0.6));
                 if (nearBottom && moveToBlockStart(nextBlock)) {
                     return;
                 }
@@ -3962,6 +4105,15 @@ export class CursorManager {
                             selection.removeAllRanges();
                             selection.addRange(hrRange);
                             return true;
+                        }
+                        const leadingImage = this._getLeadingImageInBlock(between);
+                        if (leadingImage) {
+                            const imageRange = document.createRange();
+                            if (this._collapseRangeBeforeNode(imageRange, leadingImage)) {
+                                selection.removeAllRanges();
+                                selection.addRange(imageRange);
+                                return true;
+                            }
                         }
                         if (between === targetTopLevelBlock) {
                             break;
@@ -4415,12 +4567,47 @@ export class CursorManager {
         if (this._consumePendingForwardInlineCodeEntry(selection)) {
             return true;
         }
+        // Some WebView engines occasionally normalize a collapsed caret around an image
+        // as startContainer=IMG. Treat it as "left edge" so forward keeps:
+        // left edge -> image selected -> right edge.
+        if (range.collapsed &&
+            node &&
+            node.nodeType === Node.ELEMENT_NODE &&
+            node.tagName === 'IMG') {
+            const imageRange = document.createRange();
+            imageRange.selectNode(node);
+            selection.removeAllRanges();
+            selection.addRange(imageRange);
+            return true;
+        }
         if (this._normalizeCollapsedImageAnchor(selection, 'forward')) {
             return true;
         }
         range = selection.getRangeAt(0);
         node = range.startContainer;
         offset = range.startOffset;
+
+        // 画像右エッジ（画像直後）では、次の行（次ブロック）先頭へ進む。
+        if (range.collapsed) {
+            const imageBehind = this._getImageBehindFromCollapsedRange(range);
+            if (imageBehind && this._isCollapsedRangeAtNodeBoundary(range, imageBehind, 'after')) {
+                const imageBlock = getCurrentBlockForNode(imageBehind);
+                const trailingImage = imageBlock
+                    ? this._getTrailingImageInBlock(imageBlock)
+                    : (imageBehind.parentElement === this.editor ? imageBehind : null);
+                if (trailingImage === imageBehind) {
+                    const boundaryNode = imageBlock || imageBehind;
+                    const nextElementAfterImage = this._getNextNavigableElementInDocument(boundaryNode);
+                    if (nextElementAfterImage) {
+                        if (moveToBlockStart(nextElementAfterImage)) {
+                            return true;
+                        }
+                    } else {
+                        return true;
+                    }
+                }
+            }
+        }
 
         // Element-boundary before inline code should land on outside-left first.
         if (node && node.nodeType === Node.ELEMENT_NODE) {
@@ -5900,6 +6087,37 @@ export class CursorManager {
         const range = selection.getRangeAt(0);
         const node = range.startContainer;
 
+        const getCurrentBlockForNode = (targetNode) => {
+            let blockElement = targetNode && targetNode.nodeType === Node.ELEMENT_NODE
+                ? targetNode
+                : targetNode?.parentElement;
+            while (blockElement && blockElement !== this.editor && !this.domUtils.isBlockElement(blockElement)) {
+                blockElement = blockElement.parentElement;
+            }
+            return blockElement && blockElement !== this.editor ? blockElement : null;
+        };
+        const moveAfterImageIfLeadingInBlock = (imageNode) => {
+            if (!imageNode || imageNode.nodeType !== Node.ELEMENT_NODE || imageNode.tagName !== 'IMG') {
+                return false;
+            }
+
+            const blockElement = getCurrentBlockForNode(imageNode);
+            if (blockElement) {
+                const leadingImage = this._getLeadingImageInBlock(blockElement);
+                if (leadingImage !== imageNode) {
+                    return false;
+                }
+            }
+
+            const imageRange = document.createRange();
+            if (!this._collapseRangeAfterNode(imageRange, imageNode)) {
+                return false;
+            }
+            selection.removeAllRanges();
+            selection.addRange(imageRange);
+            return true;
+        };
+
         // コードブロック内かチェック
         const codeBlock = this.domUtils.getParentElement(node, 'CODE');
         const preBlock = codeBlock ? this.domUtils.getParentElement(codeBlock, 'PRE') : null;
@@ -5978,6 +6196,16 @@ export class CursorManager {
                 }
             }
             return;
+        }
+
+        // 行頭が画像のとき、画像左エッジでのCtrl+Eは同じ行の画像右エッジへ移動する。
+        if (range.collapsed) {
+            const imageAhead = this._getImageAheadFromCollapsedRange(range);
+            if (imageAhead && this._isCollapsedRangeAtNodeBoundary(range, imageAhead, 'before')) {
+                if (moveAfterImageIfLeadingInBlock(imageAhead)) {
+                    return;
+                }
+            }
         }
 
         // デフォルトの動作：ネイティブのselection.modifyを使用

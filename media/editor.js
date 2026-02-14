@@ -6264,6 +6264,20 @@ import { SearchManager } from './modules/SearchManager.js';
         if (domUtils.getParentElement(range.startContainer, 'PRE')) {
             return false;
         }
+        // 画像境界（左/右エッジ）では独自ナビゲーションを優先する。
+        // ネイティブ矢印にフォールバックすると、WebView実装依存で
+        // 移動できないことがあるため。
+        if (cursorManager) {
+            const imageAhead = typeof cursorManager._getImageAheadFromCollapsedRange === 'function'
+                ? cursorManager._getImageAheadFromCollapsedRange(range)
+                : null;
+            const imageBehind = typeof cursorManager._getImageBehindFromCollapsedRange === 'function'
+                ? cursorManager._getImageBehindFromCollapsedRange(range)
+                : null;
+            if (imageAhead || imageBehind) {
+                return false;
+            }
+        }
 
         const anchorNode = (() => {
             if (range.startContainer !== editor) {
