@@ -21,34 +21,6 @@ ManulDown is a VSCode extension that lets you edit Markdown files in a WYSIWYG e
 - **Toolbar**: Quick access buttons for common formatting.
 - **Undo/Redo**: Edit history support.
 
-## Installation
-
-### Development setup
-
-1. Clone this repository:
-
-```bash
-git clone <repository-url>
-cd manuldown
-```
-
-2. Install dependencies:
-
-```bash
-npm install
-```
-
-3. Compile TypeScript:
-
-```bash
-npm run compile
-```
-
-4. Run the extension in VSCode:
-
-- Press `F5`, or select `Run Extension` from the Run and Debug panel.
-- A new VSCode window will open.
-
 ## Usage
 
 1. Open a Markdown file (`.md`).
