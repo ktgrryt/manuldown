@@ -1,0 +1,11 @@
+.claude/**
+.vscode/**
+.vscode-test/**
+src/**
+test.md
+media/editor.js.original
+package-lock.json
+tsconfig.json
+.eslintrc.json
+*.vsix
+**/.DS_Store

@@ -1,0 +1,229 @@
+{
+  "name": "manuldown",
+  "displayName": "ManulDown",
+  "description": "WYSIWYG editor for Markdown files in VSCode",
+  "icon": "images/icon.png",
+  "version": "0.1.0",
+  "publisher": "ktgrryt",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ktgrryt/md-wysiwyg.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ktgrryt/md-wysiwyg/issues"
+  },
+  "homepage": "https://github.com/ktgrryt/md-wysiwyg#readme",
+  "keywords": [
+    "markdown",
+    "wysiwyg",
+    "editor",
+    "custom-editor",
+    "preview"
+  ],
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCustomEditor:manulDown.editor",
+    "onLanguage:markdown"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "customEditors": [
+      {
+        "viewType": "manulDown.editor",
+        "displayName": "ManulDown",
+        "selector": [
+          {
+            "filenamePattern": "*.md"
+          }
+        ],
+        "priority": "default"
+      }
+    ],
+    "commands": [
+      {
+        "command": "manulDown.openEditor",
+        "title": "Open with ManulDown Editor",
+        "category": "ManulDown",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "manulDown.openTextEditor",
+        "title": "Open with Text Editor",
+        "category": "ManulDown",
+        "icon": "$(code)"
+      },
+      {
+        "command": "manulDown.toggleEditor",
+        "title": "Toggle ManulDown / Text Editor",
+        "category": "ManulDown"
+      },
+      {
+        "command": "manulDown.cursorUp",
+        "title": "Cursor Up (ManulDown)",
+        "category": "ManulDown"
+      },
+      {
+        "command": "manulDown.table.insertRowAbove",
+        "title": "Table: Insert Row Above",
+        "category": "ManulDown"
+      },
+      {
+        "command": "manulDown.table.insertRowBelow",
+        "title": "Table: Insert Row Below",
+        "category": "ManulDown"
+      },
+      {
+        "command": "manulDown.table.insertColumnLeft",
+        "title": "Table: Insert Column Left",
+        "category": "ManulDown"
+      },
+      {
+        "command": "manulDown.table.insertColumnRight",
+        "title": "Table: Insert Column Right",
+        "category": "ManulDown"
+      },
+      {
+        "command": "manulDown.table.selectCurrentColumn",
+        "title": "Table: Select Current Column",
+        "category": "ManulDown"
+      },
+      {
+        "command": "manulDown.table.selectCurrentRow",
+        "title": "Table: Select Current Row",
+        "category": "ManulDown"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "manulDown.openEditor",
+          "when": "resourceLangId == markdown && activeCustomEditorId != 'manulDown.editor'",
+          "group": "navigation"
+        },
+        {
+          "command": "manulDown.openTextEditor",
+          "when": "activeCustomEditorId == 'manulDown.editor'",
+          "group": "navigation"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "manulDown.toggleEditor",
+        "key": "ctrl+alt+m",
+        "mac": "cmd+alt+m",
+        "when": "resourceLangId == markdown || activeCustomEditorId == 'manulDown.editor'"
+      },
+      {
+        "command": "manulDown.cursorUp",
+        "key": "ctrl+p",
+        "mac": "ctrl+p",
+        "when": "activeCustomEditorId == 'manulDown.editor'"
+      },
+      {
+        "command": "manulDown.table.insertRowAbove",
+        "key": "ctrl+shift+alt+up",
+        "mac": "cmd+ctrl+shift+up",
+        "when": "activeCustomEditorId == 'manulDown.editor'"
+      },
+      {
+        "command": "manulDown.table.insertRowBelow",
+        "key": "ctrl+shift+alt+down",
+        "mac": "cmd+ctrl+shift+down",
+        "when": "activeCustomEditorId == 'manulDown.editor'"
+      },
+      {
+        "command": "manulDown.table.insertColumnLeft",
+        "key": "ctrl+shift+alt+left",
+        "mac": "cmd+ctrl+shift+left",
+        "when": "activeCustomEditorId == 'manulDown.editor'"
+      },
+      {
+        "command": "manulDown.table.insertColumnRight",
+        "key": "ctrl+shift+alt+right",
+        "mac": "cmd+ctrl+shift+right",
+        "when": "activeCustomEditorId == 'manulDown.editor'"
+      },
+      {
+        "command": "manulDown.table.selectCurrentColumn",
+        "key": "ctrl+alt+up",
+        "mac": "ctrl+shift+alt+up",
+        "when": "activeCustomEditorId == 'manulDown.editor'"
+      },
+      {
+        "command": "manulDown.table.selectCurrentColumn",
+        "key": "ctrl+alt+down",
+        "mac": "ctrl+shift+alt+down",
+        "when": "activeCustomEditorId == 'manulDown.editor'"
+      },
+      {
+        "command": "manulDown.table.selectCurrentRow",
+        "key": "ctrl+alt+left",
+        "mac": "ctrl+shift+alt+left",
+        "when": "activeCustomEditorId == 'manulDown.editor'"
+      },
+      {
+        "command": "manulDown.table.selectCurrentRow",
+        "key": "ctrl+alt+right",
+        "mac": "ctrl+shift+alt+right",
+        "when": "activeCustomEditorId == 'manulDown.editor'"
+      }
+    ],
+    "configuration": {
+      "title": "ManulDown",
+      "properties": {
+        "manulDown.toolbar.visible": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the toolbar."
+        },
+        "manulDown.toc.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically show the table of contents when headings exist."
+        },
+        "manulDown.openByDefault": {
+          "type": "boolean",
+          "default": true,
+          "description": "Open Markdown files with ManulDown by default."
+        },
+        "manulDown.list.dashStyle": {
+          "type": "boolean",
+          "default": false,
+          "description": "Use a dash (-) as the bullet marker style."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "20.x",
+    "@types/turndown": "^5.0.6",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.15.0",
+    "@typescript-eslint/parser": "^6.15.0",
+    "@vscode/test-electron": "^2.3.8",
+    "eslint": "^8.56.0",
+    "typescript": "^5.3.3"
+    
+  },
+  "dependencies": {
+    "mermaid": "^10.9.0",
+    "marked": "^11.1.1",
+    "prismjs": "^1.30.0",
+    "turndown": "^7.2.2",
+    "turndown-plugin-gfm": "^1.0.2"
+  }
+}
