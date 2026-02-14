@@ -5372,6 +5372,108 @@ import { SearchManager } from './modules/SearchManager.js';
             : createCollapsedRangeAtElementBoundary(nextBlock, 'start');
     }
 
+    function hasMeaningfulTextContent(value) {
+        if (typeof value !== 'string') return false;
+        return value.replace(/[\u200B\u00A0\uFEFF]/g, '').trim() !== '';
+    }
+
+    function getClosestBlockElement(node) {
+        let current = node && node.nodeType === Node.ELEMENT_NODE
+            ? node
+            : (node ? node.parentElement : null);
+        while (current && current !== editor) {
+            if (domUtils.isBlockElement(current)) {
+                return current;
+            }
+            current = current.parentElement;
+        }
+        return null;
+    }
+
+    function isImageOnlyBlockElement(blockElement) {
+        if (!blockElement || blockElement.nodeType !== Node.ELEMENT_NODE) {
+            return false;
+        }
+        const clone = blockElement.cloneNode(true);
+        clone.querySelectorAll('img').forEach((img) => img.remove());
+        return !hasMeaningfulTextContent(clone.textContent || '');
+    }
+
+    function getImageCaretAnchorNode(image) {
+        if (!image || image.tagName !== 'IMG') return null;
+        let anchor = image;
+        let current = image.parentElement;
+        while (current && current !== editor) {
+            if (current.tagName === 'A' && current.childNodes && current.childNodes.length === 1) {
+                anchor = current;
+                current = current.parentElement;
+                continue;
+            }
+            break;
+        }
+        return anchor;
+    }
+
+    function createAfterImageRangeIfRightSide(image, x, y, requireRightEdge) {
+        if (!image || !editor.contains(image)) {
+            return null;
+        }
+        const rect = image.getBoundingClientRect ? image.getBoundingClientRect() : null;
+        if (!rect || rect.width <= 0 || rect.height <= 0) {
+            return null;
+        }
+
+        const verticalTolerancePx = 6;
+        if (y < rect.top - verticalTolerancePx || y > rect.bottom + verticalTolerancePx) {
+            return null;
+        }
+
+        const rightHalfThreshold = rect.left + rect.width * 0.55;
+        if (requireRightEdge) {
+            if (x < rect.right - 2) {
+                return null;
+            }
+        } else if (x < rightHalfThreshold) {
+            return null;
+        }
+
+        const caretAnchor = getImageCaretAnchorNode(image) || image;
+        if (!caretAnchor.parentNode) {
+            return null;
+        }
+
+        const range = document.createRange();
+        range.setStartAfter(caretAnchor);
+        range.collapse(true);
+        return range;
+    }
+
+    function getRightEdgeImageCaretRangeFromClick(x, y, clickedElement) {
+        if (!clickedElement) {
+            return null;
+        }
+
+        const clickedImage = clickedElement.tagName === 'IMG'
+            ? clickedElement
+            : (clickedElement.closest ? clickedElement.closest('img') : null);
+        const directImageRange = createAfterImageRangeIfRightSide(clickedImage, x, y, false);
+        if (directImageRange) {
+            return directImageRange;
+        }
+
+        const blockElement = getClosestBlockElement(clickedElement);
+        if (!blockElement || blockElement === editor || !isImageOnlyBlockElement(blockElement)) {
+            return null;
+        }
+
+        const images = Array.from(blockElement.querySelectorAll('img')).filter((img) => editor.contains(img));
+        if (images.length !== 1) {
+            return null;
+        }
+
+        return createAfterImageRangeIfRightSide(images[0], x, y, true);
+    }
+
     function getStableGapClickRange(x, y, clickedElement, pointRange) {
         if (!clickedElement) {
             return null;
@@ -9121,6 +9223,25 @@ import { SearchManager } from './modules/SearchManager.js';
             const clickedElement = document.elementFromPoint(x, y);
             if (!clickedElement || !editor.contains(clickedElement)) return;
 
+            if (!e.shiftKey) {
+                const imageRightEdgeRange = getRightEdgeImageCaretRangeFromClick(x, y, clickedElement);
+                if (imageRightEdgeRange) {
+                    e.preventDefault();
+                    if (document.activeElement !== editor) {
+                        try {
+                            editor.focus({ preventScroll: true });
+                        } catch (focusError) {
+                            editor.focus();
+                        }
+                    }
+                    const selection = window.getSelection();
+                    if (!selection) return;
+                    selection.removeAllRanges();
+                    selection.addRange(imageRightEdgeRange);
+                    return;
+                }
+            }
+
             const pointRange = getCaretRangeFromPoint(x, y);
             const stabilizedGapRange = getStableGapClickRange(x, y, clickedElement, pointRange);
             if (stabilizedGapRange) {
@@ -9545,6 +9666,90 @@ import { SearchManager } from './modules/SearchManager.js';
             document.body.classList.remove('image-resizing');
         }
 
+        function placeCaretAfterImageRemoval(parentNode, nextSibling, prevSibling) {
+            const selection = window.getSelection();
+            if (!selection || !parentNode) return;
+
+            const range = document.createRange();
+            if (nextSibling && nextSibling.parentNode === parentNode) {
+                if (nextSibling.nodeType === Node.TEXT_NODE) {
+                    range.setStart(nextSibling, 0);
+                } else {
+                    const firstText = domUtils.getFirstTextNode(nextSibling);
+                    if (firstText) {
+                        range.setStart(firstText, 0);
+                    } else {
+                        const offset = Array.prototype.indexOf.call(parentNode.childNodes, nextSibling);
+                        range.setStart(parentNode, Math.max(0, offset));
+                    }
+                }
+            } else if (prevSibling && prevSibling.parentNode === parentNode) {
+                if (prevSibling.nodeType === Node.TEXT_NODE) {
+                    range.setStart(prevSibling, (prevSibling.textContent || '').length);
+                } else {
+                    const lastText = domUtils.getLastTextNode(prevSibling);
+                    if (lastText) {
+                        range.setStart(lastText, (lastText.textContent || '').length);
+                    } else {
+                        const prevOffset = Array.prototype.indexOf.call(parentNode.childNodes, prevSibling);
+                        range.setStart(parentNode, Math.max(0, prevOffset + 1));
+                    }
+                }
+            } else if (parentNode === editor) {
+                const paragraph = document.createElement('p');
+                paragraph.appendChild(document.createElement('br'));
+                editor.appendChild(paragraph);
+                range.setStart(paragraph, 0);
+            } else if (parentNode.nodeType === Node.ELEMENT_NODE) {
+                const parentElement = parentNode;
+                if (isEffectivelyEmptyBlock(parentElement) && parentElement.tagName === 'P') {
+                    if (!parentElement.querySelector('br')) {
+                        parentElement.appendChild(document.createElement('br'));
+                    }
+                    range.setStart(parentElement, 0);
+                } else {
+                    range.selectNodeContents(parentElement);
+                    range.collapse(false);
+                }
+            } else {
+                return;
+            }
+
+            range.collapse(true);
+            selection.removeAllRanges();
+            selection.addRange(range);
+        }
+
+        function deleteActiveResizeImage() {
+            const image = activeResizeImage;
+            if (!image || !image.isConnected || !editor.contains(image)) {
+                hideImageResizeOverlay();
+                return false;
+            }
+
+            let target = image;
+            const parentLink = image.parentElement;
+            if (parentLink && parentLink.tagName === 'A' && parentLink.childNodes.length === 1) {
+                target = parentLink;
+            }
+
+            const parentNode = target.parentNode;
+            if (!parentNode) {
+                hideImageResizeOverlay();
+                return false;
+            }
+
+            const nextSibling = target.nextSibling;
+            const prevSibling = target.previousSibling;
+
+            target.remove();
+            hideImageResizeOverlay();
+            editor.focus();
+            placeCaretAfterImageRemoval(parentNode, nextSibling, prevSibling);
+            scheduleEditorOverflowStateUpdate();
+            return true;
+        }
+
         function ensureImageResizeOverlay() {
             if (imageResizeOverlay) return imageResizeOverlay;
 
@@ -9650,6 +9855,22 @@ import { SearchManager } from './modules/SearchManager.js';
             syncImageResizeOverlayPosition();
             scheduleEditorOverflowStateUpdate();
         });
+
+        document.addEventListener('keydown', (e) => {
+            if (!activeResizeImage) return;
+
+            const key = (e.key || '').toLowerCase();
+            const isCtrlH = isMac && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && key === 'h';
+            const isBackspace = e.key === 'Backspace' && !e.metaKey && !e.altKey;
+            if (!isBackspace && !isCtrlH) return;
+
+            e.preventDefault();
+            e.stopPropagation();
+            stateManager.saveState();
+            if (deleteActiveResizeImage()) {
+                notifyChange();
+            }
+        }, true);
 
         // リンクのmousedownイベント（デフォルト動作を防ぐ）
         editor.addEventListener('mousedown', (e) => {
