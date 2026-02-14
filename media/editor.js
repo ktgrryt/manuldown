@@ -8024,6 +8024,23 @@ import { SearchManager } from './modules/SearchManager.js';
         return true;
     }
 
+    function restoreSelectionFromCheckboxTarget(target) {
+        if (!target || !target.closest) return null;
+        const checkbox = target.closest('input[type="checkbox"]');
+        if (!checkbox || !editor.contains(checkbox)) return null;
+        const listItem = domUtils.getParentElement(checkbox, 'LI');
+        if (!listItem) return null;
+
+        const selection = window.getSelection();
+        if (!selection) return null;
+        const range = document.createRange();
+        range.setStart(listItem, 0);
+        range.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        return selection;
+    }
+
     function handleKeydown(e) {
         if (handleTableStructureSelectKeydown(e)) {
             return;
@@ -8046,6 +8063,12 @@ import { SearchManager } from './modules/SearchManager.js';
         }
 
         let selection = window.getSelection();
+        if ((!selection || !selection.rangeCount) && e.key === 'Tab' && !e.isComposing) {
+            const restoredSelection = restoreSelectionFromCheckboxTarget(e.target);
+            if (restoredSelection && restoredSelection.rangeCount) {
+                selection = restoredSelection;
+            }
+        }
         if (!selection || !selection.rangeCount) {
             if ((e.key === 'ArrowDown' || (isMac && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'n'))) {
                 const target = e.target;

@@ -3739,6 +3739,47 @@ export class CursorManager {
             selection.addRange(newRange);
             return true;
         };
+        const moveToNextLineWithinImageBlock = (imageNode, blockNode) => {
+            if (!imageNode || !blockNode || blockNode === this.editor) {
+                return false;
+            }
+
+            let sibling = imageNode.nextSibling;
+            while (sibling) {
+                if (sibling.nodeType === Node.TEXT_NODE) {
+                    const text = sibling.textContent || '';
+                    const cleaned = text.replace(/[\u200B\uFEFF\u00A0]/g, '');
+                    if (cleaned.trim() === '') {
+                        sibling = sibling.nextSibling;
+                        continue;
+                    }
+                    return false;
+                }
+                if (sibling.nodeType === Node.ELEMENT_NODE) {
+                    if (this._isNavigationExcludedElement(sibling)) {
+                        sibling = sibling.nextSibling;
+                        continue;
+                    }
+                    if (sibling.tagName === 'BR') {
+                        const lineRange = document.createRange();
+                        if (this._collapseRangeAfterNode(lineRange, sibling)) {
+                            selection.removeAllRanges();
+                            selection.addRange(lineRange);
+                            return true;
+                        }
+                        const fallbackRange = document.createRange();
+                        fallbackRange.setStart(blockNode, blockNode.childNodes.length);
+                        fallbackRange.collapse(true);
+                        selection.removeAllRanges();
+                        selection.addRange(fallbackRange);
+                        return true;
+                    }
+                    return false;
+                }
+                sibling = sibling.nextSibling;
+            }
+            return false;
+        };
 
         // 画像右エッジ（画像直後）からの↓は、次ブロック先頭へ移動する。
         // 空行が続くケースで視覚プローブが不安定になってもカーソルを見失わないようにする。
@@ -3790,6 +3831,9 @@ export class CursorManager {
                     this._isCollapsedRangeAtNodeBoundary(range, imageAhead, 'before');
 
                 if (isAtImageLeftEdge) {
+                    if (imageBlock && moveToNextLineWithinImageBlock(imageAhead, imageBlock)) {
+                        return;
+                    }
                     const nextAfterImage = this._getNextNavigableElementInDocument(imageBoundary);
                     if (nextAfterImage && moveToBlockStart(nextAfterImage)) {
                         return;
