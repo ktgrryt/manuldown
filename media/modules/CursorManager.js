@@ -807,41 +807,95 @@ export class CursorManager {
     }
 
     _getNextSiblingForNavigation(node) {
-        let sibling = node ? node.nextSibling : null;
-        while (sibling) {
-            if (sibling.nodeType === Node.TEXT_NODE) {
-                if (!this._isIgnorableTextNode(sibling)) {
-                    return sibling;
+        const isBlockBoundary = (element) => {
+            if (!element || element.nodeType !== Node.ELEMENT_NODE) {
+                return false;
+            }
+            if (this.domUtils.isBlockElement(element)) {
+                return true;
+            }
+            return element.tagName === 'LI' ||
+                element.tagName === 'TD' ||
+                element.tagName === 'TH' ||
+                element.tagName === 'TR' ||
+                element.tagName === 'PRE';
+        };
+        const getValidSibling = (start) => {
+            let sibling = start;
+            while (sibling) {
+                if (sibling.nodeType === Node.TEXT_NODE) {
+                    if (!this._isIgnorableTextNode(sibling)) {
+                        return sibling;
+                    }
+                } else if (sibling.nodeType === Node.ELEMENT_NODE) {
+                    if (!this._isNavigationExcludedElement(sibling)) {
+                        // 水平線も有効なナビゲーションターゲットとして返す
+                        return sibling;
+                    }
                 }
-            } else if (sibling.nodeType === Node.ELEMENT_NODE) {
-                if (this._isNavigationExcludedElement(sibling)) {
-                    sibling = sibling.nextSibling;
-                    continue;
-                }
-                // 水平線も有効なナビゲーションターゲットとして返す
+                sibling = sibling.nextSibling;
+            }
+            return null;
+        };
+
+        let current = node;
+        while (current && current !== this.editor) {
+            const sibling = getValidSibling(current.nextSibling);
+            if (sibling) {
                 return sibling;
             }
-            sibling = sibling.nextSibling;
+            const parent = current.parentElement;
+            if (!parent || parent === this.editor || isBlockBoundary(parent)) {
+                break;
+            }
+            current = parent;
         }
         return null;
     }
 
     _getPrevSiblingForNavigation(node) {
-        let sibling = node ? node.previousSibling : null;
-        while (sibling) {
-            if (sibling.nodeType === Node.TEXT_NODE) {
-                if (!this._isIgnorableTextNode(sibling)) {
-                    return sibling;
+        const isBlockBoundary = (element) => {
+            if (!element || element.nodeType !== Node.ELEMENT_NODE) {
+                return false;
+            }
+            if (this.domUtils.isBlockElement(element)) {
+                return true;
+            }
+            return element.tagName === 'LI' ||
+                element.tagName === 'TD' ||
+                element.tagName === 'TH' ||
+                element.tagName === 'TR' ||
+                element.tagName === 'PRE';
+        };
+        const getValidSibling = (start) => {
+            let sibling = start;
+            while (sibling) {
+                if (sibling.nodeType === Node.TEXT_NODE) {
+                    if (!this._isIgnorableTextNode(sibling)) {
+                        return sibling;
+                    }
+                } else if (sibling.nodeType === Node.ELEMENT_NODE) {
+                    if (!this._isNavigationExcludedElement(sibling)) {
+                        // 水平線も有効なナビゲーションターゲットとして返す
+                        return sibling;
+                    }
                 }
-            } else if (sibling.nodeType === Node.ELEMENT_NODE) {
-                if (this._isNavigationExcludedElement(sibling)) {
-                    sibling = sibling.previousSibling;
-                    continue;
-                }
-                // 水平線も有効なナビゲーションターゲットとして返す
+                sibling = sibling.previousSibling;
+            }
+            return null;
+        };
+
+        let current = node;
+        while (current && current !== this.editor) {
+            const sibling = getValidSibling(current.previousSibling);
+            if (sibling) {
                 return sibling;
             }
-            sibling = sibling.previousSibling;
+            const parent = current.parentElement;
+            if (!parent || parent === this.editor || isBlockBoundary(parent)) {
+                break;
+            }
+            current = parent;
         }
         return null;
     }
@@ -2541,6 +2595,216 @@ export class CursorManager {
                 return false;
             }
         };
+        const getBlockFromContainer = (node, offset = null) => {
+            if (node === this.editor) {
+                const children = Array.from(this.editor.childNodes || []);
+                if (children.length === 0) {
+                    return null;
+                }
+                const safeOffset = Math.max(0, Math.min(
+                    Number.isInteger(offset) ? offset : 0,
+                    children.length - 1
+                ));
+                const directChild = children[safeOffset] || children[children.length - 1];
+                if (directChild && directChild.nodeType === Node.ELEMENT_NODE && this.domUtils.isBlockElement(directChild)) {
+                    return directChild;
+                }
+                if (directChild && directChild.nodeType === Node.TEXT_NODE) {
+                    return directChild.parentElement && directChild.parentElement !== this.editor
+                        ? directChild.parentElement
+                        : null;
+                }
+            }
+            let block = node && node.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
+            while (block && block !== this.editor && !this.domUtils.isBlockElement(block)) {
+                block = block.parentElement;
+            }
+            return block && block !== this.editor ? block : null;
+        };
+        const getEstimatedLineHeight = (node, fallbackRect = null) => {
+            const block = getBlockFromContainer(node);
+            let lineHeight = NaN;
+            if (block && window.getComputedStyle) {
+                const style = window.getComputedStyle(block);
+                if (style) {
+                    lineHeight = Number.parseFloat(style.lineHeight);
+                    if (!Number.isFinite(lineHeight) || lineHeight <= 0) {
+                        const fontSize = Number.parseFloat(style.fontSize);
+                        if (Number.isFinite(fontSize) && fontSize > 0) {
+                            lineHeight = fontSize * 1.6;
+                        }
+                    }
+                }
+            }
+            if ((!Number.isFinite(lineHeight) || lineHeight <= 0) && fallbackRect) {
+                const rectHeight = Number.parseFloat(fallbackRect.height);
+                if (Number.isFinite(rectHeight) && rectHeight > 0) {
+                    lineHeight = rectHeight;
+                }
+            }
+            if (!Number.isFinite(lineHeight) || lineHeight <= 0) {
+                lineHeight = 18;
+            }
+            return Math.max(14, Math.min(lineHeight, 72));
+        };
+        const getVisualCaretRectForRange = (targetRange) => {
+            if (!targetRange) {
+                return null;
+            }
+            const baseRect = this._getCaretRect(targetRange);
+            if (!baseRect || !targetRange.collapsed) {
+                return baseRect;
+            }
+            const containerNode = targetRange.startContainer;
+            if (!containerNode || containerNode.nodeType !== Node.TEXT_NODE) {
+                return baseRect;
+            }
+            const text = containerNode.textContent || '';
+            const offset = Math.max(0, Math.min(targetRange.startOffset, text.length));
+            if (offset <= 0 || offset >= text.length) {
+                return baseRect;
+            }
+            try {
+                const prevRange = document.createRange();
+                prevRange.setStart(containerNode, offset - 1);
+                prevRange.setEnd(containerNode, offset);
+                const prevRect = prevRange.getBoundingClientRect();
+
+                const nextRange = document.createRange();
+                nextRange.setStart(containerNode, offset);
+                nextRange.setEnd(containerNode, offset + 1);
+                const nextRect = nextRange.getBoundingClientRect();
+
+                if (!prevRect || !nextRect) {
+                    return baseRect;
+                }
+
+                const prevTop = prevRect.top || prevRect.y || 0;
+                const nextTop = nextRect.top || nextRect.y || 0;
+                if (nextTop > prevTop + 2) {
+                    return {
+                        left: nextRect.left,
+                        right: nextRect.left,
+                        top: nextRect.top,
+                        bottom: nextRect.bottom,
+                        width: 0,
+                        height: nextRect.height,
+                        x: nextRect.left,
+                        y: nextRect.y
+                    };
+                }
+            } catch (e) {
+                // ignore and use base rect
+            }
+            return baseRect;
+        };
+        const getVisualLinesForBlock = (block) => {
+            if (!block || block === this.editor) {
+                return [];
+            }
+            try {
+                const probeRange = document.createRange();
+                probeRange.selectNodeContents(block);
+                const rawRects = Array.from(probeRange.getClientRects ? probeRange.getClientRects() : []);
+                const rects = rawRects
+                    .filter(rect => rect &&
+                        Number.isFinite(rect.top) &&
+                        Number.isFinite(rect.bottom) &&
+                        Number.isFinite(rect.left) &&
+                        Number.isFinite(rect.right) &&
+                        (rect.width || rect.height))
+                    .sort((a, b) => {
+                        if (Math.abs(a.top - b.top) <= 1.5) {
+                            return a.left - b.left;
+                        }
+                        return a.top - b.top;
+                    });
+                if (rects.length === 0) {
+                    return [];
+                }
+
+                const lines = [];
+                for (const rect of rects) {
+                    const lastLine = lines.length > 0 ? lines[lines.length - 1] : null;
+                    if (!lastLine || Math.abs(lastLine.top - rect.top) > 3) {
+                        lines.push({
+                            top: rect.top,
+                            bottom: rect.bottom,
+                            left: rect.left,
+                            right: rect.right
+                        });
+                        continue;
+                    }
+                    lastLine.top = Math.min(lastLine.top, rect.top);
+                    lastLine.bottom = Math.max(lastLine.bottom, rect.bottom);
+                    lastLine.left = Math.min(lastLine.left, rect.left);
+                    lastLine.right = Math.max(lastLine.right, rect.right);
+                }
+                return lines;
+            } catch (e) {
+                return [];
+            }
+        };
+        const findLineStartCaretInBlock = (block, line) => {
+            if (!block || !line) {
+                return null;
+            }
+
+            const pickCandidate = (skipWhitespace) => {
+                const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT, null, false);
+                let textNode;
+                let best = null;
+                let guard = 0;
+                while (textNode = walker.nextNode()) {
+                    const text = textNode.textContent || '';
+                    if (text.length === 0) continue;
+                    for (let i = 0; i < text.length; i++) {
+                        guard++;
+                        if (guard > 12000) {
+                            return best;
+                        }
+                        const ch = text[i];
+                        if (ch === '\n' || ch === '\r' || ch === '\u200B' || ch === '\uFEFF') {
+                            continue;
+                        }
+                        if (skipWhitespace && /\s/.test(ch)) {
+                            continue;
+                        }
+                        let charRect = null;
+                        try {
+                            const charRange = document.createRange();
+                            charRange.setStart(textNode, i);
+                            charRange.setEnd(textNode, i + 1);
+                            charRect = charRange.getBoundingClientRect();
+                        } catch (e) {
+                            continue;
+                        }
+                        if (!charRect || !(charRect.width || charRect.height)) {
+                            continue;
+                        }
+                        const charTop = charRect.top || charRect.y || 0;
+                        const charBottom = charRect.bottom || (charRect.y + charRect.height) || charTop;
+                        const overlapsTargetLine = charBottom >= line.top - 2 && charTop <= line.bottom + 2;
+                        if (!overlapsTargetLine) {
+                            continue;
+                        }
+                        const charLeft = charRect.left || charRect.x || 0;
+                        if (!best || charLeft < best.left - 0.5 ||
+                            (Math.abs(charLeft - best.left) <= 0.5 && charTop < best.top)) {
+                            best = {
+                                node: textNode,
+                                offset: i,
+                                left: charLeft,
+                                top: charTop
+                            };
+                        }
+                    }
+                }
+                return best;
+            };
+
+            return pickCandidate(true) || pickCandidate(false);
+        };
 
         let currentListItem = this._getListItemFromContainer(container, range.startOffset, 'up') ||
             this.domUtils.getParentElement(container, 'LI');
@@ -2611,6 +2875,138 @@ export class CursorManager {
             }
         }
 
+        const tryMoveWithinCurrentBlockByVisualLine = () => {
+            if (!range || !range.collapsed || !document.caretRangeFromPoint) {
+                return false;
+            }
+            if (currentListItem || preBlock) {
+                return false;
+            }
+
+            const currentBlock = getBlockFromContainer(range.startContainer, range.startOffset);
+            if (!currentBlock || currentBlock === this.editor) {
+                return false;
+            }
+            if (currentBlock.tagName === 'LI' ||
+                currentBlock.tagName === 'PRE' ||
+                currentBlock.tagName === 'TD' ||
+                currentBlock.tagName === 'TH') {
+                return false;
+            }
+
+            const lines = getVisualLinesForBlock(currentBlock);
+            if (lines.length < 2) {
+                return false;
+            }
+
+            const currentRect = getVisualCaretRectForRange(range);
+            if (!currentRect) {
+                return false;
+            }
+            const currentTop = currentRect.top || currentRect.y || 0;
+            let currentIndex = 0;
+            let minDistance = Infinity;
+            for (let i = 0; i < lines.length; i++) {
+                const distance = Math.abs(lines[i].top - currentTop);
+                if (distance < minDistance) {
+                    minDistance = distance;
+                    currentIndex = i;
+                }
+            }
+            if (currentIndex <= 0) {
+                return false;
+            }
+
+            const currentLine = lines[currentIndex];
+            const targetLine = lines[currentIndex - 1];
+            if (!targetLine) {
+                return false;
+            }
+
+            const currentX = currentRect.left || currentRect.x || 0;
+            const atCurrentLineStart = !!currentLine && currentX <= (currentLine.left + 2);
+            if (atCurrentLineStart) {
+                const lineStartCaret = findLineStartCaretInBlock(currentBlock, targetLine);
+                if (lineStartCaret) {
+                    const startRange = document.createRange();
+                    startRange.setStart(lineStartCaret.node, lineStartCaret.offset);
+                    startRange.collapse(true);
+                    selection.removeAllRanges();
+                    selection.addRange(startRange);
+                    return true;
+                }
+            }
+
+            const targetHeight = Math.max(1, targetLine.bottom - targetLine.top);
+            const targetY = targetLine.top + Math.max(1, Math.min(targetHeight * 0.5, targetHeight - 1));
+            const xCandidates = atCurrentLineStart
+                ? [
+                    targetLine.left + 0.5,
+                    targetLine.left + 1.5,
+                    currentX,
+                    currentX + 1
+                ]
+                : [
+                    currentX + 1,
+                    currentX,
+                    targetLine.left + 1,
+                    Math.min(targetLine.right - 1, Math.max(targetLine.left + 1, currentX + 8))
+                ];
+            const tried = new Set();
+            let selectedRange = null;
+            let selectedScore = Infinity;
+
+            const trySelectRange = (probeRange) => {
+                if (!probeRange || !this.editor.contains(probeRange.startContainer)) {
+                    return false;
+                }
+                if (!currentBlock.contains(probeRange.startContainer)) {
+                    return false;
+                }
+                const probeRect = getVisualCaretRectForRange(probeRange);
+                if (!probeRect) {
+                    return false;
+                }
+                const probeTop = probeRect.top || probeRect.y || 0;
+                if (probeTop < targetLine.top - 3 || probeTop > targetLine.bottom + 3) {
+                    return false;
+                }
+                const probeLeft = probeRect.left || probeRect.x || 0;
+                const score = atCurrentLineStart ? probeLeft : Math.abs(probeLeft - currentX);
+                if (!selectedRange || score < selectedScore) {
+                    selectedRange = probeRange;
+                    selectedScore = score;
+                }
+                return true;
+            };
+
+            for (const x of xCandidates) {
+                if (!Number.isFinite(x)) continue;
+                const key = Math.round(x * 10) / 10;
+                if (tried.has(key)) continue;
+                tried.add(key);
+                const probeRange = document.caretRangeFromPoint(x, targetY);
+                trySelectRange(probeRange);
+            }
+
+            if (atCurrentLineStart) {
+                for (let dx = 0; dx <= 16; dx += 1) {
+                    const probeRange = document.caretRangeFromPoint(targetLine.left + dx, targetY);
+                    trySelectRange(probeRange);
+                }
+            }
+
+            if (selectedRange) {
+                selection.removeAllRanges();
+                selection.addRange(selectedRange);
+                return true;
+            }
+            return false;
+        };
+        if (tryMoveWithinCurrentBlockByVisualLine()) {
+            return;
+        }
+
         // 画像左エッジ（画像直前）からの↑は、画像選択に入らず前ブロック末尾へ移動する。
         // 上行 <-> 画像左エッジ の往復を安定化する。
         if (range.collapsed) {
@@ -2626,7 +3022,11 @@ export class CursorManager {
                     : (imageAhead.parentElement === this.editor ? imageAhead : null);
                 const isAtImageLeftEdge =
                     leadingImage === imageAhead &&
-                    this._isCollapsedRangeAtNodeBoundary(range, imageAhead, 'before');
+                    (
+                        this._isCollapsedRangeAtNodeBoundary(range, imageAhead, 'before') ||
+                        (boundaryNode !== imageAhead &&
+                            this._isCollapsedRangeAtNodeBoundary(range, boundaryNode, 'before'))
+                    );
 
                 if (isAtImageLeftEdge) {
                     const prevElement = this._getPrevNavigableElementInDocument(boundaryNode);
@@ -2641,12 +3041,75 @@ export class CursorManager {
                             selection.addRange(hrRange);
                             return;
                         }
+
+                        const boundaryRect = boundaryNode.getBoundingClientRect
+                            ? boundaryNode.getBoundingClientRect()
+                            : null;
+                        const rangeRect = getVisualCaretRectForRange(range);
+                        const baseX = boundaryRect && Number.isFinite(boundaryRect.left)
+                            ? boundaryRect.left + 1
+                            : ((rangeRect ? (rangeRect.left || rangeRect.x || 0) : 0) + 1);
+
+                        const prevLines = getVisualLinesForBlock(prevElement);
+                        if (prevLines.length > 0 && document.caretRangeFromPoint) {
+                            const targetLine = prevLines[prevLines.length - 1];
+                            const targetHeight = Math.max(1, targetLine.bottom - targetLine.top);
+                            const targetY = targetLine.top + Math.max(1, Math.min(targetHeight * 0.5, targetHeight - 1));
+                            const xCandidates = [
+                                Math.max(targetLine.left + 0.5, Math.min(targetLine.right - 0.5, baseX)),
+                                targetLine.left + 0.5,
+                                baseX
+                            ];
+
+                            let selectedRange = null;
+                            let selectedScore = Infinity;
+                            for (const x of xCandidates) {
+                                if (!Number.isFinite(x)) {
+                                    continue;
+                                }
+                                const probeRange = document.caretRangeFromPoint(x, targetY);
+                                if (!probeRange || !prevElement.contains(probeRange.startContainer)) {
+                                    continue;
+                                }
+                                const probeRect = getVisualCaretRectForRange(probeRange);
+                                if (!probeRect) {
+                                    continue;
+                                }
+                                const probeTop = probeRect.top || probeRect.y || 0;
+                                if (probeTop < targetLine.top - 3 || probeTop > targetLine.bottom + 3) {
+                                    continue;
+                                }
+                                const probeLeft = probeRect.left || probeRect.x || 0;
+                                const score = Math.abs(probeLeft - baseX);
+                                if (!selectedRange || score < selectedScore) {
+                                    selectedRange = probeRange;
+                                    selectedScore = score;
+                                }
+                            }
+
+                            if (selectedRange) {
+                                selection.removeAllRanges();
+                                selection.addRange(selectedRange);
+                                return;
+                            }
+
+                            const lineStartCaret = findLineStartCaretInBlock(prevElement, targetLine);
+                            if (lineStartCaret) {
+                                const startRange = document.createRange();
+                                startRange.setStart(lineStartCaret.node, lineStartCaret.offset);
+                                startRange.collapse(true);
+                                selection.removeAllRanges();
+                                selection.addRange(startRange);
+                                return;
+                            }
+                        }
+
                         const newRange = document.createRange();
-                        const firstNode = this._getFirstNavigableTextNode(prevElement);
-                        if (firstNode) {
-                            newRange.setStart(firstNode, 0);
+                        const lastNode = this._getLastNavigableTextNode(prevElement);
+                        if (lastNode) {
+                            newRange.setStart(lastNode, lastNode.textContent.length);
                         } else {
-                            newRange.setStart(prevElement, 0);
+                            newRange.setStart(prevElement, prevElement.childNodes.length);
                         }
                         newRange.collapse(true);
                         selection.removeAllRanges();
@@ -2778,14 +3241,15 @@ export class CursorManager {
         }
 
         // デフォルトの動作：カーソルを上に移動
-        let rect = this._getCaretRect(range);
+        let rect = getVisualCaretRectForRange(range);
         if (!rect) {
             return;
         }
 
+        const estimatedLineHeight = getEstimatedLineHeight(range.startContainer, rect);
         const currentX = rect.left || rect.x || 0;
         const currentY = rect.top || rect.y || 0;
-        const lineStep = Math.max(rect.height || 0, 18);
+        const lineStep = estimatedLineHeight;
         const isCursorRightOfListItemText = (listItem, x) => {
             if (!listItem) {
                 return false;
@@ -2839,6 +3303,255 @@ export class CursorManager {
                     currentListItem = visualListItem;
                 }
             }
+        }
+
+        const getVisualLinesForListItemText = (listItem) => {
+            if (!listItem) {
+                return [];
+            }
+            const textNodes = this._getDirectTextNodes(listItem);
+            if (textNodes.length === 0) {
+                return [];
+            }
+            const firstNode = textNodes[0];
+            const lastNode = textNodes[textNodes.length - 1];
+            try {
+                const probeRange = document.createRange();
+                probeRange.setStart(firstNode, 0);
+                probeRange.setEnd(lastNode, (lastNode.textContent || '').length);
+                const rawRects = Array.from(probeRange.getClientRects ? probeRange.getClientRects() : []);
+                const rects = rawRects
+                    .filter(r => r &&
+                        Number.isFinite(r.top) &&
+                        Number.isFinite(r.bottom) &&
+                        Number.isFinite(r.left) &&
+                        Number.isFinite(r.right) &&
+                        (r.width || r.height))
+                    .sort((a, b) => {
+                        if (Math.abs(a.top - b.top) <= 1.5) {
+                            return a.left - b.left;
+                        }
+                        return a.top - b.top;
+                    });
+                if (rects.length === 0) {
+                    return [];
+                }
+                const lines = [];
+                for (const rect of rects) {
+                    const lastLine = lines.length > 0 ? lines[lines.length - 1] : null;
+                    if (!lastLine || Math.abs(lastLine.top - rect.top) > 3) {
+                        lines.push({
+                            top: rect.top,
+                            bottom: rect.bottom,
+                            left: rect.left,
+                            right: rect.right
+                        });
+                        continue;
+                    }
+                    lastLine.top = Math.min(lastLine.top, rect.top);
+                    lastLine.bottom = Math.max(lastLine.bottom, rect.bottom);
+                    lastLine.left = Math.min(lastLine.left, rect.left);
+                    lastLine.right = Math.max(lastLine.right, rect.right);
+                }
+                return lines;
+            } catch (e) {
+                return [];
+            }
+        };
+        const isRangeInsideDirectListText = (probeRange, listItem, textNodes) => {
+            if (!probeRange || !listItem || !textNodes || textNodes.length === 0) {
+                return false;
+            }
+            const startContainer = probeRange.startContainer;
+            if (!startContainer || !listItem.contains(startContainer)) {
+                return false;
+            }
+            if (startContainer.nodeType === Node.TEXT_NODE && textNodes.includes(startContainer)) {
+                return true;
+            }
+            let current = startContainer.nodeType === Node.ELEMENT_NODE
+                ? startContainer
+                : startContainer.parentElement;
+            while (current && current !== listItem) {
+                if (current.tagName === 'UL' || current.tagName === 'OL') {
+                    return false;
+                }
+                current = current.parentElement;
+            }
+            return current === listItem;
+        };
+        const findLineStartCaretInListItem = (listItem, textNodes, line) => {
+            if (!listItem || !textNodes || textNodes.length === 0 || !line) {
+                return null;
+            }
+            const pickCandidate = (skipWhitespace) => {
+                let best = null;
+                let guard = 0;
+                for (const textNode of textNodes) {
+                    const text = textNode.textContent || '';
+                    if (text.length === 0) continue;
+                    for (let i = 0; i < text.length; i++) {
+                        guard++;
+                        if (guard > 12000) {
+                            return best;
+                        }
+                        const ch = text[i];
+                        if (ch === '\n' || ch === '\r' || ch === '\u200B' || ch === '\uFEFF') {
+                            continue;
+                        }
+                        if (skipWhitespace && /\s/.test(ch)) {
+                            continue;
+                        }
+                        let charRect = null;
+                        try {
+                            const charRange = document.createRange();
+                            charRange.setStart(textNode, i);
+                            charRange.setEnd(textNode, i + 1);
+                            charRect = charRange.getBoundingClientRect();
+                        } catch (e) {
+                            continue;
+                        }
+                        if (!charRect || !(charRect.width || charRect.height)) {
+                            continue;
+                        }
+                        const charTop = charRect.top || charRect.y || 0;
+                        const charBottom = charRect.bottom || (charRect.y + charRect.height) || charTop;
+                        const overlapsTargetLine = charBottom >= line.top - 2 && charTop <= line.bottom + 2;
+                        if (!overlapsTargetLine) {
+                            continue;
+                        }
+                        const charLeft = charRect.left || charRect.x || 0;
+                        if (!best || charLeft < best.left - 0.5 ||
+                            (Math.abs(charLeft - best.left) <= 0.5 && charTop < best.top)) {
+                            best = {
+                                node: textNode,
+                                offset: i,
+                                left: charLeft,
+                                top: charTop
+                            };
+                        }
+                    }
+                }
+                return best;
+            };
+            return pickCandidate(true) || pickCandidate(false);
+        };
+        const tryMoveWithinCurrentListItemByVisualLine = () => {
+            if (!range || !range.collapsed || !currentListItem || !document.caretRangeFromPoint) {
+                return false;
+            }
+            const textNodes = this._getDirectTextNodes(currentListItem);
+            if (textNodes.length === 0) {
+                return false;
+            }
+            const lines = getVisualLinesForListItemText(currentListItem);
+            if (lines.length < 2) {
+                return false;
+            }
+            const currentRect = getVisualCaretRectForRange(range);
+            if (!currentRect) {
+                return false;
+            }
+            const currentTop = currentRect.top || currentRect.y || 0;
+            let currentIndex = 0;
+            let minDistance = Infinity;
+            for (let i = 0; i < lines.length; i++) {
+                const distance = Math.abs(lines[i].top - currentTop);
+                if (distance < minDistance) {
+                    minDistance = distance;
+                    currentIndex = i;
+                }
+            }
+            if (currentIndex <= 0) {
+                return false;
+            }
+
+            const currentLine = lines[currentIndex];
+            const targetLine = lines[currentIndex - 1];
+            if (!targetLine) {
+                return false;
+            }
+            const atCurrentLineStart = (currentRect.left || currentRect.x || 0) <= (currentLine.left + 2);
+            if (atCurrentLineStart) {
+                const lineStartCaret = findLineStartCaretInListItem(currentListItem, textNodes, targetLine);
+                if (lineStartCaret) {
+                    const startRange = document.createRange();
+                    startRange.setStart(lineStartCaret.node, lineStartCaret.offset);
+                    startRange.collapse(true);
+                    selection.removeAllRanges();
+                    selection.addRange(startRange);
+                    return true;
+                }
+            }
+
+            const currentCaretX = currentRect.left || currentRect.x || 0;
+            const targetHeight = Math.max(1, targetLine.bottom - targetLine.top);
+            const targetY = targetLine.top + Math.max(1, Math.min(targetHeight * 0.5, targetHeight - 1));
+            const xCandidates = atCurrentLineStart
+                ? [
+                    targetLine.left + 0.5,
+                    targetLine.left + 1.5,
+                    currentCaretX,
+                    currentCaretX + 1
+                ]
+                : [
+                    currentCaretX + 1,
+                    currentCaretX,
+                    targetLine.left + 1,
+                    Math.min(targetLine.right - 1, Math.max(targetLine.left + 1, currentCaretX + 8))
+                ];
+            const tried = new Set();
+            let selectedRange = null;
+            let selectedScore = Infinity;
+
+            const trySelectRange = (probeRange) => {
+                if (!probeRange || !this.editor.contains(probeRange.startContainer)) {
+                    return false;
+                }
+                if (!isRangeInsideDirectListText(probeRange, currentListItem, textNodes)) {
+                    return false;
+                }
+                const probeRect = getVisualCaretRectForRange(probeRange);
+                if (!probeRect) {
+                    return false;
+                }
+                const probeTop = probeRect.top || probeRect.y || 0;
+                if (probeTop < targetLine.top - 3 || probeTop > targetLine.bottom + 3) {
+                    return false;
+                }
+                const probeLeft = probeRect.left || probeRect.x || 0;
+                const score = atCurrentLineStart ? probeLeft : Math.abs(probeLeft - currentCaretX);
+                if (!selectedRange || score < selectedScore) {
+                    selectedRange = probeRange;
+                    selectedScore = score;
+                }
+                return true;
+            };
+
+            for (const x of xCandidates) {
+                if (!Number.isFinite(x)) continue;
+                const key = Math.round(x * 10) / 10;
+                if (tried.has(key)) continue;
+                tried.add(key);
+                const probeRange = document.caretRangeFromPoint(x, targetY);
+                trySelectRange(probeRange);
+            }
+            if (atCurrentLineStart) {
+                for (let dx = 0; dx <= 16; dx += 1) {
+                    const probeRange = document.caretRangeFromPoint(targetLine.left + dx, targetY);
+                    trySelectRange(probeRange);
+                }
+            }
+
+            if (selectedRange) {
+                selection.removeAllRanges();
+                selection.addRange(selectedRange);
+                return true;
+            }
+            return false;
+        };
+        if (tryMoveWithinCurrentListItemByVisualLine()) {
+            return;
         }
 
         const isListItemSingleVisualLine = (listItem) => {
@@ -3058,7 +3771,7 @@ export class CursorManager {
                     afterRange.endContainer !== originContainer ||
                     afterRange.endOffset !== originOffset);
                 if (movedByModify && this.editor.contains(afterRange.startContainer)) {
-                    const afterRect = this._getCaretRect(afterRange);
+                    const afterRect = getVisualCaretRectForRange(afterRange);
                     const afterY = afterRect ? (afterRect.top || afterRect.y || 0) : null;
                     const movedUpByModify = Number.isFinite(afterY) && afterY < (currentY - 2);
                     if (movedUpByModify) {
@@ -3294,6 +4007,29 @@ export class CursorManager {
         let container = range.startContainer;
         let originContainer = range.startContainer;
         let originOffset = range.startOffset;
+        const restoreOriginalCaret = () => {
+            if (!originContainer || !this.editor || !this.editor.contains(originContainer)) {
+                return false;
+            }
+            try {
+                const restoreRange = document.createRange();
+                if (originContainer.nodeType === Node.TEXT_NODE) {
+                    const textLength = (originContainer.textContent || '').length;
+                    restoreRange.setStart(originContainer, Math.max(0, Math.min(originOffset, textLength)));
+                } else if (originContainer.nodeType === Node.ELEMENT_NODE) {
+                    const childCount = originContainer.childNodes ? originContainer.childNodes.length : 0;
+                    restoreRange.setStart(originContainer, Math.max(0, Math.min(originOffset, childCount)));
+                } else {
+                    return false;
+                }
+                restoreRange.collapse(true);
+                selection.removeAllRanges();
+                selection.addRange(restoreRange);
+                return true;
+            } catch (e) {
+                return false;
+            }
+        };
         const isEffectivelyEmptyBlock = (block) => {
             if (!block) return false;
             const text = (block.textContent || '').replace(/[\u200B\uFEFF\u00A0]/g, '').trim();
@@ -3311,12 +4047,109 @@ export class CursorManager {
             });
             return !meaningfulChild;
         };
-        const getBlockFromContainer = (node) => {
+        const getBlockFromContainer = (node, offset = null) => {
+            if (node === this.editor) {
+                const children = Array.from(this.editor.childNodes || []);
+                if (children.length === 0) {
+                    return null;
+                }
+                const safeOffset = Math.max(0, Math.min(
+                    Number.isInteger(offset) ? offset : 0,
+                    children.length - 1
+                ));
+                const directChild = children[safeOffset] || children[children.length - 1];
+                if (directChild && directChild.nodeType === Node.ELEMENT_NODE && this.domUtils.isBlockElement(directChild)) {
+                    return directChild;
+                }
+                if (directChild && directChild.nodeType === Node.TEXT_NODE) {
+                    return directChild.parentElement && directChild.parentElement !== this.editor
+                        ? directChild.parentElement
+                        : null;
+                }
+            }
             let block = node && node.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
             while (block && block !== this.editor && !this.domUtils.isBlockElement(block)) {
                 block = block.parentElement;
             }
             return block && block !== this.editor ? block : null;
+        };
+        const getEstimatedLineHeight = (node, fallbackRect = null) => {
+            const block = getBlockFromContainer(node);
+            let lineHeight = NaN;
+            if (block && window.getComputedStyle) {
+                const style = window.getComputedStyle(block);
+                if (style) {
+                    lineHeight = Number.parseFloat(style.lineHeight);
+                    if (!Number.isFinite(lineHeight) || lineHeight <= 0) {
+                        const fontSize = Number.parseFloat(style.fontSize);
+                        if (Number.isFinite(fontSize) && fontSize > 0) {
+                            lineHeight = fontSize * 1.6;
+                        }
+                    }
+                }
+            }
+            if ((!Number.isFinite(lineHeight) || lineHeight <= 0) && fallbackRect) {
+                const rectHeight = Number.parseFloat(fallbackRect.height);
+                if (Number.isFinite(rectHeight) && rectHeight > 0) {
+                    lineHeight = rectHeight;
+                }
+            }
+            if (!Number.isFinite(lineHeight) || lineHeight <= 0) {
+                lineHeight = 18;
+            }
+            return Math.max(14, Math.min(lineHeight, 72));
+        };
+        const getVisualCaretRectForRange = (targetRange) => {
+            if (!targetRange) {
+                return null;
+            }
+            const baseRect = this._getCaretRect(targetRange);
+            if (!baseRect || !targetRange.collapsed) {
+                return baseRect;
+            }
+            const containerNode = targetRange.startContainer;
+            if (!containerNode || containerNode.nodeType !== Node.TEXT_NODE) {
+                return baseRect;
+            }
+            const text = containerNode.textContent || '';
+            const offset = Math.max(0, Math.min(targetRange.startOffset, text.length));
+            if (offset <= 0 || offset >= text.length) {
+                return baseRect;
+            }
+            try {
+                const prevRange = document.createRange();
+                prevRange.setStart(containerNode, offset - 1);
+                prevRange.setEnd(containerNode, offset);
+                const prevRect = prevRange.getBoundingClientRect();
+
+                const nextRange = document.createRange();
+                nextRange.setStart(containerNode, offset);
+                nextRange.setEnd(containerNode, offset + 1);
+                const nextRect = nextRange.getBoundingClientRect();
+
+                if (!prevRect || !nextRect) {
+                    return baseRect;
+                }
+
+                const prevTop = prevRect.top || prevRect.y || 0;
+                const nextTop = nextRect.top || nextRect.y || 0;
+                if (nextTop > prevTop + 2) {
+                    // 折り返し行の先頭では、前文字（前行末）ではなく次文字の行を現在行として扱う。
+                    return {
+                        left: nextRect.left,
+                        right: nextRect.left,
+                        top: nextRect.top,
+                        bottom: nextRect.bottom,
+                        width: 0,
+                        height: nextRect.height,
+                        x: nextRect.left,
+                        y: nextRect.y
+                    };
+                }
+            } catch (e) {
+                // ignore and use base rect
+            }
+            return baseRect;
         };
         const getTopLevelBlockForNavigation = (node, offset = null) => {
             if (!this.editor) {
@@ -3353,6 +4186,59 @@ export class CursorManager {
             }
             return current;
         };
+        const normalizeCollapsedBoundaryToTextNode = () => {
+            if (!range || !range.collapsed) {
+                return false;
+            }
+            const boundaryContainer = range.startContainer;
+            if (!boundaryContainer || boundaryContainer.nodeType !== Node.ELEMENT_NODE) {
+                return false;
+            }
+            if (boundaryContainer === this.editor) {
+                return false;
+            }
+
+            const boundaryTag = boundaryContainer.tagName;
+            if (boundaryTag === 'LI' ||
+                boundaryTag === 'UL' ||
+                boundaryTag === 'OL' ||
+                boundaryTag === 'TABLE' ||
+                boundaryTag === 'TR' ||
+                boundaryTag === 'TD' ||
+                boundaryTag === 'TH' ||
+                boundaryTag === 'PRE' ||
+                boundaryTag === 'CODE') {
+                return false;
+            }
+
+            const maxOffset = boundaryContainer.childNodes
+                ? boundaryContainer.childNodes.length
+                : 0;
+            const safeOffset = Math.max(0, Math.min(range.startOffset, maxOffset));
+
+            let targetTextNode = this._getTextNodeInParentAfter(boundaryContainer, safeOffset);
+            let targetOffset = 0;
+            if (targetTextNode) {
+                const text = targetTextNode.textContent || '';
+                const firstOffset = this._getFirstNonZwspOffset(text);
+                targetOffset = firstOffset !== null ? firstOffset : 0;
+            } else {
+                targetTextNode = this._getTextNodeInParentBefore(boundaryContainer, safeOffset);
+                if (!targetTextNode) {
+                    return false;
+                }
+                const text = targetTextNode.textContent || '';
+                const lastOffset = this._getLastNonZwspOffset(text);
+                targetOffset = lastOffset !== null ? Math.min(text.length, lastOffset + 1) : 0;
+            }
+
+            const normalizedRange = document.createRange();
+            normalizedRange.setStart(targetTextNode, targetOffset);
+            normalizedRange.collapse(true);
+            selection.removeAllRanges();
+            selection.addRange(normalizedRange);
+            return true;
+        };
         const resolveTrailingEmptyBlock = () => {
             let block = getBlockFromContainer(range.startContainer);
             if (!block && range.startContainer === this.editor) {
@@ -3385,6 +4271,7 @@ export class CursorManager {
         }
 
         this._normalizeSelectionForNavigation(selection);
+        normalizeCollapsedBoundaryToTextNode();
         range = selection.getRangeAt(0);
         container = range.startContainer;
         originContainer = range.startContainer;
@@ -3969,6 +4856,481 @@ export class CursorManager {
             }
         }
 
+        const getVisualLinesForListItemText = (listItem) => {
+            if (!listItem) {
+                return [];
+            }
+            const textNodes = this._getDirectTextNodes(listItem);
+            if (textNodes.length === 0) {
+                return [];
+            }
+            const firstNode = textNodes[0];
+            const lastNode = textNodes[textNodes.length - 1];
+            try {
+                const probeRange = document.createRange();
+                probeRange.setStart(firstNode, 0);
+                probeRange.setEnd(lastNode, (lastNode.textContent || '').length);
+                const rawRects = Array.from(probeRange.getClientRects ? probeRange.getClientRects() : []);
+                const rects = rawRects
+                    .filter(r => r &&
+                        Number.isFinite(r.top) &&
+                        Number.isFinite(r.bottom) &&
+                        Number.isFinite(r.left) &&
+                        Number.isFinite(r.right) &&
+                        (r.width || r.height))
+                    .sort((a, b) => {
+                        if (Math.abs(a.top - b.top) <= 1.5) {
+                            return a.left - b.left;
+                        }
+                        return a.top - b.top;
+                    });
+                if (rects.length === 0) {
+                    return [];
+                }
+                const lines = [];
+                for (const rect of rects) {
+                    const lastLine = lines.length > 0 ? lines[lines.length - 1] : null;
+                    if (!lastLine || Math.abs(lastLine.top - rect.top) > 3) {
+                        lines.push({
+                            top: rect.top,
+                            bottom: rect.bottom,
+                            left: rect.left,
+                            right: rect.right
+                        });
+                        continue;
+                    }
+                    lastLine.top = Math.min(lastLine.top, rect.top);
+                    lastLine.bottom = Math.max(lastLine.bottom, rect.bottom);
+                    lastLine.left = Math.min(lastLine.left, rect.left);
+                    lastLine.right = Math.max(lastLine.right, rect.right);
+                }
+                return lines;
+            } catch (e) {
+                return [];
+            }
+        };
+        const isRangeInsideDirectListText = (probeRange, listItem, textNodes) => {
+            if (!probeRange || !listItem || !textNodes || textNodes.length === 0) {
+                return false;
+            }
+            const startContainer = probeRange.startContainer;
+            if (!startContainer || !listItem.contains(startContainer)) {
+                return false;
+            }
+            if (startContainer.nodeType === Node.TEXT_NODE && textNodes.includes(startContainer)) {
+                return true;
+            }
+            let current = startContainer.nodeType === Node.ELEMENT_NODE
+                ? startContainer
+                : startContainer.parentElement;
+            while (current && current !== listItem) {
+                if (current.tagName === 'UL' || current.tagName === 'OL') {
+                    return false;
+                }
+                current = current.parentElement;
+            }
+            return current === listItem;
+        };
+        const findLineStartCaretInListItem = (listItem, textNodes, line) => {
+            if (!listItem || !textNodes || textNodes.length === 0 || !line) {
+                return null;
+            }
+            const pickCandidate = (skipWhitespace) => {
+                let best = null;
+                let guard = 0;
+                for (const textNode of textNodes) {
+                    const text = textNode.textContent || '';
+                    if (text.length === 0) continue;
+                    for (let i = 0; i < text.length; i++) {
+                        guard++;
+                        if (guard > 12000) {
+                            return best;
+                        }
+                        const ch = text[i];
+                        if (ch === '\n' || ch === '\r' || ch === '\u200B' || ch === '\uFEFF') {
+                            continue;
+                        }
+                        if (skipWhitespace && /\s/.test(ch)) {
+                            continue;
+                        }
+                        let charRect = null;
+                        try {
+                            const charRange = document.createRange();
+                            charRange.setStart(textNode, i);
+                            charRange.setEnd(textNode, i + 1);
+                            charRect = charRange.getBoundingClientRect();
+                        } catch (e) {
+                            continue;
+                        }
+                        if (!charRect || !(charRect.width || charRect.height)) {
+                            continue;
+                        }
+                        const charTop = charRect.top || charRect.y || 0;
+                        const charBottom = charRect.bottom || (charRect.y + charRect.height) || charTop;
+                        const overlapsTargetLine = charBottom >= line.top - 2 && charTop <= line.bottom + 2;
+                        if (!overlapsTargetLine) {
+                            continue;
+                        }
+                        const charLeft = charRect.left || charRect.x || 0;
+                        if (!best || charLeft < best.left - 0.5 ||
+                            (Math.abs(charLeft - best.left) <= 0.5 && charTop < best.top)) {
+                            best = {
+                                node: textNode,
+                                offset: i,
+                                left: charLeft,
+                                top: charTop
+                            };
+                        }
+                    }
+                }
+                return best;
+            };
+            return pickCandidate(true) || pickCandidate(false);
+        };
+        const getNearestVisualLineIndex = (lines, caretRect) => {
+            if (!lines || lines.length === 0 || !caretRect) {
+                return 0;
+            }
+            const caretTop = caretRect.top || caretRect.y || 0;
+            let nearestIndex = 0;
+            let minDistance = Infinity;
+            for (let i = 0; i < lines.length; i++) {
+                const distance = Math.abs(lines[i].top - caretTop);
+                if (distance < minDistance) {
+                    minDistance = distance;
+                    nearestIndex = i;
+                }
+            }
+            return nearestIndex;
+        };
+        const isCollapsedRangeAtListTextStart = (targetRange, listItem) => {
+            if (!targetRange || !targetRange.collapsed || !listItem) {
+                return false;
+            }
+            const startContainer = targetRange.startContainer;
+            const startOffset = targetRange.startOffset;
+            const firstDirectText = this._getFirstDirectTextNode(listItem);
+
+            let isAtStart = false;
+            if (startContainer.nodeType === Node.TEXT_NODE) {
+                if (firstDirectText && startContainer === firstDirectText) {
+                    const minOffset = this._getFirstNonZwspOffset(firstDirectText.textContent || '');
+                    isAtStart = minOffset === null ? startOffset <= 0 : startOffset <= minOffset;
+                } else if (!firstDirectText) {
+                    isAtStart = startOffset <= 0;
+                }
+            } else if (startContainer === listItem) {
+                isAtStart = startOffset <= 1;
+            }
+
+            if (isAtStart) {
+                return true;
+            }
+
+            try {
+                const beforeRange = document.createRange();
+                beforeRange.selectNodeContents(listItem);
+                beforeRange.setEnd(startContainer, startOffset);
+                const beforeText = (beforeRange.toString() || '').replace(/[\u200B\uFEFF\u00A0]/g, '');
+                return beforeText.trim() === '';
+            } catch (e) {
+                return false;
+            }
+        };
+        const tryMoveDownFromListItemTextStartByVisualLine = () => {
+            if (!range || !range.collapsed || !document.caretRangeFromPoint) {
+                return false;
+            }
+            const activeListItem = originListItem ||
+                this._getListItemFromContainer(range.startContainer, range.startOffset, 'down') ||
+                this.domUtils.getParentElement(range.startContainer, 'LI');
+            if (!activeListItem) {
+                return false;
+            }
+            if (!isCollapsedRangeAtListTextStart(range, activeListItem)) {
+                return false;
+            }
+
+            const textNodes = this._getDirectTextNodes(activeListItem);
+            if (textNodes.length === 0) {
+                return false;
+            }
+            const lines = getVisualLinesForListItemText(activeListItem);
+            if (lines.length < 2) {
+                return false;
+            }
+            const currentRect = getVisualCaretRectForRange(range);
+            const currentIndex = currentRect ? getNearestVisualLineIndex(lines, currentRect) : 0;
+            if (currentIndex >= lines.length - 1) {
+                return false;
+            }
+            const targetLine = lines[currentIndex + 1];
+            if (!targetLine) {
+                return false;
+            }
+
+            const lineStartCaret = findLineStartCaretInListItem(activeListItem, textNodes, targetLine);
+            if (lineStartCaret) {
+                const startRange = document.createRange();
+                startRange.setStart(lineStartCaret.node, lineStartCaret.offset);
+                startRange.collapse(true);
+                selection.removeAllRanges();
+                selection.addRange(startRange);
+                return true;
+            }
+
+            const targetHeight = Math.max(1, targetLine.bottom - targetLine.top);
+            const targetY = targetLine.top + Math.max(1, Math.min(targetHeight * 0.5, targetHeight - 1));
+            let selectedRange = null;
+            let selectedLeft = Infinity;
+            for (let dx = 0; dx <= 24; dx += 1) {
+                const probeRange = document.caretRangeFromPoint(targetLine.left + dx, targetY);
+                if (!probeRange || !this.editor.contains(probeRange.startContainer)) {
+                    continue;
+                }
+                if (probeRange.startContainer.nodeType !== Node.TEXT_NODE ||
+                    !textNodes.includes(probeRange.startContainer)) {
+                    continue;
+                }
+                if (!isRangeInsideDirectListText(probeRange, activeListItem, textNodes)) {
+                    continue;
+                }
+                const probeRect = getVisualCaretRectForRange(probeRange);
+                if (!probeRect) {
+                    continue;
+                }
+                const probeTop = probeRect.top || probeRect.y || 0;
+                if (probeTop < targetLine.top - 3 || probeTop > targetLine.bottom + 3) {
+                    continue;
+                }
+                const probeLeft = probeRect.left || probeRect.x || 0;
+                if (!selectedRange || probeLeft < selectedLeft) {
+                    selectedRange = probeRange;
+                    selectedLeft = probeLeft;
+                }
+            }
+
+            if (selectedRange) {
+                selection.removeAllRanges();
+                selection.addRange(selectedRange);
+                return true;
+            }
+            return false;
+        };
+        const tryMoveWithinCurrentListItemByVisualLine = () => {
+            if (!range || !range.collapsed || !document.caretRangeFromPoint) {
+                return false;
+            }
+            let activeListItem = originListItem ||
+                this._getListItemFromContainer(range.startContainer, range.startOffset, 'down') ||
+                this.domUtils.getParentElement(range.startContainer, 'LI');
+            if (!activeListItem) {
+                const caretRect = getVisualCaretRectForRange(range);
+                if (caretRect && document.elementFromPoint) {
+                    const visualNode = document.elementFromPoint(
+                        (caretRect.left || caretRect.x || 0) + 1,
+                        (caretRect.top || caretRect.y || 0) + Math.max(1, Math.min(8, (caretRect.height || 16) * 0.5))
+                    );
+                    if (visualNode && this.editor.contains(visualNode)) {
+                        activeListItem = (visualNode.nodeType === Node.ELEMENT_NODE && visualNode.tagName === 'LI')
+                            ? visualNode
+                            : this.domUtils.getParentElement(visualNode, 'LI');
+                    }
+                }
+            }
+            if (!activeListItem) {
+                return false;
+            }
+            const textNodes = this._getDirectTextNodes(activeListItem);
+            if (textNodes.length === 0) {
+                return false;
+            }
+            const lines = getVisualLinesForListItemText(activeListItem);
+            if (lines.length < 2) {
+                return false;
+            }
+            const currentRect = getVisualCaretRectForRange(range);
+            if (!currentRect) {
+                return false;
+            }
+            const currentIndex = getNearestVisualLineIndex(lines, currentRect);
+            if (currentIndex >= lines.length - 1) {
+                return false;
+            }
+
+            const currentLine = lines[currentIndex];
+            const targetLine = lines[currentIndex + 1];
+            if (!targetLine) {
+                return false;
+            }
+            const atCurrentLineStart = (currentRect.left || currentRect.x || 0) <= (currentLine.left + 2);
+            if (atCurrentLineStart) {
+                const lineStartCaret = findLineStartCaretInListItem(activeListItem, textNodes, targetLine);
+                if (lineStartCaret) {
+                    const startRange = document.createRange();
+                    startRange.setStart(lineStartCaret.node, lineStartCaret.offset);
+                    startRange.collapse(true);
+                    selection.removeAllRanges();
+                    selection.addRange(startRange);
+                    return true;
+                }
+            }
+
+            const currentCaretX = currentRect.left || currentRect.x || 0;
+            const targetHeight = Math.max(1, targetLine.bottom - targetLine.top);
+            const targetY = targetLine.top + Math.max(1, Math.min(targetHeight * 0.5, targetHeight - 1));
+            const xCandidates = atCurrentLineStart
+                ? [
+                    targetLine.left + 0.5,
+                    targetLine.left + 1.5,
+                    currentCaretX,
+                    currentCaretX + 1
+                ]
+                : [
+                    currentCaretX + 1,
+                    currentCaretX,
+                    targetLine.left + 1,
+                    Math.min(targetLine.right - 1, Math.max(targetLine.left + 1, currentCaretX + 8))
+                ];
+            const tried = new Set();
+            let selectedRange = null;
+            let selectedScore = Infinity;
+
+            const trySelectRange = (probeRange) => {
+                if (!probeRange || !this.editor.contains(probeRange.startContainer)) {
+                    return false;
+                }
+                if (atCurrentLineStart &&
+                    (probeRange.startContainer.nodeType !== Node.TEXT_NODE ||
+                        !textNodes.includes(probeRange.startContainer))) {
+                    return false;
+                }
+                if (!isRangeInsideDirectListText(probeRange, activeListItem, textNodes)) {
+                    return false;
+                }
+                const probeRect = getVisualCaretRectForRange(probeRange);
+                if (!probeRect) {
+                    return false;
+                }
+                const probeTop = probeRect.top || probeRect.y || 0;
+                if (probeTop < targetLine.top - 3 || probeTop > targetLine.bottom + 3) {
+                    return false;
+                }
+                const probeLeft = probeRect.left || probeRect.x || 0;
+                const score = atCurrentLineStart ? probeLeft : Math.abs(probeLeft - currentCaretX);
+                if (!selectedRange || score < selectedScore) {
+                    selectedRange = probeRange;
+                    selectedScore = score;
+                }
+                return true;
+            };
+
+            for (const x of xCandidates) {
+                if (!Number.isFinite(x)) continue;
+                const key = Math.round(x * 10) / 10;
+                if (tried.has(key)) continue;
+                tried.add(key);
+                const probeRange = document.caretRangeFromPoint(x, targetY);
+                trySelectRange(probeRange);
+            }
+            if (atCurrentLineStart) {
+                for (let dx = 0; dx <= 16; dx += 1) {
+                    const probeRange = document.caretRangeFromPoint(targetLine.left + dx, targetY);
+                    trySelectRange(probeRange);
+                }
+            }
+
+            if (selectedRange) {
+                selection.removeAllRanges();
+                selection.addRange(selectedRange);
+                return true;
+            }
+            return false;
+        };
+        if (tryMoveDownFromListItemTextStartByVisualLine()) {
+            return;
+        }
+        if (tryMoveWithinCurrentListItemByVisualLine()) {
+            return;
+        }
+        const originListHasVisualLineBelow = (() => {
+            if (!originListItem || !range || !range.collapsed) {
+                return false;
+            }
+            const lines = getVisualLinesForListItemText(originListItem);
+            if (lines.length < 2) {
+                return false;
+            }
+            const currentRect = getVisualCaretRectForRange(range);
+            if (!currentRect) {
+                return true;
+            }
+            const currentIndex = getNearestVisualLineIndex(lines, currentRect);
+            return currentIndex < lines.length - 1;
+        })();
+        const tryNativeMoveDownWithinCurrentListItemByVisualLine = () => {
+            if (!originListItem || !originListHasVisualLineBelow || !selection.modify || !range.collapsed) {
+                return false;
+            }
+
+            const beforeRange = range.cloneRange();
+            const beforeContainer = beforeRange.startContainer;
+            const beforeOffset = beforeRange.startOffset;
+            const beforeRect = getVisualCaretRectForRange(beforeRange);
+            const beforeTop = beforeRect ? (beforeRect.top || beforeRect.y || 0) : null;
+
+            try {
+                selection.modify('move', 'forward', 'line');
+            } catch (e) {
+                return false;
+            }
+
+            const afterSelection = window.getSelection();
+            if (!afterSelection || !afterSelection.rangeCount) {
+                restoreOriginalCaret();
+                return false;
+            }
+
+            const afterRange = afterSelection.getRangeAt(0);
+            const movedByNative = afterRange.startContainer !== beforeContainer ||
+                afterRange.startOffset !== beforeOffset;
+            if (!movedByNative || !this.editor.contains(afterRange.startContainer)) {
+                restoreOriginalCaret();
+                return false;
+            }
+
+            const afterListItem = this._getListItemFromContainer(afterRange.startContainer, afterRange.startOffset, 'down') ||
+                this.domUtils.getParentElement(afterRange.startContainer, 'LI');
+            if (afterListItem !== originListItem) {
+                restoreOriginalCaret();
+                return false;
+            }
+
+            const afterRect = getVisualCaretRectForRange(afterRange);
+            const afterTop = afterRect ? (afterRect.top || afterRect.y || 0) : null;
+            const movedDown = Number.isFinite(beforeTop) &&
+                Number.isFinite(afterTop) &&
+                afterTop > beforeTop + 2;
+            if (!movedDown) {
+                restoreOriginalCaret();
+                return false;
+            }
+
+            if (beforeRect && afterRect) {
+                const beforeLineHeight = getEstimatedLineHeight(beforeRange.startContainer, beforeRect);
+                const deltaY = (afterTop || 0) - (beforeTop || 0);
+                if (deltaY > beforeLineHeight * 1.65) {
+                    restoreOriginalCaret();
+                    return false;
+                }
+            }
+
+            return true;
+        };
+        if (tryNativeMoveDownWithinCurrentListItemByVisualLine()) {
+            return;
+        }
+
         if (originListItem && range.collapsed) {
             const caretRectInList = this._getCaretRect(range);
             const listRect = originListItem.getBoundingClientRect ? originListItem.getBoundingClientRect() : null;
@@ -4010,18 +5372,291 @@ export class CursorManager {
             }
         }
 
+        const getVisualLinesForBlock = (block) => {
+            if (!block || block === this.editor) {
+                return [];
+            }
+            try {
+                const probeRange = document.createRange();
+                probeRange.selectNodeContents(block);
+                const rawRects = Array.from(probeRange.getClientRects ? probeRange.getClientRects() : []);
+                const rects = rawRects
+                    .filter(rect => rect &&
+                        Number.isFinite(rect.top) &&
+                        Number.isFinite(rect.bottom) &&
+                        Number.isFinite(rect.left) &&
+                        Number.isFinite(rect.right) &&
+                        (rect.width || rect.height))
+                    .sort((a, b) => {
+                        if (Math.abs(a.top - b.top) <= 1.5) {
+                            return a.left - b.left;
+                        }
+                        return a.top - b.top;
+                    });
+                if (rects.length === 0) {
+                    return [];
+                }
+
+                const lines = [];
+                for (const rect of rects) {
+                    const lastLine = lines.length > 0 ? lines[lines.length - 1] : null;
+                    if (!lastLine || Math.abs(lastLine.top - rect.top) > 3) {
+                        lines.push({
+                            top: rect.top,
+                            bottom: rect.bottom,
+                            left: rect.left,
+                            right: rect.right
+                        });
+                        continue;
+                    }
+                    lastLine.top = Math.min(lastLine.top, rect.top);
+                    lastLine.bottom = Math.max(lastLine.bottom, rect.bottom);
+                    lastLine.left = Math.min(lastLine.left, rect.left);
+                    lastLine.right = Math.max(lastLine.right, rect.right);
+                }
+                return lines;
+            } catch (e) {
+                return [];
+            }
+        };
+        const hasVisualLineBelowInBlock = (block, referenceRange = range) => {
+            if (!block || block === this.editor || !referenceRange) {
+                return false;
+            }
+            const currentRect = getVisualCaretRectForRange(referenceRange);
+            if (!currentRect) {
+                return false;
+            }
+            const currentTop = currentRect.top || currentRect.y || 0;
+            const lines = getVisualLinesForBlock(block);
+            if (lines.length === 0) {
+                return false;
+            }
+            let currentIndex = 0;
+            let minDistance = Infinity;
+            for (let i = 0; i < lines.length; i++) {
+                const distance = Math.abs(lines[i].top - currentTop);
+                if (distance < minDistance) {
+                    minDistance = distance;
+                    currentIndex = i;
+                }
+            }
+            return currentIndex < lines.length - 1;
+        };
+        const tryMoveWithinCurrentBlockByVisualLine = () => {
+            if (!range || !range.collapsed || !document.caretRangeFromPoint) {
+                return false;
+            }
+            if (originListItem || originPreBlock) {
+                return false;
+            }
+
+            const currentBlock = getBlockFromContainer(range.startContainer, range.startOffset);
+            if (!currentBlock || currentBlock === this.editor) {
+                return false;
+            }
+            if (currentBlock.tagName === 'LI' ||
+                currentBlock.tagName === 'PRE' ||
+                currentBlock.tagName === 'TD' ||
+                currentBlock.tagName === 'TH') {
+                return false;
+            }
+            const lines = getVisualLinesForBlock(currentBlock);
+            if (lines.length < 2) {
+                return false;
+            }
+
+            const currentRect = getVisualCaretRectForRange(range);
+            if (!currentRect) {
+                return false;
+            }
+            const currentTop = currentRect.top || currentRect.y || 0;
+            let currentIndex = 0;
+            let minDistance = Infinity;
+            for (let i = 0; i < lines.length; i++) {
+                const distance = Math.abs(lines[i].top - currentTop);
+                if (distance < minDistance) {
+                    minDistance = distance;
+                    currentIndex = i;
+                }
+            }
+            if (currentIndex >= lines.length - 1) {
+                return false;
+            }
+            const currentLine = lines[currentIndex];
+            const targetLine = lines[currentIndex + 1];
+            if (!targetLine) {
+                return false;
+            }
+
+            const currentX = currentRect.left || currentRect.x || 0;
+            const atCurrentLineStart = !!currentLine && currentX <= (currentLine.left + 2);
+            const targetHeight = Math.max(1, targetLine.bottom - targetLine.top);
+            const targetY = targetLine.top + Math.max(1, Math.min(targetHeight * 0.5, targetHeight - 1));
+            const findLineStartCaretInBlock = (block, line) => {
+                if (!block || !line) {
+                    return null;
+                }
+
+                const pickCandidate = (skipWhitespace) => {
+                    const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT, null, false);
+                    let textNode;
+                    let best = null;
+                    let guard = 0;
+                    while (textNode = walker.nextNode()) {
+                        const text = textNode.textContent || '';
+                        if (text.length === 0) continue;
+                        for (let i = 0; i < text.length; i++) {
+                            guard++;
+                            if (guard > 12000) {
+                                return best;
+                            }
+                            const ch = text[i];
+                            if (ch === '\n' || ch === '\r' || ch === '\u200B' || ch === '\uFEFF') {
+                                continue;
+                            }
+                            if (skipWhitespace && /\s/.test(ch)) {
+                                continue;
+                            }
+                            let charRect = null;
+                            try {
+                                const charRange = document.createRange();
+                                charRange.setStart(textNode, i);
+                                charRange.setEnd(textNode, i + 1);
+                                charRect = charRange.getBoundingClientRect();
+                            } catch (e) {
+                                continue;
+                            }
+                            if (!charRect || !(charRect.width || charRect.height)) {
+                                continue;
+                            }
+                            const charTop = charRect.top || charRect.y || 0;
+                            const charBottom = charRect.bottom || (charRect.y + charRect.height) || charTop;
+                            const overlapsTargetLine = charBottom >= line.top - 2 && charTop <= line.bottom + 2;
+                            if (!overlapsTargetLine) {
+                                continue;
+                            }
+                            const charLeft = charRect.left || charRect.x || 0;
+                            if (!best || charLeft < best.left - 0.5 ||
+                                (Math.abs(charLeft - best.left) <= 0.5 && charTop < best.top)) {
+                                best = {
+                                    node: textNode,
+                                    offset: i,
+                                    left: charLeft,
+                                    top: charTop
+                                };
+                            }
+                        }
+                    }
+                    return best;
+                };
+
+                return pickCandidate(true) || pickCandidate(false);
+            };
+            if (atCurrentLineStart) {
+                const lineStartCaret = findLineStartCaretInBlock(currentBlock, targetLine);
+                if (lineStartCaret) {
+                    const startRange = document.createRange();
+                    startRange.setStart(lineStartCaret.node, lineStartCaret.offset);
+                    startRange.collapse(true);
+                    selection.removeAllRanges();
+                    selection.addRange(startRange);
+                    return true;
+                }
+            }
+            const xCandidates = atCurrentLineStart
+                ? [
+                    targetLine.left + 0.5,
+                    targetLine.left + 1.5,
+                    currentX,
+                    currentX + 1
+                ]
+                : [
+                    currentX + 1,
+                    currentX,
+                    targetLine.left + 1,
+                    Math.min(targetLine.right - 1, Math.max(targetLine.left + 1, currentX + 8))
+                ];
+            const tried = new Set();
+            let selectedRange = null;
+            let selectedLeft = Infinity;
+
+            const trySelectRange = (probeRange) => {
+                if (!probeRange || !this.editor.contains(probeRange.startContainer)) {
+                    return false;
+                }
+                if (!currentBlock.contains(probeRange.startContainer)) {
+                    return false;
+                }
+                const probeRect = this._getCaretRect(probeRange);
+                if (!probeRect) {
+                    return false;
+                }
+                const probeTop = probeRect.top || probeRect.y || 0;
+                if (probeTop < targetLine.top - 3 || probeTop > targetLine.bottom + 3) {
+                    return false;
+                }
+                const probeLeft = probeRect.left || probeRect.x || 0;
+                if (!selectedRange || probeLeft < selectedLeft) {
+                    selectedRange = probeRange;
+                    selectedLeft = probeLeft;
+                }
+                return true;
+            };
+
+            for (const x of xCandidates) {
+                if (!Number.isFinite(x)) continue;
+                const key = Math.round(x * 10) / 10;
+                if (tried.has(key)) continue;
+                tried.add(key);
+                const probeRange = document.caretRangeFromPoint(x, targetY);
+                trySelectRange(probeRange);
+            }
+
+            // 行頭移動時は、ターゲット行の左端に最も近いキャレット位置を探索して採用する。
+            if (atCurrentLineStart) {
+                for (let dx = 0; dx <= 16; dx += 1) {
+                    const probeRange = document.caretRangeFromPoint(targetLine.left + dx, targetY);
+                    trySelectRange(probeRange);
+                }
+            }
+
+            if (selectedRange) {
+                selection.removeAllRanges();
+                selection.addRange(selectedRange);
+                return true;
+            }
+            return false;
+        };
+        if (tryMoveWithinCurrentBlockByVisualLine()) {
+            return;
+        }
+
         // 直下が空行ブロックの場合は、次のテキスト行へ飛ばさず空行に入る
-        const originBlock = getBlockFromContainer(container);
+        const originBlock = getBlockFromContainer(container, range.startOffset);
         if (originBlock) {
             const nextBlock = this._getNextNavigableElementSibling(originBlock);
-            const caretRect = this._getCaretRect(range);
+            const caretRect = getVisualCaretRectForRange(range);
             const blockRect = originBlock.getBoundingClientRect ? originBlock.getBoundingClientRect() : null;
-            const nearBottom = !caretRect || !blockRect
+            const lineHeightForBottom = caretRect ? getEstimatedLineHeight(range.startContainer, caretRect) : 18;
+            const effectiveCaretBottom = !caretRect
+                ? null
+                : (() => {
+                    const rectTop = caretRect.top || caretRect.y || 0;
+                    const rectBottom = caretRect.bottom || (caretRect.y + caretRect.height) || 0;
+                    const rectHeight = caretRect.height || 0;
+                    if (rectHeight > lineHeightForBottom * 1.8) {
+                        return rectTop + lineHeightForBottom;
+                    }
+                    return rectBottom;
+                })();
+            const hasLineBelowInOriginBlock = hasVisualLineBelowInBlock(originBlock, range);
+            const nearBottom = !caretRect || !blockRect || !Number.isFinite(effectiveCaretBottom)
                 ? true
-                : (caretRect.bottom + 4 >= blockRect.bottom ||
-                    (blockRect.bottom - caretRect.bottom) <= Math.max(4, (caretRect.height || 16) * 0.6));
+                : (effectiveCaretBottom + 4 >= blockRect.bottom ||
+                    (blockRect.bottom - effectiveCaretBottom) <= Math.max(4, lineHeightForBottom * 0.6));
             const nextLeadingImage = nextBlock ? this._getLeadingImageInBlock(nextBlock) : null;
-            if (nextLeadingImage && nearBottom) {
+            if (nextLeadingImage && nearBottom && !hasLineBelowInOriginBlock) {
                 const imageRange = document.createRange();
                 if (this._collapseRangeBeforeNode(imageRange, nextLeadingImage)) {
                     selection.removeAllRanges();
@@ -4030,7 +5665,7 @@ export class CursorManager {
                 }
             }
             if (nextBlock && isEffectivelyEmptyBlock(nextBlock)) {
-                if (nearBottom && moveToBlockStart(nextBlock)) {
+                if (nearBottom && !hasLineBelowInOriginBlock && moveToBlockStart(nextBlock)) {
                     return;
                 }
             }
@@ -4040,63 +5675,115 @@ export class CursorManager {
         const activeListItemForStartNav = originListItem ||
             this._getListItemFromContainer(range.startContainer, range.startOffset, 'down') ||
             this.domUtils.getParentElement(range.startContainer, 'LI');
-        if (activeListItemForStartNav && range.collapsed) {
-            const firstDirectText = this._getFirstDirectTextNode(activeListItemForStartNav);
-            let isAtListStart = false;
-            if (range.startContainer.nodeType === Node.TEXT_NODE) {
-                if (firstDirectText && range.startContainer === firstDirectText) {
-                    const minOffset = this._getFirstNonZwspOffset(firstDirectText.textContent || '');
-                    isAtListStart = minOffset === null ? range.startOffset <= 0 : range.startOffset <= minOffset;
-                } else if (!firstDirectText) {
-                    isAtListStart = range.startOffset <= 0;
+        const startNavLines = activeListItemForStartNav
+            ? getVisualLinesForListItemText(activeListItemForStartNav)
+            : [];
+        if (activeListItemForStartNav &&
+            range.collapsed &&
+            startNavLines.length <= 1 &&
+            isCollapsedRangeAtListTextStart(range, activeListItemForStartNav)) {
+            const caretRectAtStart = this._getCaretRect(range);
+            const xAtStart = caretRectAtStart ? (caretRectAtStart.left || caretRectAtStart.x || 0) : 0;
+            const nextListItem = this._getAdjacentListItem(activeListItemForStartNav, 'next');
+            if (nextListItem) {
+                if (this._placeCursorInListItemAtX(nextListItem, xAtStart, 'down', selection)) {
+                    return;
                 }
-            } else if (range.startContainer === activeListItemForStartNav) {
-                isAtListStart = range.startOffset <= 1;
-            }
-            if (!isAtListStart) {
-                try {
-                    const beforeRange = document.createRange();
-                    beforeRange.selectNodeContents(activeListItemForStartNav);
-                    beforeRange.setEnd(range.startContainer, range.startOffset);
-                    const beforeText = (beforeRange.toString() || '').replace(/[\u200B\uFEFF\u00A0]/g, '');
-                    if (beforeText.trim() === '') {
-                        isAtListStart = true;
-                    }
-                } catch (e) {
-                    // ignore
+                const fallbackNode = this._getFirstDirectTextNode(nextListItem) || this._getLastDirectTextNode(nextListItem);
+                if (fallbackNode) {
+                    const fallbackRange = document.createRange();
+                    fallbackRange.setStart(fallbackNode, 0);
+                    fallbackRange.collapse(true);
+                    selection.removeAllRanges();
+                    selection.addRange(fallbackRange);
+                    return;
                 }
-            }
-
-            if (isAtListStart) {
-                const nextListItem = this._getAdjacentListItem(activeListItemForStartNav, 'next');
-                if (nextListItem) {
-                    const caretRectAtStart = this._getCaretRect(range);
-                    const xAtStart = caretRectAtStart ? (caretRectAtStart.left || caretRectAtStart.x || 0) : 0;
-                    if (this._placeCursorInListItemAtX(nextListItem, xAtStart, 'down', selection)) {
-                        return;
-                    }
-                    const fallbackNode = this._getFirstDirectTextNode(nextListItem) || this._getLastDirectTextNode(nextListItem);
-                    if (fallbackNode) {
-                        const fallbackRange = document.createRange();
-                        fallbackRange.setStart(fallbackNode, 0);
-                        fallbackRange.collapse(true);
-                        selection.removeAllRanges();
-                        selection.addRange(fallbackRange);
-                        return;
-                    }
-                }
+            } else if (moveDownFromListBoundary(activeListItemForStartNav, xAtStart)) {
+                return;
             }
         }
 
+        const tryNativeMoveDownOneVisualLine = () => {
+            if (!selection.modify || !range.collapsed) {
+                return false;
+            }
+            if (originListItem || originPreBlock) {
+                return false;
+            }
+
+            const beforeRange = range.cloneRange();
+            const beforeContainer = beforeRange.startContainer;
+            const beforeOffset = beforeRange.startOffset;
+            const beforeRect = getVisualCaretRectForRange(beforeRange);
+            const beforeTop = beforeRect ? (beforeRect.top || beforeRect.y || 0) : null;
+
+            try {
+                selection.modify('move', 'forward', 'line');
+            } catch (e) {
+                return false;
+            }
+
+            const afterSelection = window.getSelection();
+            if (!afterSelection || !afterSelection.rangeCount) {
+                restoreOriginalCaret();
+                return false;
+            }
+
+            const afterRange = afterSelection.getRangeAt(0);
+            const movedByNative = afterRange.startContainer !== beforeContainer ||
+                afterRange.startOffset !== beforeOffset ||
+                afterRange.endContainer !== beforeContainer ||
+                afterRange.endOffset !== beforeOffset;
+            if (!movedByNative || !this.editor.contains(afterRange.startContainer)) {
+                restoreOriginalCaret();
+                return false;
+            }
+
+            const afterRect = getVisualCaretRectForRange(afterRange);
+            const afterTop = afterRect ? (afterRect.top || afterRect.y || 0) : null;
+            const movedDown = Number.isFinite(beforeTop) &&
+                Number.isFinite(afterTop) &&
+                afterTop > beforeTop + 2;
+            if (!movedDown) {
+                restoreOriginalCaret();
+                return false;
+            }
+
+            // 2行以上飛んだケースは採用せず、既存の詳細ロジックへフォールバックする。
+            if (beforeRect && afterRect) {
+                const beforeLineHeight = getEstimatedLineHeight(beforeRange.startContainer, beforeRect);
+                const deltaY = (afterTop || 0) - (beforeTop || 0);
+                if (deltaY > beforeLineHeight * 1.65) {
+                    restoreOriginalCaret();
+                    return false;
+                }
+            }
+
+            return true;
+        };
+        if (tryNativeMoveDownOneVisualLine()) {
+            return;
+        }
+
+        range = selection.getRangeAt(0);
+        container = range.startContainer;
+
         // デフォルトの動作：カーソルを下に移動
-        let rect = this._getCaretRect(range);
+        let rect = getVisualCaretRectForRange(range);
         if (!rect) {
             return;
         }
 
+        const estimatedLineHeight = getEstimatedLineHeight(range.startContainer, rect);
         const currentX = rect.left || rect.x || 0;
-        const currentY = rect.bottom || (rect.y + rect.height) || 0;
-        const lineStep = Math.max(rect.height || 0, 18);
+        const rectTop = rect.top || rect.y || 0;
+        const rectBottom = rect.bottom || (rect.y + rect.height) || 0;
+        const rangeStartsAtElementBoundary = range.startContainer && range.startContainer.nodeType === Node.ELEMENT_NODE;
+        const rectLooksLikeBlockBounds = Number.isFinite(rect.height) && rect.height > estimatedLineHeight * 1.8;
+        const currentY = (rangeStartsAtElementBoundary || rectLooksLikeBlockBounds)
+            ? (rectTop + estimatedLineHeight)
+            : rectBottom;
+        const lineStep = estimatedLineHeight;
 
         let moved = false;
 
@@ -4174,6 +5861,11 @@ export class CursorManager {
                     );
                 }
                 if (targetListItem) {
+                    if (originListHasVisualLineBelow &&
+                        originListItem &&
+                        targetListItem !== originListItem) {
+                        return false;
+                    }
                     // リスト内の移動は専用ロジックに委譲し、X位置を維持する
                     // （先頭固定にすると階層跨ぎで見た目位置が崩れる）
                     if (!(originIsEmptyWithNested && originNestedList && originNestedList.contains(targetListItem))) {
@@ -4298,6 +5990,9 @@ export class CursorManager {
                 listItemForDown = this._getListItemFromContainer(container, range.startOffset, 'down') ||
                     this.domUtils.getParentElement(container, 'LI');
             }
+            if (originListHasVisualLineBelow) {
+                listItemForDown = null;
+            }
             const nextListItem = listItemForDown ? this._getAdjacentListItem(listItemForDown, 'next') : null;
             if (nextListItem) {
                 if (this._placeCursorInListItemAtX(nextListItem, currentX, 'down', selection)) {
@@ -4401,7 +6096,8 @@ export class CursorManager {
         }
 
         if (!moved) {
-            const anchor = container.nodeType === Node.ELEMENT_NODE ? container : container.parentElement;
+            const anchor = getBlockFromContainer(container) ||
+                (container.nodeType === Node.ELEMENT_NODE ? container : container.parentElement);
             const nextElement = anchor ? this._getNextNavigableElementInDocument(anchor) : null;
             if (nextElement) {
                 if (nextElement.tagName === 'PRE' && this._selectCodeBlockLanguageLabel(nextElement, selection)) {
@@ -6076,10 +7772,10 @@ export class CursorManager {
 
 
         // デフォルトの動作：ネイティブのselection.modifyを使用
-        // これにより、視覚的な行頭移動（折り返し対応）とインライン要素の適切な処理が可能になる
+        // 論理的な行頭移動を行いつつ、インライン要素の整合性を維持する
         if (selection.modify) {
-            // "lineboundary" uses visual line start/end (handling wrapping)
-            selection.modify('move', 'backward', 'lineboundary');
+            // Ctrl+A は折り返しの見た目ではなく、論理的な行頭へ移動させる。
+            selection.modify('move', 'backward', 'paragraphboundary');
             normalizeInlineCodeLineStartToOutsideLeft();
             return;
         }
@@ -6254,8 +7950,8 @@ export class CursorManager {
 
         // デフォルトの動作：ネイティブのselection.modifyを使用
         if (selection.modify) {
-            // "lineboundary" uses visual line start/end (handling wrapping)
-            selection.modify('move', 'forward', 'lineboundary');
+            // Ctrl+E は折り返しの見た目ではなく、論理的な行末へ移動させる。
+            selection.modify('move', 'forward', 'paragraphboundary');
             return;
         }
 

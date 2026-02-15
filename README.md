@@ -2,6 +2,8 @@
 
 ManulDown is a VSCode extension that lets you edit Markdown files in a WYSIWYG editor.
 
+![image](images/README/README.png)  
+
 ## Features
 
 - **WYSIWYG editing**: Edit while previewing the rendered result in real time.
