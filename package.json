@@ -8,12 +8,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/ktgrryt/md-wysiwyg.git"
+    "url": "https://github.com/ktgrryt/manuldown.git"
   },
   "bugs": {
-    "url": "https://github.com/ktgrryt/md-wysiwyg/issues"
+    "url": "https://github.com/ktgrryt/manuldown/issues"
   },
-  "homepage": "https://github.com/ktgrryt/md-wysiwyg#readme",
+  "homepage": "https://github.com/ktgrryt/manuldown#readme",
   "keywords": [
     "markdown",
     "wysiwyg",
