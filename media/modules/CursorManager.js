@@ -5631,7 +5631,7 @@ export class CursorManager {
                 if (!currentBlock.contains(probeRange.startContainer)) {
                     return false;
                 }
-                const probeRect = this._getCaretRect(probeRange);
+                const probeRect = getVisualCaretRectForRange(probeRange);
                 if (!probeRect) {
                     return false;
                 }

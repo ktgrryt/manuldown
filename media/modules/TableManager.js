@@ -2078,6 +2078,7 @@ export class TableManager {
         const info = this._getCellInfo(cell);
         if (!info) return false;
         const { table, rowIndex, colIndex } = info;
+        const sourceRange = range && range.cloneRange ? range.cloneRange() : range;
 
         const totalRows = table.rows.length;
         const totalCols = table.rows[0] ? table.rows[0].cells.length : 0;
@@ -2135,9 +2136,17 @@ export class TableManager {
         }
 
         if (direction === 'up') {
+            if (this._hasVisualLineInCell(cell, range, 'up')) {
+                if (this._moveWithinCellByVisualLine(cell, range, 'up')) {
+                    return true;
+                }
+            }
             if (rowIndex > 0) {
                 const target = table.rows[rowIndex - 1].cells[colIndex];
                 if (target) {
+                    if (this._setCursorToCellByVisualX(sourceRange, target, 'up')) {
+                        return true;
+                    }
                     const offset = this._getCursorOffsetInCell(cell, range);
                     this._setCursorToCellOffset(target, offset);
                     return true;
@@ -2154,9 +2163,17 @@ export class TableManager {
         }
 
         if (direction === 'down') {
+            if (this._hasVisualLineInCell(cell, range, 'down')) {
+                if (this._moveWithinCellByVisualLine(cell, range, 'down')) {
+                    return true;
+                }
+            }
             if (rowIndex < totalRows - 1) {
                 const target = table.rows[rowIndex + 1].cells[colIndex];
                 if (target) {
+                    if (this._setCursorToCellByVisualX(sourceRange, target, 'down')) {
+                        return true;
+                    }
                     const offset = this._getCursorOffsetInCell(cell, range);
                     this._setCursorToCellOffset(target, offset);
                     return true;
@@ -2521,6 +2538,272 @@ export class TableManager {
         selection.addRange(range);
     }
 
+    _setCursorToCellByVisualX(sourceRange, targetCell, direction) {
+        if (!sourceRange || !targetCell || !sourceRange.collapsed) return false;
+        if (direction !== 'up' && direction !== 'down') return false;
+        if (typeof document.caretRangeFromPoint !== 'function') return false;
+
+        this._ensureCellNotEmpty(targetCell);
+
+        const sourceRect = this._getVisualCaretRectForRange(sourceRange);
+        if (!sourceRect) return false;
+        const sourceX = (sourceRect.left || sourceRect.x || 0) + 1;
+        if (!Number.isFinite(sourceX)) return false;
+
+        const lines = this._getVisualLinesForCell(targetCell);
+        if (!lines.length) return false;
+
+        const targetLine = direction === 'up'
+            ? lines[lines.length - 1]
+            : lines[0];
+        if (!targetLine) return false;
+
+        const targetHeight = Math.max(1, targetLine.bottom - targetLine.top);
+        const targetY = targetLine.top + Math.max(1, Math.min(targetHeight * 0.5, targetHeight - 1));
+
+        const minX = targetLine.left + 1;
+        const maxX = Math.max(minX, targetLine.right - 1);
+        const clampedX = Math.min(maxX, Math.max(minX, sourceX));
+        const xCandidates = [
+            clampedX,
+            sourceX,
+            minX,
+            maxX,
+            minX + 1,
+            maxX - 1
+        ];
+
+        let bestRange = null;
+        let bestScore = Infinity;
+
+        for (const candidateX of xCandidates) {
+            if (!Number.isFinite(candidateX)) continue;
+
+            let probeRange = null;
+            try {
+                probeRange = document.caretRangeFromPoint(candidateX, targetY);
+            } catch (_e) {
+                probeRange = null;
+            }
+            if (!probeRange || !targetCell.contains(probeRange.startContainer)) {
+                continue;
+            }
+
+            const probeRect = this._getVisualCaretRectForRange(probeRange);
+            if (!probeRect) {
+                continue;
+            }
+            const probeTop = probeRect.top || probeRect.y || 0;
+            if (probeTop < targetLine.top - 3 || probeTop > targetLine.bottom + 3) {
+                continue;
+            }
+
+            const probeX = probeRect.left || probeRect.x || 0;
+            const score = Math.abs(probeX - sourceX);
+            if (!bestRange || score < bestScore) {
+                bestRange = probeRange;
+                bestScore = score;
+            }
+        }
+
+        if (!bestRange) {
+            return false;
+        }
+
+        const selection = window.getSelection();
+        if (!selection) return false;
+
+        const range = document.createRange();
+        range.setStart(bestRange.startContainer, bestRange.startOffset);
+        range.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        return true;
+    }
+
+    _moveWithinCellByVisualLine(cell, range, direction) {
+        if (!cell || !range || !range.collapsed) return false;
+        if (!cell.contains(range.startContainer)) return false;
+        if (direction !== 'up' && direction !== 'down') return false;
+        if (typeof document.caretRangeFromPoint !== 'function') return false;
+        const originContainer = range.startContainer;
+        const originOffset = range.startOffset;
+
+        const lines = this._getVisualLinesForCell(cell);
+        if (lines.length < 2) return false;
+
+        const currentRect = this._getVisualCaretRectForRange(range);
+        if (!currentRect) return false;
+
+        const currentIndex = this._getNearestVisualLineIndex(lines, currentRect);
+        if (currentIndex < 0) return false;
+
+        const targetIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1;
+        if (targetIndex < 0 || targetIndex >= lines.length) return false;
+
+        const currentLine = lines[currentIndex];
+        const targetLine = lines[targetIndex];
+        if (!targetLine) return false;
+
+        const currentX = currentRect.left || currentRect.x || 0;
+        const atCurrentLineStart = !!currentLine && currentX <= (currentLine.left + 2);
+        const targetHeight = Math.max(1, targetLine.bottom - targetLine.top);
+        const targetY = targetLine.top + Math.max(1, Math.min(targetHeight * 0.5, targetHeight - 1));
+
+        const trySetRange = (targetRange) => {
+            if (!targetRange || !cell.contains(targetRange.startContainer)) return false;
+            const isSamePosition =
+                targetRange.startContainer === originContainer &&
+                targetRange.startOffset === originOffset;
+            if (isSamePosition) return false;
+            const sel = window.getSelection();
+            if (!sel) return false;
+            const collapsed = document.createRange();
+            collapsed.setStart(targetRange.startContainer, targetRange.startOffset);
+            collapsed.collapse(true);
+            sel.removeAllRanges();
+            sel.addRange(collapsed);
+            return true;
+        };
+
+        const findLineStartCaretInCell = (skipWhitespace) => {
+            const walker = document.createTreeWalker(cell, NodeFilter.SHOW_TEXT, null, false);
+            let textNode;
+            let best = null;
+            let guard = 0;
+
+            while (textNode = walker.nextNode()) {
+                const text = textNode.textContent || '';
+                if (!text.length) continue;
+                for (let i = 0; i < text.length; i++) {
+                    guard++;
+                    if (guard > 12000) return best;
+                    const ch = text[i];
+                    if (ch === '\n' || ch === '\r' || ch === '\u200B' || ch === '\uFEFF') {
+                        continue;
+                    }
+                    if (skipWhitespace && /\s/.test(ch)) {
+                        continue;
+                    }
+                    let rect = null;
+                    try {
+                        const charRange = document.createRange();
+                        charRange.setStart(textNode, i);
+                        charRange.setEnd(textNode, i + 1);
+                        rect = charRange.getBoundingClientRect();
+                    } catch (_e) {
+                        continue;
+                    }
+                    if (!rect || !(rect.width || rect.height)) {
+                        continue;
+                    }
+                    const top = rect.top || rect.y || 0;
+                    const bottom = rect.bottom || (rect.y + rect.height) || top;
+                    if (bottom < targetLine.top - 2 || top > targetLine.bottom + 2) {
+                        continue;
+                    }
+                    const left = rect.left || rect.x || 0;
+                    if (!best || left < best.left - 0.5 ||
+                        (Math.abs(left - best.left) <= 0.5 && top < best.top)) {
+                        best = { node: textNode, offset: i, left, top };
+                    }
+                }
+            }
+            return best;
+        };
+
+        if (atCurrentLineStart) {
+            const lineStartCaret = findLineStartCaretInCell(true) || findLineStartCaretInCell(false);
+            if (lineStartCaret) {
+                const startRange = document.createRange();
+                startRange.setStart(lineStartCaret.node, lineStartCaret.offset);
+                startRange.collapse(true);
+                if (trySetRange(startRange)) {
+                    return true;
+                }
+            }
+        }
+
+        const xCandidates = atCurrentLineStart
+            ? [
+                targetLine.left + 0.5,
+                targetLine.left + 1.5,
+                currentX,
+                currentX + 1
+            ]
+            : [
+                currentX + 1,
+                currentX,
+                targetLine.left + 1,
+                Math.min(targetLine.right - 1, Math.max(targetLine.left + 1, currentX + 8))
+            ];
+        const tried = new Set();
+        let bestRange = null;
+        let bestScore = Infinity;
+
+        const trySelectRange = (probeRange) => {
+            if (!probeRange || !cell.contains(probeRange.startContainer)) {
+                return;
+            }
+            const probeRect = this._getVisualCaretRectForRange(probeRange);
+            if (!probeRect) {
+                return;
+            }
+            const probeTop = probeRect.top || probeRect.y || 0;
+            if (probeTop < targetLine.top - 3 || probeTop > targetLine.bottom + 3) {
+                return;
+            }
+            const probeLeft = probeRect.left || probeRect.x || 0;
+            const score = atCurrentLineStart ? probeLeft : Math.abs(probeLeft - currentX);
+            if (!bestRange || score < bestScore) {
+                bestRange = probeRange;
+                bestScore = score;
+            }
+        };
+
+        for (const x of xCandidates) {
+            if (!Number.isFinite(x)) continue;
+            const key = Math.round(x * 10) / 10;
+            if (tried.has(key)) continue;
+            tried.add(key);
+            const probeRange = document.caretRangeFromPoint(x, targetY);
+            trySelectRange(probeRange);
+        }
+
+        if (atCurrentLineStart) {
+            for (let dx = 0; dx <= 16; dx += 1) {
+                const probeRange = document.caretRangeFromPoint(targetLine.left + dx, targetY);
+                trySelectRange(probeRange);
+            }
+        }
+
+        if (bestRange && trySetRange(bestRange)) {
+            return true;
+        }
+
+        // Safety fallback: keep movement inside current cell.
+        const selection = window.getSelection();
+        if (!selection || !selection.rangeCount) return false;
+        const restore = range.cloneRange();
+        if (typeof selection.modify !== 'function') {
+            return false;
+        }
+        try {
+            selection.modify('move', direction === 'up' ? 'backward' : 'forward', 'line');
+            if (selection.rangeCount) {
+                const movedRange = selection.getRangeAt(0);
+                if (cell.contains(movedRange.startContainer)) {
+                    return true;
+                }
+            }
+        } catch (_e) {
+            // restore below
+        }
+        selection.removeAllRanges();
+        selection.addRange(restore);
+        return false;
+    }
+
     _setCursorToEdge(edge, atEnd) {
         const selection = window.getSelection();
         if (!selection) return;
@@ -2544,6 +2827,191 @@ export class TableManager {
         tempRange.selectNodeContents(cell);
         tempRange.setEnd(range.startContainer, range.startOffset);
         return tempRange.toString().length;
+    }
+
+    _getVisualCaretRectForRange(range) {
+        if (!range) return null;
+
+        const baseRect = (() => {
+            const rects = Array.from(range.getClientRects ? range.getClientRects() : []);
+            const firstRect = rects.find(rect =>
+                rect &&
+                Number.isFinite(rect.top) &&
+                Number.isFinite(rect.left) &&
+                (rect.width || rect.height)
+            );
+            if (firstRect) return firstRect;
+            const fallback = range.getBoundingClientRect ? range.getBoundingClientRect() : null;
+            if (fallback &&
+                Number.isFinite(fallback.top) &&
+                Number.isFinite(fallback.left) &&
+                (fallback.width || fallback.height)) {
+                return fallback;
+            }
+            return null;
+        })();
+        if (!baseRect || !range.collapsed) {
+            return baseRect;
+        }
+
+        const containerNode = range.startContainer;
+        if (!containerNode || containerNode.nodeType !== Node.TEXT_NODE) {
+            return baseRect;
+        }
+        const text = containerNode.textContent || '';
+        const offset = Math.max(0, Math.min(range.startOffset, text.length));
+        if (offset <= 0 || offset >= text.length) {
+            return baseRect;
+        }
+
+        try {
+            const prevRange = document.createRange();
+            prevRange.setStart(containerNode, offset - 1);
+            prevRange.setEnd(containerNode, offset);
+            const prevRect = prevRange.getBoundingClientRect();
+
+            const nextRange = document.createRange();
+            nextRange.setStart(containerNode, offset);
+            nextRange.setEnd(containerNode, offset + 1);
+            const nextRect = nextRange.getBoundingClientRect();
+
+            if (!prevRect || !nextRect) {
+                return baseRect;
+            }
+
+            const prevTop = prevRect.top || prevRect.y || 0;
+            const nextTop = nextRect.top || nextRect.y || 0;
+            if (nextTop > prevTop + 2) {
+                // At wrapped-line head, prefer the next character's line.
+                return {
+                    left: nextRect.left,
+                    right: nextRect.left,
+                    top: nextRect.top,
+                    bottom: nextRect.bottom,
+                    width: 0,
+                    height: nextRect.height,
+                    x: nextRect.left,
+                    y: nextRect.y
+                };
+            }
+        } catch (_e) {
+            // fall back to baseRect
+        }
+        return baseRect;
+    }
+
+    _getVisualLinesForCell(cell) {
+        if (!cell) return [];
+        try {
+            const cellRect = cell.getBoundingClientRect ? cell.getBoundingClientRect() : null;
+            const rawRects = [];
+            const walker = document.createTreeWalker(cell, NodeFilter.SHOW_TEXT, null, false);
+            let textNode;
+            let guard = 0;
+            while (textNode = walker.nextNode()) {
+                const text = textNode.textContent || '';
+                if (!text.length) continue;
+                for (let i = 0; i < text.length; i++) {
+                    guard++;
+                    if (guard > 20000) break;
+                    const ch = text[i];
+                    if (ch === '\n' || ch === '\r' || ch === '\u200B' || ch === '\uFEFF') {
+                        continue;
+                    }
+                    try {
+                        const charRange = document.createRange();
+                        charRange.setStart(textNode, i);
+                        charRange.setEnd(textNode, i + 1);
+                        const rect = charRange.getBoundingClientRect();
+                        if (rect) rawRects.push(rect);
+                    } catch (_e) {
+                        // ignore broken ranges and continue
+                    }
+                }
+                if (guard > 20000) break;
+            }
+            const rects = rawRects
+                .filter(rect =>
+                    rect &&
+                    Number.isFinite(rect.top) &&
+                    Number.isFinite(rect.bottom) &&
+                    Number.isFinite(rect.left) &&
+                    Number.isFinite(rect.right) &&
+                    (!cellRect ||
+                        (rect.bottom >= cellRect.top + 1 &&
+                            rect.top <= cellRect.bottom - 1 &&
+                            rect.right >= cellRect.left + 1 &&
+                            rect.left <= cellRect.right - 1)) &&
+                    (rect.width || rect.height)
+                )
+                .sort((a, b) => {
+                    if (Math.abs(a.top - b.top) <= 1.5) {
+                        return a.left - b.left;
+                    }
+                    return a.top - b.top;
+                });
+
+            if (rects.length === 0) {
+                return [];
+            }
+
+            const lines = [];
+            for (const rect of rects) {
+                const lastLine = lines.length > 0 ? lines[lines.length - 1] : null;
+                if (!lastLine || Math.abs(lastLine.top - rect.top) > 3) {
+                    lines.push({
+                        top: rect.top,
+                        bottom: rect.bottom,
+                        left: rect.left,
+                        right: rect.right
+                    });
+                    continue;
+                }
+                lastLine.top = Math.min(lastLine.top, rect.top);
+                lastLine.bottom = Math.max(lastLine.bottom, rect.bottom);
+                lastLine.left = Math.min(lastLine.left, rect.left);
+                lastLine.right = Math.max(lastLine.right, rect.right);
+            }
+            return lines;
+        } catch (_e) {
+            return [];
+        }
+    }
+
+    _getNearestVisualLineIndex(lines, caretRect) {
+        if (!lines || !lines.length || !caretRect) {
+            return -1;
+        }
+        const caretTop = caretRect.top || caretRect.y || 0;
+        let index = 0;
+        let minDistance = Infinity;
+        for (let i = 0; i < lines.length; i++) {
+            const distance = Math.abs(lines[i].top - caretTop);
+            if (distance < minDistance) {
+                minDistance = distance;
+                index = i;
+            }
+        }
+        return index;
+    }
+
+    _hasVisualLineInCell(cell, range, direction) {
+        if (!cell || !range || !range.collapsed) return false;
+        if (!cell.contains(range.startContainer)) return false;
+        if (direction !== 'up' && direction !== 'down') return false;
+
+        const lines = this._getVisualLinesForCell(cell);
+        if (lines.length < 2) return false;
+
+        const caretRect = this._getVisualCaretRectForRange(range);
+        if (!caretRect) return false;
+
+        const currentIndex = this._getNearestVisualLineIndex(lines, caretRect);
+        if (currentIndex < 0) return false;
+
+        return direction === 'up'
+            ? currentIndex > 0
+            : currentIndex < lines.length - 1;
     }
 
     _isAtCellStart(cell, range) {
