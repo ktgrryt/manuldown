@@ -40,6 +40,7 @@ import { SearchManager } from './modules/SearchManager.js';
         listDashStyle: initialSettings.listDashStyle === true
     };
     const imageRenderMaxWidthPx = 820;
+    let imageResolveRequestSeq = 0;
     let overflowStateRaf = null;
 
     function getEditorScrollbarMetrics() {
@@ -9153,7 +9154,7 @@ import { SearchManager } from './modules/SearchManager.js';
                     return;
                 }
 
-                if (e.inputType === 'insertText' || e.inputType === 'insertLineBreak') {
+                if (e.inputType === 'insertText' || e.inputType === 'insertLineBreak' || e.inputType === 'insertFromPaste') {
                     const selection = window.getSelection();
                     let isInCodeBlock = false;
 
@@ -9447,6 +9448,1116 @@ import { SearchManager } from './modules/SearchManager.js';
             reader.readAsDataURL(file);
         };
 
+        const getSelectionRangeForPaste = () => {
+            const selection = window.getSelection();
+            if (!selection || !selection.rangeCount) {
+                return null;
+            }
+            return { selection, range: selection.getRangeAt(0) };
+        };
+
+        const isRangeInsideCodeBlock = (range) => {
+            if (!range) return false;
+            const container = range.commonAncestorContainer;
+            const codeElement = domUtils.getParentElement(container, 'CODE');
+            const preElement = codeElement ? domUtils.getParentElement(codeElement, 'PRE') : null;
+            return !!(codeElement && preElement);
+        };
+
+        const requestImageSrcResolution = (image, src) => {
+            if (!image || image.tagName !== 'IMG') return;
+            if (!src || typeof src !== 'string') return;
+            const trimmed = src.trim();
+            if (!trimmed) return;
+
+            if (
+                trimmed.startsWith('data:') ||
+                trimmed.startsWith('http://') ||
+                trimmed.startsWith('https://') ||
+                trimmed.includes('vscode-resource') ||
+                trimmed.includes('vscode-webview-resource')
+            ) {
+                return;
+            }
+
+            const requestId = `img-resolve-${Date.now()}-${++imageResolveRequestSeq}`;
+            image.setAttribute('data-image-resolve-id', requestId);
+            vscode.postMessage({
+                type: 'resolveImageSrc',
+                requestId,
+                src: trimmed
+            });
+        };
+
+        const createImageElementFromMarkdown = (rawAlt, rawTarget) => {
+            const alt = (rawAlt || '')
+                .replace(/\\\]/g, ']')
+                .replace(/\\\[/g, '[');
+            const target = (rawTarget || '').trim();
+            if (!target) return null;
+
+            const targetMatch = target.match(/^(<[^>]+>|[^\s]+)(?:\s+["'][^"']*["'])?$/);
+            if (!targetMatch) return null;
+
+            let src = targetMatch[1];
+            if (src.startsWith('<') && src.endsWith('>')) {
+                src = src.slice(1, -1);
+            }
+            src = src
+                .replace(/\\\)/g, ')')
+                .replace(/\\\(/g, '(');
+            if (!src) return null;
+
+            const image = document.createElement('img');
+            image.alt = alt;
+            image.src = src;
+            applyImageRenderSizeFromAlt(image);
+            requestImageSrcResolution(image, src);
+            return image;
+        };
+
+        const appendInlineMarkdownText = (parentNode, text) => {
+            const source = typeof text === 'string' ? text : '';
+            if (source === '') {
+                parentNode.appendChild(document.createTextNode(''));
+                return false;
+            }
+
+            let cursor = 0;
+            let textStart = 0;
+            let converted = false;
+            const flushText = (endIndex) => {
+                if (endIndex > textStart) {
+                    parentNode.appendChild(document.createTextNode(source.slice(textStart, endIndex)));
+                }
+            };
+            const hasClosing = (value) => typeof value === 'number' && value > -1;
+
+            while (cursor < source.length) {
+                let matched = false;
+
+                if (source[cursor] === '!' && source[cursor + 1] === '[') {
+                    const altEnd = source.indexOf(']', cursor + 2);
+                    if (hasClosing(altEnd) && source[altEnd + 1] === '(') {
+                        const closeParen = source.indexOf(')', altEnd + 2);
+                        if (hasClosing(closeParen)) {
+                            const rawAlt = source.slice(cursor + 2, altEnd);
+                            const rawTarget = source.slice(altEnd + 2, closeParen);
+                            const image = createImageElementFromMarkdown(rawAlt, rawTarget);
+                            if (image) {
+                                flushText(cursor);
+                                parentNode.appendChild(image);
+                                converted = true;
+                                cursor = closeParen + 1;
+                                textStart = cursor;
+                                matched = true;
+                            }
+                        }
+                    }
+                }
+
+                if (!matched && source[cursor] === '`') {
+                    const end = source.indexOf('`', cursor + 1);
+                    if (hasClosing(end) && end > cursor + 1) {
+                        flushText(cursor);
+                        const code = document.createElement('code');
+                        code.textContent = source.slice(cursor + 1, end);
+                        parentNode.appendChild(code);
+                        converted = true;
+                        cursor = end + 1;
+                        textStart = cursor;
+                        matched = true;
+                    }
+                }
+
+                if (!matched && source.startsWith('**', cursor)) {
+                    const end = source.indexOf('**', cursor + 2);
+                    if (hasClosing(end) && end > cursor + 2) {
+                        const content = source.slice(cursor + 2, end);
+                        if (content.trim() !== '') {
+                            flushText(cursor);
+                            const strong = document.createElement('strong');
+                            strong.textContent = content;
+                            parentNode.appendChild(strong);
+                            converted = true;
+                            cursor = end + 2;
+                            textStart = cursor;
+                            matched = true;
+                        }
+                    }
+                }
+
+                if (!matched && source.startsWith('~~', cursor)) {
+                    const end = source.indexOf('~~', cursor + 2);
+                    if (hasClosing(end) && end > cursor + 2) {
+                        const content = source.slice(cursor + 2, end);
+                        if (content.trim() !== '') {
+                            flushText(cursor);
+                            const strike = document.createElement('del');
+                            strike.textContent = content;
+                            parentNode.appendChild(strike);
+                            converted = true;
+                            cursor = end + 2;
+                            textStart = cursor;
+                            matched = true;
+                        }
+                    }
+                }
+
+                if (!matched && source[cursor] === '*' && source[cursor + 1] !== '*') {
+                    const end = source.indexOf('*', cursor + 1);
+                    if (hasClosing(end) && end > cursor + 1) {
+                        const content = source.slice(cursor + 1, end);
+                        if (content.trim() !== '') {
+                            flushText(cursor);
+                            const em = document.createElement('em');
+                            em.textContent = content;
+                            parentNode.appendChild(em);
+                            converted = true;
+                            cursor = end + 1;
+                            textStart = cursor;
+                            matched = true;
+                        }
+                    }
+                }
+
+                if (!matched && source[cursor] === '_' && source[cursor + 1] !== '_') {
+                    const end = source.indexOf('_', cursor + 1);
+                    if (hasClosing(end) && end > cursor + 1) {
+                        const content = source.slice(cursor + 1, end);
+                        if (content.trim() !== '') {
+                            flushText(cursor);
+                            const em = document.createElement('em');
+                            em.textContent = content;
+                            parentNode.appendChild(em);
+                            converted = true;
+                            cursor = end + 1;
+                            textStart = cursor;
+                            matched = true;
+                        }
+                    }
+                }
+
+                if (!matched) {
+                    cursor++;
+                }
+            }
+
+            flushText(source.length);
+            if (parentNode.childNodes.length === 0) {
+                parentNode.appendChild(document.createTextNode(source));
+            }
+            return converted;
+        };
+
+        const setCaretAfterNode = (selection, node) => {
+            if (!selection || !node || !node.parentNode) return;
+            const newRange = document.createRange();
+            newRange.setStartAfter(node);
+            newRange.collapse(true);
+            selection.removeAllRanges();
+            selection.addRange(newRange);
+        };
+
+        const insertPlainTextPreservingLineBreaks = (text) => {
+            const selection = window.getSelection();
+            if (!selection || !selection.rangeCount) return false;
+            const range = selection.getRangeAt(0);
+
+            cleanupEmptyStrikeAtSelection();
+            cleanupEmptyStrikes();
+            unwrapStrikeAtSelection();
+
+            if (!range.collapsed) {
+                range.deleteContents();
+            }
+
+            const normalized = String(text || '').replace(/\r\n?/g, '\n');
+            const lines = normalized.split('\n');
+            const fragment = document.createDocumentFragment();
+
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i];
+                if (line.length > 0) {
+                    fragment.appendChild(document.createTextNode(line));
+                }
+                if (i < lines.length - 1) {
+                    fragment.appendChild(document.createElement('br'));
+                }
+            }
+
+            const caretMarker = document.createTextNode('');
+            fragment.appendChild(caretMarker);
+            range.insertNode(fragment);
+            setCaretAfterNode(selection, caretMarker);
+            caretMarker.remove();
+            return true;
+        };
+
+        const tryInsertInlineMarkdownFromPastedText = (rawText) => {
+            if (typeof rawText !== 'string' || rawText.indexOf('\n') !== -1) {
+                return false;
+            }
+
+            const ctx = getSelectionRangeForPaste();
+            if (!ctx) return false;
+            const { selection, range } = ctx;
+            if (isRangeInsideCodeBlock(range)) {
+                return false;
+            }
+
+            const fragment = document.createDocumentFragment();
+            const converted = appendInlineMarkdownText(fragment, rawText);
+            if (!converted) {
+                return false;
+            }
+
+            stateManager.saveState();
+            if (!range.collapsed) {
+                range.deleteContents();
+            }
+
+            const caretMarker = document.createTextNode('');
+            fragment.appendChild(caretMarker);
+            range.insertNode(fragment);
+            setCaretAfterNode(selection, caretMarker);
+            caretMarker.remove();
+            notifyChange();
+            return true;
+        };
+
+        const tryInsertHorizontalRuleFromPastedText = (rawText) => {
+            if (typeof rawText !== 'string') return false;
+            const normalized = rawText.replace(/\r\n?/g, '\n').trim();
+            if (normalized.indexOf('\n') !== -1) return false;
+            if (!/^([-*_])(?:\s*\1){2,}$/.test(normalized)) return false;
+
+            const ctx = getSelectionRangeForPaste();
+            if (!ctx) return false;
+            const { selection, range } = ctx;
+            if (isRangeInsideCodeBlock(range)) {
+                return false;
+            }
+
+            stateManager.saveState();
+            const fragment = document.createDocumentFragment();
+            const hr = document.createElement('hr');
+            const paragraph = document.createElement('p');
+            paragraph.appendChild(document.createElement('br'));
+            fragment.appendChild(hr);
+            fragment.appendChild(paragraph);
+            tableManager._insertNodeAsBlock(range, fragment);
+
+            const newRange = document.createRange();
+            newRange.setStart(paragraph, 0);
+            newRange.collapse(true);
+            selection.removeAllRanges();
+            selection.addRange(newRange);
+            notifyChange();
+            return true;
+        };
+
+        const tryInsertFencedCodeBlockFromPastedText = (rawText) => {
+            if (typeof rawText !== 'string') return false;
+            const normalized = rawText.replace(/\r\n?/g, '\n').replace(/^\n+|\n+$/g, '');
+            const match = normalized.match(/^```([^\n`]*)\n([\s\S]*?)\n?```$/);
+            if (!match) return false;
+
+            const ctx = getSelectionRangeForPaste();
+            if (!ctx) return false;
+            const { selection, range } = ctx;
+            if (isRangeInsideCodeBlock(range)) {
+                return false;
+            }
+
+            const language = (match[1] || '').trim();
+            const codeContent = match[2] === '' ? '\n' : match[2];
+            const pre = document.createElement('pre');
+            const code = document.createElement('code');
+            code.textContent = codeContent;
+            pre.appendChild(code);
+            codeBlockManager.addCodeBlockControls(pre, language);
+
+            stateManager.saveState();
+            tableManager._insertNodeAsBlock(range, pre);
+
+            const textNode = code.firstChild;
+            if (textNode && textNode.nodeType === Node.TEXT_NODE) {
+                const newRange = document.createRange();
+                newRange.setStart(textNode, textNode.textContent.length);
+                newRange.collapse(true);
+                selection.removeAllRanges();
+                selection.addRange(newRange);
+            } else {
+                setCaretAfterNode(selection, pre);
+            }
+            notifyChange();
+            return true;
+        };
+
+        const splitMarkdownTableRow = (line) => {
+            const raw = (line || '').trim();
+            if (!raw.includes('|')) return null;
+            let working = raw;
+            if (working.startsWith('|')) {
+                working = working.slice(1);
+            }
+            if (working.endsWith('|')) {
+                working = working.slice(0, -1);
+            }
+            const cells = working.split('|').map(cell => cell.trim().replace(/\\\|/g, '|'));
+            if (cells.length < 2) return null;
+            return cells;
+        };
+
+        const isMarkdownTableSeparatorCell = (value) => /^:?-{3,}:?$/.test((value || '').trim());
+
+        const tryInsertMarkdownTableFromPastedText = (rawText) => {
+            if (typeof rawText !== 'string') return false;
+            const normalized = rawText.replace(/\r\n?/g, '\n');
+            const lines = normalized.split('\n');
+            while (lines.length > 0 && lines[0].trim() === '') lines.shift();
+            while (lines.length > 0 && lines[lines.length - 1].trim() === '') lines.pop();
+            if (lines.length < 2) return false;
+
+            const headerCells = splitMarkdownTableRow(lines[0]);
+            const separatorCells = splitMarkdownTableRow(lines[1]);
+            if (!headerCells || !separatorCells || separatorCells.length !== headerCells.length) {
+                return false;
+            }
+            if (!separatorCells.every(isMarkdownTableSeparatorCell)) {
+                return false;
+            }
+
+            const bodyRows = [];
+            for (let i = 2; i < lines.length; i++) {
+                const line = lines[i];
+                if (line.trim() === '') continue;
+                const cells = splitMarkdownTableRow(line);
+                if (!cells) {
+                    return false;
+                }
+                if (cells.length < headerCells.length) {
+                    while (cells.length < headerCells.length) cells.push('');
+                } else if (cells.length > headerCells.length) {
+                    cells.length = headerCells.length;
+                }
+                bodyRows.push(cells);
+            }
+
+            const ctx = getSelectionRangeForPaste();
+            if (!ctx) return false;
+            const { selection, range } = ctx;
+            if (isRangeInsideCodeBlock(range)) {
+                return false;
+            }
+
+            stateManager.saveState();
+            const wrapper = tableManager._createTableWrapper(Math.max(1, bodyRows.length + 1), headerCells.length);
+            const table = wrapper.querySelector('table');
+            const headCells = Array.from(table.querySelectorAll('thead th'));
+            headCells.forEach((cell, index) => {
+                const value = headerCells[index] || '';
+                cell.textContent = value;
+                if (value.trim() === '') {
+                    cell.appendChild(document.createElement('br'));
+                }
+            });
+
+            const bodyTrs = Array.from(table.querySelectorAll('tbody tr'));
+            bodyRows.forEach((row, rowIndex) => {
+                const tr = bodyTrs[rowIndex];
+                if (!tr) return;
+                const cells = Array.from(tr.cells || []);
+                cells.forEach((cell, colIndex) => {
+                    const value = row[colIndex] || '';
+                    cell.textContent = value;
+                    if (value.trim() === '') {
+                        cell.appendChild(document.createElement('br'));
+                    }
+                });
+            });
+
+            tableManager._insertNodeAsBlock(range, wrapper);
+            tableManager.wrapTables();
+            const firstCell = wrapper.querySelector('td, th');
+            if (firstCell) {
+                tableManager._setCursorToCellStart(firstCell);
+            } else {
+                setCaretAfterNode(selection, wrapper);
+            }
+            notifyChange();
+            return true;
+        };
+
+        const tryInsertMarkdownBlockquoteFromPastedText = (rawText) => {
+            if (typeof rawText !== 'string') return false;
+            const normalized = rawText.replace(/\r\n?/g, '\n');
+            const lines = normalized.split('\n');
+            if (lines.length === 0) return false;
+
+            const quoteLines = [];
+            let hasNonEmpty = false;
+            for (const line of lines) {
+                if (line.trim() === '') {
+                    quoteLines.push(null);
+                    continue;
+                }
+                const match = line.match(/^\s*>\s?(.*)$/);
+                if (!match) {
+                    return false;
+                }
+                hasNonEmpty = true;
+                quoteLines.push(match[1]);
+            }
+            if (!hasNonEmpty) return false;
+
+            const ctx = getSelectionRangeForPaste();
+            if (!ctx) return false;
+            const { selection, range } = ctx;
+            if (isRangeInsideCodeBlock(range)) {
+                return false;
+            }
+
+            const blockquote = document.createElement('blockquote');
+            let paragraph = null;
+
+            const flushEmptyParagraphIfNeeded = () => {
+                if (paragraph && paragraph.childNodes.length === 0) {
+                    paragraph.appendChild(document.createElement('br'));
+                }
+            };
+
+            for (const line of quoteLines) {
+                if (line === null) {
+                    flushEmptyParagraphIfNeeded();
+                    paragraph = null;
+                    continue;
+                }
+                if (!paragraph) {
+                    paragraph = document.createElement('p');
+                    blockquote.appendChild(paragraph);
+                } else if (paragraph.childNodes.length > 0) {
+                    paragraph.appendChild(document.createElement('br'));
+                }
+                appendInlineMarkdownText(paragraph, line);
+            }
+            flushEmptyParagraphIfNeeded();
+
+            if (blockquote.childNodes.length === 0) {
+                const fallback = document.createElement('p');
+                fallback.appendChild(document.createElement('br'));
+                blockquote.appendChild(fallback);
+            }
+
+            stateManager.saveState();
+            tableManager._insertNodeAsBlock(range, blockquote);
+            const lastTextNode = domUtils.getLastTextNode(blockquote);
+            if (lastTextNode) {
+                const newRange = document.createRange();
+                newRange.setStart(lastTextNode, lastTextNode.textContent.length);
+                newRange.collapse(true);
+                selection.removeAllRanges();
+                selection.addRange(newRange);
+            } else {
+                setCaretAfterNode(selection, blockquote);
+            }
+            notifyChange();
+            return true;
+        };
+
+        const tryInsertMarkdownHeadingsFromPastedText = (rawText) => {
+            if (typeof rawText !== 'string') return false;
+            const normalized = rawText.replace(/\r\n?/g, '\n');
+            const lines = normalized.split('\n');
+            if (lines.length === 0) return false;
+
+            const tokens = [];
+            let hasHeading = false;
+            for (const line of lines) {
+                if (line.trim() === '') {
+                    tokens.push({ type: 'blank' });
+                    continue;
+                }
+                const match = line.match(/^\s*(#{1,6})\s+(.+?)\s*$/);
+                if (!match) {
+                    return false;
+                }
+                hasHeading = true;
+                tokens.push({
+                    type: 'heading',
+                    level: match[1].length,
+                    text: match[2]
+                });
+            }
+            if (!hasHeading) return false;
+
+            const ctx = getSelectionRangeForPaste();
+            if (!ctx) return false;
+            const { selection, range } = ctx;
+            if (isRangeInsideCodeBlock(range)) {
+                return false;
+            }
+
+            stateManager.saveState();
+            const fragment = document.createDocumentFragment();
+            let lastInsertedNode = null;
+            tokens.forEach((token) => {
+                let node;
+                if (token.type === 'blank') {
+                    node = document.createElement('p');
+                    node.appendChild(document.createElement('br'));
+                } else {
+                    node = document.createElement(`h${token.level}`);
+                    appendInlineMarkdownText(node, token.text);
+                }
+                fragment.appendChild(node);
+                lastInsertedNode = node;
+            });
+
+            tableManager._insertNodeAsBlock(range, fragment);
+
+            if (lastInsertedNode && lastInsertedNode.isConnected) {
+                if (/^H[1-6]$/.test(lastInsertedNode.tagName)) {
+                    const textNode = lastInsertedNode.firstChild;
+                    if (textNode && textNode.nodeType === Node.TEXT_NODE) {
+                        const newRange = document.createRange();
+                        newRange.setStart(textNode, textNode.textContent.length);
+                        newRange.collapse(true);
+                        selection.removeAllRanges();
+                        selection.addRange(newRange);
+                    } else {
+                        const newRange = document.createRange();
+                        newRange.selectNodeContents(lastInsertedNode);
+                        newRange.collapse(false);
+                        selection.removeAllRanges();
+                        selection.addRange(newRange);
+                    }
+                } else {
+                    const newRange = document.createRange();
+                    newRange.setStart(lastInsertedNode, 0);
+                    newRange.collapse(true);
+                    selection.removeAllRanges();
+                    selection.addRange(newRange);
+                }
+            }
+
+            notifyChange();
+            return true;
+        };
+
+        const tryInsertMarkdownListFromPastedText = (rawText) => {
+            if (typeof rawText !== 'string') return false;
+
+            const normalized = rawText.replace(/\r\n?/g, '\n');
+            const lines = normalized.split('\n');
+            const parsedItems = [];
+            let rootListType = null;
+            let rootStartNumber = 1;
+
+            for (const line of lines) {
+                if (line.trim() === '') {
+                    continue;
+                }
+                const match = line.match(/^(\s*)(?:([-*+])|(\d+)\.)\s+(.*)$/);
+                if (!match) {
+                    return false;
+                }
+
+                const listType = match[2] ? 'ul' : 'ol';
+                if (!rootListType) {
+                    rootListType = listType;
+                    if (listType === 'ol') {
+                        rootStartNumber = Math.max(1, parseInt(match[3], 10) || 1);
+                    }
+                } else if (rootListType !== listType) {
+                    return false;
+                }
+
+                const indentLength = match[1].replace(/\t/g, '    ').length;
+                const rawContent = (match[4] || '').trimEnd();
+                const taskMatch = listType === 'ul'
+                    ? rawContent.match(/^\[( |x|X)\](?:\s+(.*))?$/)
+                    : null;
+                const isTaskItem = !!taskMatch;
+                parsedItems.push({
+                    indentLength,
+                    isTaskItem,
+                    checked: isTaskItem && (taskMatch[1] || '').toLowerCase() === 'x',
+                    text: isTaskItem ? (taskMatch[2] || '').trim() : rawContent.trim()
+                });
+            }
+
+            if (parsedItems.length === 0 || !rootListType) return false;
+
+            const ctx = getSelectionRangeForPaste();
+            if (!ctx) return false;
+            const { selection, range } = ctx;
+            if (isRangeInsideCodeBlock(range)) {
+                return false;
+            }
+
+            stateManager.saveState();
+            if (!range.collapsed) {
+                range.deleteContents();
+            }
+
+            const rootList = document.createElement(rootListType);
+            if (rootListType === 'ol' && rootStartNumber > 1) {
+                rootList.setAttribute('start', String(rootStartNumber));
+            }
+            const listStack = [rootList];
+            const lastLiStack = [null];
+            let currentLevel = 0;
+            let lastInsertedLi = null;
+
+            for (const item of parsedItems) {
+                let nextLevel = Math.max(0, Math.floor(item.indentLength / 2));
+                if (nextLevel > currentLevel + 1) {
+                    nextLevel = currentLevel + 1;
+                }
+
+                while (nextLevel < currentLevel) {
+                    listStack.pop();
+                    lastLiStack.pop();
+                    currentLevel--;
+                }
+
+                while (nextLevel > currentLevel) {
+                    const parentLi = lastLiStack[currentLevel];
+                    if (!parentLi) {
+                        nextLevel = currentLevel;
+                        break;
+                    }
+                    const nestedList = document.createElement(rootListType);
+                    parentLi.appendChild(nestedList);
+                    listStack.push(nestedList);
+                    lastLiStack.push(null);
+                    currentLevel++;
+                }
+
+                const targetList = listStack[currentLevel] || rootList;
+                const li = document.createElement('li');
+                if (rootListType === 'ul' && item.isTaskItem) {
+                    const checkbox = createCheckboxElement();
+                    if (item.checked) {
+                        checkbox.checked = true;
+                        checkbox.setAttribute('checked', '');
+                    }
+                    li.appendChild(checkbox);
+                    if (item.text === '') {
+                        li.appendChild(document.createTextNode('\u200B'));
+                    } else {
+                        appendInlineMarkdownText(li, item.text);
+                    }
+                } else if (item.text) {
+                    appendInlineMarkdownText(li, item.text);
+                } else {
+                    li.appendChild(document.createTextNode(''));
+                }
+                targetList.appendChild(li);
+                lastLiStack[currentLevel] = li;
+                lastInsertedLi = li;
+            }
+
+            range.insertNode(rootList);
+            const lastTextNode = lastInsertedLi
+                ? (getFirstDirectTextNodeAfterCheckbox(lastInsertedLi) || getFirstDirectTextNode(lastInsertedLi))
+                : null;
+            if (lastInsertedLi && lastTextNode) {
+                ensureCheckboxLeadingSpace(lastInsertedLi);
+                const caretTarget =
+                    getFirstDirectTextNodeAfterCheckbox(lastInsertedLi) ||
+                    getFirstDirectTextNode(lastInsertedLi) ||
+                    lastTextNode;
+                const newRange = document.createRange();
+                const targetLength = (caretTarget.textContent || '').length;
+                newRange.setStart(caretTarget, targetLength);
+                newRange.collapse(true);
+                selection.removeAllRanges();
+                selection.addRange(newRange);
+            } else {
+                const fallbackRange = document.createRange();
+                fallbackRange.setStartAfter(rootList);
+                fallbackRange.collapse(true);
+                selection.removeAllRanges();
+                selection.addRange(fallbackRange);
+            }
+
+            normalizeCheckboxListItems(rootList);
+            updateListItemClasses();
+            notifyChange();
+            return true;
+        };
+
+        const tryInsertMixedMarkdownFromPastedText = (rawText) => {
+            if (typeof rawText !== 'string' || rawText.indexOf('\n') === -1) {
+                return false;
+            }
+
+            const normalized = rawText.replace(/\r\n?/g, '\n');
+            const lines = normalized.split('\n');
+            if (lines.length === 0) return false;
+
+            const isFenceStart = (line) => /^\s*```/.test(line || '');
+            const parseListLine = (line) => {
+                const match = (line || '').match(/^(\s*)(?:([-*+])|(\d+)\.)\s+(.*)$/);
+                if (!match) return null;
+                return {
+                    indent: match[1] || '',
+                    listType: match[2] ? 'ul' : 'ol',
+                    startNumber: match[3] ? Math.max(1, parseInt(match[3], 10) || 1) : 1,
+                    content: (match[4] || '').trimEnd()
+                };
+            };
+            const parseHeadingLine = (line) => {
+                const match = (line || '').match(/^\s*(#{1,6})\s+(.+?)\s*$/);
+                if (!match) return null;
+                return { level: match[1].length, text: match[2] };
+            };
+            const parseHrLine = (line) => /^([-*_])(?:\s*\1){2,}\s*$/.test((line || '').trim());
+            const parseQuoteLine = (line) => {
+                const match = (line || '').match(/^\s*>\s?(.*)$/);
+                if (!match) return null;
+                return match[1];
+            };
+            const isTableStartAt = (index) => {
+                if (index < 0 || index + 1 >= lines.length) return false;
+                const header = splitMarkdownTableRow(lines[index]);
+                const separator = splitMarkdownTableRow(lines[index + 1]);
+                if (!header || !separator || separator.length !== header.length) return false;
+                return separator.every(isMarkdownTableSeparatorCell);
+            };
+            const startsKnownBlockAt = (index) => {
+                if (index < 0 || index >= lines.length) return false;
+                const line = lines[index];
+                if ((line || '').trim() === '') return false;
+                if (isFenceStart(line)) return true;
+                if (isTableStartAt(index)) return true;
+                if (parseHeadingLine(line)) return true;
+                if (parseHrLine(line)) return true;
+                if (parseQuoteLine(line) !== null) return true;
+                if (parseListLine(line)) return true;
+                return false;
+            };
+
+            const blocks = [];
+            let hasMarkdownSyntax = false;
+            let i = 0;
+
+            while (i < lines.length) {
+                const line = lines[i];
+                if ((line || '').trim() === '') {
+                    i++;
+                    continue;
+                }
+
+                if (isFenceStart(line)) {
+                    const open = line.match(/^\s*```([^\n`]*)\s*$/);
+                    if (open) {
+                        let closeIndex = -1;
+                        for (let j = i + 1; j < lines.length; j++) {
+                            if (/^\s*```/.test(lines[j] || '')) {
+                                closeIndex = j;
+                                break;
+                            }
+                        }
+                        if (closeIndex !== -1) {
+                            const language = (open[1] || '').trim();
+                            const codeContent = lines.slice(i + 1, closeIndex).join('\n');
+                            const pre = document.createElement('pre');
+                            const code = document.createElement('code');
+                            code.textContent = codeContent === '' ? '\n' : codeContent;
+                            pre.appendChild(code);
+                            codeBlockManager.addCodeBlockControls(pre, language);
+                            blocks.push(pre);
+                            hasMarkdownSyntax = true;
+                            i = closeIndex + 1;
+                            continue;
+                        }
+                    }
+                }
+
+                if (isTableStartAt(i)) {
+                    const headerCells = splitMarkdownTableRow(lines[i]);
+                    const separatorCells = splitMarkdownTableRow(lines[i + 1]);
+                    const colCount = headerCells.length;
+                    const bodyRows = [];
+                    let j = i + 2;
+                    while (j < lines.length) {
+                        const tableLine = lines[j];
+                        if ((tableLine || '').trim() === '') break;
+                        const cells = splitMarkdownTableRow(tableLine);
+                        if (!cells) break;
+                        if (cells.length < colCount) {
+                            while (cells.length < colCount) cells.push('');
+                        } else if (cells.length > colCount) {
+                            cells.length = colCount;
+                        }
+                        bodyRows.push(cells);
+                        j++;
+                    }
+
+                    const wrapper = tableManager._createTableWrapper(Math.max(1, bodyRows.length + 1), colCount);
+                    const table = wrapper.querySelector('table');
+                    const headCells = Array.from(table.querySelectorAll('thead th'));
+                    headCells.forEach((cell, index) => {
+                        const value = headerCells[index] || '';
+                        cell.textContent = value;
+                        if (value.trim() === '') {
+                            cell.appendChild(document.createElement('br'));
+                        }
+                    });
+                    const bodyTrs = Array.from(table.querySelectorAll('tbody tr'));
+                    bodyRows.forEach((row, rowIndex) => {
+                        const tr = bodyTrs[rowIndex];
+                        if (!tr) return;
+                        const cells = Array.from(tr.cells || []);
+                        cells.forEach((cell, colIndex) => {
+                            const value = row[colIndex] || '';
+                            cell.textContent = value;
+                            if (value.trim() === '') {
+                                cell.appendChild(document.createElement('br'));
+                            }
+                        });
+                    });
+
+                    blocks.push(wrapper);
+                    hasMarkdownSyntax = true;
+                    i = j;
+                    continue;
+                }
+
+                const heading = parseHeadingLine(line);
+                if (heading) {
+                    const headingNode = document.createElement(`h${heading.level}`);
+                    appendInlineMarkdownText(headingNode, heading.text);
+                    blocks.push(headingNode);
+                    hasMarkdownSyntax = true;
+                    i++;
+                    continue;
+                }
+
+                if (parseHrLine(line)) {
+                    const hrNode = document.createElement('hr');
+                    blocks.push(hrNode);
+                    hasMarkdownSyntax = true;
+                    i++;
+                    continue;
+                }
+
+                const quote = parseQuoteLine(line);
+                if (quote !== null) {
+                    const quoteLines = [];
+                    let j = i;
+                    while (j < lines.length) {
+                        const qLine = parseQuoteLine(lines[j]);
+                        if (qLine === null) break;
+                        quoteLines.push(qLine);
+                        j++;
+                    }
+                    const blockquote = document.createElement('blockquote');
+                    let paragraph = null;
+                    const flushParagraph = () => {
+                        if (paragraph && paragraph.childNodes.length === 0) {
+                            paragraph.appendChild(document.createElement('br'));
+                        }
+                    };
+                    quoteLines.forEach((qLine) => {
+                        if (qLine.trim() === '') {
+                            flushParagraph();
+                            paragraph = null;
+                            return;
+                        }
+                        if (!paragraph) {
+                            paragraph = document.createElement('p');
+                            blockquote.appendChild(paragraph);
+                        } else if (paragraph.childNodes.length > 0) {
+                            paragraph.appendChild(document.createElement('br'));
+                        }
+                        const inlineConverted = appendInlineMarkdownText(paragraph, qLine);
+                        if (inlineConverted) {
+                            hasMarkdownSyntax = true;
+                        }
+                    });
+                    flushParagraph();
+                    if (blockquote.childNodes.length === 0) {
+                        const p = document.createElement('p');
+                        p.appendChild(document.createElement('br'));
+                        blockquote.appendChild(p);
+                    }
+                    blocks.push(blockquote);
+                    hasMarkdownSyntax = true;
+                    i = j;
+                    continue;
+                }
+
+                const listLine = parseListLine(line);
+                if (listLine) {
+                    const rootListType = listLine.listType;
+                    const rootStartNumber = listLine.startNumber;
+                    const listItems = [];
+                    let j = i;
+                    while (j < lines.length) {
+                        const current = lines[j];
+                        if ((current || '').trim() === '') break;
+                        const parsed = parseListLine(current);
+                        if (!parsed || parsed.listType !== rootListType) break;
+                        const taskMatch = rootListType === 'ul'
+                            ? parsed.content.match(/^\[( |x|X)\](?:\s+(.*))?$/)
+                            : null;
+                        listItems.push({
+                            indentLength: parsed.indent.replace(/\t/g, '    ').length,
+                            isTaskItem: !!taskMatch,
+                            checked: !!(taskMatch && (taskMatch[1] || '').toLowerCase() === 'x'),
+                            text: taskMatch ? (taskMatch[2] || '').trim() : parsed.content.trim()
+                        });
+                        j++;
+                    }
+
+                    const rootList = document.createElement(rootListType);
+                    if (rootListType === 'ol' && rootStartNumber > 1) {
+                        rootList.setAttribute('start', String(rootStartNumber));
+                    }
+                    const listStack = [rootList];
+                    const lastLiStack = [null];
+                    let currentLevel = 0;
+                    listItems.forEach((item) => {
+                        let nextLevel = Math.max(0, Math.floor(item.indentLength / 2));
+                        if (nextLevel > currentLevel + 1) {
+                            nextLevel = currentLevel + 1;
+                        }
+                        while (nextLevel < currentLevel) {
+                            listStack.pop();
+                            lastLiStack.pop();
+                            currentLevel--;
+                        }
+                        while (nextLevel > currentLevel) {
+                            const parentLi = lastLiStack[currentLevel];
+                            if (!parentLi) {
+                                nextLevel = currentLevel;
+                                break;
+                            }
+                            const nestedList = document.createElement(rootListType);
+                            parentLi.appendChild(nestedList);
+                            listStack.push(nestedList);
+                            lastLiStack.push(null);
+                            currentLevel++;
+                        }
+
+                        const targetList = listStack[currentLevel] || rootList;
+                        const li = document.createElement('li');
+                        if (rootListType === 'ul' && item.isTaskItem) {
+                            const checkbox = createCheckboxElement();
+                            if (item.checked) {
+                                checkbox.checked = true;
+                                checkbox.setAttribute('checked', '');
+                            }
+                            li.appendChild(checkbox);
+                            if (item.text === '') {
+                                li.appendChild(document.createTextNode('\u200B'));
+                            } else {
+                                const inlineConverted = appendInlineMarkdownText(li, item.text);
+                                if (inlineConverted) {
+                                    hasMarkdownSyntax = true;
+                                }
+                            }
+                        } else if (item.text) {
+                            const inlineConverted = appendInlineMarkdownText(li, item.text);
+                            if (inlineConverted) {
+                                hasMarkdownSyntax = true;
+                            }
+                        } else {
+                            li.appendChild(document.createTextNode(''));
+                        }
+                        targetList.appendChild(li);
+                        lastLiStack[currentLevel] = li;
+                    });
+
+                    blocks.push(rootList);
+                    hasMarkdownSyntax = true;
+                    i = j;
+                    continue;
+                }
+
+                const paragraph = document.createElement('p');
+                let j = i;
+                while (j < lines.length) {
+                    const paragraphLine = lines[j];
+                    if ((paragraphLine || '').trim() === '') break;
+                    if (j !== i && startsKnownBlockAt(j)) break;
+                    if (paragraph.childNodes.length > 0) {
+                        paragraph.appendChild(document.createElement('br'));
+                    }
+                    const inlineConverted = appendInlineMarkdownText(paragraph, paragraphLine);
+                    if (inlineConverted) {
+                        hasMarkdownSyntax = true;
+                    }
+                    j++;
+                }
+                if (paragraph.childNodes.length === 0) {
+                    paragraph.appendChild(document.createElement('br'));
+                }
+                blocks.push(paragraph);
+                i = j;
+            }
+
+            if (!hasMarkdownSyntax || blocks.length === 0) {
+                return false;
+            }
+
+            const ctx = getSelectionRangeForPaste();
+            if (!ctx) return false;
+            const { selection, range } = ctx;
+            if (isRangeInsideCodeBlock(range)) {
+                return false;
+            }
+
+            stateManager.saveState();
+            const fragment = document.createDocumentFragment();
+            let lastInsertedNode = null;
+            blocks.forEach((node) => {
+                fragment.appendChild(node);
+                lastInsertedNode = node;
+            });
+            tableManager._insertNodeAsBlock(range, fragment);
+
+            normalizeCheckboxListItems();
+            tableManager.wrapTables();
+            updateListItemClasses();
+
+            if (lastInsertedNode && lastInsertedNode.isConnected) {
+                if (lastInsertedNode.classList && lastInsertedNode.classList.contains('md-table-wrapper')) {
+                    const firstCell = lastInsertedNode.querySelector('td, th');
+                    if (firstCell) {
+                        tableManager._setCursorToCellStart(firstCell);
+                    } else {
+                        setCaretAfterNode(selection, lastInsertedNode);
+                    }
+                } else {
+                    const lastTextNode = domUtils.getLastTextNode(lastInsertedNode);
+                    if (lastTextNode) {
+                        const newRange = document.createRange();
+                        newRange.setStart(lastTextNode, lastTextNode.textContent.length);
+                        newRange.collapse(true);
+                        selection.removeAllRanges();
+                        selection.addRange(newRange);
+                    } else if (lastInsertedNode.nodeType === Node.ELEMENT_NODE) {
+                        const newRange = document.createRange();
+                        newRange.selectNodeContents(lastInsertedNode);
+                        newRange.collapse(false);
+                        selection.removeAllRanges();
+                        selection.addRange(newRange);
+                    } else {
+                        setCaretAfterNode(selection, lastInsertedNode);
+                    }
+                }
+            }
+
+            notifyChange();
+            return true;
+        };
+
         // 画像のペースト・リンクのペースト
         editor.addEventListener('paste', (e) => {
             if (!isUpdating) {
@@ -9519,6 +10630,46 @@ import { SearchManager } from './modules/SearchManager.js';
                     }
                 }
 
+                if (selection && pastedText && tryInsertHorizontalRuleFromPastedText(pastedText)) {
+                    e.preventDefault();
+                    return;
+                }
+
+                if (selection && pastedText && tryInsertFencedCodeBlockFromPastedText(pastedText)) {
+                    e.preventDefault();
+                    return;
+                }
+
+                if (selection && pastedText && tryInsertMarkdownTableFromPastedText(pastedText)) {
+                    e.preventDefault();
+                    return;
+                }
+
+                if (selection && pastedText && tryInsertMarkdownBlockquoteFromPastedText(pastedText)) {
+                    e.preventDefault();
+                    return;
+                }
+
+                if (selection && pastedText && tryInsertMarkdownHeadingsFromPastedText(pastedText)) {
+                    e.preventDefault();
+                    return;
+                }
+
+                if (selection && pastedText && tryInsertMarkdownListFromPastedText(pastedText)) {
+                    e.preventDefault();
+                    return;
+                }
+
+                if (selection && pastedText && tryInsertMixedMarkdownFromPastedText(pastedText)) {
+                    e.preventDefault();
+                    return;
+                }
+
+                if (selection && pastedText && tryInsertInlineMarkdownFromPastedText(pastedText)) {
+                    e.preventDefault();
+                    return;
+                }
+
                 for (let i = 0; i < items.length; i++) {
                     if (items[i].type.indexOf('image') !== -1) {
                         hasImageFile = true;
@@ -9531,7 +10682,24 @@ import { SearchManager } from './modules/SearchManager.js';
                 }
 
                 if (!hasImageFile) {
+                    // Always paste as plain text for non-image content so visual styles
+                    // (color/font/background from rich HTML) are not imported.
+                    if (typeof pastedText === 'string') {
+                        e.preventDefault();
+                        stateManager.saveState();
+                        const inserted = insertPlainTextPreservingLineBreaks(pastedText);
+                        if (inserted) {
+                            normalizeCheckboxListItems();
+                            domUtils.ensureInlineCodeSpaces();
+                            domUtils.cleanupGhostStyles();
+                            tableManager.wrapTables();
+                            applyImageRenderSizes();
+                            notifyChange();
+                            return;
+                        }
+                    }
                     setTimeout(() => {
+                        normalizeCheckboxListItems();
                         domUtils.ensureInlineCodeSpaces();
                         domUtils.cleanupGhostStyles();
                         tableManager.wrapTables();
@@ -10688,6 +11856,23 @@ import { SearchManager } from './modules/SearchManager.js';
                 break;
             case 'settings':
                 applySettings(message.settings);
+                break;
+            case 'resolvedImageSrc':
+                {
+                    const requestId = message && message.requestId ? String(message.requestId) : '';
+                    if (!requestId) break;
+                    const resolvedSrc = message && typeof message.resolvedSrc === 'string'
+                        ? message.resolvedSrc
+                        : '';
+                    const targetImage = Array.from(editor.querySelectorAll('img[data-image-resolve-id]')).find((img) =>
+                        img.getAttribute('data-image-resolve-id') === requestId
+                    );
+                    if (!targetImage) break;
+                    targetImage.removeAttribute('data-image-resolve-id');
+                    if (!resolvedSrc) break;
+                    targetImage.src = resolvedSrc;
+                    applyImageRenderSizeFromAlt(targetImage);
+                }
                 break;
             case 'insertImage':
                 {

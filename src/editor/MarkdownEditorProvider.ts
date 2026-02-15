@@ -302,6 +302,20 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                             webviewPanel.webview
                         );
                         break;
+                    case 'resolveImageSrc':
+                        {
+                            const resolvedSrc = await this.resolveImageSrcForWebview(
+                                message.src,
+                                document,
+                                webviewPanel.webview
+                            );
+                            webviewPanel.webview.postMessage({
+                                type: 'resolvedImageSrc',
+                                requestId: message.requestId,
+                                resolvedSrc
+                            });
+                        }
+                        break;
                     case 'openLink':
                         // Open the link in the default browser
                         if (message.url) {
@@ -567,10 +581,24 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     continue;
                 }
                 if (inTaskCodeBlock) continue;
-                const match = line.match(/^(\s*)\[(\s|x|X)\]\s*$/);
-                if (match) {
-                    const indent = match[1];
-                    const checked = match[2] === 'x' || match[2] === 'X' ? 'x' : ' ';
+                taskLines[i] = line.replace(
+                    /^(\s*(?:[-*+]|\d+\.)\s+)\\\[(\s|x|X)\\\](?=\s|$)/,
+                    (_match, prefix, marker) => {
+                        const checked = marker === 'x' || marker === 'X' ? 'x' : ' ';
+                        return `${prefix}[${checked}]`;
+                    }
+                );
+                const escapedBareMatch = taskLines[i].match(/^(\s*)\\\[(\s|x|X)\\\]\s*$/);
+                if (escapedBareMatch) {
+                    const indent = escapedBareMatch[1];
+                    const checked = escapedBareMatch[2] === 'x' || escapedBareMatch[2] === 'X' ? 'x' : ' ';
+                    taskLines[i] = `${indent}- [${checked}]`;
+                    continue;
+                }
+                const bareMatch = taskLines[i].match(/^(\s*)\[(\s|x|X)\]\s*$/);
+                if (bareMatch) {
+                    const indent = bareMatch[1];
+                    const checked = bareMatch[2] === 'x' || bareMatch[2] === 'X' ? 'x' : ' ';
                     taskLines[i] = `${indent}- [${checked}]`;
                 }
             }
@@ -892,6 +920,64 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         } catch (error) {
             console.error('[openImageFile] Error opening image file:', error);
             vscode.window.showErrorMessage(`Failed to open image file: ${imageSrc}`);
+        }
+    }
+
+    private async resolveImageSrcForWebview(
+        imageSrc: string,
+        document: vscode.TextDocument,
+        webview: vscode.Webview
+    ): Promise<string | null> {
+        try {
+            if (!imageSrc || typeof imageSrc !== 'string') {
+                return null;
+            }
+
+            let decodedSrc = imageSrc.trim();
+            if (!decodedSrc) {
+                return null;
+            }
+
+            try {
+                decodedSrc = decodeURIComponent(decodedSrc);
+            } catch {
+                // Use the original value when decode fails.
+            }
+
+            if (
+                decodedSrc.startsWith('data:') ||
+                decodedSrc.startsWith('http://') ||
+                decodedSrc.startsWith('https://') ||
+                decodedSrc.includes('vscode-resource') ||
+                decodedSrc.includes('vscode-webview-resource')
+            ) {
+                return decodedSrc;
+            }
+
+            let sourceUri: vscode.Uri;
+            if (/^[a-z][a-z0-9+.-]*:/i.test(decodedSrc)) {
+                sourceUri = vscode.Uri.parse(decodedSrc);
+            } else if (decodedSrc.startsWith('/')) {
+                sourceUri = vscode.Uri.file(decodedSrc);
+            } else {
+                const documentDir = vscode.Uri.file(document.uri.fsPath.substring(0, document.uri.fsPath.lastIndexOf('/')));
+                sourceUri = vscode.Uri.joinPath(documentDir, decodedSrc);
+            }
+
+            if (sourceUri.scheme !== 'file') {
+                return null;
+            }
+
+            try {
+                await vscode.workspace.fs.stat(sourceUri);
+            } catch {
+                return null;
+            }
+
+            return webview.asWebviewUri(sourceUri).toString();
+        } catch (error) {
+            console.error('[resolveImageSrcForWebview] Error resolving image src:', error);
+            return null;
         }
     }
 

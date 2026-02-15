@@ -340,15 +340,35 @@ export class MarkdownConverter {
             return true;
         }
 
-        // 順序なしリスト構文をチェック - item
+        // 順序なしリスト構文をチェック - item / - [ ] task
         const ulMatch = normalizedText.match(/^\s*[-*]\s+(.*)$/);
         if (ulMatch) {
             const rawContent = ulMatch[1] ?? '';
             const content = rawContent.trim() === '' ? '' : rawContent;
+            const taskMatch = rawContent.match(/^\[( |x|X)\](.*)$/);
+            const isTaskItem = !!(
+                taskMatch &&
+                (taskMatch[2] === '' || /^[ \u00A0]/.test(taskMatch[2] || ''))
+            );
+            const taskChecked = !!(isTaskItem && taskMatch[1].toLowerCase() === 'x');
+            const taskText = isTaskItem
+                ? (taskMatch[2] || '').replace(/^[ \u00A0]/, '')
+                : '';
+            const listText = isTaskItem ? taskText : content;
 
             const li = document.createElement('li');
             let textContentNode = null;
-            if (content) {
+            if (isTaskItem) {
+                const checkbox = document.createElement('input');
+                checkbox.type = 'checkbox';
+                if (taskChecked) {
+                    checkbox.checked = true;
+                    checkbox.setAttribute('checked', '');
+                }
+                li.appendChild(checkbox);
+                textContentNode = document.createTextNode(listText === '' ? '\u200B' : listText);
+                li.appendChild(textContentNode);
+            } else if (content) {
                 li.textContent = content;
                 textContentNode = li.firstChild;
             } else {
@@ -408,9 +428,9 @@ export class MarkdownConverter {
             // カーソル位置を復元
             const newRange = document.createRange();
             if (textContentNode) {
-                const markerLength = ulMatch[0].length - content.length;
-                const newOffset = Math.min(content.length, Math.max(0, normalizedCursorOffset - markerLength));
-                newRange.setStart(textContentNode, newOffset);
+                const markerLength = ulMatch[0].length - listText.length;
+                const newOffset = Math.min(listText.length, Math.max(0, normalizedCursorOffset - markerLength));
+                newRange.setStart(textContentNode, isTaskItem && listText.length === 0 ? 0 : newOffset);
                 newRange.collapse(true);
                 selection.removeAllRanges();
                 selection.addRange(newRange);
