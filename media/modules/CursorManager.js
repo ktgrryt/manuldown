@@ -3061,6 +3061,26 @@ export class CursorManager {
                             ? boundaryRect.left + 1
                             : ((rangeRect ? (rangeRect.left || rangeRect.x || 0) : 0) + 1);
 
+                        // If the previous target is a list (or inside a list), use list-specific
+                        // vertical placement first so image-left-edge -> up lands on the last
+                        // visual line of the list item instead of its first line.
+                        const prevListItem = (() => {
+                            if (!prevElement || prevElement.nodeType !== Node.ELEMENT_NODE) {
+                                return null;
+                            }
+                            if (prevElement.tagName === 'LI') {
+                                return prevElement;
+                            }
+                            if (prevElement.tagName === 'UL' || prevElement.tagName === 'OL') {
+                                const listItems = prevElement.querySelectorAll('li');
+                                return listItems.length > 0 ? listItems[listItems.length - 1] : null;
+                            }
+                            return this.domUtils.getParentElement(prevElement, 'LI');
+                        })();
+                        if (prevListItem && this._placeCursorInListItemAtX(prevListItem, baseX, 'up', selection)) {
+                            return;
+                        }
+
                         const prevLines = getVisualLinesForBlock(prevElement);
                         if (prevLines.length > 0 && document.caretRangeFromPoint) {
                             const targetLine = prevLines[prevLines.length - 1];
@@ -3235,6 +3255,18 @@ export class CursorManager {
                         selection.removeAllRanges();
                         selection.addRange(newRange);
                         return;
+                    }
+                    // Empty line directly below an image should move to the image left edge.
+                    // Placing the caret at element offset 0 can land before wrapper whitespace
+                    // in some engines, which appears as jumping to the line above the image.
+                    const imageTarget = this._getImageFromNavigationCandidate(prevElement);
+                    if (imageTarget) {
+                        const imageRange = document.createRange();
+                        if (this._collapseRangeBeforeNode(imageRange, imageTarget)) {
+                            selection.removeAllRanges();
+                            selection.addRange(imageRange);
+                            return;
+                        }
                     }
                     const newRange = document.createRange();
                     const firstNode = this._getFirstNavigableTextNode(prevElement);

@@ -28,6 +28,7 @@ import { SearchManager } from './modules/SearchManager.js';
     let lastCtrlNavCommandTs = 0;
     let lastCtrlNavDirection = null;
     let scrollbarDragState = null;
+    let emacsKillBuffer = '';
 
     const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
 
@@ -580,9 +581,8 @@ import { SearchManager } from './modules/SearchManager.js';
         return output.replace(/\n{3,}/g, '\n\n').trimEnd();
     }
 
-    function createClipboardPayloadFromSelection(selection) {
-        if (!selection || !selection.rangeCount) return null;
-        const range = selection.getRangeAt(0);
+    function createClipboardPayloadFromRange(range) {
+        if (!range) return null;
         const fragment = range.cloneContents();
         const wrapper = document.createElement('div');
         wrapper.appendChild(fragment);
@@ -591,6 +591,31 @@ import { SearchManager } from './modules/SearchManager.js';
             html: wrapper.innerHTML,
             text: fragmentToClipboardPlainText(wrapper)
         };
+    }
+
+    function createClipboardPayloadFromSelection(selection) {
+        if (!selection || !selection.rangeCount) return null;
+        return createClipboardPayloadFromRange(selection.getRangeAt(0));
+    }
+
+    function focusEditorWithoutScroll() {
+        if (document.activeElement === editor) return;
+        try {
+            editor.focus({ preventScroll: true });
+        } catch (focusError) {
+            editor.focus();
+        }
+    }
+
+    function selectImageNode(image) {
+        if (!image || image.tagName !== 'IMG' || !editor.contains(image)) return false;
+        const selection = window.getSelection();
+        if (!selection) return false;
+        const range = document.createRange();
+        range.selectNode(image);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        return true;
     }
 
     let caretScrollRaf = null;
@@ -7687,6 +7712,159 @@ import { SearchManager } from './modules/SearchManager.js';
         return true;
     }
 
+    function rangesShareSameCaretPosition(rangeA, rangeB) {
+        if (!rangeA || !rangeB) return false;
+        if (!rangeA.collapsed || !rangeB.collapsed) return false;
+        try {
+            return rangeA.compareBoundaryPoints(Range.START_TO_START, rangeB) === 0 &&
+                rangeA.compareBoundaryPoints(Range.END_TO_END, rangeB) === 0;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function applySelectionRange(selection, range) {
+        if (!selection || !range) return false;
+        try {
+            selection.removeAllRanges();
+            selection.addRange(range);
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function buildCtrlKKillRange(selection, range) {
+        if (!selection || !range) return null;
+        if (!range.collapsed) {
+            return range.cloneRange();
+        }
+
+        const startRange = range.cloneRange();
+        startRange.collapse(true);
+        if (!applySelectionRange(selection, startRange)) {
+            return null;
+        }
+
+        let endRange = startRange.cloneRange();
+
+        if (typeof cursorManager.moveCursorToLineEnd === 'function') {
+            cursorManager.moveCursorToLineEnd();
+            if (selection.rangeCount) {
+                endRange = selection.getRangeAt(0).cloneRange();
+                endRange.collapse(true);
+            }
+        }
+
+        if (rangesShareSameCaretPosition(startRange, endRange) &&
+            typeof selection.modify === 'function') {
+            const restoreRange = selection.getRangeAt(0).cloneRange();
+            try {
+                selection.modify('move', 'forward', 'character');
+                if (selection.rangeCount) {
+                    const movedRange = selection.getRangeAt(0).cloneRange();
+                    movedRange.collapse(true);
+                    if (editor.contains(movedRange.startContainer)) {
+                        endRange = movedRange;
+                    } else {
+                        applySelectionRange(selection, restoreRange);
+                    }
+                }
+            } catch (e) {
+                applySelectionRange(selection, restoreRange);
+            }
+        }
+
+        applySelectionRange(selection, startRange);
+
+        if (rangesShareSameCaretPosition(startRange, endRange)) {
+            return null;
+        }
+
+        try {
+            if (startRange.compareBoundaryPoints(Range.START_TO_START, endRange) > 0) {
+                return null;
+            }
+            const killRange = document.createRange();
+            killRange.setStart(startRange.startContainer, startRange.startOffset);
+            killRange.setEnd(endRange.startContainer, endRange.startOffset);
+            return killRange;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function handleEmacsKillYankKeydown(e) {
+        if (!isMac) return false;
+        if (!e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return false;
+
+        const key = e.key.toLowerCase();
+
+        if (key === 'k') {
+            const selection = window.getSelection();
+            if (!selection || !selection.rangeCount) return false;
+            const range = selection.getRangeAt(0);
+            if (!editor.contains(range.commonAncestorContainer)) return false;
+
+            const killRange = buildCtrlKKillRange(selection, range);
+            if (!killRange) return false;
+
+            const payload = createClipboardPayloadFromRange(killRange);
+            let killedText = killRange.toString();
+            if (!killedText) {
+                killedText = payload && typeof payload.text === 'string'
+                    ? payload.text
+                    : '';
+            }
+
+            e.preventDefault();
+            e.stopPropagation();
+
+            stateManager.saveState();
+            emacsKillBuffer = killedText;
+            killRange.deleteContents();
+
+            const caretRange = document.createRange();
+            caretRange.setStart(killRange.startContainer, killRange.startOffset);
+            caretRange.collapse(true);
+            applySelectionRange(selection, caretRange);
+
+            domUtils.ensureInlineCodeSpaces();
+            domUtils.cleanupGhostStyles();
+            tableManager.wrapTables();
+            applyImageRenderSizes();
+            hideImageResizeOverlay();
+            pendingDeleteListItem = null;
+            notifyChange();
+            return true;
+        }
+
+        if (key === 'y') {
+            if (!emacsKillBuffer) return false;
+
+            const selection = window.getSelection();
+            if (!selection || !selection.rangeCount) return false;
+            const range = selection.getRangeAt(0);
+            if (!editor.contains(range.commonAncestorContainer)) return false;
+
+            e.preventDefault();
+            e.stopPropagation();
+
+            stateManager.saveState();
+            const inserted = insertPlainTextAtSelection(emacsKillBuffer);
+            if (!inserted) return true;
+
+            domUtils.ensureInlineCodeSpaces();
+            domUtils.cleanupGhostStyles();
+            tableManager.wrapTables();
+            applyImageRenderSizes();
+            notifyChange();
+            return true;
+        }
+
+        return false;
+    }
+
     function handleEmacsNavKeydown(e) {
         if (!isMac) return false;
         const ctrlKey = e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
@@ -8632,6 +8810,10 @@ import { SearchManager } from './modules/SearchManager.js';
         }
 
         if (handleCtrlKEmptyLineBeforeTableKeydown(e, context)) {
+            return;
+        }
+
+        if (handleEmacsKillYankKeydown(e)) {
             return;
         }
 
@@ -10092,6 +10274,8 @@ import { SearchManager } from './modules/SearchManager.js';
             if (!image || image.tagName !== 'IMG' || !editor.contains(image)) return;
             ensureImageResizeOverlay();
             activeResizeImage = image;
+            focusEditorWithoutScroll();
+            selectImageNode(image);
             syncImageResizeOverlayPosition();
         }
 
@@ -10104,6 +10288,17 @@ import { SearchManager } from './modules/SearchManager.js';
             if (!activeResizeImage) return;
 
             const key = (e.key || '').toLowerCase();
+            const isCopyShortcut = (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && key === 'c';
+            if (isCopyShortcut) {
+                const selection = window.getSelection();
+                const hasImageSelection = selectionContainsImage(selection);
+                const hasNonCollapsedSelection = !!(selection && selection.rangeCount && !selection.isCollapsed);
+                if (!hasImageSelection && !hasNonCollapsedSelection) {
+                    focusEditorWithoutScroll();
+                    selectImageNode(activeResizeImage);
+                }
+                return;
+            }
             const isCtrlH = isMac && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && key === 'h';
             const isBackspace = e.key === 'Backspace' && !e.metaKey && !e.altKey;
             if (!isBackspace && !isCtrlH) return;

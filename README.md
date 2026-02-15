@@ -105,6 +105,7 @@ ManulDown supports standard macOS-style Emacs keybindings. These are disabled on
 | Move to beginning of line | `Ctrl+A` |
 | Move to end of line | `Ctrl+E` |
 | Delete line/list item | `Ctrl+K` |
+| Yank last `Ctrl+K` text | `Ctrl+Y` |
 | Delete backward one character | `Ctrl+H` |
 
 ### Settings
