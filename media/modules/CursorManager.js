@@ -1898,7 +1898,18 @@ export class CursorManager {
         const isRightOfText = hasHorizontalBounds && currentX >= (fullRect.right - 1);
         const isLeftOfText = hasHorizontalBounds && currentX <= (fullRect.left + 1);
 
-        if (fullRect && fullRect.height > 0 && document.caretRangeFromPoint && !isRightOfText && !isLeftOfText) {
+        const allowVisualProbeAtCurrentX = !isRightOfText && (!isLeftOfText || direction === 'up');
+        if (fullRect && fullRect.height > 0 && document.caretRangeFromPoint && allowVisualProbeAtCurrentX) {
+            let probeX = currentX;
+            if (direction === 'up' && isLeftOfText && hasHorizontalBounds) {
+                const minProbeX = fullRect.left + 0.5;
+                const maxProbeX = fullRect.right - 0.5;
+                if (Number.isFinite(minProbeX) && Number.isFinite(maxProbeX) && maxProbeX >= minProbeX) {
+                    probeX = Math.max(minProbeX, Math.min(maxProbeX, currentX));
+                } else if (Number.isFinite(fullRect.left)) {
+                    probeX = fullRect.left + 0.5;
+                }
+            }
             const centerY = fullRect.top + (fullRect.height / 2);
             const primaryY = direction === 'up'
                 ? Math.max(fullRect.top + 2, fullRect.bottom - 4)
@@ -1910,7 +1921,7 @@ export class CursorManager {
 
             for (const y of probeYs) {
                 if (!Number.isFinite(y)) continue;
-                const caretRange = document.caretRangeFromPoint(currentX, y);
+                const caretRange = document.caretRangeFromPoint(probeX, y);
                 if (!caretRange || !listItem.contains(caretRange.startContainer)) {
                     continue;
                 }

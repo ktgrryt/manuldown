@@ -3098,6 +3098,32 @@ import { SearchManager } from './modules/SearchManager.js';
                 notifyChange();
                 return true;
             }
+
+            // 見出し行頭で、直前が空段落の場合:
+            // 現在の挙動（見出しを通常段落へ）を保ちつつ、カーソルは先頭に置く
+            if (isAtHeadingStart) {
+                const prev = heading.previousElementSibling;
+                if (prev && prev.tagName === 'P' && isEffectivelyEmptyBlock(prev)) {
+                    const p = document.createElement('p');
+                    p.innerHTML = heading.innerHTML;
+                    prev.replaceWith(p);
+                    heading.remove();
+
+                    const newRange = document.createRange();
+                    const firstNode = domUtils.getFirstTextNode(p);
+                    if (firstNode) {
+                        newRange.setStart(firstNode, 0);
+                    } else {
+                        newRange.setStart(p, 0);
+                    }
+                    newRange.collapse(true);
+                    selection.removeAllRanges();
+                    selection.addRange(newRange);
+
+                    notifyChange();
+                    return true;
+                }
+            }
         }
 
         // リストアイテムの先頭かチェック
@@ -4358,6 +4384,54 @@ import { SearchManager } from './modules/SearchManager.js';
     function handlePlainEnterKeydown(e, context) {
         const { selection, range, container, listItem } = context;
         if (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && !listItem) {
+            // 見出し行頭でEnterされた場合は、空の見出しを作らず空段落を見出しの前に挿入
+            if (range && range.collapsed) {
+                let heading = container.nodeType === Node.ELEMENT_NODE
+                    ? container
+                    : container.parentElement;
+                while (heading && heading !== editor && !/^H[1-6]$/.test(heading.tagName)) {
+                    heading = heading.parentElement;
+                }
+
+                if (heading && heading !== editor && !isEffectivelyEmptyBlock(heading)) {
+                    let isAtHeadingStart = false;
+                    try {
+                        const beforeRange = document.createRange();
+                        beforeRange.selectNodeContents(heading);
+                        beforeRange.setEnd(range.startContainer, range.startOffset);
+                        const beforeText = (beforeRange.toString() || '')
+                            .replace(/[\u200B\uFEFF\u00A0]/g, '')
+                            .trim();
+                        isAtHeadingStart = beforeText === '';
+                    } catch (err) {
+                        isAtHeadingStart = false;
+                    }
+
+                    if (isAtHeadingStart && heading.parentElement) {
+                        e.preventDefault();
+                        stateManager.saveState();
+
+                        const p = document.createElement('p');
+                        p.innerHTML = '<br>';
+                        heading.parentElement.insertBefore(p, heading);
+
+                        const newRange = document.createRange();
+                        const firstHeadingTextNode = domUtils.getFirstTextNode(heading);
+                        if (firstHeadingTextNode) {
+                            newRange.setStart(firstHeadingTextNode, 0);
+                        } else {
+                            newRange.setStart(heading, 0);
+                        }
+                        newRange.collapse(true);
+                        selection.removeAllRanges();
+                        selection.addRange(newRange);
+
+                        notifyChange();
+                        return true;
+                    }
+                }
+            }
+
             const isInlineCodeElement = (node) => {
                 if (!node || node.nodeType !== Node.ELEMENT_NODE || node.tagName !== 'CODE') {
                     return false;
@@ -6415,7 +6489,8 @@ import { SearchManager } from './modules/SearchManager.js';
                     selection.addRange(newRange);
                     return true;
                 }
-                return placeCursorAtElementBoundary(prevElement, 'end');
+                const boundary = direction === 'up' ? 'start' : 'end';
+                return placeCursorAtElementBoundary(prevElement, boundary);
             }
             // 前に要素がない場合、新しい段落を作成
             const newParagraph = document.createElement('p');
