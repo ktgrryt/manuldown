@@ -5622,7 +5622,7 @@ export class CursorManager {
                 ];
             const tried = new Set();
             let selectedRange = null;
-            let selectedLeft = Infinity;
+            let selectedScore = Infinity;
 
             const trySelectRange = (probeRange) => {
                 if (!probeRange || !this.editor.contains(probeRange.startContainer)) {
@@ -5640,9 +5640,10 @@ export class CursorManager {
                     return false;
                 }
                 const probeLeft = probeRect.left || probeRect.x || 0;
-                if (!selectedRange || probeLeft < selectedLeft) {
+                const score = atCurrentLineStart ? probeLeft : Math.abs(probeLeft - currentX);
+                if (!selectedRange || score < selectedScore) {
                     selectedRange = probeRange;
-                    selectedLeft = probeLeft;
+                    selectedScore = score;
                 }
                 return true;
             };
