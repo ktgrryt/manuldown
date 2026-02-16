@@ -211,13 +211,21 @@ export class MarkdownDocument {
 
         // Replace img src attributes with webview URIs
         return html.replace(/<img([^>]*?)src="([^"]+)"([^>]*?)>/g, (match, before, src, after) => {
+            // Decode URL-encoded src (marked encodes non-ASCII characters like Japanese)
+            let decodedSrc = src;
+            try {
+                decodedSrc = decodeURIComponent(src);
+            } catch {
+                // Use original value when decode fails
+            }
+
             // Skip if already an absolute URL or data URI
-            if (src.startsWith('http://') || src.startsWith('https://') || src.startsWith('data:')) {
+            if (decodedSrc.startsWith('http://') || decodedSrc.startsWith('https://') || decodedSrc.startsWith('data:')) {
                 return match;
             }
 
             // Convert relative path to absolute path
-            const absolutePath = path.isAbsolute(src) ? src : path.join(documentDir, src);
+            const absolutePath = path.isAbsolute(decodedSrc) ? decodedSrc : path.join(documentDir, decodedSrc);
 
             try {
                 // Convert to webview URI

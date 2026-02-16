@@ -5726,16 +5726,25 @@ import { SearchManager } from './modules/SearchManager.js';
         }
 
         const blockElement = getClosestBlockElement(clickedElement);
-        if (!blockElement || blockElement === editor || !isImageOnlyBlockElement(blockElement)) {
-            return null;
+        if (blockElement && blockElement !== editor && isImageOnlyBlockElement(blockElement)) {
+            const images = Array.from(blockElement.querySelectorAll('img')).filter((img) => editor.contains(img));
+            if (images.length === 1) {
+                return createAfterImageRangeIfRightSide(images[0], x, y, true);
+            }
         }
 
-        const images = Array.from(blockElement.querySelectorAll('img')).filter((img) => editor.contains(img));
-        if (images.length !== 1) {
-            return null;
+        // Handle images that are direct children of the editor (no block wrapper,
+        // e.g. when an image is pasted into an empty document).
+        if (!blockElement || blockElement === editor) {
+            for (const child of editor.children) {
+                if (child.tagName === 'IMG') {
+                    const range = createAfterImageRangeIfRightSide(child, x, y, true);
+                    if (range) return range;
+                }
+            }
         }
 
-        return createAfterImageRangeIfRightSide(images[0], x, y, true);
+        return null;
     }
 
     function getStableGapClickRange(x, y, clickedElement, pointRange) {
