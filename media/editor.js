@@ -11146,6 +11146,10 @@ import { SearchManager } from './modules/SearchManager.js';
         // リンクポップオーバー
         let linkPopover = null;
         let currentLink = null;
+        let linkInputUndoStack = [];
+        let linkInputRedoStack = [];
+        let linkInputSavedValue = '';
+        let linkInputDebounceTimer = null;
         let imageResizeOverlay = null;
         let activeResizeImage = null;
         let imageResizeState = null;
@@ -11158,6 +11162,19 @@ import { SearchManager } from './modules/SearchManager.js';
                 <button class="link-popover-btn danger" data-action="unlink">Unlink</button>
                 <button class="link-popover-btn primary" data-action="open">Open</button>
             `;
+            const input = popover.querySelector('.link-popover-input');
+            input.addEventListener('input', () => {
+                if (linkInputDebounceTimer === null) {
+                    // 入力開始時にスナップショットを保存
+                    linkInputUndoStack.push(linkInputSavedValue);
+                    linkInputRedoStack = [];
+                }
+                clearTimeout(linkInputDebounceTimer);
+                linkInputDebounceTimer = setTimeout(() => {
+                    linkInputSavedValue = input.value;
+                    linkInputDebounceTimer = null;
+                }, 500);
+            });
             document.body.appendChild(popover);
             return popover;
         }
@@ -11170,6 +11187,11 @@ import { SearchManager } from './modules/SearchManager.js';
             currentLink = link;
             const input = linkPopover.querySelector('.link-popover-input');
             input.value = link.getAttribute('href') || '';
+            linkInputUndoStack = [];
+            linkInputRedoStack = [];
+            linkInputSavedValue = input.value;
+            clearTimeout(linkInputDebounceTimer);
+            linkInputDebounceTimer = null;
 
             // リンクの位置に合わせてポップオーバーを表示
             const rect = link.getBoundingClientRect();
@@ -11636,6 +11658,50 @@ import { SearchManager } from './modules/SearchManager.js';
                 } else if (e.key === 'Escape') {
                     e.preventDefault();
                     hideLinkPopover();
+                } else if (isMac && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && e.key === 'f') {
+                    // Ctrl+F: カーソルを1文字前に進める（macOS Emacsスタイル）
+                    const input = linkPopover.querySelector('.link-popover-input');
+                    if (input && document.activeElement === input) {
+                        e.preventDefault();
+                        const pos = input.selectionStart;
+                        if (pos < input.value.length) {
+                            input.setSelectionRange(pos + 1, pos + 1);
+                        }
+                    }
+                } else if ((e.metaKey || e.ctrlKey) && e.key === 'z' && !e.shiftKey && !e.altKey) {
+                    // Undo
+                    const input = linkPopover.querySelector('.link-popover-input');
+                    if (input && document.activeElement === input) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        if (linkInputUndoStack.length > 0) {
+                            if (linkInputDebounceTimer !== null) {
+                                clearTimeout(linkInputDebounceTimer);
+                                linkInputSavedValue = input.value;
+                                linkInputDebounceTimer = null;
+                            }
+                            linkInputRedoStack.push(linkInputSavedValue);
+                            linkInputSavedValue = linkInputUndoStack.pop();
+                            input.value = linkInputSavedValue;
+                        }
+                    }
+                } else if ((e.metaKey || e.ctrlKey) && (e.key === 'Z' || (e.key === 'z' && e.shiftKey)) && !e.altKey) {
+                    // Redo
+                    const input = linkPopover.querySelector('.link-popover-input');
+                    if (input && document.activeElement === input) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        if (linkInputRedoStack.length > 0) {
+                            if (linkInputDebounceTimer !== null) {
+                                clearTimeout(linkInputDebounceTimer);
+                                linkInputSavedValue = input.value;
+                                linkInputDebounceTimer = null;
+                            }
+                            linkInputUndoStack.push(linkInputSavedValue);
+                            linkInputSavedValue = linkInputRedoStack.pop();
+                            input.value = linkInputSavedValue;
+                        }
+                    }
                 }
             }
         });

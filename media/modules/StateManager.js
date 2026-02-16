@@ -224,15 +224,19 @@ export class StateManager {
         
         // Undoスタックから前の状態を復元
         const state = this.undoStack[this.undoStack.length - 1];
+        const scrollTop = this.editor.scrollTop;
         this.editor.innerHTML = state.html;
         this.restoreSelection(state.selection);
-        
-        
+        this.editor.scrollTop = scrollTop;
+
         this.isRestoringState = false;
-        
-        
-        // エディタにフォーカスを維持
-        setTimeout(() => this.editor.focus(), 0);
+
+        // エディタにフォーカスを維持（スクロールを防止）
+        const scrollTopAfter = this.editor.scrollTop;
+        setTimeout(() => {
+            try { this.editor.focus({ preventScroll: true }); } catch (e) { this.editor.focus(); }
+            this.editor.scrollTop = scrollTopAfter;
+        }, 0);
         
         // VSCodeに変更を通知
         if (notifyCallback) {
@@ -269,13 +273,19 @@ export class StateManager {
         
         // Redoスタックから状態を復元
         const state = this.redoStack.pop();
+        const scrollTop = this.editor.scrollTop;
         this.editor.innerHTML = state.html;
         this.restoreSelection(state.selection);
-        
+        this.editor.scrollTop = scrollTop;
+
         this.isRestoringState = false;
-        
-        // エディタにフォーカスを維持
-        setTimeout(() => this.editor.focus(), 0);
+
+        // エディタにフォーカスを維持（スクロールを防止）
+        const scrollTopAfter = this.editor.scrollTop;
+        setTimeout(() => {
+            try { this.editor.focus({ preventScroll: true }); } catch (e) { this.editor.focus(); }
+            this.editor.scrollTop = scrollTopAfter;
+        }, 0);
         
         // VSCodeに変更を通知
         if (notifyCallback) {
