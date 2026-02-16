@@ -3,7 +3,7 @@
   "displayName": "ManulDown",
   "description": "WYSIWYG editor for Markdown files in VSCode",
   "icon": "images/icon.png",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "publisher": "ktgrryt",
   "license": "MIT",
   "repository": {

@@ -7823,7 +7823,35 @@ import { SearchManager } from './modules/SearchManager.js';
 
             stateManager.saveState();
             emacsKillBuffer = killedText;
+
+            // コードブロック内の場合、削除後に空になるかチェック
+            const killCodeBlock = domUtils.getParentElement(killRange.startContainer, 'CODE');
+            const killPreBlock = killCodeBlock ? domUtils.getParentElement(killCodeBlock, 'PRE') : null;
+
             killRange.deleteContents();
+
+            // コードブロック内で削除後に空になった場合、改行を保持してカーソルを先頭に配置
+            if (killPreBlock && killCodeBlock) {
+                const remainingText = cursorManager.getCodeBlockText(killCodeBlock);
+                const normalizedRemaining = remainingText.replace(/[\u200B\uFEFF]/g, '');
+                if (normalizedRemaining.trim() === '') {
+                    killCodeBlock.textContent = '\n';
+                    cursorManager.setCodeBlockCursorOffset(killCodeBlock, selection, 0);
+                    if (killCodeBlock.className.match(/language-\w+/)) {
+                        setTimeout(() => {
+                            codeBlockManager.highlightSingleCodeBlock(killCodeBlock);
+                        }, 0);
+                    }
+                    domUtils.ensureInlineCodeSpaces();
+                    domUtils.cleanupGhostStyles();
+                    tableManager.wrapTables();
+                    applyImageRenderSizes();
+                    hideImageResizeOverlay();
+                    pendingDeleteListItem = null;
+                    notifyChange();
+                    return true;
+                }
+            }
 
             const caretRange = document.createRange();
             caretRange.setStart(killRange.startContainer, killRange.startOffset);
