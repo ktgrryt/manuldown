@@ -317,8 +317,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                         }
                         break;
                     case 'openLink':
-                        // Open the link in the default browser
-                        if (message.url) {
+                        // Open the link in the default browser (http/https only)
+                        if (message.url && /^https?:\/\//i.test(message.url)) {
                             vscode.env.openExternal(vscode.Uri.parse(message.url));
                         }
                         break;

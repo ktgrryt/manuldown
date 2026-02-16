@@ -11187,12 +11187,21 @@ import { SearchManager } from './modules/SearchManager.js';
             setTimeout(() => input.select(), 0);
         }
 
+        function isHttpUrl(url) {
+            return /^https?:\/\//i.test(url);
+        }
+
         function saveLinkUrlIfChanged() {
             if (currentLink && linkPopover) {
                 const input = linkPopover.querySelector('.link-popover-input');
                 const newUrl = input.value.trim();
                 const oldUrl = currentLink.getAttribute('href') || '';
                 if (newUrl && newUrl !== oldUrl) {
+                    if (!isHttpUrl(newUrl)) {
+                        // http/https以外はリンクとして設定不可 - 元のURLに戻す
+                        input.value = oldUrl;
+                        return;
+                    }
                     currentLink.setAttribute('href', newUrl);
                     stateManager.saveStateDebounced();
                     notifyChange();
