@@ -5676,6 +5676,75 @@ export class CursorManager {
             return;
         }
 
+        const normalizeTopLevelIgnorableCaretDown = () => {
+            const activeSelection = window.getSelection();
+            if (!activeSelection || !activeSelection.rangeCount) {
+                return false;
+            }
+            const activeRange = activeSelection.getRangeAt(0);
+            if (!activeRange.collapsed) {
+                return false;
+            }
+            const startContainer = activeRange.startContainer;
+            if (!startContainer || startContainer.nodeType !== Node.TEXT_NODE) {
+                return false;
+            }
+            if (startContainer.parentElement !== this.editor) {
+                return false;
+            }
+            if (!this._isIgnorableTextNode(startContainer)) {
+                return false;
+            }
+
+            const findAdjacentNavigableElement = (node, direction) => {
+                let sibling = direction === 'next' ? node.nextSibling : node.previousSibling;
+                while (sibling) {
+                    if (sibling.nodeType === Node.TEXT_NODE) {
+                        if (!this._isIgnorableTextNode(sibling)) {
+                            return null;
+                        }
+                        sibling = direction === 'next' ? sibling.nextSibling : sibling.previousSibling;
+                        continue;
+                    }
+                    if (sibling.nodeType !== Node.ELEMENT_NODE) {
+                        sibling = direction === 'next' ? sibling.nextSibling : sibling.previousSibling;
+                        continue;
+                    }
+                    if (this._isNavigationExcludedElement(sibling) || sibling.tagName === 'BR') {
+                        sibling = direction === 'next' ? sibling.nextSibling : sibling.previousSibling;
+                        continue;
+                    }
+                    return sibling;
+                }
+                return null;
+            };
+
+            const nextElement = findAdjacentNavigableElement(startContainer, 'next');
+            if (nextElement && moveToBlockStart(nextElement)) {
+                return true;
+            }
+
+            const prevElement = findAdjacentNavigableElement(startContainer, 'prev');
+            if (prevElement) {
+                const fallbackRange = document.createRange();
+                const lastTextNode = this._getLastNavigableTextNode(prevElement);
+                if (lastTextNode) {
+                    fallbackRange.setStart(lastTextNode, (lastTextNode.textContent || '').length);
+                } else {
+                    fallbackRange.setStart(
+                        prevElement,
+                        prevElement.childNodes ? prevElement.childNodes.length : 0
+                    );
+                }
+                fallbackRange.collapse(true);
+                activeSelection.removeAllRanges();
+                activeSelection.addRange(fallbackRange);
+                return true;
+            }
+
+            return false;
+        };
+
         // 直下が空行ブロックの場合は、次のテキスト行へ飛ばさず空行に入る
         const originBlock = getBlockFromContainer(container, range.startOffset);
         if (originBlock) {
@@ -5709,7 +5778,7 @@ export class CursorManager {
                 }
             }
             if (nextBlock && isEffectivelyEmptyBlock(nextBlock)) {
-                if (nearBottom && !hasLineBelowInOriginBlock && moveToBlockStart(nextBlock)) {
+                if (!hasLineBelowInOriginBlock && moveToBlockStart(nextBlock)) {
                     return;
                 }
             }
@@ -5801,6 +5870,20 @@ export class CursorManager {
                     restoreOriginalCaret();
                     return false;
                 }
+            }
+
+            const landedOnTopLevelIgnorableText =
+                afterRange.collapsed &&
+                afterRange.startContainer &&
+                afterRange.startContainer.nodeType === Node.TEXT_NODE &&
+                afterRange.startContainer.parentElement === this.editor &&
+                this._isIgnorableTextNode(afterRange.startContainer);
+            if (landedOnTopLevelIgnorableText) {
+                if (normalizeTopLevelIgnorableCaretDown()) {
+                    return true;
+                }
+                restoreOriginalCaret();
+                return false;
             }
 
             return true;
@@ -6016,6 +6099,16 @@ export class CursorManager {
                 const afterBottom = afterRect ? (afterRect.bottom || (afterRect.y + afterRect.height) || 0) : null;
                 if (afterBottom === null || afterBottom <= currentY + 2) {
                     moved = false;
+                } else {
+                    const landedOnTopLevelIgnorableText =
+                        afterRange.collapsed &&
+                        afterRange.startContainer &&
+                        afterRange.startContainer.nodeType === Node.TEXT_NODE &&
+                        afterRange.startContainer.parentElement === this.editor &&
+                        this._isIgnorableTextNode(afterRange.startContainer);
+                    if (landedOnTopLevelIgnorableText && !normalizeTopLevelIgnorableCaretDown()) {
+                        moved = false;
+                    }
                 }
             }
         }

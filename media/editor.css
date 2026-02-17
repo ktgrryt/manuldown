@@ -92,7 +92,11 @@ body {
 
 #editor {
     flex: 1;
-    padding: 40px 20px 20px 20px;
+    --editor-pad-top: 40px;
+    --editor-pad-right: 20px;
+    --editor-pad-bottom: 20px;
+    --editor-pad-left: 20px;
+    padding: var(--editor-pad-top) var(--editor-pad-right) var(--editor-pad-bottom) var(--editor-pad-left);
     overflow-y: auto;
     -ms-overflow-style: none;
     scrollbar-width: none;
@@ -168,7 +172,7 @@ body[data-toolbar-visible="false"] .toolbar {
 }
 
 body[data-toolbar-visible="false"] #editor {
-    padding-top: 20px;
+    --editor-pad-top: 20px;
 }
 
 body[data-toc-enabled="false"] #editor,
@@ -938,6 +942,12 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
 /* Empty editor placeholder */
 #editor.is-empty::before {
     content: 'Start typing your markdown content...';
+    position: absolute;
+    top: var(--editor-pad-top);
+    left: var(--editor-pad-left);
+    right: var(--editor-pad-right);
+    pointer-events: none;
+    user-select: none;
     color: var(--vscode-descriptionForeground);
     opacity: 0.5;
 }

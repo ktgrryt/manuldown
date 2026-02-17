@@ -44,6 +44,62 @@ import { SearchManager } from './modules/SearchManager.js';
     let imageResolveRequestSeq = 0;
     let overflowStateRaf = null;
 
+    function isIgnorableEditorTextValue(value) {
+        return (value || '').replace(/[\u200B\uFEFF\u00A0]/g, '').trim() === '';
+    }
+
+    function isRenderableEditorNode(node) {
+        if (!node) return false;
+        if (node.nodeType === Node.TEXT_NODE) {
+            return !isIgnorableEditorTextValue(node.textContent || '');
+        }
+        if (node.nodeType !== Node.ELEMENT_NODE) {
+            return false;
+        }
+        const element = node;
+        if (element.getAttribute?.('data-exclude-from-markdown') === 'true') {
+            return false;
+        }
+        if (element.classList?.contains('md-table-insert-line')) {
+            return false;
+        }
+        if (element.getAttribute?.('aria-hidden') === 'true') {
+            return false;
+        }
+        if (element.tagName === 'BR') {
+            return false;
+        }
+        if (
+            element.tagName === 'HR' ||
+            element.tagName === 'IMG' ||
+            element.tagName === 'TABLE' ||
+            element.tagName === 'UL' ||
+            element.tagName === 'OL' ||
+            element.tagName === 'PRE' ||
+            element.tagName === 'INPUT'
+        ) {
+            return true;
+        }
+        return Array.from(element.childNodes || []).some((child) => isRenderableEditorNode(child));
+    }
+
+    function isEditorEffectivelyEmpty() {
+        if (!editor) return true;
+        return !Array.from(editor.childNodes || []).some((node) => isRenderableEditorNode(node));
+    }
+
+    function placeCaretAtEditorStart() {
+        if (!editor) return false;
+        const selection = window.getSelection();
+        if (!selection) return false;
+        const range = document.createRange();
+        range.setStart(editor, 0);
+        range.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        return true;
+    }
+
     function getEditorScrollbarMetrics() {
         if (!editor) return null;
         const clientHeight = editor.clientHeight;
@@ -67,24 +123,7 @@ import { SearchManager } from './modules/SearchManager.js';
 
     function updateEditorOverflowState() {
         if (!editor) return;
-        const hasRenderableContent = Array.from(editor.childNodes || []).some((node) => {
-            if (!node) return false;
-            if (node.nodeType === Node.TEXT_NODE) {
-                const text = (node.textContent || '').replace(/[\u200B\uFEFF\u00A0]/g, '').trim();
-                return text !== '';
-            }
-            if (node.nodeType !== Node.ELEMENT_NODE) {
-                return false;
-            }
-            const element = node;
-            if (element.getAttribute('data-exclude-from-markdown') === 'true') {
-                return false;
-            }
-            if (element.classList && element.classList.contains('md-table-insert-line')) {
-                return false;
-            }
-            return true;
-        });
+        const hasRenderableContent = !isEditorEffectivelyEmpty();
         editor.classList.toggle('is-empty', !hasRenderableContent);
 
         const metrics = getEditorScrollbarMetrics();
@@ -3383,38 +3422,46 @@ import { SearchManager } from './modules/SearchManager.js';
             }
         }
 
-        // 空の段落の直後でBackspaceされた場合、空段落を削除してカーソル位置を行頭に保つ
-        const currentP = domUtils.getParentElement(container, 'P');
-        if (currentP && range.collapsed) {
-            let isAtParagraphStart = false;
-            const pTextNodes = domUtils.getTextNodes(currentP);
-            if (pTextNodes.length > 0) {
-                const firstTextNode = pTextNodes[0];
-                if (container === firstTextNode && offset === 0) {
-                    isAtParagraphStart = true;
-                }
-            } else if (container === currentP && offset === 0) {
-                isAtParagraphStart = true;
-            }
-
-            if (isAtParagraphStart) {
-                const prev = currentP.previousElementSibling;
-                if (prev && prev.tagName === 'P' && isEffectivelyEmptyBlock(prev)) {
-                    prev.remove();
-
-                    const newRange = document.createRange();
-                    const firstNode = domUtils.getFirstTextNode(currentP);
-                    if (firstNode) {
-                        newRange.setStart(firstNode, 0);
-                    } else {
-                        newRange.setStart(currentP, 0);
+        // テキスト行の行頭でBackspaceされた際、直前の空行(P/DIV)のみを削除し、
+        // 現在行の先頭にカーソルを保持する。
+        const currentBlockForEmptyLineDelete = getCurrentBlock(container);
+        if (currentBlockForEmptyLineDelete && range.collapsed) {
+            const isSupportedCurrentBlock =
+                currentBlockForEmptyLineDelete.tagName !== 'LI' &&
+                currentBlockForEmptyLineDelete.tagName !== 'PRE';
+            if (isSupportedCurrentBlock) {
+                let isAtBlockStart = isRangeAtBlockStart(range, currentBlockForEmptyLineDelete);
+                if (!isAtBlockStart) {
+                    const blockTextNodes = domUtils.getTextNodes(currentBlockForEmptyLineDelete);
+                    if (blockTextNodes.length > 0) {
+                        isAtBlockStart = container === blockTextNodes[0] && offset === 0;
+                    } else if (container === currentBlockForEmptyLineDelete && offset === 0) {
+                        isAtBlockStart = true;
                     }
-                    newRange.collapse(true);
-                    selection.removeAllRanges();
-                    selection.addRange(newRange);
+                }
 
-                    notifyChange();
-                    return true;
+                if (isAtBlockStart) {
+                    const prev = currentBlockForEmptyLineDelete.previousElementSibling;
+                    const isEmptyLineBlock = prev &&
+                        (prev.tagName === 'P' || prev.tagName === 'DIV') &&
+                        isEffectivelyEmptyBlock(prev);
+                    if (isEmptyLineBlock) {
+                        prev.remove();
+
+                        const newRange = document.createRange();
+                        const firstNode = domUtils.getFirstTextNode(currentBlockForEmptyLineDelete);
+                        if (firstNode) {
+                            newRange.setStart(firstNode, 0);
+                        } else {
+                            newRange.setStart(currentBlockForEmptyLineDelete, 0);
+                        }
+                        newRange.collapse(true);
+                        selection.removeAllRanges();
+                        selection.addRange(newRange);
+
+                        notifyChange();
+                        return true;
+                    }
                 }
             }
         }
@@ -6702,6 +6749,15 @@ import { SearchManager } from './modules/SearchManager.js';
     }
 
     function handleArrowKeydown(e) {
+        if (e.key === 'ArrowDown' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
+            if (isEditorEffectivelyEmpty()) {
+                e.preventDefault();
+                e.stopPropagation();
+                placeCaretAtEditorStart();
+                return true;
+            }
+        }
+
         // 水平線が選択されている場合の処理
         const selectedHR = isHRSelected();
         if (selectedHR && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
@@ -8785,8 +8841,16 @@ import { SearchManager } from './modules/SearchManager.js';
                 selection = restoredSelection;
             }
         }
+        const isArrowDownOrCtrlN = e.key === 'ArrowDown' ||
+            (isMac && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'n');
         if (!selection || !selection.rangeCount) {
-            if ((e.key === 'ArrowDown' || (isMac && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'n'))) {
+            if (isArrowDownOrCtrlN && isEditorEffectivelyEmpty()) {
+                if (placeCaretAtEditorStart()) {
+                    e.preventDefault();
+                    return;
+                }
+            }
+            if (isArrowDownOrCtrlN) {
                 const target = e.target;
                 const preBlock = target && target.closest ? target.closest('pre') : domUtils.getParentElement(target, 'PRE');
                 if (exitEmptyCodeBlockDownFromPre(preBlock, window.getSelection())) {
