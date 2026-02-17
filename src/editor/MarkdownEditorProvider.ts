@@ -245,6 +245,39 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         // Track if we're currently updating from webview
         let isUpdatingFromWebview = false;
         let lastWebviewUpdateTime = 0;
+        let pendingWebviewHtml: string | null = null;
+        let processingWebviewUpdate = false;
+
+        const flushPendingWebviewUpdate = async (): Promise<void> => {
+            if (processingWebviewUpdate) {
+                return;
+            }
+
+            processingWebviewUpdate = true;
+            isUpdatingFromWebview = true;
+
+            try {
+                while (pendingWebviewHtml !== null) {
+                    const htmlToApply = pendingWebviewHtml;
+                    pendingWebviewHtml = null;
+                    lastWebviewUpdateTime = Date.now();
+                    await this.updateTextDocument(document, htmlToApply);
+                }
+            } catch (error) {
+                console.error('[webview update] Failed to apply editor update:', error);
+            } finally {
+                // Wait for all document change events to be processed
+                await new Promise(resolve => setTimeout(resolve, 300));
+                processingWebviewUpdate = false;
+
+                if (pendingWebviewHtml !== null) {
+                    void flushPendingWebviewUpdate();
+                    return;
+                }
+
+                isUpdatingFromWebview = false;
+            }
+        };
 
         // Handle messages from the webview
         webviewPanel.webview.onDidReceiveMessage(
@@ -255,19 +288,9 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                         lastWebviewUpdateTime = Date.now();
                         break;
                     case 'update':
-                        isUpdatingFromWebview = true;
+                        pendingWebviewHtml = typeof message.content === 'string' ? message.content : '';
                         lastWebviewUpdateTime = Date.now();
-                        try {
-                            await this.updateTextDocument(document, message.content);
-                        } finally {
-                            // Wait for all document change events to be processed
-                            // Increased timeout to ensure all async events complete
-                            await new Promise(resolve => setTimeout(resolve, 300));
-                            isUpdatingFromWebview = false;
-
-                            // Don't send refresh message - WebView already has the correct state
-                            // Sending refresh would reset cursor position
-                        }
+                        void flushPendingWebviewUpdate();
                         break;
                     case 'ready':
                         // Send initial content to webview

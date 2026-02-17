@@ -20,6 +20,7 @@ import { SearchManager } from './modules/SearchManager.js';
     let pendingDeleteListItem = null;
     let pendingStrikeCleanup = false;
     let pendingEmptyListItemInsert = null;
+    let pendingCtrlKDeleteSync = false;
     let pendingListMouseAdjustment = null;
     let pendingMouseDriftCorrection = null;
     let lastPointerCaretIntentTs = 0;
@@ -2311,7 +2312,9 @@ import { SearchManager } from './modules/SearchManager.js';
     }
 
     // 変更を通知
-    function notifyChange() {
+    function prepareEditorForNotify() {
+        pendingCtrlKDeleteSync = false;
+
         // ゴーストスタイル（削除されたインラインコードのスタイルが残ったもの）をクリーンアップ
         domUtils.cleanupGhostStyles();
 
@@ -2322,12 +2325,16 @@ import { SearchManager } from './modules/SearchManager.js';
         mergeAdjacentLists();
 
         scheduleEditorOverflowStateUpdate();
+    }
+
+    function notifyChange() {
+        prepareEditorForNotify();
 
         scheduleUpdate(500);
     }
 
     function notifyChangeImmediate() {
-        scheduleEditorOverflowStateUpdate();
+        prepareEditorForNotify();
         scheduleUpdate(0);
     }
 
@@ -4931,7 +4938,7 @@ import { SearchManager } from './modules/SearchManager.js';
                 sel.removeAllRanges();
                 sel.addRange(newRange);
             }
-            notifyChange();
+            notifyChangeImmediate();
             return true;
         }
 
@@ -5024,7 +5031,7 @@ import { SearchManager } from './modules/SearchManager.js';
             }
         }
 
-        notifyChange();
+        notifyChangeImmediate();
         return true;
     }
 
@@ -5110,7 +5117,7 @@ import { SearchManager } from './modules/SearchManager.js';
     // チェックボックス付きリストアイテムを丸ごと削除し、カーソルを隣接アイテムへ移動
     // チェックボックス付きリストアイテムの中身を消して空の行にする
     // チェックボックス付きリストアイテムを削除し、空のパラグラフに置き換える
-    function deleteCheckboxListItem(li) {
+    function deleteCheckboxListItem(li, immediate = false) {
         if (!li) return;
         const sel = window.getSelection();
         if (!sel) return;
@@ -5174,6 +5181,10 @@ import { SearchManager } from './modules/SearchManager.js';
         nr.collapse(true);
         sel.removeAllRanges();
         sel.addRange(nr);
+        if (immediate) {
+            notifyChangeImmediate();
+            return;
+        }
         notifyChange();
     }
 
@@ -7744,11 +7755,59 @@ import { SearchManager } from './modules/SearchManager.js';
         }
     }
 
+    function isRangeAtBlockTextStart(range, block) {
+        if (!range || !block || !range.collapsed) {
+            return false;
+        }
+        try {
+            const prefixRange = document.createRange();
+            prefixRange.selectNodeContents(block);
+            prefixRange.setEnd(range.startContainer, range.startOffset);
+            const beforeText = prefixRange.toString().replace(/[\u200B\uFEFF\u00A0]/g, '');
+            return beforeText.length === 0;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function ensureBlockHasCaretPlaceholder(block) {
+        if (!block || block.nodeType !== Node.ELEMENT_NODE) return;
+        const hasMeaningfulChild = Array.from(block.childNodes || []).some((child) => {
+            if (!child) return false;
+            if (child.nodeType === Node.TEXT_NODE) {
+                return (child.textContent || '').replace(/[\u200B\uFEFF\u00A0]/g, '').trim() !== '';
+            }
+            if (child.nodeType !== Node.ELEMENT_NODE) return false;
+            if (child.tagName === 'BR') return true;
+            if (child.tagName === 'UL' || child.tagName === 'OL') return true;
+            if (child.getAttribute && child.getAttribute('data-exclude-from-markdown') === 'true') return false;
+            return true;
+        });
+        if (!hasMeaningfulChild) {
+            block.appendChild(document.createElement('br'));
+        }
+    }
+
     function buildCtrlKKillRange(selection, range) {
         if (!selection || !range) return null;
         if (!range.collapsed) {
             return range.cloneRange();
         }
+
+        const isAtBlockStart = (targetRange, block) => {
+            if (!targetRange || !block || !targetRange.collapsed) {
+                return false;
+            }
+            try {
+                const prefixRange = document.createRange();
+                prefixRange.selectNodeContents(block);
+                prefixRange.setEnd(targetRange.startContainer, targetRange.startOffset);
+                const beforeText = prefixRange.toString().replace(/[\u200B\uFEFF\u00A0]/g, '');
+                return beforeText.length === 0;
+            } catch (e) {
+                return false;
+            }
+        };
 
         const startRange = range.cloneRange();
         startRange.collapse(true);
@@ -7763,6 +7822,22 @@ import { SearchManager } from './modules/SearchManager.js';
             if (selection.rangeCount) {
                 endRange = selection.getRangeAt(0).cloneRange();
                 endRange.collapse(true);
+            }
+        }
+
+        // Some WebView paths place Ctrl+E/Ctrl+K end at the next block start.
+        // At line start we clamp to the current block end so the line stays as an empty line.
+        const startBlock = getClosestBlockElement(startRange.startContainer);
+        const supportsClampBlock = !!(startBlock && /^(P|DIV|H[1-6])$/.test(startBlock.tagName));
+        if (supportsClampBlock && isAtBlockStart(startRange, startBlock)) {
+            const endInsideStartBlock =
+                endRange.startContainer === startBlock ||
+                startBlock.contains(endRange.startContainer);
+            if (!endInsideStartBlock) {
+                const clampedEndRange = document.createRange();
+                clampedEndRange.selectNodeContents(startBlock);
+                clampedEndRange.collapse(false);
+                endRange = clampedEndRange;
             }
         }
 
@@ -7816,8 +7891,62 @@ import { SearchManager } from './modules/SearchManager.js';
             const range = selection.getRangeAt(0);
             if (!editor.contains(range.commonAncestorContainer)) return false;
 
+            // Always intercept native Ctrl+K behavior inside the editor.
+            // If our custom range build fails, we keep the current line instead of letting
+            // the browser remove the whole line/newline.
+            e.preventDefault();
+            e.stopPropagation();
+
+            if (range.collapsed) {
+                const startBlock = getClosestBlockElement(range.startContainer);
+                const supportsLinePreserve = !!(startBlock && /^(P|DIV|H[1-6])$/.test(startBlock.tagName));
+                if (supportsLinePreserve && isRangeAtBlockTextStart(range, startBlock)) {
+                    try {
+                        const blockEndRange = document.createRange();
+                        blockEndRange.setStart(range.startContainer, range.startOffset);
+                        blockEndRange.setEnd(startBlock, startBlock.childNodes.length);
+                        const blockEndText = blockEndRange.toString().replace(/[\u200B\uFEFF\u00A0]/g, '');
+                        if (blockEndText.length > 0) {
+                            const payload = createClipboardPayloadFromRange(blockEndRange);
+                            let killedText = blockEndRange.toString();
+                            if (!killedText) {
+                                killedText = payload && typeof payload.text === 'string'
+                                    ? payload.text
+                                    : '';
+                            }
+
+                            stateManager.saveState();
+                            emacsKillBuffer = killedText;
+                            blockEndRange.deleteContents();
+                            ensureBlockHasCaretPlaceholder(startBlock);
+
+                            const caretRange = document.createRange();
+                            const firstNode = getPreferredFirstTextNodeForElement(startBlock);
+                            if (firstNode) {
+                                caretRange.setStart(firstNode, 0);
+                            } else {
+                                caretRange.setStart(startBlock, 0);
+                            }
+                            caretRange.collapse(true);
+                            applySelectionRange(selection, caretRange);
+
+                            domUtils.ensureInlineCodeSpaces();
+                            domUtils.cleanupGhostStyles();
+                            tableManager.wrapTables();
+                            applyImageRenderSizes();
+                            hideImageResizeOverlay();
+                            pendingDeleteListItem = null;
+                            notifyChangeImmediate();
+                            return true;
+                        }
+                    } catch (e) {
+                        // Fall through to the default Ctrl+K kill logic.
+                    }
+                }
+            }
+
             const killRange = buildCtrlKKillRange(selection, range);
-            if (!killRange) return false;
+            if (!killRange) return true;
 
             const payload = createClipboardPayloadFromRange(killRange);
             let killedText = killRange.toString();
@@ -7826,9 +7955,6 @@ import { SearchManager } from './modules/SearchManager.js';
                     ? payload.text
                     : '';
             }
-
-            e.preventDefault();
-            e.stopPropagation();
 
             stateManager.saveState();
             emacsKillBuffer = killedText;
@@ -7857,7 +7983,7 @@ import { SearchManager } from './modules/SearchManager.js';
                     applyImageRenderSizes();
                     hideImageResizeOverlay();
                     pendingDeleteListItem = null;
-                    notifyChange();
+                    notifyChangeImmediate();
                     return true;
                 }
             }
@@ -7873,7 +7999,7 @@ import { SearchManager } from './modules/SearchManager.js';
             applyImageRenderSizes();
             hideImageResizeOverlay();
             pendingDeleteListItem = null;
-            notifyChange();
+            notifyChangeImmediate();
             return true;
         }
 
@@ -8624,6 +8750,34 @@ import { SearchManager } from './modules/SearchManager.js';
             return;
         }
 
+        const ctrlKChord = isMac &&
+            e.ctrlKey &&
+            !e.metaKey &&
+            !e.altKey &&
+            !e.shiftKey &&
+            (e.key || '').toLowerCase() === 'k';
+        if (ctrlKChord) {
+            pendingCtrlKDeleteSync = true;
+            // Native Ctrl+K deletion can bypass custom handlers in some WebView paths.
+            // If no notification occurs in this turn, force a sync once.
+            setTimeout(() => {
+                if (!pendingCtrlKDeleteSync || isUpdating) return;
+                const currentSelection = window.getSelection();
+                if (!currentSelection || !currentSelection.rangeCount) {
+                    pendingCtrlKDeleteSync = false;
+                    return;
+                }
+                const activeRange = currentSelection.getRangeAt(0);
+                if (!editor.contains(activeRange.commonAncestorContainer)) {
+                    pendingCtrlKDeleteSync = false;
+                    return;
+                }
+                notifyChangeImmediate();
+            }, 0);
+        } else if (!e.isComposing) {
+            pendingCtrlKDeleteSync = false;
+        }
+
         let selection = window.getSelection();
         if ((!selection || !selection.rangeCount) && e.key === 'Tab' && !e.isComposing) {
             const restoredSelection = restoreSelectionFromCheckboxTarget(e.target);
@@ -8664,7 +8818,7 @@ import { SearchManager } from './modules/SearchManager.js';
                         e.stopPropagation();
                         stateManager.saveState();
                         deleteCodeBlock(pre, selection);
-                        notifyChange();
+                        notifyChangeImmediate();
                         return;
                     }
                 }
@@ -8741,7 +8895,7 @@ import { SearchManager } from './modules/SearchManager.js';
             if (checkboxForCtrlK) {
                 e.preventDefault();
                 stateManager.saveState();
-                deleteCheckboxListItem(checkboxForCtrlK.parentElement);
+                deleteCheckboxListItem(checkboxForCtrlK.parentElement, true);
                 return;
             }
             // 空のリストアイテムでCtrl+K → リストアイテムを削除
@@ -8782,7 +8936,7 @@ import { SearchManager } from './modules/SearchManager.js';
                     newRange.collapse(true);
                     selection.removeAllRanges();
                     selection.addRange(newRange);
-                    notifyChange();
+                    notifyChangeImmediate();
                     return;
                 }
 
@@ -8811,7 +8965,7 @@ import { SearchManager } from './modules/SearchManager.js';
                     newRange.collapse(true);
                     selection.removeAllRanges();
                     selection.addRange(newRange);
-                    notifyChange();
+                    notifyChangeImmediate();
                     return;
                 }
 
@@ -8841,7 +8995,7 @@ import { SearchManager } from './modules/SearchManager.js';
                     selection.removeAllRanges();
                     selection.addRange(newRange);
                 }
-                notifyChange();
+                notifyChangeImmediate();
                 return;
             }
             pendingDeleteListItem = listItem;
@@ -9130,6 +9284,11 @@ import { SearchManager } from './modules/SearchManager.js';
                     return;
                 }
                 stateManager.saveStateDebounced();
+                const isDeleteInput = typeof e.inputType === 'string' && e.inputType.startsWith('delete');
+                const shouldImmediateDeleteNotify = isDeleteInput;
+                if (!isDeleteInput && pendingCtrlKDeleteSync) {
+                    pendingCtrlKDeleteSync = false;
+                }
 
                 const isInsertTextInput =
                     e.inputType === 'insertText' ||
@@ -9165,7 +9324,6 @@ import { SearchManager } from './modules/SearchManager.js';
                     }
                 }
 
-                const isDeleteInput = typeof e.inputType === 'string' && e.inputType.startsWith('delete');
                 if (isDeleteInput) {
                     if (pendingDeleteListItem) {
                         preserveEmptyListItemAfterDelete(pendingDeleteListItem);
@@ -9228,7 +9386,12 @@ import { SearchManager } from './modules/SearchManager.js';
 
                     setTimeout(() => domUtils.cleanupEmptyListItems(), 0);
                 } else {
-                    notifyChange();
+                    if (shouldImmediateDeleteNotify) {
+                        pendingCtrlKDeleteSync = false;
+                        notifyChangeImmediate();
+                    } else {
+                        notifyChange();
+                    }
                 }
 
                 if (caretFixListItem && caretFixListItem.isConnected) {
