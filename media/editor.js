@@ -5712,6 +5712,127 @@ import { SearchManager } from './modules/SearchManager.js';
         return null;
     }
 
+    function getNearestTextRectForBlockClickByY(blockElement, y) {
+        if (!blockElement || blockElement.nodeType !== Node.ELEMENT_NODE) {
+            return null;
+        }
+
+        const walker = document.createTreeWalker(
+            blockElement,
+            NodeFilter.SHOW_TEXT,
+            {
+                acceptNode(node) {
+                    if (!node || node.nodeType !== Node.TEXT_NODE) {
+                        return NodeFilter.FILTER_REJECT;
+                    }
+                    if (!hasMeaningfulTextContent(node.textContent || '')) {
+                        return NodeFilter.FILTER_REJECT;
+                    }
+
+                    let parent = node.parentElement;
+                    while (parent && parent !== blockElement) {
+                        if (blockElement.tagName === 'LI' && (parent.tagName === 'UL' || parent.tagName === 'OL')) {
+                            return NodeFilter.FILTER_REJECT;
+                        }
+                        if (parent.getAttribute) {
+                            if (parent.getAttribute('data-exclude-from-markdown') === 'true' ||
+                                parent.getAttribute('contenteditable') === 'false' ||
+                                parent.getAttribute('aria-hidden') === 'true') {
+                                return NodeFilter.FILTER_REJECT;
+                            }
+                        }
+                        parent = parent.parentElement;
+                    }
+                    return NodeFilter.FILTER_ACCEPT;
+                }
+            },
+            false
+        );
+
+        let bestRect = null;
+        let bestScore = Number.POSITIVE_INFINITY;
+        let textNode;
+        while (textNode = walker.nextNode()) {
+            const textRange = document.createRange();
+            textRange.selectNodeContents(textNode);
+            const rects = textRange.getClientRects ? Array.from(textRange.getClientRects()) : [];
+            if (rects.length === 0 && textRange.getBoundingClientRect) {
+                const fallbackRect = textRange.getBoundingClientRect();
+                if (fallbackRect) {
+                    rects.push(fallbackRect);
+                }
+            }
+
+            for (const rect of rects) {
+                if (!rect || rect.width <= 0 || rect.height <= 0 || !Number.isFinite(rect.right)) {
+                    continue;
+                }
+                const verticalOutsideDistance = y < rect.top
+                    ? rect.top - y
+                    : (y > rect.bottom ? y - rect.bottom : 0);
+                const centerDistance = Math.abs((rect.top + rect.bottom) / 2 - y);
+                const score = verticalOutsideDistance * 1000 + centerDistance;
+
+                if (!bestRect || score < bestScore || (score === bestScore && rect.right > bestRect.right)) {
+                    bestRect = rect;
+                    bestScore = score;
+                }
+            }
+        }
+
+        return bestRect;
+    }
+
+    function getLooseRightSideTextClickRange(x, y, clickedElement, pointRange) {
+        if (!clickedElement || clickedElement === editor) {
+            return null;
+        }
+        if (domUtils.getParentElement(clickedElement, 'TD') || domUtils.getParentElement(clickedElement, 'TH')) {
+            return null;
+        }
+
+        const blockElement = getClosestBlockElement(clickedElement);
+        if (!blockElement || blockElement === editor) {
+            return null;
+        }
+
+        const tag = blockElement.tagName;
+        const isSupportedBlock = tag === 'P' || tag === 'LI' || tag === 'DIV' || tag === 'BLOCKQUOTE' || /^H[1-6]$/.test(tag);
+        if (!isSupportedBlock) {
+            return null;
+        }
+
+        const pointContainer = pointRange && pointRange.startContainer ? pointRange.startContainer : null;
+        if (pointContainer &&
+            pointContainer !== editor &&
+            pointContainer !== blockElement &&
+            !blockElement.contains(pointContainer)) {
+            return null;
+        }
+
+        const nearestTextRect = getNearestTextRectForBlockClickByY(blockElement, y);
+        if (!nearestTextRect) {
+            return null;
+        }
+
+        const rightSideTolerancePx = 10;
+        if (x < nearestTextRect.right - rightSideTolerancePx) {
+            return null;
+        }
+
+        if (tag === 'LI') {
+            const lastDirectTextNode = getLastMeaningfulDirectTextNode(blockElement) || getLastDirectTextNode(blockElement);
+            if (lastDirectTextNode) {
+                const range = document.createRange();
+                range.setStart(lastDirectTextNode, (lastDirectTextNode.textContent || '').length);
+                range.collapse(true);
+                return range;
+            }
+        }
+
+        return createCollapsedRangeAtElementBoundary(blockElement, 'end');
+    }
+
     function isImageOnlyBlockElement(blockElement) {
         if (!blockElement || blockElement.nodeType !== Node.ELEMENT_NODE) {
             return false;
@@ -11104,11 +11225,25 @@ import { SearchManager } from './modules/SearchManager.js';
             const stabilizedGapRange = getStableGapClickRange(x, y, clickedElement, pointRange);
             if (stabilizedGapRange) {
                 e.preventDefault();
+                focusEditorWithoutScroll();
                 const selection = window.getSelection();
                 if (!selection) return;
                 selection.removeAllRanges();
                 selection.addRange(stabilizedGapRange);
                 return;
+            }
+
+            if (!e.shiftKey) {
+                const looseRightSideRange = getLooseRightSideTextClickRange(x, y, clickedElement, pointRange);
+                if (looseRightSideRange) {
+                    e.preventDefault();
+                    focusEditorWithoutScroll();
+                    const selection = window.getSelection();
+                    if (!selection) return;
+                    selection.removeAllRanges();
+                    selection.addRange(looseRightSideRange);
+                    return;
+                }
             }
 
             if (clickedElement === editor) {
@@ -11123,6 +11258,7 @@ import { SearchManager } from './modules/SearchManager.js';
             // 水平線がクリックされた場合、水平線全体を選択
             if (clickedElement.tagName === 'HR') {
                 e.preventDefault();
+                focusEditorWithoutScroll();
                 const hr = clickedElement;
                 const selection = window.getSelection();
                 const newRange = document.createRange();
@@ -11191,6 +11327,7 @@ import { SearchManager } from './modules/SearchManager.js';
                     newRange.setStart(targetTextNode, getCheckboxTextMinOffset(listItem));
                     newRange.collapse(true);
                     e.preventDefault();
+                    focusEditorWithoutScroll();
                     selection.removeAllRanges();
                     selection.addRange(newRange);
                     return;
@@ -11272,6 +11409,7 @@ import { SearchManager } from './modules/SearchManager.js';
             if (newRange) {
                 if (shouldApplyImmediately) {
                     e.preventDefault();
+                    focusEditorWithoutScroll();
                     const selection = window.getSelection();
                     if (!selection) return;
                     selection.removeAllRanges();
