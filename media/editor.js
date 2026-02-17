@@ -2899,7 +2899,11 @@ import { SearchManager } from './modules/SearchManager.js';
                     const raw = sibling.textContent || '';
                     const cleaned = raw.replace(/[\u200B\uFEFF\u00A0]/g, '');
                     if (cleaned.trim() === '') {
-                        if (!firstGapTextNode && /[\r\n]/.test(raw)) {
+                        // Treat whitespace text nodes as an intentional visual gap only when
+                        // they contain two or more line breaks. A single '\n' commonly comes
+                        // from HTML formatting between block elements and should not create
+                        // an extra empty paragraph during cursor navigation.
+                        if (!firstGapTextNode && /(?:\r?\n\s*){2,}/.test(raw)) {
                             firstGapTextNode = sibling;
                         }
                         sibling = sibling.nextSibling;

@@ -33,7 +33,8 @@ export class MarkdownDocument {
         const markdown = this.document.getText();
         try {
 
-            const preprocessedMarkdown = this.preserveExtraBlankLines(markdown);
+            const explicitBlockquoteMarkdown = this.breakLazyBlockquoteContinuations(markdown);
+            const preprocessedMarkdown = this.preserveExtraBlankLines(explicitBlockquoteMarkdown);
             let html = marked.parse(preprocessedMarkdown) as string;
 
 
@@ -167,6 +168,65 @@ export class MarkdownDocument {
         return output.join('');
     }
 
+    private breakLazyBlockquoteContinuations(markdown: string): string {
+        const segments = markdown.match(/[^\n]*\n|[^\n]+$/g);
+        if (!segments || segments.length === 0) {
+            return markdown;
+        }
+
+        const output: string[] = [];
+        let inFence = false;
+        let fenceMarker: '`' | '~' | null = null;
+        let fenceLength = 0;
+        let previousWasExplicitBlockquote = false;
+        let preferredLineEnding = '\n';
+
+        for (const segment of segments) {
+            if (segment.endsWith('\r\n')) {
+                preferredLineEnding = '\r\n';
+            } else if (segment.endsWith('\n')) {
+                preferredLineEnding = '\n';
+            }
+
+            const line = this.stripTrailingCarriageReturn(
+                segment.endsWith('\n') ? segment.slice(0, -1) : segment
+            );
+
+            if (inFence) {
+                output.push(segment);
+                if (fenceMarker && this.isFenceClosingLine(line, fenceMarker, fenceLength)) {
+                    inFence = false;
+                    fenceMarker = null;
+                    fenceLength = 0;
+                }
+                previousWasExplicitBlockquote = false;
+                continue;
+            }
+
+            const openingFence = this.parseFenceOpeningLine(line);
+            if (openingFence) {
+                output.push(segment);
+                inFence = true;
+                fenceMarker = openingFence.marker;
+                fenceLength = openingFence.length;
+                previousWasExplicitBlockquote = false;
+                continue;
+            }
+
+            const isBlankLine = line.trim() === '';
+            const isExplicitBlockquoteLine = /^ {0,3}>[ \t]?/.test(line);
+
+            if (previousWasExplicitBlockquote && !isBlankLine && !isExplicitBlockquoteLine) {
+                output.push(preferredLineEnding);
+            }
+
+            output.push(segment);
+            previousWasExplicitBlockquote = isExplicitBlockquoteLine;
+        }
+
+        return output.join('');
+    }
+
     private parseFenceOpeningLine(line: string): { marker: '`' | '~'; length: number } | null {
         const match = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
         if (!match) {
@@ -200,6 +260,10 @@ export class MarkdownDocument {
         }
 
         return true;
+    }
+
+    private stripTrailingCarriageReturn(line: string): string {
+        return line.endsWith('\r') ? line.slice(0, -1) : line;
     }
 
     private convertImagePaths(html: string): string {

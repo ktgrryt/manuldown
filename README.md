@@ -187,4 +187,3 @@ manuldown/
 ## License
 
 MIT
-
