@@ -3,9 +3,12 @@ import { MarkdownEditorProvider } from './editor/MarkdownEditorProvider';
 
 const MARKDOWN_ASSOCIATION_PROMPT_KEY = 'manulDown.markdownAssociationPromptShown';
 const MANULDOWN_EDITOR_VIEW_TYPE = 'manulDown.editor';
+const MANULDOWN_CONFIGURATION_SECTION = 'manulDown';
+const OPEN_BY_DEFAULT_SETTING_KEY = 'openByDefault';
+const MARKDOWN_FILE_ASSOCIATION_KEY = '*.md';
 
 export function activate(context: vscode.ExtensionContext) {
-    void promptForDefaultMarkdownAssociation(context);
+    void initializeDefaultMarkdownAssociation(context);
 
     // Register the custom editor provider
     const provider = new MarkdownEditorProvider(context);
@@ -108,9 +111,21 @@ export function activate(context: vscode.ExtensionContext) {
         });
         context.subscriptions.push(disposable);
     });
+
+    const configurationListener = vscode.workspace.onDidChangeConfiguration((event) => {
+        if (event.affectsConfiguration(`${MANULDOWN_CONFIGURATION_SECTION}.${OPEN_BY_DEFAULT_SETTING_KEY}`)) {
+            void syncDefaultMarkdownAssociationWithSetting();
+        }
+    });
+    context.subscriptions.push(configurationListener);
 }
 
 export function deactivate() {
+}
+
+async function initializeDefaultMarkdownAssociation(context: vscode.ExtensionContext): Promise<void> {
+    await promptForDefaultMarkdownAssociation(context);
+    await syncDefaultMarkdownAssociationWithSetting();
 }
 
 async function promptForDefaultMarkdownAssociation(context: vscode.ExtensionContext): Promise<void> {
@@ -119,16 +134,20 @@ async function promptForDefaultMarkdownAssociation(context: vscode.ExtensionCont
         return;
     }
 
-    const workbenchConfig = vscode.workspace.getConfiguration('workbench');
-    const editorAssociations = workbenchConfig.get<Record<string, string>>('editorAssociations') ?? {};
+    if (!getOpenByDefaultSetting()) {
+        await context.globalState.update(MARKDOWN_ASSOCIATION_PROMPT_KEY, true);
+        return;
+    }
 
-    if (editorAssociations['*.md'] === MANULDOWN_EDITOR_VIEW_TYPE) {
+    const editorAssociations = getEditorAssociations();
+
+    if (editorAssociations[MARKDOWN_FILE_ASSOCIATION_KEY] === MANULDOWN_EDITOR_VIEW_TYPE) {
         await context.globalState.update(MARKDOWN_ASSOCIATION_PROMPT_KEY, true);
         return;
     }
 
     const setDefaultAction = 'Set as Default';
-    const skipAction = 'Skip';
+    const skipAction = 'No';
     const selection = await vscode.window.showInformationMessage(
         'Set ManulDown as the default editor for Markdown files (*.md)?',
         { modal: true },
@@ -137,9 +156,41 @@ async function promptForDefaultMarkdownAssociation(context: vscode.ExtensionCont
     );
 
     if (selection === setDefaultAction) {
+        try {
+            await setOpenByDefaultSetting(true);
+            vscode.window.showInformationMessage('ManulDown is now the default editor for Markdown files.');
+            await context.globalState.update(MARKDOWN_ASSOCIATION_PROMPT_KEY, true);
+            return;
+        } catch {
+            vscode.window.showErrorMessage('Failed to save the default Markdown editor setting.');
+            return;
+        }
+    }
+
+    try {
+        await setOpenByDefaultSetting(false);
+    } catch {
+        vscode.window.showErrorMessage('Failed to save the default Markdown editor setting.');
+        return;
+    }
+
+    await context.globalState.update(MARKDOWN_ASSOCIATION_PROMPT_KEY, true);
+}
+
+async function syncDefaultMarkdownAssociationWithSetting(): Promise<void> {
+    const openByDefault = getOpenByDefaultSetting();
+    const workbenchConfig = vscode.workspace.getConfiguration('workbench');
+    const editorAssociations = getEditorAssociations();
+    const currentAssociation = editorAssociations[MARKDOWN_FILE_ASSOCIATION_KEY];
+
+    if (openByDefault) {
+        if (currentAssociation === MANULDOWN_EDITOR_VIEW_TYPE) {
+            return;
+        }
+
         const updatedEditorAssociations: Record<string, string> = {
             ...editorAssociations,
-            '*.md': MANULDOWN_EDITOR_VIEW_TYPE,
+            [MARKDOWN_FILE_ASSOCIATION_KEY]: MANULDOWN_EDITOR_VIEW_TYPE,
         };
 
         try {
@@ -148,16 +199,42 @@ async function promptForDefaultMarkdownAssociation(context: vscode.ExtensionCont
                 updatedEditorAssociations,
                 vscode.ConfigurationTarget.Global
             );
-            vscode.window.showInformationMessage('ManulDown is now the default editor for Markdown files.');
-            await context.globalState.update(MARKDOWN_ASSOCIATION_PROMPT_KEY, true);
-            return;
         } catch {
             vscode.window.showErrorMessage('Failed to update default Markdown editor setting.');
-            return;
         }
+        return;
     }
 
-    await context.globalState.update(MARKDOWN_ASSOCIATION_PROMPT_KEY, true);
+    if (currentAssociation !== MANULDOWN_EDITOR_VIEW_TYPE) {
+        return;
+    }
+
+    const { [MARKDOWN_FILE_ASSOCIATION_KEY]: _, ...updatedEditorAssociations } = editorAssociations;
+    try {
+        await workbenchConfig.update(
+            'editorAssociations',
+            updatedEditorAssociations,
+            vscode.ConfigurationTarget.Global
+        );
+    } catch {
+        vscode.window.showErrorMessage('Failed to update default Markdown editor setting.');
+    }
+}
+
+function getOpenByDefaultSetting(): boolean {
+    return vscode.workspace
+        .getConfiguration(MANULDOWN_CONFIGURATION_SECTION)
+        .get<boolean>(OPEN_BY_DEFAULT_SETTING_KEY, true);
+}
+
+async function setOpenByDefaultSetting(value: boolean): Promise<void> {
+    await vscode.workspace
+        .getConfiguration(MANULDOWN_CONFIGURATION_SECTION)
+        .update(OPEN_BY_DEFAULT_SETTING_KEY, value, vscode.ConfigurationTarget.Global);
+}
+
+function getEditorAssociations(): Record<string, string> {
+    return vscode.workspace.getConfiguration('workbench').get<Record<string, string>>('editorAssociations') ?? {};
 }
 
 // Made with Bob

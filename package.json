@@ -193,6 +193,11 @@
           "default": true,
           "description": "Open Markdown files with ManulDown by default."
         },
+        "manulDown.keepTabOpenOnExplorerClick": {
+          "type": "boolean",
+          "default": true,
+          "description": "Keep ManulDown tabs open (not preview-reused) when opening Markdown files from Explorer."
+        },
         "manulDown.list.dashStyle": {
           "type": "boolean",
           "default": false,

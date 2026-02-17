@@ -226,6 +226,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
 
         // Set webview HTML content
         webviewPanel.webview.html = this.getHtmlForWebview(webviewPanel.webview, document);
+        this.keepEditorTabOpenIfConfigured(wasExplicit);
 
         const documentKey = document.uri.toString();
         this.webviewPanels.set(documentKey, webviewPanel);
@@ -411,6 +412,25 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         }
 
         return null;
+    }
+
+    private keepEditorTabOpenIfConfigured(wasExplicit: boolean): void {
+        if (wasExplicit) {
+            return;
+        }
+
+        const keepOpenOnClick = vscode.workspace
+            .getConfiguration('manulDown')
+            .get<boolean>('keepTabOpenOnExplorerClick', true);
+
+        if (!keepOpenOnClick) {
+            return;
+        }
+
+        // Avoid preview-tab replacement when opening Markdown from Explorer.
+        setTimeout(() => {
+            void vscode.commands.executeCommand('workbench.action.keepEditor');
+        }, 0);
     }
 
     private async updateTextDocument(document: vscode.TextDocument, html: string): Promise<void> {
