@@ -645,6 +645,23 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             // Remove zero-width markers used for caret placement
             html = html.replace(/[\u200B\uFEFF]/g, '');
 
+            // Drop empty anchors left by contenteditable when link text was deleted.
+            // Keep links that wrap images so image links still round-trip.
+            html = html.replace(/<a\b([^>]*)>([\s\S]*?)<\/a>/gi, (match, _attrs, content) => {
+                if (/<img\b/i.test(content)) {
+                    return match;
+                }
+
+                const visibleText = content
+                    .replace(/<br\s*\/?>/gi, '')
+                    .replace(/&nbsp;|&#160;/gi, '')
+                    .replace(/[\u00A0\u200B\uFEFF]/g, '')
+                    .replace(/<[^>]*>/g, '')
+                    .trim();
+
+                return visibleText === '' ? '' : match;
+            });
+
             // Remove empty strikethrough tags (e.g. <del><br></del>) to avoid "~~" artifacts
             html = html.replace(/<(del|s|strike)(\s[^>]*)?>\s*(?:<br[^>]*>|&nbsp;|\u00A0|\s)*<\/\1>/gi, '');
 

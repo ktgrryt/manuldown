@@ -30,6 +30,7 @@ import { SearchManager } from './modules/SearchManager.js';
     let lastCtrlNavDirection = null;
     let scrollbarDragState = null;
     let emacsKillBuffer = '';
+    let suppressNextNativeCtrlKDelete = false;
 
     const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
 
@@ -43,6 +44,16 @@ import { SearchManager } from './modules/SearchManager.js';
     const imageRenderMaxWidthPx = 820;
     let imageResolveRequestSeq = 0;
     let overflowStateRaf = null;
+
+    function hideImageResizeOverlaySafely() {
+        if (typeof hideImageResizeOverlay === 'function') {
+            try {
+                hideImageResizeOverlay();
+            } catch (_e) {
+                // noop
+            }
+        }
+    }
 
     function isIgnorableEditorTextValue(value) {
         return (value || '').replace(/[\u200B\uFEFF\u00A0]/g, '').trim() === '';
@@ -5876,6 +5887,95 @@ import { SearchManager } from './modules/SearchManager.js';
         return null;
     }
 
+    function getTopLevelLineContainer(node) {
+        let current = node && node.nodeType === Node.ELEMENT_NODE
+            ? node
+            : (node ? node.parentElement : null);
+        while (current && current !== editor && current.parentElement && current.parentElement !== editor) {
+            current = current.parentElement;
+        }
+        if (!current || current === editor) return null;
+        return current.parentElement === editor ? current : null;
+    }
+
+    function getCtrlKLineContainer(node) {
+        return getClosestBlockElement(node) || getTopLevelLineContainer(node);
+    }
+
+    function getNearestTopLevelElementFromIndex(nodes, startIndex, step) {
+        if (!nodes || !Number.isFinite(startIndex) || !step) return null;
+        for (let i = startIndex; i >= 0 && i < nodes.length; i += step) {
+            const node = nodes[i];
+            if (!node) continue;
+            if (node.nodeType === Node.ELEMENT_NODE) {
+                return node;
+            }
+            if (node.nodeType === Node.TEXT_NODE) {
+                const normalized = (node.textContent || '').replace(/[\u200B\uFEFF\u00A0\s]/g, '');
+                if (normalized !== '') {
+                    return null;
+                }
+                continue;
+            }
+        }
+        return null;
+    }
+
+    function getCtrlKLineContainerFromRange(range) {
+        if (!range) return null;
+        const container = range.startContainer;
+        const nodes = editor ? editor.childNodes : null;
+        if (!nodes) return null;
+
+        if (container === editor && container.nodeType === Node.ELEMENT_NODE) {
+            return getNearestTopLevelElementFromIndex(nodes, range.startOffset, 1) ||
+                getNearestTopLevelElementFromIndex(nodes, range.startOffset - 1, -1);
+        }
+
+        if (container && container.nodeType === Node.TEXT_NODE && container.parentElement === editor) {
+            const text = container.textContent || '';
+            const textIndex = Array.prototype.indexOf.call(nodes, container);
+            if (textIndex !== -1) {
+                const preferForward = range.startOffset >= text.length;
+                if (preferForward) {
+                    return getNearestTopLevelElementFromIndex(nodes, textIndex + 1, 1) ||
+                        getNearestTopLevelElementFromIndex(nodes, textIndex - 1, -1);
+                }
+                return getNearestTopLevelElementFromIndex(nodes, textIndex - 1, -1) ||
+                    getNearestTopLevelElementFromIndex(nodes, textIndex + 1, 1);
+            }
+        }
+
+        return getCtrlKLineContainer(container);
+    }
+
+    function isRangeAtTopLevelBoundaryBeforeBlock(range, block) {
+        if (!range || !block || !range.collapsed || !editor || block.parentElement !== editor) {
+            return false;
+        }
+        const nodes = editor.childNodes || [];
+        const blockIndex = Array.prototype.indexOf.call(nodes, block);
+        if (blockIndex === -1) return false;
+
+        if (range.startContainer === editor) {
+            return range.startOffset === blockIndex;
+        }
+
+        if (range.startContainer && range.startContainer.nodeType === Node.TEXT_NODE && range.startContainer.parentElement === editor) {
+            const textNode = range.startContainer;
+            const text = textNode.textContent || '';
+            const textIndex = Array.prototype.indexOf.call(nodes, textNode);
+            if (textIndex === -1) return false;
+            const normalized = text.replace(/[\u200B\uFEFF\u00A0\s]/g, '');
+            if (normalized !== '') return false;
+
+            const nextElement = getNearestTopLevelElementFromIndex(nodes, textIndex + 1, 1);
+            return nextElement === block && range.startOffset >= text.length;
+        }
+
+        return false;
+    }
+
     function getNearestTextRectForBlockClickByY(blockElement, y) {
         if (!blockElement || blockElement.nodeType !== Node.ELEMENT_NODE) {
             return null;
@@ -8100,11 +8200,14 @@ import { SearchManager } from './modules/SearchManager.js';
         if (!range || !block || !range.collapsed) {
             return false;
         }
+        if (isRangeAtTopLevelBoundaryBeforeBlock(range, block)) {
+            return true;
+        }
         try {
             const prefixRange = document.createRange();
             prefixRange.selectNodeContents(block);
             prefixRange.setEnd(range.startContainer, range.startOffset);
-            const beforeText = prefixRange.toString().replace(/[\u200B\uFEFF\u00A0]/g, '');
+            const beforeText = prefixRange.toString().replace(/[\u200B\uFEFF\u00A0\s]/g, '');
             return beforeText.length === 0;
         } catch (e) {
             return false;
@@ -8129,6 +8232,37 @@ import { SearchManager } from './modules/SearchManager.js';
         }
     }
 
+    function isEmptyAnchorElement(anchor) {
+        if (!anchor || anchor.tagName !== 'A') return false;
+        if (anchor.querySelector && anchor.querySelector('img')) return false;
+
+        const text = (anchor.textContent || '').replace(/[\u200B\uFEFF\u00A0\s]/g, '');
+        if (text !== '') return false;
+
+        const hasMeaningfulChild = Array.from(anchor.childNodes || []).some((child) => {
+            if (!child) return false;
+            if (child.nodeType === Node.TEXT_NODE) {
+                return (child.textContent || '').replace(/[\u200B\uFEFF\u00A0\s]/g, '') !== '';
+            }
+            if (child.nodeType !== Node.ELEMENT_NODE) return false;
+            return child.tagName !== 'BR';
+        });
+
+        return !hasMeaningfulChild;
+    }
+
+    function cleanupEmptyAnchorsInBlock(block) {
+        if (!block || block.nodeType !== Node.ELEMENT_NODE || typeof block.querySelectorAll !== 'function') {
+            return;
+        }
+        const anchors = Array.from(block.querySelectorAll('a'));
+        anchors.forEach((anchor) => {
+            if (isEmptyAnchorElement(anchor)) {
+                anchor.remove();
+            }
+        });
+    }
+
     function buildCtrlKKillRange(selection, range) {
         if (!selection || !range) return null;
         if (!range.collapsed) {
@@ -8139,11 +8273,14 @@ import { SearchManager } from './modules/SearchManager.js';
             if (!targetRange || !block || !targetRange.collapsed) {
                 return false;
             }
+            if (isRangeAtTopLevelBoundaryBeforeBlock(targetRange, block)) {
+                return true;
+            }
             try {
                 const prefixRange = document.createRange();
                 prefixRange.selectNodeContents(block);
                 prefixRange.setEnd(targetRange.startContainer, targetRange.startOffset);
-                const beforeText = prefixRange.toString().replace(/[\u200B\uFEFF\u00A0]/g, '');
+                const beforeText = prefixRange.toString().replace(/[\u200B\uFEFF\u00A0\s]/g, '');
                 return beforeText.length === 0;
             } catch (e) {
                 return false;
@@ -8168,8 +8305,8 @@ import { SearchManager } from './modules/SearchManager.js';
 
         // Some WebView paths place Ctrl+E/Ctrl+K end at the next block start.
         // At line start we clamp to the current block end so the line stays as an empty line.
-        const startBlock = getClosestBlockElement(startRange.startContainer);
-        const supportsClampBlock = !!(startBlock && /^(P|DIV|H[1-6])$/.test(startBlock.tagName));
+        const startBlock = getCtrlKLineContainerFromRange(startRange);
+        const supportsClampBlock = !!(startBlock && startBlock !== editor);
         if (supportsClampBlock && isAtBlockStart(startRange, startBlock)) {
             const endInsideStartBlock =
                 endRange.startContainer === startBlock ||
@@ -8220,6 +8357,161 @@ import { SearchManager } from './modules/SearchManager.js';
         }
     }
 
+    function performCtrlKDeleteFromRange(selection, range) {
+        if (!selection || !range || !editor.contains(range.commonAncestorContainer)) {
+            return false;
+        }
+
+        if (range.collapsed) {
+            const startBlock = getCtrlKLineContainerFromRange(range);
+            const supportsLinePreserve = !!(startBlock && startBlock !== editor && startBlock.tagName !== 'PRE');
+            if (supportsLinePreserve) {
+                try {
+                    const blockEndRange = document.createRange();
+                    const rangeStartsInsideBlock =
+                        range.startContainer === startBlock ||
+                        startBlock.contains(range.startContainer);
+                    if (rangeStartsInsideBlock) {
+                        blockEndRange.setStart(range.startContainer, range.startOffset);
+                    } else {
+                        blockEndRange.setStart(startBlock, 0);
+                    }
+                    blockEndRange.setEnd(startBlock, startBlock.childNodes.length);
+                    const blockEndText = blockEndRange.toString().replace(/[\u200B\uFEFF\u00A0\s]/g, '');
+                    if (blockEndText.length === 0) {
+                        pendingCtrlKDeleteSync = false;
+                        suppressNextNativeCtrlKDelete = true;
+                        setTimeout(() => {
+                            suppressNextNativeCtrlKDelete = false;
+                        }, 0);
+                        return true;
+                    }
+
+                    const payload = createClipboardPayloadFromRange(blockEndRange);
+                    let killedText = blockEndRange.toString();
+                    if (!killedText) {
+                        killedText = payload && typeof payload.text === 'string'
+                            ? payload.text
+                            : '';
+                    }
+
+                    stateManager.saveState();
+                    emacsKillBuffer = killedText;
+                    blockEndRange.deleteContents();
+                    cleanupEmptyAnchorsInBlock(startBlock);
+                    ensureBlockHasCaretPlaceholder(startBlock);
+
+                    const caretRange = document.createRange();
+                    const firstNode = getPreferredFirstTextNodeForElement(startBlock);
+                    if (firstNode) {
+                        caretRange.setStart(firstNode, 0);
+                    } else {
+                        const anchor = document.createTextNode('\u200B');
+                        startBlock.insertBefore(anchor, startBlock.firstChild || null);
+                        caretRange.setStart(anchor, 1);
+                    }
+                    caretRange.collapse(true);
+                    applySelectionRange(selection, caretRange);
+
+                    domUtils.ensureInlineCodeSpaces();
+                    domUtils.cleanupGhostStyles();
+                    tableManager.wrapTables();
+                    applyImageRenderSizes();
+                    hideImageResizeOverlaySafely();
+                    pendingDeleteListItem = null;
+                    pendingCtrlKDeleteSync = false;
+                    suppressNextNativeCtrlKDelete = true;
+                    notifyChangeImmediate();
+                    setTimeout(() => {
+                        suppressNextNativeCtrlKDelete = false;
+                    }, 0);
+                    return true;
+                } catch (e) {
+                    // Fall through to the default Ctrl+K kill logic.
+                }
+            }
+        }
+
+        const killRange = buildCtrlKKillRange(selection, range);
+        if (!killRange) {
+            pendingCtrlKDeleteSync = false;
+            suppressNextNativeCtrlKDelete = true;
+            setTimeout(() => {
+                suppressNextNativeCtrlKDelete = false;
+            }, 0);
+            return true;
+        }
+
+        const payload = createClipboardPayloadFromRange(killRange);
+        let killedText = killRange.toString();
+        if (!killedText) {
+            killedText = payload && typeof payload.text === 'string'
+                ? payload.text
+                : '';
+        }
+
+        stateManager.saveState();
+        emacsKillBuffer = killedText;
+
+        // コードブロック内の場合、削除後に空になるかチェック
+        const killCodeBlock = domUtils.getParentElement(killRange.startContainer, 'CODE');
+        const killPreBlock = killCodeBlock ? domUtils.getParentElement(killCodeBlock, 'PRE') : null;
+
+        killRange.deleteContents();
+        const startBlockAfterFallbackDelete = getClosestBlockElement(killRange.startContainer);
+        if (startBlockAfterFallbackDelete) {
+            cleanupEmptyAnchorsInBlock(startBlockAfterFallbackDelete);
+            ensureBlockHasCaretPlaceholder(startBlockAfterFallbackDelete);
+        }
+
+        // コードブロック内で削除後に空になった場合、改行を保持してカーソルを先頭に配置
+        if (killPreBlock && killCodeBlock) {
+            const remainingText = cursorManager.getCodeBlockText(killCodeBlock);
+            const normalizedRemaining = remainingText.replace(/[\u200B\uFEFF]/g, '');
+            if (normalizedRemaining.trim() === '') {
+                killCodeBlock.textContent = '\n';
+                cursorManager.setCodeBlockCursorOffset(killCodeBlock, selection, 0);
+                if (killCodeBlock.className.match(/language-\w+/)) {
+                    setTimeout(() => {
+                        codeBlockManager.highlightSingleCodeBlock(killCodeBlock);
+                    }, 0);
+                }
+                domUtils.ensureInlineCodeSpaces();
+                domUtils.cleanupGhostStyles();
+                tableManager.wrapTables();
+                applyImageRenderSizes();
+                hideImageResizeOverlaySafely();
+                pendingDeleteListItem = null;
+                pendingCtrlKDeleteSync = false;
+                suppressNextNativeCtrlKDelete = true;
+                notifyChangeImmediate();
+                setTimeout(() => {
+                    suppressNextNativeCtrlKDelete = false;
+                }, 0);
+                return true;
+            }
+        }
+
+        const caretRange = document.createRange();
+        caretRange.setStart(killRange.startContainer, killRange.startOffset);
+        caretRange.collapse(true);
+        applySelectionRange(selection, caretRange);
+
+        domUtils.ensureInlineCodeSpaces();
+        domUtils.cleanupGhostStyles();
+        tableManager.wrapTables();
+        applyImageRenderSizes();
+        hideImageResizeOverlaySafely();
+        pendingDeleteListItem = null;
+        pendingCtrlKDeleteSync = false;
+        suppressNextNativeCtrlKDelete = true;
+        notifyChangeImmediate();
+        setTimeout(() => {
+            suppressNextNativeCtrlKDelete = false;
+        }, 0);
+        return true;
+    }
+
     function handleEmacsKillYankKeydown(e) {
         if (!isMac) return false;
         if (!e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return false;
@@ -8227,6 +8519,7 @@ import { SearchManager } from './modules/SearchManager.js';
         const key = e.key.toLowerCase();
 
         if (key === 'k') {
+            suppressNextNativeCtrlKDelete = false;
             const selection = window.getSelection();
             if (!selection || !selection.rangeCount) return false;
             const range = selection.getRangeAt(0);
@@ -8237,111 +8530,7 @@ import { SearchManager } from './modules/SearchManager.js';
             // the browser remove the whole line/newline.
             e.preventDefault();
             e.stopPropagation();
-
-            if (range.collapsed) {
-                const startBlock = getClosestBlockElement(range.startContainer);
-                const supportsLinePreserve = !!(startBlock && /^(P|DIV|H[1-6])$/.test(startBlock.tagName));
-                if (supportsLinePreserve && isRangeAtBlockTextStart(range, startBlock)) {
-                    try {
-                        const blockEndRange = document.createRange();
-                        blockEndRange.setStart(range.startContainer, range.startOffset);
-                        blockEndRange.setEnd(startBlock, startBlock.childNodes.length);
-                        const blockEndText = blockEndRange.toString().replace(/[\u200B\uFEFF\u00A0]/g, '');
-                        if (blockEndText.length > 0) {
-                            const payload = createClipboardPayloadFromRange(blockEndRange);
-                            let killedText = blockEndRange.toString();
-                            if (!killedText) {
-                                killedText = payload && typeof payload.text === 'string'
-                                    ? payload.text
-                                    : '';
-                            }
-
-                            stateManager.saveState();
-                            emacsKillBuffer = killedText;
-                            blockEndRange.deleteContents();
-                            ensureBlockHasCaretPlaceholder(startBlock);
-
-                            const caretRange = document.createRange();
-                            const firstNode = getPreferredFirstTextNodeForElement(startBlock);
-                            if (firstNode) {
-                                caretRange.setStart(firstNode, 0);
-                            } else {
-                                caretRange.setStart(startBlock, 0);
-                            }
-                            caretRange.collapse(true);
-                            applySelectionRange(selection, caretRange);
-
-                            domUtils.ensureInlineCodeSpaces();
-                            domUtils.cleanupGhostStyles();
-                            tableManager.wrapTables();
-                            applyImageRenderSizes();
-                            hideImageResizeOverlay();
-                            pendingDeleteListItem = null;
-                            notifyChangeImmediate();
-                            return true;
-                        }
-                    } catch (e) {
-                        // Fall through to the default Ctrl+K kill logic.
-                    }
-                }
-            }
-
-            const killRange = buildCtrlKKillRange(selection, range);
-            if (!killRange) return true;
-
-            const payload = createClipboardPayloadFromRange(killRange);
-            let killedText = killRange.toString();
-            if (!killedText) {
-                killedText = payload && typeof payload.text === 'string'
-                    ? payload.text
-                    : '';
-            }
-
-            stateManager.saveState();
-            emacsKillBuffer = killedText;
-
-            // コードブロック内の場合、削除後に空になるかチェック
-            const killCodeBlock = domUtils.getParentElement(killRange.startContainer, 'CODE');
-            const killPreBlock = killCodeBlock ? domUtils.getParentElement(killCodeBlock, 'PRE') : null;
-
-            killRange.deleteContents();
-
-            // コードブロック内で削除後に空になった場合、改行を保持してカーソルを先頭に配置
-            if (killPreBlock && killCodeBlock) {
-                const remainingText = cursorManager.getCodeBlockText(killCodeBlock);
-                const normalizedRemaining = remainingText.replace(/[\u200B\uFEFF]/g, '');
-                if (normalizedRemaining.trim() === '') {
-                    killCodeBlock.textContent = '\n';
-                    cursorManager.setCodeBlockCursorOffset(killCodeBlock, selection, 0);
-                    if (killCodeBlock.className.match(/language-\w+/)) {
-                        setTimeout(() => {
-                            codeBlockManager.highlightSingleCodeBlock(killCodeBlock);
-                        }, 0);
-                    }
-                    domUtils.ensureInlineCodeSpaces();
-                    domUtils.cleanupGhostStyles();
-                    tableManager.wrapTables();
-                    applyImageRenderSizes();
-                    hideImageResizeOverlay();
-                    pendingDeleteListItem = null;
-                    notifyChangeImmediate();
-                    return true;
-                }
-            }
-
-            const caretRange = document.createRange();
-            caretRange.setStart(killRange.startContainer, killRange.startOffset);
-            caretRange.collapse(true);
-            applySelectionRange(selection, caretRange);
-
-            domUtils.ensureInlineCodeSpaces();
-            domUtils.cleanupGhostStyles();
-            tableManager.wrapTables();
-            applyImageRenderSizes();
-            hideImageResizeOverlay();
-            pendingDeleteListItem = null;
-            notifyChangeImmediate();
-            return true;
+            return performCtrlKDeleteFromRange(selection, range);
         }
 
         if (key === 'y') {
@@ -9113,6 +9302,7 @@ import { SearchManager } from './modules/SearchManager.js';
                     pendingCtrlKDeleteSync = false;
                     return;
                 }
+                pendingCtrlKDeleteSync = false;
                 notifyChangeImmediate();
             }, 0);
         } else if (!e.isComposing) {
@@ -9494,6 +9684,27 @@ import { SearchManager } from './modules/SearchManager.js';
             window.addEventListener('blur', stopScrollbarDrag);
         }
 
+        document.addEventListener('keydown', (e) => {
+            const isCtrlK =
+                isMac &&
+                e.ctrlKey &&
+                !e.metaKey &&
+                !e.altKey &&
+                !e.shiftKey &&
+                (e.key || '').toLowerCase() === 'k';
+            if (!isCtrlK || isUpdating) return;
+
+            const selection = window.getSelection();
+            if (!selection || !selection.rangeCount) return;
+            const range = selection.getRangeAt(0);
+            if (!editor.contains(range.commonAncestorContainer)) return;
+
+            pendingCtrlKDeleteSync = true;
+            if (handleEmacsKillYankKeydown(e)) {
+                return;
+            }
+        }, true);
+
         // Ensure table cell range deletion works even if editor doesn't have focus
         document.addEventListener('keydown', (e) => {
             if (editor.contains(e.target)) return;
@@ -9529,6 +9740,28 @@ import { SearchManager } from './modules/SearchManager.js';
         });
 
         editor.addEventListener('beforeinput', (e) => {
+            if (suppressNextNativeCtrlKDelete && typeof e.inputType === 'string' && e.inputType.startsWith('delete')) {
+                // WebView can fire an extra native delete after custom Ctrl+K handling.
+                // Swallow that follow-up delete so the current line itself is preserved.
+                e.preventDefault();
+                e.stopPropagation();
+                suppressNextNativeCtrlKDelete = false;
+                pendingCtrlKDeleteSync = false;
+                return;
+            }
+
+            if (pendingCtrlKDeleteSync && typeof e.inputType === 'string' && e.inputType.startsWith('delete')) {
+                const selection = window.getSelection();
+                const range = selection && selection.rangeCount ? selection.getRangeAt(0) : null;
+                e.preventDefault();
+                e.stopPropagation();
+                if (selection && range && performCtrlKDeleteFromRange(selection, range)) {
+                    return;
+                }
+                pendingCtrlKDeleteSync = false;
+                return;
+            }
+
             if (tableManager.handleEdgeBeforeInput(e)) {
                 return;
             }

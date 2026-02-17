@@ -785,7 +785,24 @@ export class CursorManager {
             const listContainerForNormalize =
                 this.domUtils.getParentElement(container, 'UL') ||
                 this.domUtils.getParentElement(container, 'OL');
-            if (!listItemForNormalize && !listContainerForNormalize) {
+            // Ctrl+K直後の空段落など、ブロック要素内のプレースホルダーは
+            // 有効なキャレット位置として扱う（末尾への誤補正を防ぐ）。
+            let blockForNormalize = container.parentElement;
+            let hasExcludedAncestor = false;
+            while (blockForNormalize && blockForNormalize !== this.editor && !this.domUtils.isBlockElement(blockForNormalize)) {
+                if (this._isNavigationExcludedElement(blockForNormalize)) {
+                    hasExcludedAncestor = true;
+                    break;
+                }
+                blockForNormalize = blockForNormalize.parentElement;
+            }
+            const hasValidBlockContext =
+                !hasExcludedAncestor &&
+                !!blockForNormalize &&
+                blockForNormalize !== this.editor &&
+                !this._isNavigationExcludedElement(blockForNormalize);
+
+            if (!listItemForNormalize && !listContainerForNormalize && !hasValidBlockContext) {
                 invalid = true;
             }
         } else if (element) {
