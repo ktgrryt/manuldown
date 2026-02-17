@@ -1389,6 +1389,13 @@ import { SearchManager } from './modules/SearchManager.js';
         query: '',
         match: null
     };
+    let customSlashCommands = [];
+    let isCustomSlashCommandRequestInFlight = false;
+    let lastCustomSlashCommandRequestTs = 0;
+    const CUSTOM_SLASH_COMMAND_REQUEST_INTERVAL_MS = 2500;
+    let slashMenuKeyboardNavigationActive = false;
+    let slashMenuPointerHoverActive = false;
+    let applyTextInsertionWithPasteRules = null;
     let pendingSlashCheckboxCaretListItem = null;
 
     function insertSlashTable() {
@@ -1711,19 +1718,117 @@ import { SearchManager } from './modules/SearchManager.js';
         });
     }
 
-    const slashCommands = [
-        { id: 'table', action: insertSlashTable },
-        { id: 'quote', action: insertSlashQuote },
-        { id: 'code', action: insertSlashCodeBlock },
-        { id: 'checkbox', action: insertSlashCheckbox }
+    function insertCustomSlashTemplate(templateContent) {
+        const normalizedContent = String(templateContent || '').replace(/\r\n?/g, '\n');
+        if (normalizedContent === '') return;
+
+        if (typeof applyTextInsertionWithPasteRules === 'function') {
+            const handled = applyTextInsertionWithPasteRules(normalizedContent);
+            if (handled) {
+                editor.focus();
+                return;
+            }
+        }
+
+        stateManager.saveState();
+        const inserted = insertPlainTextWithLineBreaksAtSelection(normalizedContent);
+        if (!inserted) return;
+
+        editor.focus();
+        notifyChange();
+    }
+
+    const builtInSlashCommands = [
+        { id: 'table', source: 'builtin', description: 'Insert a 2x2 table', action: insertSlashTable },
+        { id: 'quote', source: 'builtin', description: 'Insert a quote block', action: insertSlashQuote },
+        { id: 'code', source: 'builtin', description: 'Insert a code block', action: insertSlashCodeBlock },
+        { id: 'checkbox', source: 'builtin', description: 'Create a checklist item', action: insertSlashCheckbox }
     ];
+    const builtInSlashCommandIdSet = new Set(builtInSlashCommands.map((cmd) => cmd.id.toLowerCase()));
+
+    function getAllSlashCommands() {
+        return builtInSlashCommands.concat(customSlashCommands);
+    }
+
+    function normalizeSlashCommandId(rawId) {
+        return String(rawId || '')
+            .trim()
+            .replace(/^\/+/, '')
+            .replace(/\s+/g, '-')
+            .replace(/[\/\\]/g, '-')
+            .toLowerCase();
+    }
+
+    function requestCustomSlashCommands(force = false) {
+        const now = Date.now();
+        const elapsedSinceLastRequest = now - lastCustomSlashCommandRequestTs;
+        if (
+            !force &&
+            isCustomSlashCommandRequestInFlight &&
+            elapsedSinceLastRequest < CUSTOM_SLASH_COMMAND_REQUEST_INTERVAL_MS
+        ) {
+            return;
+        }
+        if (!force && elapsedSinceLastRequest < CUSTOM_SLASH_COMMAND_REQUEST_INTERVAL_MS) {
+            return;
+        }
+
+        isCustomSlashCommandRequestInFlight = true;
+        lastCustomSlashCommandRequestTs = now;
+        vscode.postMessage({ type: 'requestCustomSlashCommands' });
+    }
+
+    function setCustomSlashCommands(commands) {
+        const nextCommands = [];
+        const usedIds = new Set();
+        const sourceCommands = Array.isArray(commands) ? commands : [];
+
+        sourceCommands.forEach((entry) => {
+            if (!entry || typeof entry.id !== 'string') return;
+            if (typeof entry.content !== 'string') return;
+
+            const id = normalizeSlashCommandId(entry.id);
+            const lowerId = id.toLowerCase();
+            if (!id) return;
+            if (builtInSlashCommandIdSet.has(lowerId)) return;
+            if (usedIds.has(lowerId)) return;
+
+            usedIds.add(lowerId);
+            nextCommands.push({
+                id,
+                source: 'custom',
+                description: typeof entry.description === 'string' && entry.description.trim() !== ''
+                    ? entry.description
+                    : 'Custom template',
+                action: () => insertCustomSlashTemplate(entry.content)
+            });
+        });
+
+        customSlashCommands = nextCommands;
+    }
 
     function createSlashMenu() {
         const menu = document.createElement('div');
         menu.className = 'slash-command-menu';
         menu.setAttribute('data-exclude-from-markdown', 'true');
+        menu.classList.toggle('keyboard-nav-active', slashMenuKeyboardNavigationActive);
+        menu.classList.toggle('pointer-hover-active', slashMenuPointerHoverActive);
         document.body.appendChild(menu);
         return menu;
+    }
+
+    function setSlashMenuKeyboardNavigationActive(active) {
+        slashMenuKeyboardNavigationActive = !!active;
+        if (slashMenu) {
+            slashMenu.classList.toggle('keyboard-nav-active', slashMenuKeyboardNavigationActive);
+        }
+    }
+
+    function setSlashMenuPointerHoverActive(active) {
+        slashMenuPointerHoverActive = !!active;
+        if (slashMenu) {
+            slashMenu.classList.toggle('pointer-hover-active', slashMenuPointerHoverActive);
+        }
     }
 
     function getActiveTextNodeAtCursor(range) {
@@ -1793,15 +1898,19 @@ import { SearchManager } from './modules/SearchManager.js';
 
     function getFilteredSlashCommands(query) {
         const q = (query || '').toLowerCase();
-        if (!q) return slashCommands;
-        return slashCommands.filter(cmd => cmd.id.toLowerCase().startsWith(q));
+        const allSlashCommands = getAllSlashCommands();
+        if (!q) return allSlashCommands;
+        return allSlashCommands.filter(cmd => cmd.id.toLowerCase().startsWith(q));
     }
 
-    function updateSlashMenuSelection() {
+    function updateSlashMenuSelection(shouldScrollActiveItem = true) {
         if (!slashMenu) return;
         const items = slashMenu.querySelectorAll('.slash-command-item');
         items.forEach((item, index) => {
             item.classList.toggle('selected', index === slashMenuState.activeIndex);
+            if (shouldScrollActiveItem && index === slashMenuState.activeIndex) {
+                item.scrollIntoView({ block: 'nearest' });
+            }
         });
     }
 
@@ -1810,6 +1919,7 @@ import { SearchManager } from './modules/SearchManager.js';
             return false;
         }
 
+        setSlashMenuKeyboardNavigationActive(true);
         const total = slashMenuState.items.length;
         slashMenuState.activeIndex = (slashMenuState.activeIndex + delta + total) % total;
         updateSlashMenuSelection();
@@ -1850,6 +1960,9 @@ import { SearchManager } from './modules/SearchManager.js';
         items.forEach((cmd, index) => {
             const item = document.createElement('div');
             item.className = 'slash-command-item';
+            if (cmd.source === 'custom') {
+                item.classList.add('custom-command');
+            }
             if (index === slashMenuState.activeIndex) {
                 item.classList.add('selected');
             }
@@ -1859,12 +1972,6 @@ import { SearchManager } from './modules/SearchManager.js';
             name.textContent = `/${cmd.id}`;
 
             item.appendChild(name);
-            if (cmd.description && cmd.description.trim() !== '') {
-                const desc = document.createElement('span');
-                desc.className = 'slash-command-desc';
-                desc.textContent = cmd.description;
-                item.appendChild(desc);
-            }
 
             item.addEventListener('mousedown', (e) => {
                 e.preventDefault();
@@ -1872,9 +1979,14 @@ import { SearchManager } from './modules/SearchManager.js';
                 executeSlashCommand(cmd);
             });
 
-            item.addEventListener('mouseenter', () => {
+            item.addEventListener('mousemove', () => {
+                setSlashMenuPointerHoverActive(true);
+                setSlashMenuKeyboardNavigationActive(false);
+                if (slashMenuState.activeIndex === index) {
+                    return;
+                }
                 slashMenuState.activeIndex = index;
-                updateSlashMenuSelection();
+                updateSlashMenuSelection(false);
             });
 
             slashMenu.appendChild(item);
@@ -1890,6 +2002,7 @@ import { SearchManager } from './modules/SearchManager.js';
         slashMenuState.items = items;
         slashMenuState.match = match;
         slashMenuState.visible = true;
+        setSlashMenuPointerHoverActive(false);
 
         renderSlashMenu(items);
         slashMenu.style.display = 'block';
@@ -1900,6 +2013,8 @@ import { SearchManager } from './modules/SearchManager.js';
         if (slashMenu) {
             slashMenu.style.display = 'none';
         }
+        setSlashMenuKeyboardNavigationActive(false);
+        setSlashMenuPointerHoverActive(false);
         slashMenuState.visible = false;
         slashMenuState.items = [];
         slashMenuState.query = '';
@@ -1918,6 +2033,7 @@ import { SearchManager } from './modules/SearchManager.js';
             return;
         }
 
+        requestCustomSlashCommands(false);
         const items = getFilteredSlashCommands(match.query);
         if (items.length === 0) {
             hideSlashCommandMenu();
@@ -2003,6 +2119,10 @@ import { SearchManager } from './modules/SearchManager.js';
         removeSlashCommandText(match);
         ensureSlashCommandSelectionInEditor(match.textNode, match.slashIndex);
         cmd.action();
+        // Capture the post-command snapshot so slash execution can be redone.
+        requestAnimationFrame(() => {
+            stateManager.saveState();
+        });
     }
 
     function handleSlashCommandKeydown(e) {
@@ -2753,6 +2873,46 @@ import { SearchManager } from './modules/SearchManager.js';
         newRange.collapse(true);
         selection.removeAllRanges();
         selection.addRange(newRange);
+        return true;
+    }
+
+    function insertPlainTextWithLineBreaksAtSelection(text) {
+        const selection = window.getSelection();
+        if (!selection || !selection.rangeCount) return false;
+        const range = selection.getRangeAt(0);
+
+        cleanupEmptyStrikeAtSelection();
+        cleanupEmptyStrikes();
+        unwrapStrikeAtSelection();
+
+        if (!range.collapsed) {
+            range.deleteContents();
+        }
+
+        const normalized = String(text || '').replace(/\r\n?/g, '\n');
+        const lines = normalized.split('\n');
+        const fragment = document.createDocumentFragment();
+
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i];
+            if (line.length > 0) {
+                fragment.appendChild(document.createTextNode(line));
+            }
+            if (i < lines.length - 1) {
+                fragment.appendChild(document.createElement('br'));
+            }
+        }
+
+        const caretMarker = document.createTextNode('');
+        fragment.appendChild(caretMarker);
+        range.insertNode(fragment);
+
+        const newRange = document.createRange();
+        newRange.setStartAfter(caretMarker);
+        newRange.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(newRange);
+        caretMarker.remove();
         return true;
     }
 
@@ -10440,6 +10600,11 @@ import { SearchManager } from './modules/SearchManager.js';
 
             const normalized = rawText.replace(/\r\n?/g, '\n');
             const lines = normalized.split('\n');
+            // Let the mixed parser handle documents that include blank lines
+            // so visual line breaks between list blocks are preserved.
+            if (lines.some((line) => (line || '').trim() === '')) {
+                return false;
+            }
             const parsedItems = [];
             let rootListType = null;
             let rootStartNumber = 1;
@@ -10637,6 +10802,9 @@ import { SearchManager } from './modules/SearchManager.js';
             while (i < lines.length) {
                 const line = lines[i];
                 if ((line || '').trim() === '') {
+                    const blankLine = document.createElement('p');
+                    blankLine.appendChild(document.createElement('br'));
+                    blocks.push(blankLine);
                     i++;
                     continue;
                 }
@@ -10947,6 +11115,66 @@ import { SearchManager } from './modules/SearchManager.js';
             return true;
         };
 
+        const insertTextWithPasteBehavior = (rawText, options = {}) => {
+            const allowPlainTextFallback = options.allowPlainTextFallback !== false;
+            const selection = window.getSelection();
+            if (!selection) return false;
+
+            if (rawText && tryInsertHorizontalRuleFromPastedText(rawText)) {
+                return true;
+            }
+
+            if (rawText && tryInsertFencedCodeBlockFromPastedText(rawText)) {
+                return true;
+            }
+
+            if (rawText && tryInsertMarkdownTableFromPastedText(rawText)) {
+                return true;
+            }
+
+            if (rawText && tryInsertMarkdownBlockquoteFromPastedText(rawText)) {
+                return true;
+            }
+
+            if (rawText && tryInsertMarkdownHeadingsFromPastedText(rawText)) {
+                return true;
+            }
+
+            if (rawText && tryInsertMarkdownListFromPastedText(rawText)) {
+                return true;
+            }
+
+            if (rawText && tryInsertMixedMarkdownFromPastedText(rawText)) {
+                return true;
+            }
+
+            if (rawText && tryInsertInlineMarkdownFromPastedText(rawText)) {
+                return true;
+            }
+
+            if (!allowPlainTextFallback || typeof rawText !== 'string') {
+                return false;
+            }
+
+            stateManager.saveState();
+            const inserted = insertPlainTextPreservingLineBreaks(rawText);
+            if (!inserted) {
+                return false;
+            }
+
+            normalizeCheckboxListItems();
+            domUtils.ensureInlineCodeSpaces();
+            domUtils.cleanupGhostStyles();
+            tableManager.wrapTables();
+            applyImageRenderSizes();
+            notifyChange();
+            return true;
+        };
+
+        applyTextInsertionWithPasteRules = (rawText) => {
+            return insertTextWithPasteBehavior(rawText, { allowPlainTextFallback: true });
+        };
+
         // 画像のペースト・リンクのペースト
         editor.addEventListener('paste', (e) => {
             if (!isUpdating) {
@@ -11019,42 +11247,11 @@ import { SearchManager } from './modules/SearchManager.js';
                     }
                 }
 
-                if (selection && pastedText && tryInsertHorizontalRuleFromPastedText(pastedText)) {
-                    e.preventDefault();
-                    return;
-                }
-
-                if (selection && pastedText && tryInsertFencedCodeBlockFromPastedText(pastedText)) {
-                    e.preventDefault();
-                    return;
-                }
-
-                if (selection && pastedText && tryInsertMarkdownTableFromPastedText(pastedText)) {
-                    e.preventDefault();
-                    return;
-                }
-
-                if (selection && pastedText && tryInsertMarkdownBlockquoteFromPastedText(pastedText)) {
-                    e.preventDefault();
-                    return;
-                }
-
-                if (selection && pastedText && tryInsertMarkdownHeadingsFromPastedText(pastedText)) {
-                    e.preventDefault();
-                    return;
-                }
-
-                if (selection && pastedText && tryInsertMarkdownListFromPastedText(pastedText)) {
-                    e.preventDefault();
-                    return;
-                }
-
-                if (selection && pastedText && tryInsertMixedMarkdownFromPastedText(pastedText)) {
-                    e.preventDefault();
-                    return;
-                }
-
-                if (selection && pastedText && tryInsertInlineMarkdownFromPastedText(pastedText)) {
+                if (
+                    selection &&
+                    pastedText &&
+                    insertTextWithPasteBehavior(pastedText, { allowPlainTextFallback: false })
+                ) {
                     e.preventDefault();
                     return;
                 }
@@ -11071,21 +11268,12 @@ import { SearchManager } from './modules/SearchManager.js';
                 }
 
                 if (!hasImageFile) {
-                    // Always paste as plain text for non-image content so visual styles
-                    // (color/font/background from rich HTML) are not imported.
-                    if (typeof pastedText === 'string') {
+                    if (
+                        typeof pastedText === 'string' &&
+                        insertTextWithPasteBehavior(pastedText, { allowPlainTextFallback: true })
+                    ) {
                         e.preventDefault();
-                        stateManager.saveState();
-                        const inserted = insertPlainTextPreservingLineBreaks(pastedText);
-                        if (inserted) {
-                            normalizeCheckboxListItems();
-                            domUtils.ensureInlineCodeSpaces();
-                            domUtils.cleanupGhostStyles();
-                            tableManager.wrapTables();
-                            applyImageRenderSizes();
-                            notifyChange();
-                            return;
-                        }
+                        return;
                     }
                     setTimeout(() => {
                         normalizeCheckboxListItems();
@@ -12270,6 +12458,7 @@ import { SearchManager } from './modules/SearchManager.js';
         tocManager.setup();
 
         vscode.postMessage({ type: 'ready' });
+        requestCustomSlashCommands(true);
     }
 
     // VSCodeからのメッセージ処理
@@ -12337,6 +12526,13 @@ import { SearchManager } from './modules/SearchManager.js';
                 break;
             case 'settings':
                 applySettings(message.settings);
+                break;
+            case 'customSlashCommands':
+                isCustomSlashCommandRequestInFlight = false;
+                setCustomSlashCommands(message.commands);
+                if (slashMenuState.visible) {
+                    updateSlashCommandMenu();
+                }
                 break;
             case 'resolvedImageSrc':
                 {

@@ -1,14 +1,29 @@
 import * as vscode from 'vscode';
+import * as os from 'os';
+import * as path from 'path';
 import { MarkdownDocument } from './MarkdownDocument';
 import { getNonce } from '../utils/getNonce';
 import TurndownService from 'turndown';
 const { gfm } = require('turndown-plugin-gfm');
 
+type CustomSlashCommandTemplate = {
+    id: string;
+    description: string;
+    content: string;
+};
+
 export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     private static readonly viewType = 'manulDown.editor';
+    private static readonly builtInSlashCommandIds = new Set(['table', 'quote', 'code', 'checkbox']);
+    private static readonly customSlashTemplateDirectoryName = '.manuldown';
+    private static readonly customSlashTemplateExtension = '.md';
+    private static readonly maxCustomSlashCommands = 200;
+    private static readonly maxCustomSlashTemplateBytes = 128 * 1024;
+    private static readonly customSlashCommandCacheTtlMs = 2000;
     private turndownService: TurndownService;
     private webviewPanels = new Map<string, vscode.WebviewPanel>();
     private lastActivePanel: vscode.WebviewPanel | null = null;
+    private customSlashCommandCache: { loadedAt: number; items: CustomSlashCommandTemplate[] } | null = null;
     public explicitlyRequested = false;
 
     constructor(private readonly context: vscode.ExtensionContext) {
@@ -300,6 +315,10 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                             type: 'init',
                             content: initialHtml,
                         });
+                        await this.postCustomSlashCommands(webviewPanel.webview);
+                        break;
+                    case 'requestCustomSlashCommands':
+                        await this.postCustomSlashCommands(webviewPanel.webview);
                         break;
                     case 'openImage':
                         // Open the image file in VSCode
@@ -431,6 +450,166 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         setTimeout(() => {
             void vscode.commands.executeCommand('workbench.action.keepEditor');
         }, 0);
+    }
+
+    private getCustomSlashTemplateRootUri(): vscode.Uri {
+        const rootPath = path.join(
+            os.homedir(),
+            MarkdownEditorProvider.customSlashTemplateDirectoryName
+        );
+        return vscode.Uri.file(rootPath);
+    }
+
+    private normalizeSlashCommandIdFromFileName(fileName: string): string {
+        return fileName
+            .trim()
+            .replace(/^\/+/, '')
+            .replace(/\s+/g, '-')
+            .replace(/[\/\\]/g, '-')
+            .replace(/^-+/, '')
+            .replace(/-+$/, '')
+            .toLowerCase();
+    }
+
+    private async collectMarkdownTemplateFiles(
+        directoryUri: vscode.Uri,
+        output: vscode.Uri[]
+    ): Promise<void> {
+        if (output.length >= MarkdownEditorProvider.maxCustomSlashCommands) {
+            return;
+        }
+
+        let entries: [string, vscode.FileType][];
+        try {
+            entries = await vscode.workspace.fs.readDirectory(directoryUri);
+        } catch {
+            return;
+        }
+
+        entries.sort((a, b) => a[0].localeCompare(b[0], 'en'));
+
+        for (const [name, fileType] of entries) {
+            if (output.length >= MarkdownEditorProvider.maxCustomSlashCommands) {
+                return;
+            }
+
+            const childUri = vscode.Uri.joinPath(directoryUri, name);
+            if (fileType === vscode.FileType.Directory) {
+                await this.collectMarkdownTemplateFiles(childUri, output);
+                continue;
+            }
+            if (fileType !== vscode.FileType.File) {
+                continue;
+            }
+
+            if (!name.toLowerCase().endsWith(MarkdownEditorProvider.customSlashTemplateExtension)) {
+                continue;
+            }
+
+            output.push(childUri);
+        }
+    }
+
+    private async loadCustomSlashCommandsFromDisk(): Promise<CustomSlashCommandTemplate[]> {
+        const templateRootUri = this.getCustomSlashTemplateRootUri();
+
+        try {
+            const rootStat = await vscode.workspace.fs.stat(templateRootUri);
+            if ((rootStat.type & vscode.FileType.Directory) === 0) {
+                return [];
+            }
+        } catch {
+            return [];
+        }
+
+        const markdownFiles: vscode.Uri[] = [];
+        await this.collectMarkdownTemplateFiles(templateRootUri, markdownFiles);
+        if (markdownFiles.length === 0) {
+            return [];
+        }
+
+        const usedIds = new Set<string>();
+        const templates: CustomSlashCommandTemplate[] = [];
+
+        for (const fileUri of markdownFiles) {
+            if (templates.length >= MarkdownEditorProvider.maxCustomSlashCommands) {
+                break;
+            }
+
+            const parsed = path.parse(fileUri.fsPath);
+            const commandId = this.normalizeSlashCommandIdFromFileName(parsed.name);
+            if (!commandId) {
+                continue;
+            }
+            if (MarkdownEditorProvider.builtInSlashCommandIds.has(commandId)) {
+                continue;
+            }
+            if (usedIds.has(commandId)) {
+                continue;
+            }
+
+            let fileContent: Uint8Array;
+            try {
+                fileContent = await vscode.workspace.fs.readFile(fileUri);
+            } catch {
+                continue;
+            }
+
+            if (fileContent.byteLength > MarkdownEditorProvider.maxCustomSlashTemplateBytes) {
+                continue;
+            }
+
+            const markdownText = Buffer.from(fileContent).toString('utf8');
+            if (markdownText.trim() === '') {
+                continue;
+            }
+
+            const relativePath = path
+                .relative(templateRootUri.fsPath, fileUri.fsPath)
+                .replace(/\\/g, '/');
+
+            templates.push({
+                id: commandId,
+                description: `Template: ${relativePath}`,
+                content: markdownText
+            });
+            usedIds.add(commandId);
+        }
+
+        return templates;
+    }
+
+    private async getCustomSlashCommands(): Promise<CustomSlashCommandTemplate[]> {
+        const now = Date.now();
+        if (
+            this.customSlashCommandCache &&
+            now - this.customSlashCommandCache.loadedAt < MarkdownEditorProvider.customSlashCommandCacheTtlMs
+        ) {
+            return this.customSlashCommandCache.items;
+        }
+
+        const items = await this.loadCustomSlashCommandsFromDisk();
+        this.customSlashCommandCache = {
+            loadedAt: now,
+            items
+        };
+        return items;
+    }
+
+    private async postCustomSlashCommands(webview: vscode.Webview): Promise<void> {
+        try {
+            const commands = await this.getCustomSlashCommands();
+            webview.postMessage({
+                type: 'customSlashCommands',
+                commands
+            });
+        } catch (error) {
+            console.error('[customSlashCommands] Failed to load templates:', error);
+            webview.postMessage({
+                type: 'customSlashCommands',
+                commands: []
+            });
+        }
     }
 
     private async updateTextDocument(document: vscode.TextDocument, html: string): Promise<void> {

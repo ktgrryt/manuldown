@@ -697,6 +697,12 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
     color: var(--vscode-list-activeSelectionForeground);
 }
 
+.language-suggestions:not(.pointer-hover-active) .language-suggestion-item:hover:not(.selected),
+.language-suggestions.keyboard-nav-active .language-suggestion-item:hover:not(.selected) {
+    background-color: transparent;
+    color: var(--vscode-editor-foreground);
+}
+
 .language-suggestions::-webkit-scrollbar {
     width: 8px;
 }
@@ -1208,7 +1214,26 @@ body.image-resizing * {
     padding: 6px;
     min-width: 220px;
     max-width: 320px;
+    max-height: 200px;
+    overflow-y: auto;
     display: none;
+}
+
+.slash-command-menu::-webkit-scrollbar {
+    width: 8px;
+}
+
+.slash-command-menu::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.slash-command-menu::-webkit-scrollbar-thumb {
+    background: var(--vscode-scrollbarSlider-background);
+    border-radius: 4px;
+}
+
+.slash-command-menu::-webkit-scrollbar-thumb:hover {
+    background: var(--vscode-scrollbarSlider-hoverBackground);
 }
 
 .slash-command-item {
@@ -1221,10 +1246,17 @@ body.image-resizing * {
     font-size: 12px;
     cursor: pointer;
     color: var(--vscode-editor-foreground);
+    min-width: 0;
+    overflow: hidden;
 }
 
 .slash-command-item:hover {
     background-color: var(--vscode-list-hoverBackground);
+}
+
+.slash-command-menu:not(.pointer-hover-active) .slash-command-item:hover:not(.selected),
+.slash-command-menu.keyboard-nav-active .slash-command-item:hover:not(.selected) {
+    background-color: transparent;
 }
 
 .slash-command-item.selected {
@@ -1232,9 +1264,29 @@ body.image-resizing * {
     color: var(--vscode-list-activeSelectionForeground);
 }
 
+.slash-command-item.custom-command .slash-command-name {
+    color: var(--vscode-terminal-ansiGreen, #3fb950);
+}
+
+.slash-command-item.custom-command .slash-command-desc {
+    color: var(--vscode-terminal-ansiGreen, #3fb950);
+    opacity: 0.8;
+}
+
+.slash-command-item.custom-command.selected .slash-command-name,
+.slash-command-item.custom-command.selected .slash-command-desc {
+    color: inherit;
+    opacity: 0.9;
+}
+
 .slash-command-name {
     font-weight: 600;
+    display: block;
+    flex: 1;
+    min-width: 0;
     white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .slash-command-desc {

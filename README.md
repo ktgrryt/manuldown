@@ -51,6 +51,20 @@ Type `/` in the editor to open the slash command menu. You can narrow results by
 | `/code` | Insert a code block and focus the language label for editing |
 | `/checkbox` | Create a checklist item (task list) |
 
+Custom slash commands:
+
+Drop .md files into ~/.manuldown, and each file becomes a slash command based on its filename.
+For example, ~/.manuldown/meeting-minutes.md can be inserted with /meeting-minutes at the current cursor position.
+- The command name is the filename without .md
+- Running the command inserts the file contents at the cursor
+- User-defined commands appear in green in the slash menu
+
+Notes for custom command names:
+
+- Command IDs are normalized from file names (`spaces` -> `-`, leading `/` removed, lowercase).
+- Built-in command IDs (`table`, `quote`, `code`, `checkbox`) are reserved.
+- Duplicate normalized command IDs are ignored.
+
 Menu controls:
 
 - `Enter`: Run the selected command

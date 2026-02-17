@@ -596,7 +596,19 @@ export class CodeBlockManager {
         toolbar.appendChild(suggestionBox);
         
         let selectedIndex = -1;
+        let languageSuggestionKeyboardNavigationActive = false;
+        let languageSuggestionPointerHoverActive = false;
         let handleInput, handleKeydown, handleKeypress, finishEditing;
+
+        const setLanguageSuggestionKeyboardNavigationActive = (active) => {
+            languageSuggestionKeyboardNavigationActive = !!active;
+            suggestionBox.classList.toggle('keyboard-nav-active', languageSuggestionKeyboardNavigationActive);
+        };
+
+        const setLanguageSuggestionPointerHoverActive = (active) => {
+            languageSuggestionPointerHoverActive = !!active;
+            suggestionBox.classList.toggle('pointer-hover-active', languageSuggestionPointerHoverActive);
+        };
         
         // サジェストを表示する関数
         const showSuggestions = (filter) => {
@@ -607,11 +619,15 @@ export class CodeBlockManager {
             if (filtered.length === 0) {
                 suggestionBox.style.display = 'none';
                 selectedIndex = -1;
+                setLanguageSuggestionKeyboardNavigationActive(false);
+                setLanguageSuggestionPointerHoverActive(false);
                 return;
             }
             
             suggestionBox.innerHTML = '';
             selectedIndex = 0;
+            setLanguageSuggestionKeyboardNavigationActive(false);
+            setLanguageSuggestionPointerHoverActive(false);
             
             filtered.forEach((lang, index) => {
                 const item = document.createElement('div');
@@ -632,6 +648,8 @@ export class CodeBlockManager {
                     langLabel.removeEventListener('blur', finishEditing);
                     
                     langLabel.textContent = lang;
+                    setLanguageSuggestionKeyboardNavigationActive(false);
+                    setLanguageSuggestionPointerHoverActive(false);
                     suggestionBox.style.display = 'none';
                     langLabel.classList.remove('editing');
                     langLabel.contentEditable = 'false';
@@ -640,7 +658,9 @@ export class CodeBlockManager {
                     this.updateCodeBlockLanguage(pre, lang);
                 });
                 
-                item.addEventListener('mouseenter', () => {
+                item.addEventListener('mousemove', () => {
+                    setLanguageSuggestionPointerHoverActive(true);
+                    setLanguageSuggestionKeyboardNavigationActive(false);
                     suggestionBox.querySelectorAll('.language-suggestion-item').forEach(el => {
                         el.classList.remove('selected');
                     });
@@ -658,6 +678,8 @@ export class CodeBlockManager {
         const hideSuggestions = () => {
             suggestionBox.style.display = 'none';
             selectedIndex = -1;
+            setLanguageSuggestionKeyboardNavigationActive(false);
+            setLanguageSuggestionPointerHoverActive(false);
         };
         
         // 言語ラベルをクリックで編集可能にする
@@ -737,6 +759,7 @@ export class CodeBlockManager {
                 const hasSuggestions = suggestions.length > 0;
                 const moveSelection = (delta) => {
                     if (!hasSuggestions) return;
+                    setLanguageSuggestionKeyboardNavigationActive(true);
                     selectedIndex = (selectedIndex + delta + suggestions.length) % suggestions.length;
                     suggestions.forEach((item, idx) => {
                         item.classList.toggle('selected', idx === selectedIndex);
