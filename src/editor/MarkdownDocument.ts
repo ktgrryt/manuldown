@@ -48,6 +48,10 @@ export class MarkdownDocument {
             // Pattern: <p></p> or <p>\s*</p>
             html = html.replace(/<p>\s*<\/p>/gi, '<p><br></p>');
 
+            // Fix empty blockquotes generated from ">" so they stay visible/editable.
+            // marked outputs: <blockquote></blockquote> with no paragraph children.
+            html = html.replace(/<blockquote>\s*<\/blockquote>/gi, '<blockquote><p><br></p></blockquote>');
+
             // Fix marked's incorrect parsing of empty list items as headings
             // Pattern: <li><h1></h1> to <li>, <li><h2></h2> to <li>, etc.
             // This happens when there's an empty list item followed by spaces

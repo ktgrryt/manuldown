@@ -86,6 +86,7 @@ import { SearchManager } from './modules/SearchManager.js';
             element.tagName === 'TABLE' ||
             element.tagName === 'UL' ||
             element.tagName === 'OL' ||
+            element.tagName === 'BLOCKQUOTE' ||
             element.tagName === 'PRE' ||
             element.tagName === 'INPUT'
         ) {
@@ -5563,6 +5564,58 @@ import { SearchManager } from './modules/SearchManager.js';
         return true;
     }
 
+    function getTopLevelBlockquoteForCtrlK(range) {
+        if (!range || !editor) return null;
+
+        let blockquote = domUtils.getParentElement(range.startContainer, 'BLOCKQUOTE');
+        if (!blockquote && range.startContainer === editor) {
+            const children = Array.from(editor.childNodes || []);
+            const safeOffset = Math.max(0, Math.min(range.startOffset, children.length));
+            const direct = children[safeOffset] || children[safeOffset - 1] || null;
+            if (direct && direct.nodeType === Node.ELEMENT_NODE && direct.tagName === 'BLOCKQUOTE') {
+                blockquote = direct;
+            }
+        }
+
+        if (!blockquote || blockquote.parentElement !== editor) {
+            return null;
+        }
+
+        return blockquote;
+    }
+
+    function isCtrlKTargetBlockquoteEmpty(blockquote) {
+        if (!blockquote) return false;
+
+        const normalizedText = (blockquote.textContent || '').replace(/[\u200B\u00A0\uFEFF]/g, '').trim();
+        if (normalizedText !== '') {
+            return false;
+        }
+
+        // Treat structural content as non-empty even when textContent is blank.
+        const hasStructuralContent = !!blockquote.querySelector('img, hr, table, pre, ul, ol, input');
+        return !hasStructuralContent;
+    }
+
+    function replaceBlockquoteWithEmptyParagraph(blockquote, selection) {
+        if (!blockquote || !blockquote.parentElement) return false;
+
+        const p = document.createElement('p');
+        p.appendChild(document.createElement('br'));
+        blockquote.replaceWith(p);
+
+        const activeSelection = selection || window.getSelection();
+        if (activeSelection) {
+            const newRange = document.createRange();
+            newRange.setStart(p, 0);
+            newRange.collapse(true);
+            activeSelection.removeAllRanges();
+            activeSelection.addRange(newRange);
+        }
+
+        return true;
+    }
+
     function handleCtrlKEmptyLineBeforeTableKeydown(e, context) {
         if (!isMac) return false;
         if (!e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return false;
@@ -5590,28 +5643,15 @@ import { SearchManager } from './modules/SearchManager.js';
             }
             if (block === editor) return false;
         }
+
         // 空の引用ブロック → 空のパラグラフに変換
-        let blockquote = null;
-        if (block.tagName === 'BLOCKQUOTE') {
-            blockquote = block;
-        } else if (block.parentElement && block.parentElement.tagName === 'BLOCKQUOTE' && block.parentElement.parentElement === editor) {
-            blockquote = block.parentElement;
-        }
-        const isBlockquoteEmpty = blockquote && (blockquote.textContent || '').replace(/[\u200B\u00A0]/g, '').trim() === '';
-        if (isBlockquoteEmpty) {
+        const blockquote = getTopLevelBlockquoteForCtrlK(range);
+        if (isCtrlKTargetBlockquoteEmpty(blockquote)) {
             e.preventDefault();
             stateManager.saveState();
-            const p = document.createElement('p');
-            p.appendChild(document.createElement('br'));
-            blockquote.replaceWith(p);
-            const sel = window.getSelection();
-            if (sel) {
-                const newRange = document.createRange();
-                newRange.setStart(p, 0);
-                newRange.collapse(true);
-                sel.removeAllRanges();
-                sel.addRange(newRange);
-            }
+            emacsKillBuffer = '\n';
+            replaceBlockquoteWithEmptyParagraph(blockquote, window.getSelection());
+            finalizeCtrlKDeleteTurn();
             notifyChangeImmediate();
             return true;
         }
@@ -6806,7 +6846,7 @@ import { SearchManager } from './modules/SearchManager.js';
             return null;
         }
 
-        const rightHalfThreshold = rect.left + rect.width * 0.55;
+        const rightHalfThreshold = rect.left + rect.width * 0.5;
         if (requireRightEdge) {
             if (x < rect.right - 2) {
                 return null;
@@ -6826,6 +6866,164 @@ import { SearchManager } from './modules/SearchManager.js';
         return range;
     }
 
+    function createBeforeImageRangeIfLeftSide(image, x, y, requireLeftEdge) {
+        if (!image || !editor.contains(image)) {
+            return null;
+        }
+        const rect = image.getBoundingClientRect ? image.getBoundingClientRect() : null;
+        if (!rect || rect.width <= 0 || rect.height <= 0) {
+            return null;
+        }
+
+        const verticalTolerancePx = 6;
+        if (y < rect.top - verticalTolerancePx || y > rect.bottom + verticalTolerancePx) {
+            return null;
+        }
+
+        const leftHalfThreshold = rect.left + rect.width * 0.5;
+        if (requireLeftEdge) {
+            if (x > rect.left + 2) {
+                return null;
+            }
+        } else if (x > leftHalfThreshold) {
+            return null;
+        }
+
+        const caretAnchor = getImageCaretAnchorNode(image) || image;
+        if (!caretAnchor.parentNode) {
+            return null;
+        }
+
+        const range = document.createRange();
+        range.setStartBefore(caretAnchor);
+        range.collapse(true);
+        return range;
+    }
+
+    function createImageEdgeRangeFromImageOnlyBlock(image, x, side) {
+        if (!image || !editor.contains(image)) {
+            return null;
+        }
+        const rect = image.getBoundingClientRect ? image.getBoundingClientRect() : null;
+        if (!rect || rect.width <= 0 || rect.height <= 0) {
+            return null;
+        }
+
+        const centerX = rect.left + rect.width * 0.5;
+        if (side === 'left' && x > centerX) {
+            return null;
+        }
+        if (side === 'right' && x < centerX) {
+            return null;
+        }
+
+        const caretAnchor = getImageCaretAnchorNode(image) || image;
+        if (!caretAnchor.parentNode) {
+            return null;
+        }
+
+        const range = document.createRange();
+        if (side === 'left') {
+            range.setStartBefore(caretAnchor);
+        } else {
+            range.setStartAfter(caretAnchor);
+        }
+        range.collapse(true);
+        return range;
+    }
+
+    function getSingleImageFromImageOnlyBlock(blockElement) {
+        if (!blockElement || blockElement === editor || !isImageOnlyBlockElement(blockElement)) {
+            return null;
+        }
+        const images = Array.from(blockElement.querySelectorAll('img')).filter((img) => editor.contains(img));
+        if (images.length !== 1) {
+            return null;
+        }
+        return images[0];
+    }
+
+    function getNearestSingleImageFromImageOnlyBlockByY(y) {
+        if (!Number.isFinite(y)) {
+            return null;
+        }
+
+        const candidates = Array.from(editor.querySelectorAll('p, div, li, blockquote'));
+        let nearestImage = null;
+        let nearestDistance = Number.POSITIVE_INFINITY;
+        const maxVerticalDistancePx = 28;
+
+        for (const block of candidates) {
+            if (!block || block.nodeType !== Node.ELEMENT_NODE) continue;
+            if (domUtils.getParentElement(block, 'TD') || domUtils.getParentElement(block, 'TH')) continue;
+
+            const image = getSingleImageFromImageOnlyBlock(block);
+            if (!image) continue;
+
+            const rect = block.getBoundingClientRect ? block.getBoundingClientRect() : null;
+            if (!rect || (!rect.width && !rect.height)) continue;
+
+            const distance = y < rect.top
+                ? rect.top - y
+                : (y > rect.bottom ? y - rect.bottom : 0);
+            if (distance < nearestDistance) {
+                nearestDistance = distance;
+                nearestImage = image;
+            }
+        }
+
+        if (nearestDistance > maxVerticalDistancePx) {
+            return null;
+        }
+        return nearestImage;
+    }
+
+    function getLeftEdgeImageCaretRangeFromClick(x, y, clickedElement) {
+        if (!clickedElement) {
+            return null;
+        }
+
+        const clickedImage = clickedElement.tagName === 'IMG'
+            ? clickedElement
+            : (clickedElement.closest ? clickedElement.closest('img') : null);
+        const directImageRange = createBeforeImageRangeIfLeftSide(clickedImage, x, y, false);
+        if (directImageRange) {
+            return directImageRange;
+        }
+
+        const blockElement = getClosestBlockElement(clickedElement);
+        const imageInCurrentBlock = getSingleImageFromImageOnlyBlock(blockElement);
+        if (imageInCurrentBlock) {
+            const blockEdgeRange = createImageEdgeRangeFromImageOnlyBlock(imageInCurrentBlock, x, 'left');
+            if (blockEdgeRange) {
+                return blockEdgeRange;
+            }
+            return createBeforeImageRangeIfLeftSide(imageInCurrentBlock, x, y, false);
+        }
+
+        // Handle images that are direct children of the editor (no block wrapper,
+        // e.g. when an image is pasted into an empty document).
+        if (!blockElement || blockElement === editor) {
+            for (const child of editor.children) {
+                if (child.tagName === 'IMG') {
+                    const range = createBeforeImageRangeIfLeftSide(child, x, y, true);
+                    if (range) return range;
+                }
+            }
+        }
+
+        const nearestImage = getNearestSingleImageFromImageOnlyBlockByY(y);
+        if (nearestImage) {
+            const blockEdgeRange = createImageEdgeRangeFromImageOnlyBlock(nearestImage, x, 'left');
+            if (blockEdgeRange) {
+                return blockEdgeRange;
+            }
+            return createBeforeImageRangeIfLeftSide(nearestImage, x, y, false);
+        }
+
+        return null;
+    }
+
     function getRightEdgeImageCaretRangeFromClick(x, y, clickedElement) {
         if (!clickedElement) {
             return null;
@@ -6840,11 +7038,13 @@ import { SearchManager } from './modules/SearchManager.js';
         }
 
         const blockElement = getClosestBlockElement(clickedElement);
-        if (blockElement && blockElement !== editor && isImageOnlyBlockElement(blockElement)) {
-            const images = Array.from(blockElement.querySelectorAll('img')).filter((img) => editor.contains(img));
-            if (images.length === 1) {
-                return createAfterImageRangeIfRightSide(images[0], x, y, true);
+        const imageInCurrentBlock = getSingleImageFromImageOnlyBlock(blockElement);
+        if (imageInCurrentBlock) {
+            const blockEdgeRange = createImageEdgeRangeFromImageOnlyBlock(imageInCurrentBlock, x, 'right');
+            if (blockEdgeRange) {
+                return blockEdgeRange;
             }
+            return createAfterImageRangeIfRightSide(imageInCurrentBlock, x, y, false);
         }
 
         // Handle images that are direct children of the editor (no block wrapper,
@@ -6856,6 +7056,15 @@ import { SearchManager } from './modules/SearchManager.js';
                     if (range) return range;
                 }
             }
+        }
+
+        const nearestImage = getNearestSingleImageFromImageOnlyBlockByY(y);
+        if (nearestImage) {
+            const blockEdgeRange = createImageEdgeRangeFromImageOnlyBlock(nearestImage, x, 'right');
+            if (blockEdgeRange) {
+                return blockEdgeRange;
+            }
+            return createAfterImageRangeIfRightSide(nearestImage, x, y, false);
         }
 
         return null;
@@ -9180,20 +9389,27 @@ import { SearchManager } from './modules/SearchManager.js';
         }
 
         if (range.collapsed) {
+            const emptyTopLevelBlockquote = getTopLevelBlockquoteForCtrlK(range);
+            if (isCtrlKTargetBlockquoteEmpty(emptyTopLevelBlockquote)) {
+                stateManager.saveState();
+                emacsKillBuffer = '\n';
+                replaceBlockquoteWithEmptyParagraph(emptyTopLevelBlockquote, selection);
+                domUtils.ensureInlineCodeSpaces();
+                domUtils.cleanupGhostStyles();
+                tableManager.wrapTables();
+                applyImageRenderSizes();
+                hideImageResizeOverlaySafely();
+                finalizeCtrlKDeleteTurn();
+                notifyChangeImmediate();
+                return true;
+            }
+
             if (isCollapsedSelectionOnEmptyLineInTableCell(selection, range)) {
                 stateManager.saveState();
                 emacsKillBuffer = '\n';
-                const forwardDeleted = deleteForwardCharacterInSameTableCell(selection, range);
-                if (!forwardDeleted) {
-                    handleBackspace();
-                } else {
-                    domUtils.ensureInlineCodeSpaces();
-                    domUtils.cleanupGhostStyles();
-                    tableManager.wrapTables();
-                    applyImageRenderSizes();
-                    hideImageResizeOverlaySafely();
-                    notifyChangeImmediate();
-                }
+                // Match Ctrl+H behavior for empty visual lines in table cells.
+                // Forward-delete can leave the caret on a zero-height visual line.
+                handleBackspace();
                 finalizeCtrlKDeleteTurn();
                 return true;
             }
@@ -12780,6 +12996,23 @@ import { SearchManager } from './modules/SearchManager.js';
             if (!clickedElement || !editor.contains(clickedElement)) return;
 
             if (!e.shiftKey) {
+                const imageLeftEdgeRange = getLeftEdgeImageCaretRangeFromClick(x, y, clickedElement);
+                if (imageLeftEdgeRange) {
+                    e.preventDefault();
+                    if (document.activeElement !== editor) {
+                        try {
+                            editor.focus({ preventScroll: true });
+                        } catch (focusError) {
+                            editor.focus();
+                        }
+                    }
+                    const selection = window.getSelection();
+                    if (!selection) return;
+                    selection.removeAllRanges();
+                    selection.addRange(imageLeftEdgeRange);
+                    return;
+                }
+
                 const imageRightEdgeRange = getRightEdgeImageCaretRangeFromClick(x, y, clickedElement);
                 if (imageRightEdgeRange) {
                     e.preventDefault();
@@ -13448,12 +13681,15 @@ import { SearchManager } from './modules/SearchManager.js';
             return overlay;
         }
 
-        function showImageResizeOverlay(image) {
+        function showImageResizeOverlay(image, options = {}) {
             if (!image || image.tagName !== 'IMG' || !editor.contains(image)) return;
+            const { preserveSelection = false } = options;
             ensureImageResizeOverlay();
             activeResizeImage = image;
             focusEditorWithoutScroll();
-            selectImageNode(image);
+            if (!preserveSelection) {
+                selectImageNode(image);
+            }
             syncImageResizeOverlayPosition();
         }
 
@@ -13574,6 +13810,28 @@ import { SearchManager } from './modules/SearchManager.js';
                 e.preventDefault();
                 e.stopPropagation();
                 hideLinkPopover();
+
+                const clickedElement = e.target && e.target.nodeType === Node.ELEMENT_NODE
+                    ? e.target
+                    : e.target?.parentElement;
+                const clickX = typeof e.clientX === 'number' ? e.clientX : null;
+                const clickY = typeof e.clientY === 'number' ? e.clientY : null;
+
+                if (!e.shiftKey && Number.isFinite(clickX) && Number.isFinite(clickY)) {
+                    const edgeRange =
+                        getLeftEdgeImageCaretRangeFromClick(clickX, clickY, clickedElement || image) ||
+                        getRightEdgeImageCaretRangeFromClick(clickX, clickY, clickedElement || image);
+                    if (edgeRange) {
+                        const selection = window.getSelection();
+                        if (selection) {
+                            selection.removeAllRanges();
+                            selection.addRange(edgeRange);
+                        }
+                        showImageResizeOverlay(image, { preserveSelection: true });
+                        return;
+                    }
+                }
+
                 showImageResizeOverlay(image);
                 return;
             }

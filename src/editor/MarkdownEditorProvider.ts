@@ -863,12 +863,19 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             let markdown = this.turndownService.turndown(html);
 
             // Post-process the markdown to fix indentation and spacing
-            // 0. Replace EMPTYLINE placeholder with empty line
-            // Each EMPTYLINE represents one extra blank line. Turndown already adds \n\n
-            // between paragraphs, so we consume the preceding \n to avoid doubling.
-            markdown = markdown.replace(/\nEMPTYLINE/g, '');
-            // Handle EMPTYLINE at the very start of the document
-            markdown = markdown.replace(/^EMPTYLINE\n?/g, '');
+            // 0. Replace EMPTYLINE placeholder with empty line.
+            // This also handles blockquote placeholders like "> EMPTYLINE"
+            // by reducing them to a bare ">" quote line.
+            const linesWithEmptyLineMarkers = markdown.split('\n');
+            for (let i = 0; i < linesWithEmptyLineMarkers.length; i++) {
+                const emptyLineMatch = linesWithEmptyLineMarkers[i].match(/^(\s*(?:>\s*)*)EMPTYLINE\s*$/);
+                if (!emptyLineMatch) {
+                    continue;
+                }
+                const blockquotePrefix = emptyLineMatch[1];
+                linesWithEmptyLineMarkers[i] = blockquotePrefix ? blockquotePrefix.replace(/\s+$/, '') : '';
+            }
+            markdown = linesWithEmptyLineMarkers.join('\n');
 
             // 0.5. Replace EMPTYCODE placeholder with actual empty code blocks
             markdown = markdown.replace(/```([^\n]*)\nEMPTYCODE_([A-Za-z0-9_-]+)_EMPTYCODE\n```/g, (match, lang1, lang2) => {

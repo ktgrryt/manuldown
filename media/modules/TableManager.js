@@ -363,13 +363,22 @@ export class TableManager {
                 const table = wrapper.querySelector('table');
                 if (table) {
                     const rect = table.getBoundingClientRect();
-                    const isLeftSide = e.clientX < rect.left + rect.width / 2;
-                    if (isLeftSide) {
-                        const firstCell = table.querySelector('td, th');
-                        if (firstCell) this._setCursorToCellStart(firstCell);
+                    const leftEdge = wrapper.querySelector('.md-table-edge-left');
+                    const rightEdge = wrapper.querySelector('.md-table-edge-right');
+
+                    let targetEdge = null;
+                    if (e.clientX <= rect.left) {
+                        targetEdge = leftEdge;
+                    } else if (e.clientX >= rect.right) {
+                        targetEdge = rightEdge;
                     } else {
-                        const lastCell = this._getLastCell(table);
-                        if (lastCell) this._setCursorToCellEnd(lastCell);
+                        const distLeft = Math.abs(e.clientX - rect.left);
+                        const distRight = Math.abs(rect.right - e.clientX);
+                        targetEdge = distLeft <= distRight ? leftEdge : rightEdge;
+                    }
+
+                    if (targetEdge) {
+                        this._setCursorToEdge(targetEdge, targetEdge.dataset.tableEdge === 'right');
                     }
                 }
                 return true;
@@ -421,14 +430,39 @@ export class TableManager {
         const tables = Array.from(this.editor.querySelectorAll('table.md-table'));
         if (!tables.length) return false;
         const edgeSnapThreshold = 24;
+        const sideSnapVerticalThreshold = 6;
 
         let belowCandidate = null;
         let belowDistance = Number.POSITIVE_INFINITY;
         let aboveCandidate = null;
         let aboveDistance = Number.POSITIVE_INFINITY;
+        let leftCandidate = null;
+        let leftDistance = Number.POSITIVE_INFINITY;
+        let rightCandidate = null;
+        let rightDistance = Number.POSITIVE_INFINITY;
 
         for (const table of tables) {
             const rect = table.getBoundingClientRect();
+
+            const withinVerticalBand =
+                y >= rect.top - sideSnapVerticalThreshold &&
+                y <= rect.bottom + sideSnapVerticalThreshold;
+            if (withinVerticalBand) {
+                if (x < rect.left) {
+                    const distance = rect.left - x;
+                    if (distance < leftDistance) {
+                        leftDistance = distance;
+                        leftCandidate = table;
+                    }
+                } else if (x > rect.right) {
+                    const distance = x - rect.right;
+                    if (distance < rightDistance) {
+                        rightDistance = distance;
+                        rightCandidate = table;
+                    }
+                }
+            }
+
             if (x < rect.left || x > rect.right) continue;
 
             if (y > rect.bottom) {
@@ -442,6 +476,22 @@ export class TableManager {
                 if (distance < aboveDistance) {
                     aboveDistance = distance;
                     aboveCandidate = table;
+                }
+            }
+        }
+
+        if (leftCandidate || rightCandidate) {
+            const useLeft = !!(
+                leftCandidate &&
+                (!rightCandidate || leftDistance <= rightDistance)
+            );
+            const table = useLeft ? leftCandidate : rightCandidate;
+            const wrapper = table ? table.closest('.md-table-wrapper') : null;
+            if (wrapper) {
+                const edge = wrapper.querySelector(useLeft ? '.md-table-edge-left' : '.md-table-edge-right');
+                if (edge) {
+                    this._setCursorToEdge(edge, !useLeft);
+                    return true;
                 }
             }
         }
@@ -1196,6 +1246,24 @@ export class TableManager {
         }
 
         const edge = this._getEdgeFromSelection();
+        if (edge && edge.dataset.tableEdge === 'left') {
+            e.preventDefault();
+
+            const wrapper = edge.closest('.md-table-wrapper');
+            const previousNode = wrapper ? this._getPrevNavigableSiblingNode(wrapper) : null;
+            const removableEmptyLine = this._isRemovableEmptyLineBeforeTableWrapper(previousNode);
+
+            if (removableEmptyLine) {
+                this.stateManager.saveState();
+                removableEmptyLine.remove();
+                if (this.notifyChange) this.notifyChange();
+            }
+
+            // Keep caret anchored on the left edge and never mutate edge text content.
+            this._setCursorToEdge(edge, false);
+            return true;
+        }
+
         if (edge && edge.dataset.tableEdge === 'right') {
             e.preventDefault();
             this.stateManager.saveState();
@@ -1209,6 +1277,48 @@ export class TableManager {
 
     _getDomSelectedCells() {
         return Array.from(this.editor.querySelectorAll('.md-table-cell-selected'));
+    }
+
+    _isRemovableEmptyLineBeforeTableWrapper(node) {
+        if (!node || node.nodeType !== Node.ELEMENT_NODE) return null;
+        if (node.getAttribute?.('data-exclude-from-markdown') === 'true') return null;
+        if (!/^(P|DIV)$/.test(node.tagName)) return null;
+        if (!this._isPlaceholderOnlyNodeForTableEdge(node)) return null;
+        return node;
+    }
+
+    _isPlaceholderOnlyNodeForTableEdge(node) {
+        if (!node) return true;
+
+        if (node.nodeType === Node.TEXT_NODE) {
+            return (node.textContent || '').replace(/[\u200B\u00A0\uFEFF]/g, '').trim() === '';
+        }
+
+        if (node.nodeType !== Node.ELEMENT_NODE) {
+            return true;
+        }
+
+        const element = node;
+        if (element.getAttribute?.('data-exclude-from-markdown') === 'true') {
+            return true;
+        }
+        if (element.tagName === 'BR') {
+            return true;
+        }
+        if (
+            element.tagName === 'HR' ||
+            element.tagName === 'IMG' ||
+            element.tagName === 'TABLE' ||
+            element.tagName === 'UL' ||
+            element.tagName === 'OL' ||
+            element.tagName === 'PRE' ||
+            element.tagName === 'INPUT' ||
+            element.tagName === 'BLOCKQUOTE'
+        ) {
+            return false;
+        }
+
+        return Array.from(element.childNodes || []).every((child) => this._isPlaceholderOnlyNodeForTableEdge(child));
     }
 
     handlePaste(e) {
