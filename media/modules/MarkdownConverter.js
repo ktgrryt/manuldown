@@ -10,6 +10,117 @@ export class MarkdownConverter {
         this.domUtils = domUtils;
     }
 
+    isIgnorableText(text) {
+        return (text || '').replace(/[\u200B\u00A0]/g, '').trim() === '';
+    }
+
+    trimBoundaryNodes(nodes, { trimLeadingBreak = false, trimTrailingBreak = false } = {}) {
+        if (!Array.isArray(nodes) || nodes.length === 0) return;
+
+        if (trimLeadingBreak) {
+            while (nodes.length > 0) {
+                const first = nodes[0];
+                if (first.nodeType === Node.TEXT_NODE && this.isIgnorableText(first.textContent || '')) {
+                    nodes.shift();
+                    continue;
+                }
+                if (first.nodeType === Node.ELEMENT_NODE && first.tagName === 'BR') {
+                    nodes.shift();
+                    continue;
+                }
+                break;
+            }
+        }
+
+        if (trimTrailingBreak) {
+            while (nodes.length > 0) {
+                const last = nodes[nodes.length - 1];
+                if (last.nodeType === Node.TEXT_NODE && this.isIgnorableText(last.textContent || '')) {
+                    nodes.pop();
+                    continue;
+                }
+                if (last.nodeType === Node.ELEMENT_NODE && last.tagName === 'BR') {
+                    nodes.pop();
+                    continue;
+                }
+                break;
+            }
+        }
+    }
+
+    hasMeaningfulNodes(nodes) {
+        if (!Array.isArray(nodes) || nodes.length === 0) return false;
+        return nodes.some((node) => {
+            if (!node) return false;
+            if (node.nodeType === Node.TEXT_NODE) {
+                return !this.isIgnorableText(node.textContent || '');
+            }
+            if (node.nodeType !== Node.ELEMENT_NODE) return false;
+            return node.tagName !== 'BR';
+        });
+    }
+
+    splitParagraphAndInsertBlock(textNode, blockElement) {
+        const parent = textNode && textNode.parentElement;
+        if (!parent || parent.tagName !== 'P') return false;
+        const parentContainer = parent.parentNode;
+        if (!parentContainer) return false;
+
+        const beforeNodes = [];
+        const afterNodes = [];
+        let passedTarget = false;
+        Array.from(parent.childNodes).forEach((node) => {
+            if (node === textNode) {
+                passedTarget = true;
+                return;
+            }
+            if (passedTarget) {
+                afterNodes.push(node);
+            } else {
+                beforeNodes.push(node);
+            }
+        });
+
+        if (beforeNodes.length === 0 && afterNodes.length === 0) {
+            return false;
+        }
+
+        this.trimBoundaryNodes(beforeNodes, { trimTrailingBreak: true });
+        this.trimBoundaryNodes(afterNodes, { trimLeadingBreak: true });
+
+        const beforeHasMeaningful = this.hasMeaningfulNodes(beforeNodes);
+        const afterHasMeaningful = this.hasMeaningfulNodes(afterNodes);
+
+        const beforeParagraph = beforeHasMeaningful ? document.createElement('p') : null;
+        const afterParagraph = afterHasMeaningful ? document.createElement('p') : null;
+
+        if (beforeParagraph) {
+            beforeNodes.forEach((node) => beforeParagraph.appendChild(node));
+        }
+        if (afterParagraph) {
+            afterNodes.forEach((node) => afterParagraph.appendChild(node));
+        }
+
+        if (!passedTarget) {
+            return false;
+        }
+
+        textNode.remove();
+        parentContainer.insertBefore(blockElement, parent);
+        if (beforeParagraph) {
+            parentContainer.insertBefore(beforeParagraph, blockElement);
+        }
+        if (afterParagraph) {
+            if (blockElement.nextSibling) {
+                parentContainer.insertBefore(afterParagraph, blockElement.nextSibling);
+            } else {
+                parentContainer.appendChild(afterParagraph);
+            }
+        }
+        parent.remove();
+        return true;
+    }
+
     /**
      * 隣接する同じタイプのリストをマージする
      * @param {HTMLElement} listElement - マージ対象のリスト要素(UL/OL)
@@ -414,7 +525,10 @@ export class MarkdownConverter {
                     }
                 } else {
                     ul = document.createElement('ul');
-                    if (parent && parent !== this.editor && !parentIsTableCell) {
+                    const splitInserted = this.splitParagraphAndInsertBlock(textNode, ul);
+                    if (splitInserted) {
+                        // inserted as sibling blocks around the original paragraph
+                    } else if (parent && parent !== this.editor && !parentIsTableCell) {
                         parent.replaceWith(ul);
                     } else {
                         textNode.parentNode.replaceChild(ul, textNode);
@@ -497,7 +611,10 @@ export class MarkdownConverter {
                     }
                 } else {
                     ol = document.createElement('ol');
-                    if (parent && parent !== this.editor && !parentIsTableCell) {
+                    const splitInserted = this.splitParagraphAndInsertBlock(textNode, ol);
+                    if (splitInserted) {
+                        // inserted as sibling blocks around the original paragraph
+                    } else if (parent && parent !== this.editor && !parentIsTableCell) {
                         parent.replaceWith(ol);
                     } else {
                         textNode.parentNode.replaceChild(ol, textNode);
