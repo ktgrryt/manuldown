@@ -5928,7 +5928,7 @@ import { SearchManager } from './modules/SearchManager.js';
         const shouldInsertPlaceholderBreak = !!(
             beforeList ||
             afterList ||
-            (!hadPrevBr && !hadNextBr)
+            !(hadPrevBr && hadNextBr)
         );
         let placeholderBr = null;
         if (shouldInsertPlaceholderBreak) {
@@ -9609,6 +9609,11 @@ import { SearchManager } from './modules/SearchManager.js';
             if (!selection || !selection.rangeCount) return false;
             const range = selection.getRangeAt(0);
             if (!editor.contains(range.commonAncestorContainer)) return false;
+
+            if (tableManager.handleDeleteTableKeydown(e)) {
+                finalizeCtrlKDeleteTurn();
+                return true;
+            }
 
             // Always intercept native Ctrl+K behavior inside the editor.
             // If our custom range build fails, we keep the current line instead of letting
