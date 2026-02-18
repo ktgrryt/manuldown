@@ -94,7 +94,7 @@ body {
     flex: 1;
     --editor-pad-top: 40px;
     --editor-pad-right: 20px;
-    --editor-pad-bottom: 20px;
+    --editor-pad-bottom: clamp(120px, 45vh, 420px);
     --editor-pad-left: 20px;
     padding: var(--editor-pad-top) var(--editor-pad-right) var(--editor-pad-bottom) var(--editor-pad-left);
     overflow-y: auto;
