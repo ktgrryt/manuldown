@@ -3761,6 +3761,94 @@ import { SearchManager } from './modules/SearchManager.js';
             }
         }
 
+        // テキスト行の行頭でBackspaceされた際、直前リストの末尾にある空LIのみを削除し、
+        // 現在行の先頭にカーソルを保持する。
+        const currentBlockForTrailingEmptyListDelete = getCurrentBlock(container);
+        if (currentBlockForTrailingEmptyListDelete && range.collapsed) {
+            const isSupportedCurrentBlock =
+                currentBlockForTrailingEmptyListDelete.tagName !== 'LI' &&
+                currentBlockForTrailingEmptyListDelete.tagName !== 'PRE';
+            if (isSupportedCurrentBlock) {
+                let isAtBlockStart = isRangeAtBlockStart(range, currentBlockForTrailingEmptyListDelete);
+                if (!isAtBlockStart) {
+                    const blockTextNodes = domUtils.getTextNodes(currentBlockForTrailingEmptyListDelete);
+                    if (blockTextNodes.length > 0) {
+                        isAtBlockStart = container === blockTextNodes[0] && offset === 0;
+                    } else if (container === currentBlockForTrailingEmptyListDelete && offset === 0) {
+                        isAtBlockStart = true;
+                    }
+                }
+
+                if (isAtBlockStart) {
+                    const prev = currentBlockForTrailingEmptyListDelete.previousElementSibling;
+                    if (prev && (prev.tagName === 'UL' || prev.tagName === 'OL')) {
+                        const listItems = Array.from(prev.children || []).filter(
+                            child => child && child.tagName === 'LI'
+                        );
+                        const trailingListItem = listItems.length > 0
+                            ? listItems[listItems.length - 1]
+                            : null;
+                        const isTrailingEmptyListItem = !!(
+                            trailingListItem &&
+                            !hasDirectTextContent(trailingListItem) &&
+                            !getNestedListContainerForListItem(trailingListItem)
+                        );
+
+                        if (isTrailingEmptyListItem) {
+                            const keepNodes = Array.from(trailingListItem.childNodes || []).filter(
+                                child => child &&
+                                    child.nodeType === Node.ELEMENT_NODE &&
+                                    child.tagName === 'INPUT' &&
+                                    child.type === 'checkbox'
+                            );
+
+                            while (trailingListItem.firstChild) {
+                                trailingListItem.removeChild(trailingListItem.firstChild);
+                            }
+                            keepNodes.forEach(node => trailingListItem.appendChild(node));
+
+                            while (currentBlockForTrailingEmptyListDelete.firstChild) {
+                                trailingListItem.appendChild(currentBlockForTrailingEmptyListDelete.firstChild);
+                            }
+                            currentBlockForTrailingEmptyListDelete.remove();
+
+                            if (hasCheckboxAtStart(trailingListItem)) {
+                                ensureCheckboxLeadingSpace(trailingListItem);
+                            }
+
+                            const newRange = document.createRange();
+                            const isCheckboxTarget = hasCheckboxAtStart(trailingListItem);
+                            let firstNode = isCheckboxTarget
+                                ? getFirstDirectTextNodeAfterCheckbox(trailingListItem)
+                                : getFirstDirectTextNode(trailingListItem);
+                            if (!firstNode) {
+                                firstNode = domUtils.getFirstTextNode(trailingListItem);
+                            }
+                            if (!firstNode) {
+                                const anchor = document.createTextNode(isCheckboxTarget ? '\u200B' : '');
+                                trailingListItem.appendChild(anchor);
+                                firstNode = anchor;
+                            }
+
+                            if (firstNode.nodeType === Node.TEXT_NODE) {
+                                const startOffset = isCheckboxTarget ? getCheckboxTextMinOffset(trailingListItem) : 0;
+                                newRange.setStart(firstNode, startOffset);
+                            } else {
+                                newRange.setStart(firstNode, 0);
+                            }
+                            newRange.collapse(true);
+                            selection.removeAllRanges();
+                            selection.addRange(newRange);
+
+                            updateListItemClasses();
+                            notifyChange();
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+
         // テキスト行の行頭でBackspaceされた際、直前の空行(P/DIV)のみを削除し、
         // 現在行の先頭にカーソルを保持する。
         const currentBlockForEmptyLineDelete = getCurrentBlock(container);
@@ -4416,7 +4504,20 @@ import { SearchManager } from './modules/SearchManager.js';
                 p.appendChild(br);
 
                 if (activeListItem.previousElementSibling || activeListItem.nextElementSibling) {
-                    parentList.parentElement.insertBefore(p, parentList.nextSibling);
+                    if (activeListItem.nextElementSibling) {
+                        // Split current list at the empty item so the paragraph stays between items.
+                        const newList = document.createElement(parentList.tagName);
+                        let nextItem = activeListItem.nextElementSibling;
+                        while (nextItem) {
+                            const itemToMove = nextItem;
+                            nextItem = nextItem.nextElementSibling;
+                            newList.appendChild(itemToMove);
+                        }
+                        parentList.parentElement.insertBefore(p, parentList.nextSibling);
+                        parentList.parentElement.insertBefore(newList, p.nextSibling);
+                    } else {
+                        parentList.parentElement.insertBefore(p, parentList.nextSibling);
+                    }
                     activeListItem.remove();
 
                     if (parentList.children.length === 0) {

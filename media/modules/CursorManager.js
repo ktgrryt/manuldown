@@ -298,23 +298,64 @@ export class CursorManager {
                 range.setStart(listItem, targetOffset);
             }
         } else {
-            let targetOffset;
-            if (direction === 'up') {
-                // ネストされたサブリストがある場合、その前にカーソルを配置
-                // （後ろに配置すると視覚的にサブリストの下にジャンプしてしまう）
-                const childNodes = listItem.childNodes ? Array.from(listItem.childNodes) : [];
-                const nestedListIndex = childNodes.findIndex(
-                    child => child.nodeType === Node.ELEMENT_NODE &&
-                        (child.tagName === 'UL' || child.tagName === 'OL')
-                );
-                // ネストリストがない場合はoffset 0に配置する
-                // （childNodes.lengthだとブラウザが挿入した<br>の後になり、
-                //  テキスト入力時に1行下にずれてしまうため）
-                targetOffset = nestedListIndex >= 0 ? nestedListIndex : 0;
-            } else {
-                targetOffset = 0;
+            let directTextNode = null;
+            const childNodes = listItem.childNodes ? Array.from(listItem.childNodes) : [];
+            const nestedListIndex = childNodes.findIndex(
+                child => child.nodeType === Node.ELEMENT_NODE &&
+                    (child.tagName === 'UL' || child.tagName === 'OL')
+            );
+
+            // 空のliでは element-level の offset 配置だと親li側へ見かけ上ジャンプすることがあるため、
+            // 直接テキストノード（なければZWSPアンカー）へカーソルを置く。
+            for (const child of childNodes) {
+                if (child.nodeType === Node.ELEMENT_NODE &&
+                    (child.tagName === 'UL' || child.tagName === 'OL')) {
+                    break;
+                }
+                if (child.nodeType === Node.TEXT_NODE) {
+                    directTextNode = child;
+                    break;
+                }
+                if (child.nodeType === Node.ELEMENT_NODE) {
+                    const candidate = this.domUtils.getFirstTextNode(child);
+                    if (candidate) {
+                        directTextNode = candidate;
+                        break;
+                    }
+                }
             }
-            range.setStart(listItem, targetOffset);
+
+            if (!directTextNode) {
+                const anchorNode = document.createTextNode('\u200B');
+                const nestedListNode = nestedListIndex >= 0 ? childNodes[nestedListIndex] : null;
+                if (nestedListNode) {
+                    listItem.insertBefore(anchorNode, nestedListNode);
+                } else if (listItem.firstChild) {
+                    listItem.insertBefore(anchorNode, listItem.firstChild);
+                } else {
+                    listItem.appendChild(anchorNode);
+                }
+                directTextNode = anchorNode;
+            } else if ((directTextNode.textContent || '') === '') {
+                directTextNode.textContent = '\u200B';
+            }
+
+            if (directTextNode) {
+                const text = directTextNode.textContent || '';
+                if (direction === 'up') {
+                    const lastNonZwsp = this._getLastNonZwspOffset(text);
+                    const targetOffset = lastNonZwsp === null ? 0 : Math.min(text.length, lastNonZwsp + 1);
+                    range.setStart(directTextNode, targetOffset);
+                } else {
+                    const firstNonZwsp = this._getFirstNonZwspOffset(text);
+                    const targetOffset = firstNonZwsp === null ? 0 : firstNonZwsp;
+                    range.setStart(directTextNode, targetOffset);
+                }
+            } else {
+                // フォールバック（基本的には到達しない）
+                const targetOffset = nestedListIndex >= 0 ? nestedListIndex : 0;
+                range.setStart(listItem, targetOffset);
+            }
         }
 
         range.collapse(true);
