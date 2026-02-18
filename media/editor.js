@@ -236,13 +236,24 @@ import { SearchManager } from './modules/SearchManager.js';
     }
 
     function hasDirectTextContent(listItem) {
-        return getDirectTextContent(listItem).replace(/[\u00A0\u200B]/g, '').trim() !== '';
+        return getDirectTextContent(listItem).replace(/[\u00A0\u200B\uFEFF]/g, '').trim() !== '';
+    }
+
+    function getNestedListContainerForListItem(listItem) {
+        if (!listItem || listItem.tagName !== 'LI') return null;
+        const directNestedList = Array.from(listItem.children || []).find(
+            child => child.tagName === 'UL' || child.tagName === 'OL'
+        );
+        if (directNestedList) return directNestedList;
+        const nextSibling = listItem.nextElementSibling;
+        if (nextSibling && (nextSibling.tagName === 'UL' || nextSibling.tagName === 'OL')) {
+            return nextSibling;
+        }
+        return null;
     }
 
     function hasNestedListChild(listItem) {
-        return Array.from(listItem.children).some(
-            child => child.tagName === 'UL' || child.tagName === 'OL'
-        );
+        return !!getNestedListContainerForListItem(listItem);
     }
 
     function isRangeInListItemDirectContent(range, listItem) {
@@ -1168,6 +1179,146 @@ import { SearchManager } from './modules/SearchManager.js';
         if (listItem) return listItem;
         listItem = resolveFromEditorBoundary(range.endContainer, range.endOffset);
         return listItem || null;
+    }
+
+    function getCtrlKTargetListItem(range) {
+        if (!range || !range.collapsed) return null;
+
+        const getAdjacentListBoundaryItem = (node, edge = 'first') => {
+            if (!node || node.nodeType !== Node.ELEMENT_NODE) return null;
+            if (node.tagName !== 'UL' && node.tagName !== 'OL') return null;
+            const items = Array.from(node.children || []).filter(
+                (child) => child && child.nodeType === Node.ELEMENT_NODE && child.tagName === 'LI'
+            );
+            if (items.length === 0) return null;
+            return edge === 'last' ? items[items.length - 1] : items[0];
+        };
+
+        const resolveFromListContainerBoundary = (container, offset) => {
+            if (!container || container.nodeType !== Node.ELEMENT_NODE) return null;
+            if (container.tagName !== 'UL' && container.tagName !== 'OL') return null;
+            const nodes = Array.from(container.childNodes || []);
+            const safeOffset = Math.max(0, Math.min(offset, nodes.length));
+            const prev = safeOffset > 0 ? nodes[safeOffset - 1] : null;
+            const current = safeOffset < nodes.length ? nodes[safeOffset] : null;
+            const prevNestedLast = getAdjacentListBoundaryItem(prev, 'last');
+            const currentNestedFirst = getAdjacentListBoundaryItem(current, 'first');
+
+            const caretRect = cursorManager && typeof cursorManager._getCaretRect === 'function'
+                ? cursorManager._getCaretRect(range)
+                : null;
+            const caretTop = caretRect && Number.isFinite(caretRect.top) ? caretRect.top : null;
+            const getTop = (element) => {
+                if (!element || typeof element.getBoundingClientRect !== 'function') return null;
+                const rect = element.getBoundingClientRect();
+                return rect && Number.isFinite(rect.top) ? rect.top : null;
+            };
+
+            if (currentNestedFirst) {
+                if (caretTop !== null) {
+                    const nestedTop = getTop(currentNestedFirst);
+                    if (nestedTop !== null && caretTop >= nestedTop - 2) {
+                        return currentNestedFirst;
+                    }
+                }
+                if (prev && prev.nodeType === Node.ELEMENT_NODE && prev.tagName === 'LI') {
+                    return prev;
+                }
+                return currentNestedFirst;
+            }
+
+            // caret in list container should resolve to the nearest concrete LI first
+            if (current && current.nodeType === Node.ELEMENT_NODE && current.tagName === 'LI') {
+                if (prevNestedLast && caretTop !== null) {
+                    const currentTop = getTop(current);
+                    if (currentTop !== null && caretTop < currentTop - 2) {
+                        return prevNestedLast;
+                    }
+                }
+                return current;
+            }
+            if (prev && prev.nodeType === Node.ELEMENT_NODE && prev.tagName === 'LI') {
+                // empty parent LI + nested UL sibling boundary should resolve to the parent LI
+                if (!current ||
+                    (current.nodeType === Node.ELEMENT_NODE &&
+                        (current.tagName === 'UL' || current.tagName === 'OL'))) {
+                    return prev;
+                }
+            }
+            if (prevNestedLast) {
+                if (!current) return prevNestedLast;
+                if (caretTop !== null && current.nodeType === Node.ELEMENT_NODE && current.tagName === 'LI') {
+                    const currentTop = getTop(current);
+                    if (currentTop !== null && caretTop < currentTop - 2) {
+                        return prevNestedLast;
+                    }
+                }
+            }
+            return null;
+        };
+
+        const resolveFromListItemChildBoundary = (container, offset) => {
+            if (!container || container.nodeType !== Node.ELEMENT_NODE || container.tagName !== 'LI') {
+                return null;
+            }
+            const nodes = Array.from(container.childNodes || []);
+            const safeOffset = Math.max(0, Math.min(offset, nodes.length));
+            const prev = safeOffset > 0 ? nodes[safeOffset - 1] : null;
+            const current = safeOffset < nodes.length ? nodes[safeOffset] : null;
+            const currentNestedFirst = getAdjacentListBoundaryItem(current, 'first');
+            const prevNestedLast = getAdjacentListBoundaryItem(prev, 'last');
+            if (!currentNestedFirst && !prevNestedLast) {
+                return null;
+            }
+
+            const caretRect = cursorManager && typeof cursorManager._getCaretRect === 'function'
+                ? cursorManager._getCaretRect(range)
+                : null;
+            const caretTop = caretRect && Number.isFinite(caretRect.top) ? caretRect.top : null;
+            const getTop = (element) => {
+                if (!element || typeof element.getBoundingClientRect !== 'function') return null;
+                const rect = element.getBoundingClientRect();
+                return rect && Number.isFinite(rect.top) ? rect.top : null;
+            };
+
+            if (currentNestedFirst) {
+                if (caretTop === null) return null;
+                const nestedTop = getTop(currentNestedFirst);
+                if (nestedTop !== null && caretTop >= nestedTop - 2) {
+                    return currentNestedFirst;
+                }
+            }
+
+            if (prevNestedLast) {
+                if (caretTop === null) return prevNestedLast;
+                const nestedTop = getTop(prevNestedLast);
+                if (nestedTop !== null && caretTop >= nestedTop - 2) {
+                    return prevNestedLast;
+                }
+            }
+
+            return null;
+        };
+
+        const boundaryCandidate =
+            resolveFromListContainerBoundary(range.startContainer, range.startOffset) ||
+            resolveFromListContainerBoundary(range.endContainer, range.endOffset) ||
+            resolveFromListItemChildBoundary(range.startContainer, range.startOffset) ||
+            resolveFromListItemChildBoundary(range.endContainer, range.endOffset);
+        if (boundaryCandidate) {
+            return boundaryCandidate;
+        }
+
+        const directListItem =
+            domUtils.getParentElement(range.startContainer, 'LI') ||
+            domUtils.getParentElement(range.endContainer, 'LI');
+        if (directListItem && isRangeInListItemDirectContent(range, directListItem)) {
+            return directListItem;
+        }
+
+        return getListItemFromRange(range, 'up') ||
+            getListItemFromRange(range, 'down') ||
+            directListItem;
     }
 
     function isRangeAtListItemStart(range, listItem) {
@@ -3410,6 +3561,18 @@ import { SearchManager } from './modules/SearchManager.js';
                     isAtStart = true;
                 }
             }
+            // 直接テキストがない親LI（子リストのみ）の場合、
+            // Safari/WebViewでは先頭判定が外れやすいので補正する。
+            if (!isAtStart && container === listItem && !hasDirectTextContent(listItem)) {
+                const childNodes = Array.from(listItem.childNodes || []);
+                const nestedListIndex = childNodes.findIndex(
+                    child => child && child.nodeType === Node.ELEMENT_NODE &&
+                        (child.tagName === 'UL' || child.tagName === 'OL')
+                );
+                if (offset <= 0 || (nestedListIndex >= 0 && offset <= nestedListIndex)) {
+                    isAtStart = true;
+                }
+            }
 
             if (isAtStart) {
                 const firstTextNode = textNodes.length > 0 ? textNodes[0] : null;
@@ -3418,9 +3581,7 @@ import { SearchManager } from './modules/SearchManager.js';
                 const parentList = listItem.parentElement;
                 const grandParentItem = parentList ? parentList.parentElement : null;
 
-                // リストアイテムのテキストコンテンツを取得（サブリストを除く）
-                const directTextContent = getDirectTextContent(listItem);
-                const isEmpty = directTextContent.trim() === '';
+                const isEmpty = !hasDirectTextContent(listItem);
 
                 if (grandParentItem && grandParentItem.tagName === 'LI') {
                     // ネストされたリスト
@@ -3428,6 +3589,9 @@ import { SearchManager } from './modules/SearchManager.js';
                     notifyChange();
                     return true;
                 } else {
+                    if (isEmpty && hasNestedListChild(listItem)) {
+                        return replaceEmptyListItemWithParagraphAndPromotedNestedItems(listItem, false);
+                    }
                     // トップレベルでのみチェックボックスを解除
                     if (hasCheckbox(listItem)) {
                         const checkbox = getCheckboxInListItemDirectContent(listItem);
@@ -5408,6 +5572,80 @@ import { SearchManager } from './modules/SearchManager.js';
             return;
         }
         notifyChange();
+    }
+
+    function replaceEmptyListItemWithParagraphAndPromotedNestedItems(listItem, immediate = false) {
+        if (!listItem || listItem.tagName !== 'LI') return false;
+        const parentList = listItem.parentElement;
+        if (!parentList || (parentList.tagName !== 'UL' && parentList.tagName !== 'OL') || !parentList.parentElement) {
+            return false;
+        }
+        if (hasDirectTextContent(listItem)) return false;
+
+        const nestedList = getNestedListContainerForListItem(listItem);
+        if (!nestedList) return false;
+        const nestedListIsAdjacentSibling =
+            nestedList.parentElement === parentList && nestedList === listItem.nextElementSibling;
+
+        const selection = window.getSelection();
+        if (!selection) return false;
+
+        const p = document.createElement('p');
+        p.appendChild(document.createElement('br'));
+
+        const promotedItems = Array.from(nestedList.children || []).filter(
+            child => child && child.tagName === 'LI'
+        );
+        const nextSiblings = [];
+        let next = nestedListIsAdjacentSibling ? nestedList.nextElementSibling : listItem.nextElementSibling;
+        while (next) {
+            nextSiblings.push(next);
+            next = next.nextElementSibling;
+        }
+        const followingItems = [...promotedItems, ...nextSiblings];
+        const hasPrevSibling = !!listItem.previousElementSibling;
+
+        if (nestedListIsAdjacentSibling && nestedList.parentElement === parentList) {
+            nestedList.remove();
+        }
+
+        const createFollowingListIfNeeded = () => {
+            if (followingItems.length === 0) return null;
+            const followingList = document.createElement(parentList.tagName);
+            followingItems.forEach(item => followingList.appendChild(item));
+            return followingList;
+        };
+
+        if (hasPrevSibling) {
+            parentList.parentElement.insertBefore(p, parentList.nextSibling);
+            const followingList = createFollowingListIfNeeded();
+            if (followingList) {
+                p.parentElement.insertBefore(followingList, p.nextSibling);
+            }
+            listItem.remove();
+            if (parentList.children.length === 0) {
+                parentList.remove();
+            }
+        } else {
+            const followingList = createFollowingListIfNeeded();
+            parentList.replaceWith(p);
+            if (followingList) {
+                p.parentElement.insertBefore(followingList, p.nextSibling);
+            }
+        }
+
+        const newRange = document.createRange();
+        newRange.setStart(p, 0);
+        newRange.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(newRange);
+
+        if (immediate) {
+            notifyChangeImmediate();
+        } else {
+            notifyChange();
+        }
+        return true;
     }
 
     function getSelectedCodeBlockLanguageLabel() {
@@ -8263,6 +8501,43 @@ import { SearchManager } from './modules/SearchManager.js';
         });
     }
 
+    function finalizeCtrlKDeleteTurn() {
+        pendingDeleteListItem = null;
+        pendingCtrlKDeleteSync = false;
+        suppressNextNativeCtrlKDelete = true;
+        setTimeout(() => {
+            suppressNextNativeCtrlKDelete = false;
+        }, 0);
+    }
+
+    function getCtrlKBlockEndBoundary(targetRange, block) {
+        if (!block || block.nodeType !== Node.ELEMENT_NODE) {
+            return {
+                container: block,
+                offset: block && block.childNodes ? block.childNodes.length : 0
+            };
+        }
+
+        if (block.tagName !== 'LI' || !isRangeInListItemDirectContent(targetRange, block)) {
+            return {
+                container: block,
+                offset: block.childNodes ? block.childNodes.length : 0
+            };
+        }
+
+        const childNodes = Array.from(block.childNodes || []);
+        const nestedListIndex = childNodes.findIndex(
+            (child) => child &&
+                child.nodeType === Node.ELEMENT_NODE &&
+                (child.tagName === 'UL' || child.tagName === 'OL')
+        );
+
+        return {
+            container: block,
+            offset: nestedListIndex >= 0 ? nestedListIndex : childNodes.length
+        };
+    }
+
     function buildCtrlKKillRange(selection, range) {
         if (!selection || !range) return null;
         if (!range.collapsed) {
@@ -8313,8 +8588,9 @@ import { SearchManager } from './modules/SearchManager.js';
                 startBlock.contains(endRange.startContainer);
             if (!endInsideStartBlock) {
                 const clampedEndRange = document.createRange();
-                clampedEndRange.selectNodeContents(startBlock);
-                clampedEndRange.collapse(false);
+                const ctrlKEndBoundary = getCtrlKBlockEndBoundary(startRange, startBlock);
+                clampedEndRange.setStart(ctrlKEndBoundary.container, ctrlKEndBoundary.offset);
+                clampedEndRange.collapse(true);
                 endRange = clampedEndRange;
             }
         }
@@ -8363,6 +8639,45 @@ import { SearchManager } from './modules/SearchManager.js';
         }
 
         if (range.collapsed) {
+            const listItemAtCaretForCtrlK = getCtrlKTargetListItem(range);
+            const hasNestedListInCtrlKTarget = !!getNestedListContainerForListItem(listItemAtCaretForCtrlK);
+            const parentListForCtrlK = listItemAtCaretForCtrlK ? listItemAtCaretForCtrlK.parentElement : null;
+            const grandParentItemForCtrlK = parentListForCtrlK ? parentListForCtrlK.parentElement : null;
+            const isPlainEmptyListItemForCtrlK = !!(
+                listItemAtCaretForCtrlK &&
+                !hasDirectTextContent(listItemAtCaretForCtrlK) &&
+                !hasNestedListInCtrlKTarget
+            );
+            const isEmptyNestedListItemForCtrlK = !!(
+                listItemAtCaretForCtrlK &&
+                !hasDirectTextContent(listItemAtCaretForCtrlK) &&
+                hasNestedListInCtrlKTarget
+            );
+
+            if (isPlainEmptyListItemForCtrlK) {
+                stateManager.saveState();
+                if (grandParentItemForCtrlK && grandParentItemForCtrlK.tagName === 'LI') {
+                    const textNode = range.startContainer.nodeType === Node.TEXT_NODE
+                        ? range.startContainer
+                        : (range.startContainer.firstChild || range.startContainer);
+                    listManager.outdentListItem(listItemAtCaretForCtrlK, textNode, range.startOffset);
+                    notifyChangeImmediate();
+                    finalizeCtrlKDeleteTurn();
+                    return true;
+                }
+                deleteCheckboxListItem(listItemAtCaretForCtrlK, true);
+                finalizeCtrlKDeleteTurn();
+                return true;
+            }
+            if (isEmptyNestedListItemForCtrlK &&
+                (!grandParentItemForCtrlK || grandParentItemForCtrlK.tagName !== 'LI')) {
+                stateManager.saveState();
+                if (replaceEmptyListItemWithParagraphAndPromotedNestedItems(listItemAtCaretForCtrlK, true)) {
+                    finalizeCtrlKDeleteTurn();
+                    return true;
+                }
+            }
+
             const startBlock = getCtrlKLineContainerFromRange(range);
             const supportsLinePreserve = !!(startBlock && startBlock !== editor && startBlock.tagName !== 'PRE');
             if (supportsLinePreserve) {
@@ -8376,9 +8691,95 @@ import { SearchManager } from './modules/SearchManager.js';
                     } else {
                         blockEndRange.setStart(startBlock, 0);
                     }
-                    blockEndRange.setEnd(startBlock, startBlock.childNodes.length);
+                    const ctrlKEndBoundary = getCtrlKBlockEndBoundary(range, startBlock);
+                    blockEndRange.setEnd(ctrlKEndBoundary.container, ctrlKEndBoundary.offset);
                     const blockEndText = blockEndRange.toString().replace(/[\u200B\uFEFF\u00A0\s]/g, '');
                     if (blockEndText.length === 0) {
+                        const isRemovableEmptyLineBlock =
+                            startBlock.parentElement === editor &&
+                            /^(P|DIV|H[1-6])$/.test(startBlock.tagName) &&
+                            isEffectivelyEmptyBlock(startBlock);
+
+                        if (isRemovableEmptyLineBlock) {
+                            stateManager.saveState();
+                            emacsKillBuffer = '\n';
+
+                            const prevElement = getPreviousElementSibling(startBlock);
+                            const nextElement = getNextElementSibling(startBlock);
+                            let wrapper = null;
+                            const nextIsRawTable = !!(nextElement && nextElement.tagName === 'TABLE');
+                            if (nextElement) {
+                                if (nextElement.classList?.contains('md-table-wrapper')) {
+                                    wrapper = nextElement;
+                                } else if (nextElement.tagName === 'TABLE') {
+                                    wrapper = nextElement.closest('.md-table-wrapper');
+                                }
+                            }
+
+                            startBlock.remove();
+
+                            if (!wrapper && nextIsRawTable) {
+                                tableManager.wrapTables();
+                                wrapper = nextElement.closest('.md-table-wrapper');
+                            }
+
+                            if (nextElement) {
+                                if (wrapper) {
+                                    const leftEdge = wrapper.querySelector('.md-table-edge-left');
+                                    if (leftEdge) {
+                                        tableManager._setCursorToEdge(leftEdge, false);
+                                    } else {
+                                        const newRange = document.createRange();
+                                        newRange.setStart(wrapper, 0);
+                                        newRange.collapse(true);
+                                        applySelectionRange(selection, newRange);
+                                    }
+                                } else {
+                                    const newRange = document.createRange();
+                                    const firstNode = getPreferredFirstTextNodeForElement(nextElement);
+                                    if (firstNode) {
+                                        newRange.setStart(firstNode, 0);
+                                    } else {
+                                        newRange.setStart(nextElement, 0);
+                                    }
+                                    newRange.collapse(true);
+                                    applySelectionRange(selection, newRange);
+                                }
+                            } else if (prevElement) {
+                                const newRange = document.createRange();
+                                const lastNode = domUtils.getLastTextNode(prevElement);
+                                if (lastNode) {
+                                    newRange.setStart(lastNode, lastNode.textContent.length);
+                                } else {
+                                    newRange.setStart(prevElement, prevElement.childNodes.length);
+                                }
+                                newRange.collapse(true);
+                                applySelectionRange(selection, newRange);
+                            } else {
+                                const p = document.createElement('p');
+                                p.appendChild(document.createElement('br'));
+                                editor.appendChild(p);
+                                const newRange = document.createRange();
+                                newRange.setStart(p, 0);
+                                newRange.collapse(true);
+                                applySelectionRange(selection, newRange);
+                            }
+
+                            domUtils.ensureInlineCodeSpaces();
+                            domUtils.cleanupGhostStyles();
+                            tableManager.wrapTables();
+                            applyImageRenderSizes();
+                            hideImageResizeOverlaySafely();
+                            pendingDeleteListItem = null;
+                            pendingCtrlKDeleteSync = false;
+                            suppressNextNativeCtrlKDelete = true;
+                            notifyChangeImmediate();
+                            setTimeout(() => {
+                                suppressNextNativeCtrlKDelete = false;
+                            }, 0);
+                            return true;
+                        }
+
                         pendingCtrlKDeleteSync = false;
                         suppressNextNativeCtrlKDelete = true;
                         setTimeout(() => {
@@ -8397,18 +8798,55 @@ import { SearchManager } from './modules/SearchManager.js';
 
                     stateManager.saveState();
                     emacsKillBuffer = killedText;
+                    const deleteStartContainer = blockEndRange.startContainer;
+                    const deleteStartOffset = blockEndRange.startOffset;
                     blockEndRange.deleteContents();
                     cleanupEmptyAnchorsInBlock(startBlock);
                     ensureBlockHasCaretPlaceholder(startBlock);
 
                     const caretRange = document.createRange();
-                    const firstNode = getPreferredFirstTextNodeForElement(startBlock);
-                    if (firstNode) {
-                        caretRange.setStart(firstNode, 0);
+                    const nestedListForCaret = startBlock.tagName === 'LI'
+                        ? Array.from(startBlock.childNodes || []).find(
+                            (child) => child &&
+                                child.nodeType === Node.ELEMENT_NODE &&
+                                (child.tagName === 'UL' || child.tagName === 'OL')
+                        )
+                        : null;
+                    const shouldPlaceCaretAtNestedListBoundary = !!(
+                        nestedListForCaret &&
+                        !hasDirectTextContent(startBlock)
+                    );
+                    if (shouldPlaceCaretAtNestedListBoundary) {
+                        const boundaryOffset = Array.prototype.indexOf.call(startBlock.childNodes, nestedListForCaret);
+                        caretRange.setStart(startBlock, Math.max(0, boundaryOffset));
                     } else {
-                        const anchor = document.createTextNode('\u200B');
-                        startBlock.insertBefore(anchor, startBlock.firstChild || null);
-                        caretRange.setStart(anchor, 1);
+                        let restoredAtDeleteStart = false;
+                        if (deleteStartContainer && editor.contains(deleteStartContainer)) {
+                            try {
+                                if (deleteStartContainer.nodeType === Node.TEXT_NODE) {
+                                    const textLength = (deleteStartContainer.textContent || '').length;
+                                    caretRange.setStart(deleteStartContainer, Math.max(0, Math.min(deleteStartOffset, textLength)));
+                                    restoredAtDeleteStart = true;
+                                } else if (deleteStartContainer.nodeType === Node.ELEMENT_NODE) {
+                                    const childCount = deleteStartContainer.childNodes ? deleteStartContainer.childNodes.length : 0;
+                                    caretRange.setStart(deleteStartContainer, Math.max(0, Math.min(deleteStartOffset, childCount)));
+                                    restoredAtDeleteStart = true;
+                                }
+                            } catch (restoreError) {
+                                restoredAtDeleteStart = false;
+                            }
+                        }
+
+                        if (!restoredAtDeleteStart) {
+                            const firstNode = getPreferredFirstTextNodeForElement(startBlock);
+                            if (firstNode) {
+                                caretRange.setStart(firstNode, 0);
+                            } else {
+                                const anchor = document.createTextNode('\u200B');
+                                startBlock.insertBefore(anchor, startBlock.firstChild || null);
+                                caretRange.setStart(anchor, 1);
+                            }
+                        }
                     }
                     caretRange.collapse(true);
                     applySelectionRange(selection, caretRange);
@@ -9428,36 +9866,68 @@ import { SearchManager } from './modules/SearchManager.js';
             return;
         }
 
-        if (isMac && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'k' && listItem && range.collapsed) {
+        const ctrlKListItemCandidate = getCtrlKTargetListItem(range) || listItem;
+        if (isMac && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'k' && range.collapsed && ctrlKListItemCandidate) {
+            const ctrlKListItem = ctrlKListItemCandidate;
             // チェックボックス上でCtrl+K → リストアイテム全体を削除
             const checkboxForCtrlK = isCursorOnCheckbox();
             if (checkboxForCtrlK) {
                 e.preventDefault();
                 stateManager.saveState();
                 deleteCheckboxListItem(checkboxForCtrlK.parentElement, true);
+                finalizeCtrlKDeleteTurn();
                 return;
             }
             // 空のリストアイテムでCtrl+K → リストアイテムを削除
-            if (!hasDirectTextContent(listItem)) {
+            if (!hasDirectTextContent(ctrlKListItem)) {
                 e.preventDefault();
                 stateManager.saveState();
-                const parentList = listItem.parentElement;
+                const parentList = ctrlKListItem.parentElement;
+                const nestedList = getNestedListContainerForListItem(ctrlKListItem);
+                const grandParentItem = parentList ? parentList.parentElement : null;
+
+                // 空のネスト項目（子リストなし）は削除せずアウトデントする
+                if (!nestedList && grandParentItem && grandParentItem.tagName === 'LI') {
+                    const textNode = container.nodeType === Node.TEXT_NODE
+                        ? container
+                        : (container.firstChild || container);
+                    const offset = range.startOffset;
+                    listManager.outdentListItem(ctrlKListItem, textNode, offset);
+                    notifyChangeImmediate();
+                    finalizeCtrlKDeleteTurn();
+                    return;
+                }
+
+                // 空の箇条書き（子リストなし）は、箇条書きを外して空行にする
+                if (!nestedList) {
+                    deleteCheckboxListItem(ctrlKListItem, true);
+                    finalizeCtrlKDeleteTurn();
+                    return;
+                }
+                // 空の親LI + 子リストあり（トップレベル）は、
+                // 親LIを空行に置換しつつ子リストを1段持ち上げる。
+                if (!grandParentItem || grandParentItem.tagName !== 'LI') {
+                    if (replaceEmptyListItemWithParagraphAndPromotedNestedItems(ctrlKListItem, true)) {
+                        finalizeCtrlKDeleteTurn();
+                        return;
+                    }
+                }
 
                 // 次の兄弟リストアイテムがある場合 → 空アイテムを削除して次のアイテムにカーソル移動
-                const nextSibling = listItem.nextElementSibling;
+                const nextSibling = ctrlKListItem.nextElementSibling;
                 if (nextSibling && nextSibling.tagName === 'LI') {
                     // ネストされた子リストがあれば次の兄弟の前に昇格
-                    const nestedList = Array.from(listItem.children).find(
-                        child => child.tagName === 'UL' || child.tagName === 'OL'
-                    );
                     let firstPromotedItem = null;
                     if (nestedList && nestedList.children.length > 0) {
                         firstPromotedItem = nestedList.children[0];
                         while (nestedList.children.length > 0) {
-                            parentList.insertBefore(nestedList.children[0], listItem);
+                            parentList.insertBefore(nestedList.children[0], ctrlKListItem);
+                        }
+                        if (nestedList.parentElement === parentList && nestedList !== ctrlKListItem) {
+                            nestedList.remove();
                         }
                     }
-                    listItem.remove();
+                    ctrlKListItem.remove();
                     // ネストされた子があった場合は昇格した最初のアイテムに、なければ次の兄弟にカーソル
                     const cursorTarget = firstPromotedItem || nextSibling;
                     const newRange = document.createRange();
@@ -9476,19 +9946,20 @@ import { SearchManager } from './modules/SearchManager.js';
                     selection.removeAllRanges();
                     selection.addRange(newRange);
                     notifyChangeImmediate();
+                    finalizeCtrlKDeleteTurn();
                     return;
                 }
 
                 // ネストされた子リストがある場合（次の兄弟なし）→ 子アイテムを親レベルに昇格
-                const nestedList = Array.from(listItem.children).find(
-                    child => child.tagName === 'UL' || child.tagName === 'OL'
-                );
                 if (nestedList && nestedList.children.length > 0) {
                     const firstPromotedItem = nestedList.children[0];
                     while (nestedList.children.length > 0) {
-                        parentList.insertBefore(nestedList.children[0], listItem);
+                        parentList.insertBefore(nestedList.children[0], ctrlKListItem);
                     }
-                    listItem.remove();
+                    if (nestedList.parentElement === parentList && nestedList !== ctrlKListItem) {
+                        nestedList.remove();
+                    }
+                    ctrlKListItem.remove();
                     const newRange = document.createRange();
                     let targetNode = null;
                     for (const child of firstPromotedItem.childNodes) {
@@ -9505,23 +9976,23 @@ import { SearchManager } from './modules/SearchManager.js';
                     selection.removeAllRanges();
                     selection.addRange(newRange);
                     notifyChangeImmediate();
+                    finalizeCtrlKDeleteTurn();
                     return;
                 }
 
-                const grandParentItem = parentList ? parentList.parentElement : null;
                 if (grandParentItem && grandParentItem.tagName === 'LI') {
                     // ネストされたリスト → アウトデント
                     const textNode = container.nodeType === 3 ? container : container.firstChild;
                     const offset = range.startOffset;
-                    listManager.outdentListItem(listItem, textNode, offset);
+                    listManager.outdentListItem(ctrlKListItem, textNode, offset);
                 } else {
                     // トップレベルリスト → パラグラフに変換
                     const p = document.createElement('p');
                     const br = document.createElement('br');
                     p.appendChild(br);
-                    if (listItem.previousElementSibling || listItem.nextElementSibling) {
+                    if (ctrlKListItem.previousElementSibling || ctrlKListItem.nextElementSibling) {
                         parentList.parentElement.insertBefore(p, parentList.nextSibling);
-                        listItem.remove();
+                        ctrlKListItem.remove();
                         if (parentList.children.length === 0) {
                             parentList.remove();
                         }
@@ -9535,9 +10006,10 @@ import { SearchManager } from './modules/SearchManager.js';
                     selection.addRange(newRange);
                 }
                 notifyChangeImmediate();
+                finalizeCtrlKDeleteTurn();
                 return;
             }
-            pendingDeleteListItem = listItem;
+            pendingDeleteListItem = ctrlKListItem;
         }
 
         if (handleCtrlKEmptyLineBeforeTableKeydown(e, context)) {
