@@ -154,11 +154,14 @@ export class DOMUtils {
         });
 
         // Normalize table cells so browser-inserted BR/DIV/P don't break Markdown table rows.
+        // Preserve visual line breaks as literal "<br>" text inside the Markdown table cell.
         const tableCells = clone.querySelectorAll('td, th');
         tableCells.forEach(cell => {
             const hasText = (cell.textContent || '').replace(/[\u200B\u00A0]/g, '').trim() !== '';
             const hasProblematicStructure =
-                !!cell.querySelector('br') || !!cell.querySelector(':scope > div, :scope > p');
+                !!cell.querySelector('br') ||
+                !!cell.querySelector(':scope > div, :scope > p') ||
+                !!cell.querySelector('ul, ol');
 
             if (!hasText) {
                 const emptyArtifacts = cell.querySelectorAll('br, div, p');
@@ -167,10 +170,36 @@ export class DOMUtils {
             }
 
             if (hasProblematicStructure) {
-                const normalized = (cell.textContent || '')
-                    .replace(/[\u200B\u00A0]/g, ' ')
-                    .replace(/\s+/g, ' ')
-                    .trim();
+                // Convert rendered line boundaries (BR/DIV/P) into line feeds first, then
+                // convert them into literal "<br>" text so Turndown emits
+                // a single Markdown table row with inline breaks (instead of splitting rows).
+                const htmlWithLineFeeds = (cell.innerHTML || '')
+                    .replace(/<br\s*\/?>/gi, '\n')
+                    .replace(/<\/(?:div|p)>/gi, '\n')
+                    .replace(/<(?:div|p)\b[^>]*>/gi, '')
+                    .replace(/<input\b(?=[^>]*\btype\s*=\s*["']?checkbox["']?)[^>]*>/gi, (inputTag) =>
+                        /\bchecked\b/i.test(inputTag) ? '[x] ' : '[ ] '
+                    )
+                    .replace(/<li\b[^>]*>/gi, '\n- ')
+                    .replace(/<\/li>/gi, '')
+                    .replace(/<(?:ul|ol)\b[^>]*>/gi, '')
+                    .replace(/<\/(?:ul|ol)>/gi, '\n');
+                const lineProbe = document.createElement('div');
+                lineProbe.innerHTML = htmlWithLineFeeds;
+
+                const normalizedLines = ((lineProbe.textContent || '') + '')
+                    .replace(/\r\n?/g, '\n')
+                    .replace(/[\u200B]/g, '')
+                    .replace(/\u00A0/g, ' ')
+                    .split('\n')
+                    .map(line => line.replace(/[ \t\f\v]+/g, ' ').trim());
+
+                // Keep leading empty lines so intentional first-line breaks in a cell survive.
+                while (normalizedLines.length > 0 && normalizedLines[normalizedLines.length - 1] === '') {
+                    normalizedLines.pop();
+                }
+
+                const normalized = normalizedLines.join('<br>');
                 cell.textContent = normalized;
             }
         });

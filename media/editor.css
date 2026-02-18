@@ -75,6 +75,24 @@ body {
     border-color: var(--vscode-focusBorder);
 }
 
+.toolbar-btn:disabled,
+.toolbar-btn.is-disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    background-color: transparent;
+    border-color: transparent;
+}
+
+.toolbar-btn:disabled:hover,
+.toolbar-btn.is-disabled:hover,
+.toolbar-btn:disabled:active,
+.toolbar-btn.is-disabled:active,
+.toolbar-btn:disabled:focus-visible,
+.toolbar-btn.is-disabled:focus-visible {
+    background-color: transparent;
+    border-color: transparent;
+}
+
 .toolbar-separator {
     width: 1px;
     height: 20px;
@@ -1068,6 +1086,7 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
     list-style: none;
     /* Keep task text aligned with regular ol/ul item text */
     padding-left: 0;
+    min-height: 1.6em;
 }
 
 #editor li > input[type="checkbox"]:first-child {

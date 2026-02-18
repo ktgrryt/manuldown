@@ -11,6 +11,16 @@ export class ToolbarManager {
         this.onInsertTable = options.onInsertTable || null;
         this.onInsertQuote = options.onInsertQuote || null;
         this.onInsertCodeBlock = options.onInsertCodeBlock || null;
+        this.onInsertCheckbox = options.onInsertCheckbox || null;
+        this.commandButtons = new Map();
+        this.tableCellRestrictedCommands = new Set([
+            'h1',
+            'h2',
+            'h3',
+            'quote',
+            'codeblock',
+            'table',
+        ]);
     }
 
     /**
@@ -19,6 +29,10 @@ export class ToolbarManager {
     setup() {
         const buttons = document.querySelectorAll('.toolbar-btn');
         buttons.forEach(button => {
+            const command = button.getAttribute('data-command');
+            if (command) {
+                this.commandButtons.set(command, button);
+            }
             button.addEventListener('click', (e) => {
                 e.preventDefault();
                 const command = button.getAttribute('data-command');
@@ -29,6 +43,15 @@ export class ToolbarManager {
                 }
             });
         });
+
+        const updateAvailability = () => this.updateCommandAvailability();
+        document.addEventListener('selectionchange', updateAvailability);
+        this.editor.addEventListener('keyup', updateAvailability);
+        this.editor.addEventListener('mouseup', updateAvailability);
+        this.editor.addEventListener('input', updateAvailability);
+        this.editor.addEventListener('focus', updateAvailability);
+
+        this.updateCommandAvailability();
     }
 
     /**
@@ -37,6 +60,12 @@ export class ToolbarManager {
      */
     executeCommand(command) {
         this.editor.focus();
+
+        const isTableCellRestrictedCommand =
+            !!command && this.tableCellRestrictedCommands.has(command);
+        if (isTableCellRestrictedCommand && this.isSelectionInTableCellContext()) {
+            return;
+        }
 
         if (command === 'table' && this.onInsertTable) {
             this.onInsertTable();
@@ -50,6 +79,11 @@ export class ToolbarManager {
 
         if (command === 'codeblock' && this.onInsertCodeBlock) {
             this.onInsertCodeBlock();
+            return;
+        }
+
+        if (command === 'checkbox' && this.onInsertCheckbox) {
+            this.onInsertCheckbox();
             return;
         }
 
@@ -90,16 +124,157 @@ export class ToolbarManager {
         }
     }
 
+    updateCommandAvailability() {
+        const inTableCellContext = this.isSelectionInTableCellContext();
+
+        this.tableCellRestrictedCommands.forEach((command) => {
+            const button = this.commandButtons.get(command);
+            if (!button) return;
+            button.disabled = inTableCellContext;
+            button.classList.toggle('is-disabled', inTableCellContext);
+            if (inTableCellContext) {
+                button.setAttribute('aria-disabled', 'true');
+            } else {
+                button.removeAttribute('aria-disabled');
+            }
+        });
+    }
+
+    isSelectionInTableCellContext() {
+        const selection = window.getSelection();
+        if (selection && selection.rangeCount > 0) {
+            for (let i = 0; i < selection.rangeCount; i++) {
+                const range = selection.getRangeAt(i);
+                if (this._isNodeInTableCell(range.startContainer) || this._isNodeInTableCell(range.endContainer)) {
+                    return true;
+                }
+            }
+        }
+
+        // TableManager uses these classes for active table selections.
+        return !!this.editor.querySelector('.md-table-cell-selected, .md-table-structure-selected-cell');
+    }
+
+    _isNodeInTableCell(node) {
+        if (!node) return false;
+        const element = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+        if (!element) return false;
+        return !!element.closest('td, th');
+    }
+
     /**
      * チェックボックスリストを挿入
      */
     insertCheckboxList() {
         const selection = window.getSelection();
-        if (!selection || !selection.rangeCount) return;
+        if (!selection) return;
 
-        const range = selection.getRangeAt(0);
+        const isRangeInsideEditor = (range) => {
+            if (!range) return false;
+            return this.editor.contains(range.startContainer) && this.editor.contains(range.endContainer);
+        };
+
+        const getCellFromNode = (node) => {
+            if (!node) return null;
+            const element = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+            if (!element) return null;
+            return element.closest('td, th');
+        };
+
+        const isStructureHandleNode = (node) =>
+            !!(node &&
+                node.nodeType === Node.ELEMENT_NODE &&
+                node.classList &&
+                node.classList.contains('md-table-structure-handle'));
+
+        const isPlaceholderOnlyNode = (node) => {
+            if (!node) return true;
+            if (node.nodeType === Node.TEXT_NODE) {
+                const text = (node.textContent || '').replace(/[\u200B\u00A0]/g, '');
+                return text.trim() === '';
+            }
+            if (node.nodeType !== Node.ELEMENT_NODE) {
+                return true;
+            }
+            if (isStructureHandleNode(node)) {
+                return true;
+            }
+            if (
+                node.classList?.contains('md-table-insert-line') ||
+                node.getAttribute?.('data-exclude-from-markdown') === 'true'
+            ) {
+                return true;
+            }
+            if (node.tagName === 'BR') {
+                return true;
+            }
+            if (node.tagName === 'UL' || node.tagName === 'OL' || node.tagName === 'TABLE') {
+                return false;
+            }
+            const children = Array.from(node.childNodes || []);
+            if (!children.length) {
+                const text = (node.textContent || '').replace(/[\u200B\u00A0]/g, '');
+                return text.trim() === '';
+            }
+            return children.every((child) => isPlaceholderOnlyNode(child));
+        };
+
+        const isPlaceholderOnlyTableCell = (cell) => {
+            if (!cell) return false;
+            return Array.from(cell.childNodes || []).every((child) => isPlaceholderOnlyNode(child));
+        };
+
+        const cleanupPlaceholderArtifactsInCell = (cell) => {
+            if (!cell) return;
+            Array.from(cell.childNodes || []).forEach((node) => {
+                if (isStructureHandleNode(node)) return;
+                if (node.nodeType === Node.ELEMENT_NODE &&
+                    (node.tagName === 'UL' || node.tagName === 'OL' || node.tagName === 'TABLE')) {
+                    return;
+                }
+                if (isPlaceholderOnlyNode(node)) {
+                    node.remove();
+                }
+            });
+        };
+
+        const getActiveSelectedTableCell = () => {
+            const cell = this.editor.querySelector('.md-table-cell-selected, .md-table-structure-selected-cell');
+            if (!cell) return null;
+            return (cell.tagName === 'TD' || cell.tagName === 'TH') ? cell : null;
+        };
+
+        const placeCaretAtCellStart = (cell) => {
+            if (!cell) return null;
+            const range = document.createRange();
+            const textWalker = document.createTreeWalker(cell, NodeFilter.SHOW_TEXT, null);
+            const textNode = textWalker.nextNode();
+            if (textNode) {
+                range.setStart(textNode, 0);
+            } else {
+                range.setStart(cell, 0);
+            }
+            range.collapse(true);
+            selection.removeAllRanges();
+            selection.addRange(range);
+            return range;
+        };
+
+        let range = selection.rangeCount ? selection.getRangeAt(0) : null;
+        const selectedCell = getActiveSelectedTableCell();
+        const rangeCell = range ? getCellFromNode(range.startContainer) : null;
+        if (selectedCell && !rangeCell) {
+            range = placeCaretAtCellStart(selectedCell);
+        } else if (!isRangeInsideEditor(range)) {
+            range = selectedCell ? placeCaretAtCellStart(selectedCell) : null;
+        }
+        if (!isRangeInsideEditor(range)) return;
+
         const container = range.commonAncestorContainer;
         const block = container.nodeType === 3 ? container.parentElement : container;
+        const tableCellBoundary = getCellFromNode(container);
+        const traversalBoundary = tableCellBoundary || this.editor;
+        const hadOnlyPlaceholderBreaks = isPlaceholderOnlyTableCell(tableCellBoundary);
 
         const getFirstTextNode = (element) => {
             if (!element) return null;
@@ -135,9 +310,16 @@ export class ToolbarManager {
             if (!checkbox) return;
 
             let firstContentNode = null;
+            let firstSublist = null;
             for (const child of li.childNodes) {
                 if (child === checkbox) continue;
                 if (child.nodeType === Node.ELEMENT_NODE && child.tagName === 'INPUT') continue;
+                if (child.nodeType === Node.ELEMENT_NODE && (child.tagName === 'UL' || child.tagName === 'OL')) {
+                    if (!firstSublist) {
+                        firstSublist = child;
+                    }
+                    continue;
+                }
                 firstContentNode = child;
                 break;
             }
@@ -153,14 +335,37 @@ export class ToolbarManager {
                 return;
             }
 
-            if (!firstContentNode) {
-                li.appendChild(document.createTextNode('\u200B'));
+            // Replace placeholder BR with a text anchor so no extra blank line appears.
+            if (
+                firstContentNode &&
+                firstContentNode.nodeType === Node.ELEMENT_NODE &&
+                firstContentNode.tagName === 'BR'
+            ) {
+                const anchorNode = document.createTextNode('\u200B');
+                firstContentNode.replaceWith(anchorNode);
+                return;
+            }
+
+            if (!getFirstDirectTextNodeAfterCheckbox(li)) {
+                const anchorNode = document.createTextNode('\u200B');
+                if (firstContentNode) {
+                    li.insertBefore(anchorNode, firstContentNode);
+                } else if (firstSublist) {
+                    li.insertBefore(anchorNode, firstSublist);
+                } else {
+                    const nextNode = checkbox.nextSibling;
+                    if (nextNode) {
+                        li.insertBefore(anchorNode, nextNode);
+                    } else {
+                        li.appendChild(anchorNode);
+                    }
+                }
             }
         };
 
         // 現在のブロック要素を取得
         let currentBlock = block;
-        while (currentBlock && currentBlock !== this.editor) {
+        while (currentBlock && currentBlock !== traversalBoundary) {
             if (currentBlock.tagName === 'LI') {
                 // 既にリストアイテム内の場合、チェックボックスを追加/削除
                 const existingCheckbox = currentBlock.querySelector(':scope > input[type="checkbox"]');
@@ -183,6 +388,9 @@ export class ToolbarManager {
                         selection.addRange(newRange);
                     }
                 }
+                if (hadOnlyPlaceholderBreaks) {
+                    cleanupPlaceholderArtifactsInCell(tableCellBoundary);
+                }
                 return;
             }
             currentBlock = currentBlock.parentElement;
@@ -198,10 +406,14 @@ export class ToolbarManager {
 
         // 現在のブロックを置き換え
         currentBlock = block;
-        while (currentBlock && currentBlock !== this.editor && currentBlock.parentElement !== this.editor) {
+        while (
+            currentBlock &&
+            currentBlock !== traversalBoundary &&
+            currentBlock.parentElement !== traversalBoundary
+        ) {
             currentBlock = currentBlock.parentElement;
         }
-        if (currentBlock && currentBlock !== this.editor) {
+        if (currentBlock && currentBlock !== traversalBoundary) {
             const nodesToMove = Array.from(currentBlock.childNodes);
             nodesToMove.forEach(node => li.appendChild(node));
             ensureCheckboxLeadingSpace(li);
@@ -224,6 +436,9 @@ export class ToolbarManager {
         newRange.collapse(true);
         selection.removeAllRanges();
         selection.addRange(newRange);
+        if (hadOnlyPlaceholderBreaks) {
+            cleanupPlaceholderArtifactsInCell(tableCellBoundary);
+        }
     }
 
     /**

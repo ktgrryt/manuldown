@@ -199,7 +199,8 @@ import { SearchManager } from './modules/SearchManager.js';
     const toolbarManager = new ToolbarManager(editor, stateManager, {
         onInsertTable: () => tableManager.openTableDialog(),
         onInsertQuote: () => insertToolbarQuote(),
-        onInsertCodeBlock: () => insertToolbarCodeBlock()
+        onInsertCodeBlock: () => insertToolbarCodeBlock(),
+        onInsertCheckbox: () => insertSlashCheckbox()
     });
 
     function applySettings(nextSettings) {
@@ -393,6 +394,10 @@ import { SearchManager } from './modules/SearchManager.js';
     // チェックボックスがリストアイテムの先頭にあるかどうかをチェック
     function hasCheckboxAtStart(listItem) {
         return hasCheckbox(listItem);
+    }
+
+    function isEmptyCheckboxListItem(listItem) {
+        return !!(listItem && hasCheckboxAtStart(listItem) && !hasDirectTextContent(listItem));
     }
 
     function parseImageAltSizeSpec(rawAlt) {
@@ -781,6 +786,27 @@ import { SearchManager } from './modules/SearchManager.js';
         const checkbox = li.querySelector(':scope > input[type="checkbox"]');
         if (!checkbox) return;
 
+        const isPlaceholderOnlyListNode = (node) => {
+            if (!node) return true;
+            if (node.nodeType === Node.TEXT_NODE) {
+                return (node.textContent || '').replace(/[\u200B\u00A0]/g, '').trim() === '';
+            }
+            if (node.nodeType !== Node.ELEMENT_NODE) {
+                return true;
+            }
+            if (node.tagName === 'BR') {
+                return true;
+            }
+            if (node.tagName === 'UL' || node.tagName === 'OL' || node.tagName === 'INPUT') {
+                return false;
+            }
+            const children = Array.from(node.childNodes || []);
+            if (!children.length) {
+                return (node.textContent || '').replace(/[\u200B\u00A0]/g, '').trim() === '';
+            }
+            return children.every((child) => isPlaceholderOnlyListNode(child));
+        };
+
         let firstContentNode = null;
         let firstSublist = null;
         for (const child of li.childNodes) {
@@ -808,6 +834,17 @@ import { SearchManager } from './modules/SearchManager.js';
                 firstContentNode.textContent = '\u200B';
             }
             return;
+        }
+
+        if (
+            firstContentNode &&
+            firstContentNode.nodeType === Node.ELEMENT_NODE &&
+            firstContentNode.tagName !== 'UL' &&
+            firstContentNode.tagName !== 'OL' &&
+            isPlaceholderOnlyListNode(firstContentNode)
+        ) {
+            firstContentNode.remove();
+            firstContentNode = null;
         }
 
         // Empty checkbox list items can carry a BR from an empty paragraph.
@@ -1754,13 +1791,121 @@ import { SearchManager } from './modules/SearchManager.js';
 
     function insertSlashCheckbox() {
         const selection = window.getSelection();
-        if (!selection || !selection.rangeCount) return;
+        if (!selection) return;
 
-        const range = selection.getRangeAt(0);
+        const isRangeInsideEditor = (targetRange) =>
+            !!(
+                targetRange &&
+                editor.contains(targetRange.startContainer) &&
+                editor.contains(targetRange.endContainer)
+            );
+
+        const getActiveSelectedTableCell = () => {
+            const cell = editor.querySelector('.md-table-cell-selected, .md-table-structure-selected-cell');
+            if (!cell) return null;
+            return (cell.tagName === 'TD' || cell.tagName === 'TH') ? cell : null;
+        };
+
+        const placeCaretAtCellStart = (cell) => {
+            if (!cell) return null;
+            const newRange = document.createRange();
+            const textWalker = document.createTreeWalker(cell, NodeFilter.SHOW_TEXT, null);
+            const textNode = textWalker.nextNode();
+            if (textNode) {
+                newRange.setStart(textNode, 0);
+            } else {
+                newRange.setStart(cell, 0);
+            }
+            newRange.collapse(true);
+            selection.removeAllRanges();
+            selection.addRange(newRange);
+            return newRange;
+        };
+
+        let range = selection.rangeCount ? selection.getRangeAt(0) : null;
+        const selectedCell = getActiveSelectedTableCell();
+        if (!isRangeInsideEditor(range) && selectedCell) {
+            range = placeCaretAtCellStart(selectedCell);
+        }
+        if (!isRangeInsideEditor(range)) return;
+
+        const consumeBreakAtInsertionPoint = (targetRange) => {
+            if (!targetRange || !targetRange.collapsed) return;
+            if (targetRange.startContainer.nodeType !== Node.ELEMENT_NODE) return;
+            const containerEl = targetRange.startContainer;
+            const nextNode = containerEl.childNodes[targetRange.startOffset];
+            if (nextNode && nextNode.nodeType === Node.ELEMENT_NODE && nextNode.tagName === 'BR') {
+                nextNode.remove();
+            }
+        };
+
         const container = range.commonAncestorContainer;
+        const getCellFromNode = (node) => {
+            if (!node) return null;
+            const element = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+            if (!element) return null;
+            return element.closest('td, th');
+        };
+        const tableCellBoundary = getCellFromNode(container);
+        const traversalBoundary = tableCellBoundary || editor;
+        const isStructureHandleNode = (node) =>
+            !!(node &&
+                node.nodeType === Node.ELEMENT_NODE &&
+                node.classList &&
+                node.classList.contains('md-table-structure-handle'));
+        const isPlaceholderOnlyNode = (node) => {
+            if (!node) return true;
+            if (node.nodeType === Node.TEXT_NODE) {
+                return (node.textContent || '').replace(/[\u200B\u00A0]/g, '').trim() === '';
+            }
+            if (node.nodeType !== Node.ELEMENT_NODE) {
+                return true;
+            }
+            if (
+                isStructureHandleNode(node) ||
+                node.classList?.contains('md-table-insert-line') ||
+                node.getAttribute?.('data-exclude-from-markdown') === 'true'
+            ) {
+                return true;
+            }
+            if (node.tagName === 'BR') {
+                return true;
+            }
+            if (node.tagName === 'UL' || node.tagName === 'OL' || node.tagName === 'TABLE' || node.tagName === 'INPUT') {
+                return false;
+            }
+            const children = Array.from(node.childNodes || []);
+            if (!children.length) {
+                return (node.textContent || '').replace(/[\u200B\u00A0]/g, '').trim() === '';
+            }
+            return children.every((child) => isPlaceholderOnlyNode(child));
+        };
+        const isPlaceholderOnlyTableCell = (cell) => {
+            if (!cell) return false;
+            return Array.from(cell.childNodes || []).every((child) => isPlaceholderOnlyNode(child));
+        };
+        const cleanupPlaceholderArtifactsInCell = (cell) => {
+            if (!cell) return;
+            Array.from(cell.childNodes || []).forEach((node) => {
+                if (isStructureHandleNode(node)) return;
+                if (
+                    node.nodeType === Node.ELEMENT_NODE &&
+                    (node.tagName === 'UL' || node.tagName === 'OL' || node.tagName === 'TABLE')
+                ) {
+                    return;
+                }
+                if (isPlaceholderOnlyNode(node)) {
+                    node.remove();
+                }
+            });
+        };
+        const hadOnlyPlaceholderBreaks = isPlaceholderOnlyTableCell(tableCellBoundary);
+        if (tableCellBoundary) {
+            consumeBreakAtInsertionPoint(range);
+        }
         let currentBlock = container.nodeType === 3 ? container.parentElement : container;
 
-        while (currentBlock && currentBlock !== editor) {
+        while (currentBlock && currentBlock !== traversalBoundary) {
             if (currentBlock.tagName === 'LI') {
                 stateManager.saveState();
 
@@ -1807,6 +1952,9 @@ import { SearchManager } from './modules/SearchManager.js';
                         correctCheckboxCursorPosition();
                     }, 0);
                 });
+                if (hadOnlyPlaceholderBreaks) {
+                    cleanupPlaceholderArtifactsInCell(tableCellBoundary);
+                }
                 return;
             }
             currentBlock = currentBlock.parentElement;
@@ -1821,25 +1969,42 @@ import { SearchManager } from './modules/SearchManager.js';
         ul.appendChild(li);
 
         let topBlock = container.nodeType === 3 ? container.parentElement : container;
-        while (topBlock && topBlock !== editor && topBlock.parentElement !== editor) {
+        while (
+            topBlock &&
+            topBlock !== traversalBoundary &&
+            topBlock.parentElement !== traversalBoundary
+        ) {
             topBlock = topBlock.parentElement;
         }
 
-        if (topBlock && topBlock !== editor && isBlockElement(topBlock)) {
+        if (topBlock && topBlock !== traversalBoundary && isBlockElement(topBlock)) {
             const nodesToMove = Array.from(topBlock.childNodes);
             nodesToMove.forEach(node => li.appendChild(node));
             ensureCheckboxLeadingSpace(li);
             topBlock.replaceWith(ul);
         } else {
-            const nodesToMove = getDirectNodesFromEditor(range);
-            if (nodesToMove.length > 0) {
-                editor.insertBefore(ul, nodesToMove[0]);
-                nodesToMove.forEach(node => li.appendChild(node));
-                ensureCheckboxLeadingSpace(li);
-            } else {
+            if (traversalBoundary !== editor) {
                 range.deleteContents();
                 range.insertNode(ul);
                 ensureCheckboxLeadingSpace(li);
+            } else {
+                const nodesToMove = getDirectNodesFromEditor(range);
+                if (nodesToMove.length > 0) {
+                    editor.insertBefore(ul, nodesToMove[0]);
+                    nodesToMove.forEach(node => li.appendChild(node));
+                    ensureCheckboxLeadingSpace(li);
+                } else {
+                    range.deleteContents();
+                    range.insertNode(ul);
+                    ensureCheckboxLeadingSpace(li);
+                }
+            }
+        }
+
+        if (tableCellBoundary && ul.parentElement === tableCellBoundary) {
+            const nextAfterList = ul.nextSibling;
+            if (nextAfterList && nextAfterList.nodeType === Node.ELEMENT_NODE && nextAfterList.tagName === 'BR') {
+                nextAfterList.remove();
             }
         }
 
@@ -1878,6 +2043,9 @@ import { SearchManager } from './modules/SearchManager.js';
                 correctCheckboxCursorPosition();
             }, 0);
         });
+        if (hadOnlyPlaceholderBreaks) {
+            cleanupPlaceholderArtifactsInCell(tableCellBoundary);
+        }
     }
 
     function insertCustomSlashTemplate(templateContent) {
@@ -2393,6 +2561,9 @@ import { SearchManager } from './modules/SearchManager.js';
             if (offset === 0) return;
             // offset === 1 はチェックボックス直後 → テキスト先頭へ補正
             if (offset === 1) {
+                if (isEmptyCheckboxListItem(container)) {
+                    return;
+                }
                 const textNode = getFirstDirectTextNodeAfterCheckbox(container);
                 if (textNode) {
                     const minOffset = getCheckboxTextMinOffset(container);
@@ -2437,6 +2608,10 @@ import { SearchManager } from './modules/SearchManager.js';
         }
 
         listItems.forEach(li => {
+            if (hasCheckboxAtStart(li)) {
+                ensureCheckboxLeadingSpace(li);
+            }
+
             // Check if list item only contains nested lists (no text content)
             const directText = getDirectTextContent(li);
             const directTextWithoutPlaceholders = directText.replace(/[\u00A0\u200B]/g, '');
@@ -4100,16 +4275,21 @@ import { SearchManager } from './modules/SearchManager.js';
             const allListItems = editor.querySelectorAll('li');
 
             allListItems.forEach(li => {
+                const isCheckboxListItem = hasCheckboxAtStart(li);
                 // まず、空白のみのテキストノードとBRタグを削除
                 const childNodesToRemove = [];
                 for (let child of li.childNodes) {
                     if (child.nodeType === Node.TEXT_NODE && child.textContent.trim() === '') {
                         childNodesToRemove.push(child);
-                    } else if (child.nodeType === Node.ELEMENT_NODE && child.tagName === 'BR') {
+                    } else if (!isCheckboxListItem && child.nodeType === Node.ELEMENT_NODE && child.tagName === 'BR') {
                         childNodesToRemove.push(child);
                     }
                 }
                 childNodesToRemove.forEach(node => node.remove());
+
+                if (isCheckboxListItem) {
+                    ensureCheckboxLeadingSpace(li);
+                }
 
                 // 直接のテキストコンテンツがあるかチェック（サブリストを除く）
                 const hasDirectTextContentValue = hasDirectTextContent(li);
@@ -5197,7 +5377,14 @@ import { SearchManager } from './modules/SearchManager.js';
             if (checkboxForBS) {
                 e.preventDefault();
                 stateManager.saveState();
-                deleteCheckboxListItem(checkboxForBS.parentElement);
+                const checkboxListItem = checkboxForBS.parentElement;
+                const isBackwardDelete =
+                    e.key === 'Backspace' ||
+                    (isMac && e.ctrlKey && key === 'h');
+                if (isBackwardDelete && replaceCheckboxListItemWithEmptyLineInTableCell(checkboxListItem)) {
+                    return true;
+                }
+                deleteCheckboxListItem(checkboxListItem);
                 return true;
             }
 
@@ -5557,17 +5744,22 @@ import { SearchManager } from './modules/SearchManager.js';
     }
 
     // チェックボックス上にカーソルがあるかを判定
-    // カーソル位置が { container: li, offset: 0 } でli先頭にチェックボックスがある場合に
-    // そのチェックボックス要素を返す。それ以外はnull。
+    // カーソル位置が { container: li, offset: 0 }（または空アイテム時の offset: 1）で
+    // li先頭にチェックボックスがある場合にその要素を返す。それ以外はnull。
     function isCursorOnCheckbox() {
         const sel = window.getSelection();
         if (!sel || !sel.rangeCount || !sel.isCollapsed) return null;
         const range = sel.getRangeAt(0);
         const container = range.startContainer;
         const offset = range.startOffset;
-        if (container.nodeType === Node.ELEMENT_NODE && container.tagName === 'LI'
-            && hasCheckboxAtStart(container) && offset === 0) {
-            return container.querySelector(':scope > input[type="checkbox"]');
+        if (container.nodeType === Node.ELEMENT_NODE && container.tagName === 'LI' && hasCheckboxAtStart(container)) {
+            if (offset === 0) {
+                return container.querySelector(':scope > input[type="checkbox"]');
+            }
+            // Empty checkbox items can normalize to offset=1 in WebView/Safari.
+            if (offset === 1 && isEmptyCheckboxListItem(container)) {
+                return container.querySelector(':scope > input[type="checkbox"]');
+            }
         }
         return null;
     }
@@ -5590,8 +5782,13 @@ import { SearchManager } from './modules/SearchManager.js';
         const firstTextNode = getFirstDirectTextNodeAfterCheckbox(li);
         const minOffset = getCheckboxTextMinOffset(li);
 
-        if (firstTextNode && container === firstTextNode && offset <= minOffset) {
-            return li;
+        if (firstTextNode && container === firstTextNode) {
+            if (isEmptyCheckboxListItem(li)) {
+                return li;
+            }
+            if (offset <= minOffset) {
+                return li;
+            }
         }
 
         // Safari/WebView ではチェックボックス直後が { container: li, offset: 1 } になることがある
@@ -5673,6 +5870,127 @@ import { SearchManager } from './modules/SearchManager.js';
             return;
         }
         notifyChange();
+    }
+
+    function replaceCheckboxListItemWithEmptyLineInTableCell(li, immediate = false) {
+        if (!li || li.tagName !== 'LI') return false;
+        const tableCell =
+            domUtils.getParentElement(li, 'TD') ||
+            domUtils.getParentElement(li, 'TH');
+        if (!tableCell) return false;
+
+        const parentList = li.parentElement;
+        if (!parentList || (parentList.tagName !== 'UL' && parentList.tagName !== 'OL')) {
+            return false;
+        }
+        const host = parentList.parentElement;
+        if (!host) return false;
+
+        const listItems = Array.from(parentList.children || []).filter(
+            child => child && child.tagName === 'LI'
+        );
+        const targetIndex = listItems.indexOf(li);
+        if (targetIndex < 0) return false;
+
+        const beforeItems = listItems.slice(0, targetIndex);
+        const afterItems = listItems.slice(targetIndex + 1);
+
+        const prevSibling = parentList.previousSibling;
+        const nextSibling = parentList.nextSibling;
+        const hadPrevBr = !!(
+            prevSibling &&
+            prevSibling.nodeType === Node.ELEMENT_NODE &&
+            prevSibling.tagName === 'BR'
+        );
+        const hadNextBr = !!(
+            nextSibling &&
+            nextSibling.nodeType === Node.ELEMENT_NODE &&
+            nextSibling.tagName === 'BR'
+        );
+
+        const insertionAnchor = nextSibling;
+        const createListFromItems = (items) => {
+            if (!items.length) return null;
+            const list = document.createElement(parentList.tagName);
+            items.forEach(item => list.appendChild(item));
+            return list;
+        };
+
+        const beforeList = createListFromItems(beforeItems);
+        const afterList = createListFromItems(afterItems);
+
+        parentList.remove();
+
+        if (beforeList) {
+            host.insertBefore(beforeList, insertionAnchor);
+        }
+
+        const shouldInsertPlaceholderBreak = !!(
+            beforeList ||
+            afterList ||
+            (!hadPrevBr && !hadNextBr)
+        );
+        let placeholderBr = null;
+        if (shouldInsertPlaceholderBreak) {
+            placeholderBr = document.createElement('br');
+            host.insertBefore(placeholderBr, insertionAnchor);
+        }
+
+        if (afterList) {
+            host.insertBefore(afterList, insertionAnchor);
+        }
+
+        const selection = window.getSelection();
+        if (selection) {
+            const newRange = document.createRange();
+            let positioned = false;
+
+            if (placeholderBr && placeholderBr.parentNode) {
+                const parent = placeholderBr.parentNode;
+                const offset = Array.prototype.indexOf.call(parent.childNodes, placeholderBr);
+                if (offset >= 0) {
+                    newRange.setStart(parent, offset);
+                    positioned = true;
+                }
+            }
+
+            if (!positioned && hadNextBr && nextSibling && nextSibling.parentNode) {
+                const parent = nextSibling.parentNode;
+                const offset = Array.prototype.indexOf.call(parent.childNodes, nextSibling);
+                if (offset >= 0) {
+                    newRange.setStart(parent, offset);
+                    positioned = true;
+                }
+            }
+
+            if (!positioned && hadPrevBr && prevSibling && prevSibling.parentNode) {
+                const parent = prevSibling.parentNode;
+                const offset = Array.prototype.indexOf.call(parent.childNodes, prevSibling);
+                if (offset >= 0) {
+                    newRange.setStart(parent, offset + 1);
+                    positioned = true;
+                }
+            }
+
+            if (!positioned) {
+                const parent = host;
+                const anchorOffset = insertionAnchor && insertionAnchor.parentNode === parent
+                    ? Array.prototype.indexOf.call(parent.childNodes, insertionAnchor)
+                    : parent.childNodes.length;
+                newRange.setStart(parent, Math.max(0, anchorOffset));
+            }
+
+            newRange.collapse(true);
+            selection.removeAllRanges();
+            selection.addRange(newRange);
+        }
+
+        if (immediate) {
+            notifyChangeImmediate();
+        } else {
+            notifyChange();
+        }
+        return true;
     }
 
     function replaceEmptyListItemWithParagraphAndPromotedNestedItems(listItem, immediate = false) {
@@ -6238,7 +6556,21 @@ import { SearchManager } from './modules/SearchManager.js';
     }
 
     function getCtrlKLineContainer(node) {
-        return getClosestBlockElement(node) || getTopLevelLineContainer(node);
+        const closestBlock = getClosestBlockElement(node);
+        const tableCell =
+            domUtils.getParentElement(node, 'TD') ||
+            domUtils.getParentElement(node, 'TH');
+
+        // Inside table cells, never escalate the kill scope to the table wrapper.
+        // Prefer the closest block inside the cell; otherwise treat the cell itself as the boundary.
+        if (tableCell) {
+            if (closestBlock && tableCell.contains(closestBlock)) {
+                return closestBlock;
+            }
+            return tableCell;
+        }
+
+        return closestBlock || getTopLevelLineContainer(node);
     }
 
     function getNearestTopLevelElementFromIndex(nodes, startIndex, step) {
@@ -8734,12 +9066,138 @@ import { SearchManager } from './modules/SearchManager.js';
         }
     }
 
+    function isCollapsedSelectionOnEmptyLineInTableCell(selection, range) {
+        if (!selection || !range || !range.collapsed) return false;
+
+        const cell =
+            domUtils.getParentElement(range.startContainer, 'TD') ||
+            domUtils.getParentElement(range.startContainer, 'TH');
+        if (!cell) return false;
+
+        if (typeof cursorManager.moveCursorToLineStart !== 'function' ||
+            typeof cursorManager.moveCursorToLineEnd !== 'function') {
+            return false;
+        }
+
+        const originalRange = range.cloneRange();
+
+        try {
+            applySelectionRange(selection, originalRange.cloneRange());
+            cursorManager.moveCursorToLineStart();
+            if (!selection.rangeCount) {
+                applySelectionRange(selection, originalRange);
+                return false;
+            }
+            const lineStartRange = selection.getRangeAt(0).cloneRange();
+            lineStartRange.collapse(true);
+
+            applySelectionRange(selection, originalRange.cloneRange());
+            cursorManager.moveCursorToLineEnd();
+            if (!selection.rangeCount) {
+                applySelectionRange(selection, originalRange);
+                return false;
+            }
+            const lineEndRange = selection.getRangeAt(0).cloneRange();
+            lineEndRange.collapse(true);
+
+            applySelectionRange(selection, originalRange);
+
+            if (!cell.contains(lineStartRange.startContainer) ||
+                !cell.contains(lineEndRange.startContainer)) {
+                return false;
+            }
+
+            if (rangesShareSameCaretPosition(lineStartRange, lineEndRange)) {
+                return true;
+            }
+
+            const lineTextRange = document.createRange();
+            lineTextRange.setStart(lineStartRange.startContainer, lineStartRange.startOffset);
+            lineTextRange.setEnd(lineEndRange.startContainer, lineEndRange.startOffset);
+            const lineText = (lineTextRange.toString() || '').replace(/[\u200B\uFEFF\u00A0\s]/g, '');
+            return lineText.length === 0;
+        } catch (e) {
+            applySelectionRange(selection, originalRange);
+            return false;
+        }
+    }
+
+    function deleteForwardCharacterInSameTableCell(selection, range) {
+        if (!selection || !range || !range.collapsed) return false;
+
+        const cell =
+            domUtils.getParentElement(range.startContainer, 'TD') ||
+            domUtils.getParentElement(range.startContainer, 'TH');
+        if (!cell) return false;
+        if (typeof selection.modify !== 'function') return false;
+
+        const startRange = range.cloneRange();
+        startRange.collapse(true);
+        applySelectionRange(selection, startRange.cloneRange());
+
+        let endRange = startRange.cloneRange();
+        try {
+            selection.modify('move', 'forward', 'character');
+            if (!selection.rangeCount) {
+                applySelectionRange(selection, startRange);
+                return false;
+            }
+            endRange = selection.getRangeAt(0).cloneRange();
+            endRange.collapse(true);
+        } catch (e) {
+            applySelectionRange(selection, startRange);
+            return false;
+        }
+
+        const moved =
+            endRange.startContainer !== startRange.startContainer ||
+            endRange.startOffset !== startRange.startOffset;
+        if (!moved || !cell.contains(endRange.startContainer)) {
+            applySelectionRange(selection, startRange);
+            return false;
+        }
+
+        try {
+            const deleteRange = document.createRange();
+            deleteRange.setStart(startRange.startContainer, startRange.startOffset);
+            deleteRange.setEnd(endRange.startContainer, endRange.startOffset);
+            deleteRange.deleteContents();
+
+            const caretRange = document.createRange();
+            caretRange.setStart(deleteRange.startContainer, deleteRange.startOffset);
+            caretRange.collapse(true);
+            applySelectionRange(selection, caretRange);
+            return true;
+        } catch (e) {
+            applySelectionRange(selection, startRange);
+            return false;
+        }
+    }
+
     function performCtrlKDeleteFromRange(selection, range) {
         if (!selection || !range || !editor.contains(range.commonAncestorContainer)) {
             return false;
         }
 
         if (range.collapsed) {
+            if (isCollapsedSelectionOnEmptyLineInTableCell(selection, range)) {
+                stateManager.saveState();
+                emacsKillBuffer = '\n';
+                const forwardDeleted = deleteForwardCharacterInSameTableCell(selection, range);
+                if (!forwardDeleted) {
+                    handleBackspace();
+                } else {
+                    domUtils.ensureInlineCodeSpaces();
+                    domUtils.cleanupGhostStyles();
+                    tableManager.wrapTables();
+                    applyImageRenderSizes();
+                    hideImageResizeOverlaySafely();
+                    notifyChangeImmediate();
+                }
+                finalizeCtrlKDeleteTurn();
+                return true;
+            }
+
             const listItemAtCaretForCtrlK = getCtrlKTargetListItem(range);
             const hasNestedListInCtrlKTarget = !!getNestedListContainerForListItem(listItemAtCaretForCtrlK);
             const parentListForCtrlK = listItemAtCaretForCtrlK ? listItemAtCaretForCtrlK.parentElement : null;
@@ -8766,6 +9224,11 @@ import { SearchManager } from './modules/SearchManager.js';
                     finalizeCtrlKDeleteTurn();
                     return true;
                 }
+                if (hasCheckboxAtStart(listItemAtCaretForCtrlK) &&
+                    replaceCheckboxListItemWithEmptyLineInTableCell(listItemAtCaretForCtrlK, true)) {
+                    finalizeCtrlKDeleteTurn();
+                    return true;
+                }
                 deleteCheckboxListItem(listItemAtCaretForCtrlK, true);
                 finalizeCtrlKDeleteTurn();
                 return true;
@@ -8780,7 +9243,15 @@ import { SearchManager } from './modules/SearchManager.js';
             }
 
             const startBlock = getCtrlKLineContainerFromRange(range);
-            const supportsLinePreserve = !!(startBlock && startBlock !== editor && startBlock.tagName !== 'PRE');
+            const tableCellForCtrlK =
+                domUtils.getParentElement(range.startContainer, 'TD') ||
+                domUtils.getParentElement(range.startContainer, 'TH');
+            const supportsLinePreserve = !!(
+                startBlock &&
+                startBlock !== editor &&
+                startBlock.tagName !== 'PRE' &&
+                !tableCellForCtrlK
+            );
             if (supportsLinePreserve) {
                 try {
                     const blockEndRange = document.createRange();
@@ -8800,6 +9271,17 @@ import { SearchManager } from './modules/SearchManager.js';
                             startBlock.parentElement === editor &&
                             /^(P|DIV|H[1-6])$/.test(startBlock.tagName) &&
                             isEffectivelyEmptyBlock(startBlock);
+                        const cellForCtrlK =
+                            domUtils.getParentElement(range.startContainer, 'TD') ||
+                            domUtils.getParentElement(range.startContainer, 'TH');
+                        const isRemovableEmptyLineInTableCell = !!(
+                            cellForCtrlK &&
+                            startBlock &&
+                            startBlock !== cellForCtrlK &&
+                            cellForCtrlK.contains(startBlock) &&
+                            /^(P|DIV)$/.test(startBlock.tagName) &&
+                            isEffectivelyEmptyBlock(startBlock)
+                        );
 
                         if (isRemovableEmptyLineBlock) {
                             stateManager.saveState();
@@ -8878,6 +9360,61 @@ import { SearchManager } from './modules/SearchManager.js';
                             setTimeout(() => {
                                 suppressNextNativeCtrlKDelete = false;
                             }, 0);
+                            return true;
+                        }
+
+                        if (isRemovableEmptyLineInTableCell) {
+                            stateManager.saveState();
+                            emacsKillBuffer = '\n';
+
+                            const prevElement = getPreviousElementSibling(startBlock);
+                            const nextElement = getNextElementSibling(startBlock);
+
+                            startBlock.remove();
+
+                            const newRange = document.createRange();
+                            let placed = false;
+
+                            if (prevElement && cellForCtrlK.contains(prevElement)) {
+                                const lastNode = domUtils.getLastTextNode(prevElement);
+                                if (lastNode) {
+                                    newRange.setStart(lastNode, lastNode.textContent.length);
+                                } else {
+                                    newRange.setStart(prevElement, prevElement.childNodes.length);
+                                }
+                                placed = true;
+                            } else if (nextElement && cellForCtrlK.contains(nextElement)) {
+                                const firstNode = domUtils.getFirstTextNode(nextElement);
+                                if (firstNode) {
+                                    newRange.setStart(firstNode, 0);
+                                } else {
+                                    newRange.setStart(nextElement, 0);
+                                }
+                                placed = true;
+                            }
+
+                            if (!placed) {
+                                if (!cellForCtrlK.childNodes.length) {
+                                    cellForCtrlK.appendChild(document.createElement('br'));
+                                }
+                                const firstNodeInCell = domUtils.getFirstTextNode(cellForCtrlK);
+                                if (firstNodeInCell) {
+                                    newRange.setStart(firstNodeInCell, 0);
+                                } else {
+                                    newRange.setStart(cellForCtrlK, 0);
+                                }
+                            }
+
+                            newRange.collapse(true);
+                            applySelectionRange(selection, newRange);
+
+                            domUtils.ensureInlineCodeSpaces();
+                            domUtils.cleanupGhostStyles();
+                            tableManager.wrapTables();
+                            applyImageRenderSizes();
+                            hideImageResizeOverlaySafely();
+                            finalizeCtrlKDeleteTurn();
+                            notifyChangeImmediate();
                             return true;
                         }
 
@@ -8973,6 +9510,15 @@ import { SearchManager } from './modules/SearchManager.js';
 
         const killRange = buildCtrlKKillRange(selection, range);
         if (!killRange) {
+            if (isCollapsedSelectionOnEmptyLineInTableCell(selection, range)) {
+                stateManager.saveState();
+                // Match Ctrl+H behavior for empty visual lines in table cells.
+                // Reuse the existing backspace flow instead of native delete to avoid table corruption.
+                handleBackspace();
+                finalizeCtrlKDeleteTurn();
+                return true;
+            }
+
             pendingCtrlKDeleteSync = false;
             suppressNextNativeCtrlKDelete = true;
             setTimeout(() => {
@@ -9975,7 +10521,13 @@ import { SearchManager } from './modules/SearchManager.js';
             if (checkboxForCtrlK) {
                 e.preventDefault();
                 stateManager.saveState();
-                deleteCheckboxListItem(checkboxForCtrlK.parentElement, true);
+                const checkboxListItem = checkboxForCtrlK.parentElement;
+                if (isEmptyCheckboxListItem(checkboxListItem) &&
+                    replaceCheckboxListItemWithEmptyLineInTableCell(checkboxListItem, true)) {
+                    finalizeCtrlKDeleteTurn();
+                    return;
+                }
+                deleteCheckboxListItem(checkboxListItem, true);
                 finalizeCtrlKDeleteTurn();
                 return;
             }
@@ -11165,6 +11717,40 @@ import { SearchManager } from './modules/SearchManager.js';
             return cells;
         };
 
+        const setTableCellFromMarkdown = (cell, rawValue) => {
+            if (!cell) return;
+            const value = (rawValue || '').replace(/\r\n?/g, '\n');
+            const lineBreakPattern = /<br\s*\/?>/gi;
+            const hasExplicitBreak = lineBreakPattern.test(value);
+            lineBreakPattern.lastIndex = 0;
+
+            if (!hasExplicitBreak) {
+                cell.textContent = value;
+                if (value.trim() === '') {
+                    cell.appendChild(document.createElement('br'));
+                }
+                return;
+            }
+
+            const parts = value.split(lineBreakPattern);
+            cell.textContent = '';
+
+            parts.forEach((part, index) => {
+                if (part !== '') {
+                    cell.appendChild(document.createTextNode(part));
+                }
+                if (index < parts.length - 1) {
+                    cell.appendChild(document.createElement('br'));
+                }
+            });
+
+            const hasMeaningfulText = (cell.textContent || '').replace(/[\u200B\u00A0]/g, '').trim() !== '';
+            const hasBreak = !!cell.querySelector('br');
+            if (!hasMeaningfulText && !hasBreak) {
+                cell.appendChild(document.createElement('br'));
+            }
+        };
+
         const isMarkdownTableSeparatorCell = (value) => /^:?-{3,}:?$/.test((value || '').trim());
 
         const tryInsertMarkdownTableFromPastedText = (rawText) => {
@@ -11213,10 +11799,7 @@ import { SearchManager } from './modules/SearchManager.js';
             const headCells = Array.from(table.querySelectorAll('thead th'));
             headCells.forEach((cell, index) => {
                 const value = headerCells[index] || '';
-                cell.textContent = value;
-                if (value.trim() === '') {
-                    cell.appendChild(document.createElement('br'));
-                }
+                setTableCellFromMarkdown(cell, value);
             });
 
             const bodyTrs = Array.from(table.querySelectorAll('tbody tr'));
@@ -11226,10 +11809,7 @@ import { SearchManager } from './modules/SearchManager.js';
                 const cells = Array.from(tr.cells || []);
                 cells.forEach((cell, colIndex) => {
                     const value = row[colIndex] || '';
-                    cell.textContent = value;
-                    if (value.trim() === '') {
-                        cell.appendChild(document.createElement('br'));
-                    }
+                    setTableCellFromMarkdown(cell, value);
                 });
             });
 
@@ -11666,10 +12246,7 @@ import { SearchManager } from './modules/SearchManager.js';
                     const headCells = Array.from(table.querySelectorAll('thead th'));
                     headCells.forEach((cell, index) => {
                         const value = headerCells[index] || '';
-                        cell.textContent = value;
-                        if (value.trim() === '') {
-                            cell.appendChild(document.createElement('br'));
-                        }
+                        setTableCellFromMarkdown(cell, value);
                     });
                     const bodyTrs = Array.from(table.querySelectorAll('tbody tr'));
                     bodyRows.forEach((row, rowIndex) => {
@@ -11678,10 +12255,7 @@ import { SearchManager } from './modules/SearchManager.js';
                         const cells = Array.from(tr.cells || []);
                         cells.forEach((cell, colIndex) => {
                             const value = row[colIndex] || '';
-                            cell.textContent = value;
-                            if (value.trim() === '') {
-                                cell.appendChild(document.createElement('br'));
-                            }
+                            setTableCellFromMarkdown(cell, value);
                         });
                     });
 
@@ -13178,7 +13752,7 @@ import { SearchManager } from './modules/SearchManager.js';
             if (container.nodeType === Node.ELEMENT_NODE && container.tagName === 'INPUT') {
                 const li = container.parentElement;
                 if (li && li.tagName === 'LI' && hasCheckboxAtStart(li)) {
-                    if (pointerRecent && placeCheckboxCaretAtTextStart(li)) {
+                    if (pointerRecent && !isEmptyCheckboxListItem(li) && placeCheckboxCaretAtTextStart(li)) {
                         return;
                     }
                     isCorrectingCheckboxCursor = true;
@@ -13196,7 +13770,7 @@ import { SearchManager } from './modules/SearchManager.js';
             if (container.nodeType === Node.ELEMENT_NODE && container.tagName === 'LI' && hasCheckboxAtStart(container)) {
                 // offset === 0 はチェックボックス位置 → 補正しない
                 if (offset === 0) {
-                    if (pointerRecent && placeCheckboxCaretAtTextStart(container)) {
+                    if (pointerRecent && !isEmptyCheckboxListItem(container) && placeCheckboxCaretAtTextStart(container)) {
                         return;
                     }
                     tableManager.updateEdgeActive();
@@ -13204,6 +13778,10 @@ import { SearchManager } from './modules/SearchManager.js';
                 }
                 // offset === 1 はチェックボックス直後 → テキスト先頭へ補正
                 if (offset === 1) {
+                    if (isEmptyCheckboxListItem(container)) {
+                        tableManager.updateEdgeActive();
+                        return;
+                    }
                     const textNode = getFirstDirectTextNodeAfterCheckbox(container);
                     if (textNode) {
                         const minOffset = getCheckboxTextMinOffset(container);

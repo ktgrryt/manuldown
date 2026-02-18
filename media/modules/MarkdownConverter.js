@@ -122,10 +122,14 @@ export class MarkdownConverter {
         const rawText = textNode.textContent || '';
         const normalizedText = rawText.replace(/[\u200B\u00A0]/g, '');
         const normalizedCursorOffset = rawText.slice(0, cursorOffset).replace(/[\u200B\u00A0]/g, '').length;
+        const isInTableCell = !!(
+            this.domUtils.getParentElement(textNode, 'TD') ||
+            this.domUtils.getParentElement(textNode, 'TH')
+        );
 
         // 見出し構文をチェック（行頭）
         const headingMatch = normalizedText.match(/^\s*(#{1,6})\s+(.+)$/);
-        if (headingMatch) {
+        if (!isInTableCell && headingMatch) {
             const level = headingMatch[1].length;
             const content = headingMatch[2];
             const headingTag = 'h' + level;
@@ -311,7 +315,7 @@ export class MarkdownConverter {
 
         // 水平線構文をチェック --- (3つ以上のハイフンのみ)
         const hrMatch = normalizedText.match(/^-{3,}$/);
-        if (hrMatch) {
+        if (!isInTableCell && hrMatch) {
             const hr = document.createElement('hr');
 
             const parent = textNode.parentElement;
@@ -377,6 +381,9 @@ export class MarkdownConverter {
             }
 
             const parent = textNode.parentElement;
+            const parentIsTableCell = !!(
+                parent && (parent.tagName === 'TD' || parent.tagName === 'TH')
+            );
             let ul = this.domUtils.getParentElement(textNode, 'UL');
 
             if (!ul) {
@@ -407,7 +414,7 @@ export class MarkdownConverter {
                     }
                 } else {
                     ul = document.createElement('ul');
-                    if (parent && parent !== this.editor) {
+                    if (parent && parent !== this.editor && !parentIsTableCell) {
                         parent.replaceWith(ul);
                     } else {
                         textNode.parentNode.replaceChild(ul, textNode);
@@ -457,6 +464,9 @@ export class MarkdownConverter {
             }
 
             const parent = textNode.parentElement;
+            const parentIsTableCell = !!(
+                parent && (parent.tagName === 'TD' || parent.tagName === 'TH')
+            );
             let ol = this.domUtils.getParentElement(textNode, 'OL');
 
             if (!ol) {
@@ -487,7 +497,7 @@ export class MarkdownConverter {
                     }
                 } else {
                     ol = document.createElement('ol');
-                    if (parent && parent !== this.editor) {
+                    if (parent && parent !== this.editor && !parentIsTableCell) {
                         parent.replaceWith(ol);
                     } else {
                         textNode.parentNode.replaceChild(ol, textNode);
@@ -522,7 +532,7 @@ export class MarkdownConverter {
 
         // 引用構文をチェック > text（テキストが必要）
         const blockquoteMatch = normalizedText.match(/^\s*>\s+(.+)$/);
-        if (blockquoteMatch) {
+        if (!isInTableCell && blockquoteMatch) {
             const content = blockquoteMatch[1];
 
             const blockquote = document.createElement('blockquote');

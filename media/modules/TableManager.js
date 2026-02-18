@@ -478,9 +478,13 @@ export class TableManager {
         const isDeleteKey = e.key === 'Backspace' || e.key === 'Delete' || (this._isMac && e.ctrlKey && key === 'h');
         const isPlainInput = e.key.length === 1 && !isModifier;
         const isEsc = e.key === 'Escape' && !e.metaKey && !e.ctrlKey && !e.altKey;
+        const isEnter = e.key === 'Enter' && !e.metaKey && !e.ctrlKey && !e.altKey;
         const isCtrlNavMove =
             this._isMac && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey &&
             ['f', 'b', 'n', 'p'].includes(key);
+        const isLineBoundaryMove =
+            this._isMac && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey &&
+            ['a', 'e', 'w'].includes(key);
 
         if (isCopyPaste) {
             return false;
@@ -498,7 +502,7 @@ export class TableManager {
             if (structureSelection && this._handleStructureMoveKeydown(e, structureSelection)) {
                 return true;
             }
-            if (!isDeleteKey && (isNavigation || isTab || e.key === 'Enter' || isPlainInput || isCtrlNavMove)) {
+            if (!isDeleteKey && (isNavigation || isTab || isEnter || isPlainInput || isCtrlNavMove || isLineBoundaryMove)) {
                 const anchorCell = this._getStructureAnchorCell(structureSelection);
                 this.clearStructureSelection();
                 if (anchorCell) {
@@ -508,7 +512,7 @@ export class TableManager {
             return false;
         }
 
-        if (isNavigation || isTab || isCtrlNavMove) {
+        if (isNavigation || isTab || isCtrlNavMove || isLineBoundaryMove || isEnter) {
             const selection = window.getSelection();
             const range = selection && selection.rangeCount ? selection.getRangeAt(0) : null;
             const caretCell = range && selection.isCollapsed
@@ -525,7 +529,18 @@ export class TableManager {
             }
 
             if (anchorCell) {
-                this._setCursorToCellStart(anchorCell);
+                if (isLineBoundaryMove && key !== 'a') {
+                    this._setCursorToCellEnd(anchorCell);
+                } else {
+                    this._setCursorToCellStart(anchorCell);
+                }
+            }
+
+            // For Enter / line-boundary keys without an existing caret,
+            // consume this key press after restoring a caret and clearing selection highlight.
+            if (isLineBoundaryMove || isEnter) {
+                e.preventDefault();
+                return true;
             }
             return false;
         }
@@ -694,7 +709,9 @@ export class TableManager {
         if (!this._isMac) return false;
         if (!e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return false;
         const key = e.key.toLowerCase();
-        if (key !== 'e' && key !== 'a') return false;
+        const isLineStartKey = key === 'a';
+        const isLineEndKey = key === 'e' || key === 'w';
+        if (!isLineStartKey && !isLineEndKey) return false;
 
         const selection = window.getSelection();
         if (selection && selection.rangeCount) {
@@ -702,7 +719,20 @@ export class TableManager {
             const cell = this._getCellFromTarget(range.startContainer);
             if (cell) {
                 e.preventDefault();
-                if (key === 'a') {
+                if (isLineStartKey) {
+                    if (range.collapsed && this._isAtCurrentVisualLineStartInCell(cell, range)) {
+                        const info = this._getCellInfo(cell);
+                        const leftEdge = info ? this._getTableEdge(info.table, 'left') : null;
+                        if (leftEdge) {
+                            this._setCursorToEdge(leftEdge, false);
+                        } else {
+                            this._setCursorToCellStart(cell);
+                        }
+                        return true;
+                    }
+                    if (range.collapsed && this._moveToCurrentVisualLineStartInCell(cell, range)) {
+                        return true;
+                    }
                     if (range.collapsed && this._isAtCellStart(cell, range)) {
                         const info = this._getCellInfo(cell);
                         const leftEdge = info ? this._getTableEdge(info.table, 'left') : null;
@@ -715,6 +745,19 @@ export class TableManager {
                         this._setCursorToCellStart(cell);
                     }
                 } else {
+                    if (range.collapsed && this._isAtCurrentVisualLineEndInCell(cell, range)) {
+                        const info = this._getCellInfo(cell);
+                        const rightEdge = info ? this._getTableEdge(info.table, 'right') : null;
+                        if (rightEdge) {
+                            this._setCursorToEdge(rightEdge, true);
+                        } else {
+                            this._setCursorToCellEnd(cell);
+                        }
+                        return true;
+                    }
+                    if (range.collapsed && this._moveToCurrentVisualLineEndInCell(cell, range)) {
+                        return true;
+                    }
                     if (range.collapsed && this._isAtCellEnd(cell, range)) {
                         const info = this._getCellInfo(cell);
                         const rightEdge = info ? this._getTableEdge(info.table, 'right') : null;
@@ -736,7 +779,7 @@ export class TableManager {
         const wrapper = edge.closest('.md-table-wrapper');
         if (!wrapper) return false;
 
-        if (key === 'e') {
+        if (isLineEndKey) {
             if (edge.dataset.tableEdge !== 'left') return false;
             const rightEdge = wrapper.querySelector('.md-table-edge-right');
             if (!rightEdge) return false;
@@ -745,7 +788,7 @@ export class TableManager {
             return true;
         }
 
-        if (key === 'a') {
+        if (isLineStartKey) {
             if (edge.dataset.tableEdge !== 'right') return false;
             const leftEdge = wrapper.querySelector('.md-table-edge-left');
             if (!leftEdge) return false;
@@ -755,6 +798,156 @@ export class TableManager {
         }
 
         return false;
+    }
+
+    _moveToCurrentVisualLineStartInCell(cell, range) {
+        if (!cell || !range || !range.collapsed) return false;
+        if (!cell.contains(range.startContainer)) return false;
+        if (typeof document.caretRangeFromPoint !== 'function') return false;
+
+        const lines = this._getVisualLinesForCell(cell);
+        if (lines.length < 2) return false;
+
+        const currentRect = this._getVisualCaretRectForRange(range);
+        if (!currentRect) return false;
+
+        const currentIndex = this._getNearestVisualLineIndex(lines, currentRect);
+        if (currentIndex < 0) return false;
+
+        const targetLine = lines[currentIndex];
+        if (!targetLine) return false;
+
+        const targetHeight = Math.max(1, targetLine.bottom - targetLine.top);
+        const targetY = targetLine.top + Math.max(1, Math.min(targetHeight * 0.5, targetHeight - 1));
+
+        const xCandidates = [];
+        for (let dx = 0; dx <= 32; dx++) {
+            xCandidates.push(targetLine.left + dx + 0.5);
+        }
+        xCandidates.push(targetLine.left + 1);
+        xCandidates.push(targetLine.left + 2);
+
+        let bestRange = null;
+        let bestLeft = Infinity;
+
+        const tryProbe = (probeRange) => {
+            if (!probeRange || !cell.contains(probeRange.startContainer)) return;
+            const probeRect = this._getVisualCaretRectForRange(probeRange);
+            if (!probeRect) return;
+            const probeTop = probeRect.top || probeRect.y || 0;
+            if (probeTop < targetLine.top - 3 || probeTop > targetLine.bottom + 3) {
+                return;
+            }
+            const probeLeft = probeRect.left || probeRect.x || 0;
+            if (!bestRange || probeLeft < bestLeft - 0.5) {
+                bestRange = probeRange;
+                bestLeft = probeLeft;
+            }
+        };
+
+        for (const x of xCandidates) {
+            if (!Number.isFinite(x)) continue;
+            let probeRange = null;
+            try {
+                probeRange = document.caretRangeFromPoint(x, targetY);
+            } catch (_e) {
+                probeRange = null;
+            }
+            tryProbe(probeRange);
+        }
+
+        if (!bestRange) return false;
+        if (
+            bestRange.startContainer === range.startContainer &&
+            bestRange.startOffset === range.startOffset
+        ) {
+            return false;
+        }
+
+        const selection = window.getSelection();
+        if (!selection) return false;
+
+        const collapsed = document.createRange();
+        collapsed.setStart(bestRange.startContainer, bestRange.startOffset);
+        collapsed.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(collapsed);
+        return true;
+    }
+
+    _moveToCurrentVisualLineEndInCell(cell, range) {
+        if (!cell || !range || !range.collapsed) return false;
+        if (!cell.contains(range.startContainer)) return false;
+        if (typeof document.caretRangeFromPoint !== 'function') return false;
+
+        const lines = this._getVisualLinesForCell(cell);
+        if (lines.length < 2) return false;
+
+        const currentRect = this._getVisualCaretRectForRange(range);
+        if (!currentRect) return false;
+
+        const currentIndex = this._getNearestVisualLineIndex(lines, currentRect);
+        if (currentIndex < 0) return false;
+
+        const targetLine = lines[currentIndex];
+        if (!targetLine) return false;
+
+        const targetHeight = Math.max(1, targetLine.bottom - targetLine.top);
+        const targetY = targetLine.top + Math.max(1, Math.min(targetHeight * 0.5, targetHeight - 1));
+
+        const xCandidates = [];
+        for (let dx = 0; dx <= 32; dx++) {
+            xCandidates.push(targetLine.right - dx - 0.5);
+        }
+        xCandidates.push(targetLine.right - 1);
+        xCandidates.push(targetLine.right - 2);
+
+        let bestRange = null;
+        let bestLeft = Number.NEGATIVE_INFINITY;
+
+        const tryProbe = (probeRange) => {
+            if (!probeRange || !cell.contains(probeRange.startContainer)) return;
+            const probeRect = this._getVisualCaretRectForRange(probeRange);
+            if (!probeRect) return;
+            const probeTop = probeRect.top || probeRect.y || 0;
+            if (probeTop < targetLine.top - 3 || probeTop > targetLine.bottom + 3) {
+                return;
+            }
+            const probeLeft = probeRect.left || probeRect.x || 0;
+            if (!bestRange || probeLeft > bestLeft + 0.5) {
+                bestRange = probeRange;
+                bestLeft = probeLeft;
+            }
+        };
+
+        for (const x of xCandidates) {
+            if (!Number.isFinite(x)) continue;
+            let probeRange = null;
+            try {
+                probeRange = document.caretRangeFromPoint(x, targetY);
+            } catch (_e) {
+                probeRange = null;
+            }
+            tryProbe(probeRange);
+        }
+
+        if (!bestRange) return false;
+        if (
+            bestRange.startContainer === range.startContainer &&
+            bestRange.startOffset === range.startOffset
+        ) {
+            return false;
+        }
+
+        const selection = window.getSelection();
+        if (!selection) return false;
+
+        const collapsed = document.createRange();
+        collapsed.setStart(bestRange.startContainer, bestRange.startOffset);
+        collapsed.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(collapsed);
+        return true;
     }
 
     handleDeleteTableKeydown(e) {
@@ -2080,11 +2273,28 @@ export class TableManager {
         const { table, rowIndex, colIndex } = info;
         const sourceRange = range && range.cloneRange ? range.cloneRange() : range;
 
+        if ((direction === 'left' || direction === 'right') &&
+            this._handleCheckboxCaretNavigationInCell(cell, range, direction)) {
+            return true;
+        }
+
         const totalRows = table.rows.length;
         const totalCols = table.rows[0] ? table.rows[0].cells.length : 0;
 
         if (direction === 'left') {
-            if (!this._isAtCellStart(cell, range)) return false;
+            if (this._moveAcrossVisualLineBoundaryInCell(cell, range, 'left')) {
+                this._snapCaretToCheckboxIfOnEmptyCheckboxTextStart(cell);
+                return true;
+            }
+            const atVisualLineStart = this._isAtCurrentVisualLineStartInCell(cell, range);
+            if (!atVisualLineStart) return false;
+            if (this._hasVisualLineInCell(cell, range, 'up')) {
+                if (this._moveWithinCellByNativeLine(cell, range, 'up')) {
+                    this._snapCaretToCheckboxIfOnEmptyCheckboxTextStart(cell);
+                    return true;
+                }
+                return false;
+            }
             if (colIndex > 0) {
                 const target = table.rows[rowIndex].cells[colIndex - 1];
                 if (target) {
@@ -2110,7 +2320,19 @@ export class TableManager {
         }
 
         if (direction === 'right') {
-            if (!this._isAtCellEnd(cell, range)) return false;
+            if (this._moveAcrossVisualLineBoundaryInCell(cell, range, 'right')) {
+                this._snapCaretToCheckboxIfOnEmptyCheckboxTextStart(cell);
+                return true;
+            }
+            const atVisualLineEnd = this._isAtCurrentVisualLineEndInCell(cell, range);
+            if (!atVisualLineEnd) return false;
+            if (this._hasVisualLineInCell(cell, range, 'down')) {
+                if (this._moveWithinCellByNativeLine(cell, range, 'down')) {
+                    this._snapCaretToCheckboxIfOnEmptyCheckboxTextStart(cell);
+                    return true;
+                }
+                return false;
+            }
             if (colIndex < totalCols - 1) {
                 const target = table.rows[rowIndex].cells[colIndex + 1];
                 if (target) {
@@ -2138,6 +2360,7 @@ export class TableManager {
         if (direction === 'up') {
             if (this._hasVisualLineInCell(cell, range, 'up')) {
                 if (this._moveWithinCellByVisualLine(cell, range, 'up')) {
+                    this._snapCaretToCheckboxIfOnEmptyCheckboxTextStart(cell);
                     return true;
                 }
             }
@@ -2145,10 +2368,12 @@ export class TableManager {
                 const target = table.rows[rowIndex - 1].cells[colIndex];
                 if (target) {
                     if (this._setCursorToCellByVisualX(sourceRange, target, 'up')) {
+                        this._snapCaretToCheckboxIfOnEmptyCheckboxTextStart(target);
                         return true;
                     }
                     const offset = this._getCursorOffsetInCell(cell, range);
                     this._setCursorToCellOffset(target, offset);
+                    this._snapCaretToCheckboxIfOnEmptyCheckboxTextStart(target);
                     return true;
                 }
             }
@@ -2165,6 +2390,7 @@ export class TableManager {
         if (direction === 'down') {
             if (this._hasVisualLineInCell(cell, range, 'down')) {
                 if (this._moveWithinCellByVisualLine(cell, range, 'down')) {
+                    this._snapCaretToCheckboxIfOnEmptyCheckboxTextStart(cell);
                     return true;
                 }
             }
@@ -2172,10 +2398,12 @@ export class TableManager {
                 const target = table.rows[rowIndex + 1].cells[colIndex];
                 if (target) {
                     if (this._setCursorToCellByVisualX(sourceRange, target, 'down')) {
+                        this._snapCaretToCheckboxIfOnEmptyCheckboxTextStart(target);
                         return true;
                     }
                     const offset = this._getCursorOffsetInCell(cell, range);
                     this._setCursorToCellOffset(target, offset);
+                    this._snapCaretToCheckboxIfOnEmptyCheckboxTextStart(target);
                     return true;
                 }
             }
@@ -2224,6 +2452,357 @@ export class TableManager {
         }
 
         return false;
+    }
+
+    _getParentElementByTag(node, tagName) {
+        let current = node && node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+        while (current && current !== this.editor) {
+            if (current.tagName === tagName) {
+                return current;
+            }
+            current = current.parentElement;
+        }
+        return null;
+    }
+
+    _getListItemFromNodeInCell(cell, node) {
+        if (!cell || !node) return null;
+        if (node.nodeType === Node.TEXT_NODE) {
+            const li = this._getParentElementByTag(node, 'LI');
+            return li && cell.contains(li) ? li : null;
+        }
+        if (node.nodeType !== Node.ELEMENT_NODE) return null;
+
+        if (node.tagName === 'LI') {
+            return cell.contains(node) ? node : null;
+        }
+
+        if (node.tagName === 'UL' || node.tagName === 'OL') {
+            const firstLi = Array.from(node.children || []).find((child) => child.tagName === 'LI');
+            return firstLi && cell.contains(firstLi) ? firstLi : null;
+        }
+
+        if (node.tagName === 'BR') {
+            const resolveSiblingLi = (sibling) => {
+                if (!sibling) return null;
+                if (sibling.nodeType === Node.TEXT_NODE) {
+                    const li = this._getParentElementByTag(sibling, 'LI');
+                    return li && cell.contains(li) ? li : null;
+                }
+                if (sibling.nodeType !== Node.ELEMENT_NODE) return null;
+                if (sibling.tagName === 'LI') {
+                    return cell.contains(sibling) ? sibling : null;
+                }
+                if (sibling.tagName === 'UL' || sibling.tagName === 'OL') {
+                    const firstLi = Array.from(sibling.children || []).find((child) => child.tagName === 'LI');
+                    return firstLi && cell.contains(firstLi) ? firstLi : null;
+                }
+                const closest = sibling.closest ? sibling.closest('li') : null;
+                return closest && cell.contains(closest) ? closest : null;
+            };
+
+            const prevLi = resolveSiblingLi(node.previousSibling);
+            if (prevLi) return prevLi;
+            const nextLi = resolveSiblingLi(node.nextSibling);
+            if (nextLi) return nextLi;
+        }
+
+        const closestLi = node.closest ? node.closest('li') : null;
+        if (closestLi && cell.contains(closestLi)) {
+            return closestLi;
+        }
+
+        const nestedLi = node.querySelector ? node.querySelector('li') : null;
+        if (nestedLi && cell.contains(nestedLi)) {
+            return nestedLi;
+        }
+
+        return null;
+    }
+
+    _resolveListItemFromRangeInCell(cell, range) {
+        if (!cell || !range) return null;
+        const fromContainer = this._getParentElementByTag(range.startContainer, 'LI');
+        if (fromContainer && cell.contains(fromContainer)) {
+            return fromContainer;
+        }
+
+        const container = range.startContainer;
+        if (!container) {
+            return null;
+        }
+
+        let elementContainer = null;
+        let elementOffset = range.startOffset || 0;
+
+        if (container.nodeType === Node.ELEMENT_NODE) {
+            elementContainer = container;
+        } else if (container.nodeType === Node.TEXT_NODE) {
+            const parent = container.parentElement;
+            if (!parent || !cell.contains(parent)) {
+                return null;
+            }
+            elementContainer = parent;
+            const parentNodes = Array.from(parent.childNodes || []);
+            const textIndex = parentNodes.indexOf(container);
+            if (textIndex >= 0) {
+                elementOffset = textIndex + ((range.startOffset || 0) > 0 ? 1 : 0);
+            } else {
+                elementOffset = 0;
+            }
+        } else {
+            return null;
+        }
+
+        const candidates = [];
+        const pushCandidate = (candidate) => {
+            if (!candidate || candidates.includes(candidate)) return;
+            candidates.push(candidate);
+        };
+
+        if (container.nodeType === Node.TEXT_NODE) {
+            pushCandidate(container);
+            pushCandidate(container.previousSibling);
+            pushCandidate(container.nextSibling);
+        }
+
+        const childNodes = Array.from(elementContainer.childNodes || []);
+        const safeOffset = Math.max(0, Math.min(elementOffset, childNodes.length));
+        if (safeOffset < childNodes.length) {
+            pushCandidate(childNodes[safeOffset]);
+        }
+        if (safeOffset > 0) {
+            pushCandidate(childNodes[safeOffset - 1]);
+        }
+        if (safeOffset + 1 < childNodes.length) {
+            pushCandidate(childNodes[safeOffset + 1]);
+        }
+        pushCandidate(elementContainer);
+
+        const parent = elementContainer.parentElement;
+        if (parent && cell.contains(parent)) {
+            pushCandidate(parent);
+            const siblings = Array.from(parent.childNodes || []);
+            const elementIndex = siblings.indexOf(elementContainer);
+            if (elementIndex > 0) {
+                pushCandidate(siblings[elementIndex - 1]);
+            }
+            if (elementIndex >= 0 && elementIndex + 1 < siblings.length) {
+                pushCandidate(siblings[elementIndex + 1]);
+            }
+        }
+
+        for (const candidate of candidates) {
+            const li = this._getListItemFromNodeInCell(cell, candidate);
+            if (li) {
+                return li;
+            }
+        }
+
+        return null;
+    }
+
+    _getCheckboxInListItemDirectContent(listItem) {
+        if (!listItem || listItem.tagName !== 'LI') return null;
+        const checkbox = listItem.querySelector(':scope > input[type="checkbox"]');
+        if (!checkbox || checkbox.parentElement !== listItem) return null;
+        return checkbox;
+    }
+
+    _getFirstDirectTextNodeAfterCheckbox(listItem) {
+        if (!listItem) return null;
+        const checkbox = this._getCheckboxInListItemDirectContent(listItem);
+        if (!checkbox) return null;
+        let passedCheckbox = false;
+
+        for (const child of Array.from(listItem.childNodes || [])) {
+            if (child === checkbox) {
+                passedCheckbox = true;
+                continue;
+            }
+            if (!passedCheckbox) continue;
+            if (child.nodeType === Node.ELEMENT_NODE && child.tagName === 'INPUT') continue;
+            if (child.nodeType === Node.TEXT_NODE) return child;
+            if (child.nodeType === Node.ELEMENT_NODE &&
+                child.tagName !== 'UL' && child.tagName !== 'OL') {
+                const textNode = this.domUtils.getFirstTextNode(child);
+                if (textNode) return textNode;
+            }
+        }
+        return null;
+    }
+
+    _getCheckboxTextMinOffset(listItem) {
+        const textNode = this._getFirstDirectTextNodeAfterCheckbox(listItem);
+        if (!textNode) return 0;
+        const text = textNode.textContent || '';
+        const visibleText = text.replace(/[\u200B\uFEFF\u00A0]/g, '');
+        if (visibleText === '') {
+            return 0;
+        }
+        let offset = 0;
+        while (offset < text.length && text[offset] === '\u200B') {
+            offset += 1;
+        }
+        return offset;
+    }
+
+    _isEmptyCheckboxListItem(listItem) {
+        if (!listItem || !this._getCheckboxInListItemDirectContent(listItem)) return false;
+        let directText = '';
+        for (const child of Array.from(listItem.childNodes || [])) {
+            if (child.nodeType === Node.ELEMENT_NODE && child.tagName === 'INPUT') continue;
+            if (child.nodeType === Node.TEXT_NODE) {
+                directText += child.textContent || '';
+                continue;
+            }
+            if (child.nodeType === Node.ELEMENT_NODE &&
+                child.tagName !== 'UL' && child.tagName !== 'OL') {
+                directText += child.textContent || '';
+            }
+        }
+        return directText.replace(/[\u200B\uFEFF\u00A0]/g, '').trim() === '';
+    }
+
+    _ensureCheckboxTextAnchor(listItem) {
+        let textNode = this._getFirstDirectTextNodeAfterCheckbox(listItem);
+        if (textNode) return textNode;
+        const checkbox = this._getCheckboxInListItemDirectContent(listItem);
+        if (!checkbox) return null;
+
+        const anchorNode = document.createTextNode('\u200B');
+        const firstSublist = Array.from(listItem.children || []).find(
+            child => child.tagName === 'UL' || child.tagName === 'OL'
+        );
+        if (firstSublist) {
+            listItem.insertBefore(anchorNode, firstSublist);
+        } else {
+            const nextNode = checkbox.nextSibling;
+            if (nextNode) {
+                listItem.insertBefore(anchorNode, nextNode);
+            } else {
+                listItem.appendChild(anchorNode);
+            }
+        }
+        return anchorNode;
+    }
+
+    _isRangeAtCheckboxTextStart(listItem, range) {
+        if (!listItem || !range || !range.collapsed) return false;
+        const firstTextNode = this._getFirstDirectTextNodeAfterCheckbox(listItem);
+        const minOffset = this._getCheckboxTextMinOffset(listItem);
+        if (firstTextNode && range.startContainer === firstTextNode) {
+            if (this._isEmptyCheckboxListItem(listItem)) {
+                const textLength = (firstTextNode.textContent || '').length;
+                return range.startOffset <= textLength;
+            }
+            if (range.startOffset <= minOffset) {
+                return true;
+            }
+        }
+        if (range.startContainer === listItem && range.startOffset === 1) {
+            return true;
+        }
+        return false;
+    }
+
+    _isRangeOnCheckboxPosition(listItem, range) {
+        if (!listItem || !range || !range.collapsed) return false;
+        const checkbox = this._getCheckboxInListItemDirectContent(listItem);
+        if (!checkbox) return false;
+
+        if (range.startContainer === checkbox) {
+            return true;
+        }
+        if (range.startContainer === listItem) {
+            if (range.startOffset === 0) return true;
+            if (range.startOffset === 1 && this._isEmptyCheckboxListItem(listItem)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    _handleCheckboxCaretNavigationInCell(cell, range, direction) {
+        if (!cell || !range || !range.collapsed) return false;
+        if (direction !== 'left' && direction !== 'right') return false;
+
+        const listItem = this._resolveListItemFromRangeInCell(cell, range);
+        if (!listItem) return false;
+        if (!this._getCheckboxInListItemDirectContent(listItem)) return false;
+
+        const selection = window.getSelection();
+        if (!selection) return false;
+
+        if (direction === 'left' && this._isRangeAtCheckboxTextStart(listItem, range)) {
+            const newRange = document.createRange();
+            newRange.setStart(listItem, 0);
+            newRange.collapse(true);
+            selection.removeAllRanges();
+            selection.addRange(newRange);
+            return true;
+        }
+
+        if (direction === 'right' && this._isRangeOnCheckboxPosition(listItem, range)) {
+            const textNode = this._ensureCheckboxTextAnchor(listItem);
+            if (!textNode) return false;
+            const minOffset = this._getCheckboxTextMinOffset(listItem);
+            const newRange = document.createRange();
+            newRange.setStart(textNode, minOffset);
+            newRange.collapse(true);
+            selection.removeAllRanges();
+            selection.addRange(newRange);
+            return true;
+        }
+
+        return false;
+    }
+
+    _isRangeOnCheckboxVisualLine(listItem, range) {
+        if (!listItem || !range || !range.collapsed) return false;
+        const checkbox = this._getCheckboxInListItemDirectContent(listItem);
+        if (!checkbox) return false;
+
+        if (listItem.contains(range.startContainer)) {
+            return true;
+        }
+
+        const caretRect = this._getVisualCaretRectForRange(range);
+        if (!caretRect) return false;
+
+        const checkboxRect = checkbox.getBoundingClientRect
+            ? checkbox.getBoundingClientRect()
+            : null;
+        if (!checkboxRect) return false;
+
+        const caretTop = Number.isFinite(caretRect.top) ? caretRect.top : (caretRect.y || 0);
+        const caretBottom = Number.isFinite(caretRect.bottom)
+            ? caretRect.bottom
+            : (caretTop + (caretRect.height || 0));
+        const caretMidY = (caretTop + caretBottom) / 2;
+        const checkboxMidY = (checkboxRect.top + checkboxRect.bottom) / 2;
+        const tolerance = Math.max(3, (checkboxRect.height || 0) * 0.7);
+        return Math.abs(caretMidY - checkboxMidY) <= tolerance;
+    }
+
+    _snapCaretToCheckboxIfOnEmptyCheckboxTextStart(cell) {
+        const selection = window.getSelection();
+        if (!selection || !selection.rangeCount || !selection.isCollapsed) return false;
+        const range = selection.getRangeAt(0);
+        const listItem = this._resolveListItemFromRangeInCell(cell, range);
+        if (!listItem) return false;
+        if (!this._isEmptyCheckboxListItem(listItem)) return false;
+        const atTextStart = this._isRangeAtCheckboxTextStart(listItem, range);
+        if (!atTextStart && !this._isRangeOnCheckboxVisualLine(listItem, range)) {
+            return false;
+        }
+
+        const newRange = document.createRange();
+        newRange.setStart(listItem, 0);
+        newRange.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(newRange);
+        return true;
     }
 
     _handleOutsideNavigation(range, direction) {
@@ -2621,6 +3200,191 @@ export class TableManager {
         return true;
     }
 
+    _moveWithinCellByNativeCharacter(cell, range, direction, dryRun = false) {
+        if (!cell || !range || !range.collapsed) return false;
+        if (!cell.contains(range.startContainer)) return false;
+        if (direction !== 'left' && direction !== 'right') return false;
+
+        const selection = window.getSelection();
+        if (!selection || typeof selection.modify !== 'function') return false;
+
+        const restore = range.cloneRange();
+        selection.removeAllRanges();
+        selection.addRange(restore.cloneRange());
+
+        try {
+            selection.modify('move', direction === 'left' ? 'backward' : 'forward', 'character');
+            if (!selection.rangeCount) {
+                selection.removeAllRanges();
+                selection.addRange(restore);
+                return false;
+            }
+
+            const movedRange = selection.getRangeAt(0);
+            const movedInsideCell = cell.contains(movedRange.startContainer);
+            const movedPosition =
+                movedRange.startContainer !== restore.startContainer ||
+                movedRange.startOffset !== restore.startOffset;
+            const moved = movedInsideCell && movedPosition;
+
+            if (dryRun || !moved) {
+                selection.removeAllRanges();
+                selection.addRange(restore);
+            }
+            return moved;
+        } catch (_e) {
+            selection.removeAllRanges();
+            selection.addRange(restore);
+            return false;
+        }
+    }
+
+    _findVisualLineEdgeCaretInCell(cell, targetLine, side) {
+        if (!cell || !targetLine) return null;
+        if (typeof document.caretRangeFromPoint !== 'function') return null;
+        if (side !== 'start' && side !== 'end') return null;
+
+        const targetHeight = Math.max(1, targetLine.bottom - targetLine.top);
+        const targetY = targetLine.top + Math.max(1, Math.min(targetHeight * 0.5, targetHeight - 1));
+        const xCandidates = [];
+        if (side === 'start') {
+            for (let dx = 0; dx <= 32; dx++) {
+                xCandidates.push(targetLine.left + dx + 0.5);
+            }
+            xCandidates.push(targetLine.left + 1);
+            xCandidates.push(targetLine.left + 2);
+        } else {
+            for (let dx = 0; dx <= 32; dx++) {
+                xCandidates.push(targetLine.right - dx - 0.5);
+            }
+            xCandidates.push(targetLine.right - 1);
+            xCandidates.push(targetLine.right - 2);
+        }
+
+        let bestRange = null;
+        let bestLeft = side === 'start' ? Infinity : Number.NEGATIVE_INFINITY;
+        const tryProbe = (probeRange) => {
+            if (!probeRange || !cell.contains(probeRange.startContainer)) return;
+            const probeRect = this._getVisualCaretRectForRange(probeRange);
+            if (!probeRect) return;
+            const probeTop = probeRect.top || probeRect.y || 0;
+            if (probeTop < targetLine.top - 3 || probeTop > targetLine.bottom + 3) return;
+            const probeLeft = probeRect.left || probeRect.x || 0;
+            if (side === 'start') {
+                if (!bestRange || probeLeft < bestLeft - 0.5) {
+                    bestRange = probeRange;
+                    bestLeft = probeLeft;
+                }
+                return;
+            }
+            if (!bestRange || probeLeft > bestLeft + 0.5) {
+                bestRange = probeRange;
+                bestLeft = probeLeft;
+            }
+        };
+
+        for (const x of xCandidates) {
+            if (!Number.isFinite(x)) continue;
+            let probeRange = null;
+            try {
+                probeRange = document.caretRangeFromPoint(x, targetY);
+            } catch (_e) {
+                probeRange = null;
+            }
+            tryProbe(probeRange);
+        }
+
+        return bestRange;
+    }
+
+    _moveAcrossVisualLineBoundaryInCell(cell, range, direction) {
+        if (!cell || !range || !range.collapsed) return false;
+        if (!cell.contains(range.startContainer)) return false;
+        if (direction !== 'left' && direction !== 'right') return false;
+
+        const lines = this._getVisualLinesForCell(cell);
+        if (lines.length < 2) return false;
+
+        const caretRect = this._getVisualCaretRectForRange(range);
+        if (!caretRect) return false;
+
+        const currentIndex = this._getNearestVisualLineIndex(lines, caretRect);
+        if (currentIndex < 0) return false;
+
+        if (direction === 'right') {
+            if (currentIndex >= lines.length - 1) return false;
+            if (!this._isAtCurrentVisualLineEndInCell(cell, range)) return false;
+            const targetLine = lines[currentIndex + 1];
+            const bestRange = this._findVisualLineEdgeCaretInCell(cell, targetLine, 'start');
+            if (!bestRange) {
+                return this._moveWithinCellByNativeLine(cell, range, 'down');
+            }
+            const selection = window.getSelection();
+            if (!selection) return false;
+            const collapsed = document.createRange();
+            collapsed.setStart(bestRange.startContainer, bestRange.startOffset);
+            collapsed.collapse(true);
+            selection.removeAllRanges();
+            selection.addRange(collapsed);
+            return true;
+        }
+
+        if (currentIndex <= 0) return false;
+        if (!this._isAtCurrentVisualLineStartInCell(cell, range)) return false;
+        const targetLine = lines[currentIndex - 1];
+        const bestRange = this._findVisualLineEdgeCaretInCell(cell, targetLine, 'end');
+        if (!bestRange) {
+            return this._moveWithinCellByNativeLine(cell, range, 'up');
+        }
+        const selection = window.getSelection();
+        if (!selection) return false;
+        const collapsed = document.createRange();
+        collapsed.setStart(bestRange.startContainer, bestRange.startOffset);
+        collapsed.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(collapsed);
+        return true;
+    }
+
+    _moveWithinCellByNativeLine(cell, range, direction, dryRun = false) {
+        if (!cell || !range || !range.collapsed) return false;
+        if (!cell.contains(range.startContainer)) return false;
+        if (direction !== 'up' && direction !== 'down') return false;
+
+        const selection = window.getSelection();
+        if (!selection || typeof selection.modify !== 'function') return false;
+
+        const restore = range.cloneRange();
+        selection.removeAllRanges();
+        selection.addRange(restore.cloneRange());
+
+        try {
+            selection.modify('move', direction === 'up' ? 'backward' : 'forward', 'line');
+            if (!selection.rangeCount) {
+                selection.removeAllRanges();
+                selection.addRange(restore);
+                return false;
+            }
+
+            const movedRange = selection.getRangeAt(0);
+            const movedInsideCell = cell.contains(movedRange.startContainer);
+            const movedPosition =
+                movedRange.startContainer !== restore.startContainer ||
+                movedRange.startOffset !== restore.startOffset;
+            const moved = movedInsideCell && movedPosition;
+
+            if (dryRun || !moved) {
+                selection.removeAllRanges();
+                selection.addRange(restore);
+            }
+            return moved;
+        } catch (_e) {
+            selection.removeAllRanges();
+            selection.addRange(restore);
+            return false;
+        }
+    }
+
     _moveWithinCellByVisualLine(cell, range, direction) {
         if (!cell || !range || !range.collapsed) return false;
         if (!cell.contains(range.startContainer)) return false;
@@ -2630,16 +3394,24 @@ export class TableManager {
         const originOffset = range.startOffset;
 
         const lines = this._getVisualLinesForCell(cell);
-        if (lines.length < 2) return false;
+        if (lines.length < 2) {
+            return this._moveWithinCellByNativeLine(cell, range, direction);
+        }
 
         const currentRect = this._getVisualCaretRectForRange(range);
-        if (!currentRect) return false;
+        if (!currentRect) {
+            return this._moveWithinCellByNativeLine(cell, range, direction);
+        }
 
         const currentIndex = this._getNearestVisualLineIndex(lines, currentRect);
-        if (currentIndex < 0) return false;
+        if (currentIndex < 0) {
+            return this._moveWithinCellByNativeLine(cell, range, direction);
+        }
 
         const targetIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1;
-        if (targetIndex < 0 || targetIndex >= lines.length) return false;
+        if (targetIndex < 0 || targetIndex >= lines.length) {
+            return this._moveWithinCellByNativeLine(cell, range, direction);
+        }
 
         const currentLine = lines[currentIndex];
         const targetLine = lines[targetIndex];
@@ -2781,27 +3553,7 @@ export class TableManager {
             return true;
         }
 
-        // Safety fallback: keep movement inside current cell.
-        const selection = window.getSelection();
-        if (!selection || !selection.rangeCount) return false;
-        const restore = range.cloneRange();
-        if (typeof selection.modify !== 'function') {
-            return false;
-        }
-        try {
-            selection.modify('move', direction === 'up' ? 'backward' : 'forward', 'line');
-            if (selection.rangeCount) {
-                const movedRange = selection.getRangeAt(0);
-                if (cell.contains(movedRange.startContainer)) {
-                    return true;
-                }
-            }
-        } catch (_e) {
-            // restore below
-        }
-        selection.removeAllRanges();
-        selection.addRange(restore);
-        return false;
+        return this._moveWithinCellByNativeLine(cell, range, direction);
     }
 
     _setCursorToEdge(edge, atEnd) {
@@ -2905,6 +3657,40 @@ export class TableManager {
         try {
             const cellRect = cell.getBoundingClientRect ? cell.getBoundingClientRect() : null;
             const rawRects = [];
+            const pushRectCandidate = (rect, sourceElement = null) => {
+                if (!rect) return;
+                const top = Number.isFinite(rect.top) ? rect.top : null;
+                const left = Number.isFinite(rect.left) ? rect.left : null;
+                if (top === null || left === null) return;
+
+                let width = Number.isFinite(rect.width) ? rect.width : 0;
+                let height = Number.isFinite(rect.height) ? rect.height : 0;
+                let right = Number.isFinite(rect.right) ? rect.right : left + width;
+                let bottom = Number.isFinite(rect.bottom) ? rect.bottom : top + height;
+
+                // BR can report zero-size rects depending on browser/WebView.
+                // Synthesize a tiny caret-sized rect so empty visual lines are still tracked.
+                if ((width <= 0 && height <= 0) && sourceElement) {
+                    const host = sourceElement.parentElement || cell;
+                    const lineHeight = parseFloat(window.getComputedStyle(host).lineHeight || '') || 16;
+                    width = 1;
+                    height = Math.max(1, lineHeight);
+                    right = left + width;
+                    bottom = top + height;
+                }
+
+                rawRects.push({
+                    top,
+                    bottom,
+                    left,
+                    right,
+                    width,
+                    height,
+                    x: left,
+                    y: top
+                });
+            };
+
             const walker = document.createTreeWalker(cell, NodeFilter.SHOW_TEXT, null, false);
             let textNode;
             let guard = 0;
@@ -2923,13 +3709,39 @@ export class TableManager {
                         charRange.setStart(textNode, i);
                         charRange.setEnd(textNode, i + 1);
                         const rect = charRange.getBoundingClientRect();
-                        if (rect) rawRects.push(rect);
+                        pushRectCandidate(rect);
                     } catch (_e) {
                         // ignore broken ranges and continue
                     }
                 }
                 if (guard > 20000) break;
             }
+
+            // Include BR positions so empty lines inside table cells are navigable.
+            const brNodes = Array.from(cell.querySelectorAll('br'));
+            for (const br of brNodes) {
+                try {
+                    const brRange = document.createRange();
+                    brRange.setStartBefore(br);
+                    brRange.setEndAfter(br);
+                    const rect = brRange.getBoundingClientRect();
+                    pushRectCandidate(rect, br);
+                } catch (_e) {
+                    // ignore broken ranges and continue
+                }
+            }
+
+            // Include checkbox rects so empty checkbox list items are treated as visual lines.
+            const checkboxes = Array.from(cell.querySelectorAll('li > input[type="checkbox"]'));
+            for (const checkbox of checkboxes) {
+                try {
+                    const rect = checkbox.getBoundingClientRect();
+                    pushRectCandidate(rect, checkbox);
+                } catch (_e) {
+                    // ignore broken ranges and continue
+                }
+            }
+
             const rects = rawRects
                 .filter(rect =>
                     rect &&
@@ -3001,35 +3813,186 @@ export class TableManager {
         if (direction !== 'up' && direction !== 'down') return false;
 
         const lines = this._getVisualLinesForCell(cell);
-        if (lines.length < 2) return false;
+        if (lines.length < 2) {
+            return this._moveWithinCellByNativeLine(cell, range, direction, true);
+        }
 
         const caretRect = this._getVisualCaretRectForRange(range);
-        if (!caretRect) return false;
+        if (!caretRect) {
+            return this._moveWithinCellByNativeLine(cell, range, direction, true);
+        }
 
         const currentIndex = this._getNearestVisualLineIndex(lines, caretRect);
-        if (currentIndex < 0) return false;
+        if (currentIndex < 0) {
+            return this._moveWithinCellByNativeLine(cell, range, direction, true);
+        }
 
         return direction === 'up'
             ? currentIndex > 0
             : currentIndex < lines.length - 1;
     }
 
+    _isAtCurrentVisualLineStartInCell(cell, range) {
+        if (!cell || !range || !range.collapsed) return false;
+        if (!cell.contains(range.startContainer)) return false;
+        const lines = this._getVisualLinesForCell(cell);
+        if (!lines.length) return this._isAtCellStart(cell, range);
+        const caretRect = this._getVisualCaretRectForRange(range);
+        if (!caretRect) return this._isAtCellStart(cell, range);
+        const currentIndex = this._getNearestVisualLineIndex(lines, caretRect);
+        if (currentIndex < 0) return this._isAtCellStart(cell, range);
+        const line = lines[currentIndex];
+        const caretLeft = caretRect.left || caretRect.x || 0;
+        return caretLeft <= (line.left + 2);
+    }
+
+    _isAtCurrentVisualLineEndInCell(cell, range) {
+        if (!cell || !range || !range.collapsed) return false;
+        if (!cell.contains(range.startContainer)) return false;
+        const lines = this._getVisualLinesForCell(cell);
+        if (!lines.length) return this._isAtCellEnd(cell, range);
+        const caretRect = this._getVisualCaretRectForRange(range);
+        if (!caretRect) return this._isAtCellEnd(cell, range);
+        const currentIndex = this._getNearestVisualLineIndex(lines, caretRect);
+        if (currentIndex < 0) return this._isAtCellEnd(cell, range);
+        const line = lines[currentIndex];
+        const caretLeft = caretRect.left || caretRect.x || 0;
+        return caretLeft >= (line.right - 2);
+    }
+
     _isAtCellStart(cell, range) {
         if (this._isCellEmpty(cell)) return true;
-        const offset = this._getCursorOffsetInCell(cell, range);
-        return offset <= 0;
+        if (!cell || !range || !range.collapsed || !cell.contains(range.startContainer)) return false;
+        try {
+            const caret = document.createRange();
+            caret.setStart(range.startContainer, range.startOffset);
+            caret.collapse(true);
+            const startBoundary = this._getCellContentBoundaryRange(cell, false);
+            if (!startBoundary) return false;
+            return caret.compareBoundaryPoints(Range.START_TO_START, startBoundary) <= 0;
+        } catch (_e) {
+            const offset = this._getCursorOffsetInCell(cell, range);
+            return offset <= 0;
+        }
     }
 
     _isAtCellEnd(cell, range) {
         if (this._isCellEmpty(cell)) return true;
-        const total = (cell.textContent || '').length;
-        const offset = this._getCursorOffsetInCell(cell, range);
-        return offset >= total;
+        if (!cell || !range || !range.collapsed || !cell.contains(range.startContainer)) return false;
+        try {
+            const caret = document.createRange();
+            caret.setStart(range.startContainer, range.startOffset);
+            caret.collapse(true);
+            const endBoundary = this._getCellContentBoundaryRange(cell, true);
+            if (!endBoundary) return false;
+            return caret.compareBoundaryPoints(Range.START_TO_START, endBoundary) >= 0;
+        } catch (_e) {
+            const total = (cell.textContent || '').length;
+            const offset = this._getCursorOffsetInCell(cell, range);
+            return offset >= total;
+        }
+    }
+
+    _isDirectStructureHandleNode(node) {
+        return !!(
+            node &&
+            node.nodeType === Node.ELEMENT_NODE &&
+            node.classList &&
+            node.classList.contains('md-table-structure-handle')
+        );
+    }
+
+    _isPlaceholderOnlyCellNode(node) {
+        if (!node) return true;
+        if (node.nodeType === Node.TEXT_NODE) {
+            const text = (node.textContent || '').replace(/[\u200B\u00A0]/g, '');
+            return text.trim() === '';
+        }
+        if (node.nodeType !== Node.ELEMENT_NODE) {
+            return true;
+        }
+
+        if (this._isDirectStructureHandleNode(node)) {
+            return true;
+        }
+
+        if (
+            node.classList?.contains('md-table-insert-line') ||
+            node.getAttribute?.('data-exclude-from-markdown') === 'true'
+        ) {
+            return true;
+        }
+
+        if (node.tagName === 'BR') {
+            return true;
+        }
+
+        if (
+            node.tagName === 'UL' ||
+            node.tagName === 'OL' ||
+            node.tagName === 'TABLE' ||
+            node.tagName === 'PRE' ||
+            node.tagName === 'BLOCKQUOTE' ||
+            node.tagName === 'HR' ||
+            node.tagName === 'IMG' ||
+            node.tagName === 'VIDEO' ||
+            node.tagName === 'AUDIO' ||
+            node.tagName === 'SVG' ||
+            node.tagName === 'CANVAS' ||
+            node.tagName === 'INPUT' ||
+            node.tagName === 'TEXTAREA' ||
+            node.tagName === 'SELECT' ||
+            node.tagName === 'BUTTON' ||
+            node.tagName === 'IFRAME' ||
+            node.tagName === 'OBJECT' ||
+            node.tagName === 'EMBED'
+        ) {
+            return false;
+        }
+
+        const children = Array.from(node.childNodes || []);
+        if (!children.length) {
+            const text = (node.textContent || '').replace(/[\u200B\u00A0]/g, '');
+            return text.trim() === '';
+        }
+        return children.every((child) => this._isPlaceholderOnlyCellNode(child));
+    }
+
+    _hasRenderableCellContent(cell) {
+        if (!cell) return false;
+        const nodes = Array.from(cell.childNodes || []);
+        return nodes.some((node) => !this._isPlaceholderOnlyCellNode(node));
+    }
+
+    _getCellContentBoundaryRange(cell, atEnd) {
+        if (!cell) return null;
+        const range = document.createRange();
+        const nodes = Array.from(cell.childNodes || []);
+
+        if (!atEnd) {
+            let startIndex = 0;
+            while (startIndex < nodes.length && this._isDirectStructureHandleNode(nodes[startIndex])) {
+                startIndex += 1;
+            }
+            range.setStart(cell, Math.min(startIndex, cell.childNodes.length));
+            range.collapse(true);
+            return range;
+        }
+
+        let endIndex = nodes.length;
+        for (let i = 0; i < nodes.length; i++) {
+            if (this._isDirectStructureHandleNode(nodes[i])) {
+                endIndex = i;
+                break;
+            }
+        }
+        range.setStart(cell, Math.max(0, Math.min(endIndex, cell.childNodes.length)));
+        range.collapse(true);
+        return range;
     }
 
     _isCellEmpty(cell) {
-        const text = (cell.textContent || '').replace(/\u200B/g, '');
-        return text.trim() === '';
+        return !this._hasRenderableCellContent(cell);
     }
 
     _getCellFromTarget(target) {
@@ -3387,7 +4350,7 @@ export class TableManager {
 
     _ensureCellNotEmpty(cell) {
         if (!cell) return;
-        const hasText = (cell.textContent || '').replace(/\u200B/g, '').trim() !== '';
+        const hasText = this._hasRenderableCellContent(cell);
         const hasBr = !!cell.querySelector('br');
         if (hasText) {
             this._cleanupHandleCellPlaceholderBreaks(cell);
@@ -3402,13 +4365,6 @@ export class TableManager {
         if (!cell) return;
         const hasHandle = !!cell.querySelector(':scope > .md-table-structure-handle');
         if (!hasHandle) return;
-
-        let first = cell.firstChild;
-        while (first && first.nodeType === Node.ELEMENT_NODE && first.tagName === 'BR') {
-            const next = first.nextSibling;
-            first.remove();
-            first = next;
-        }
 
         let last = cell.lastChild;
         while (last && last.nodeType === Node.ELEMENT_NODE && last.tagName === 'BR') {

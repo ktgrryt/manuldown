@@ -67,6 +67,17 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         // Just ensure proper indentation with 2 spaces
         this.turndownService.keep(['br']);
 
+        const provider = this;
+        this.turndownService.addRule('tableCell', {
+            filter: ['th', 'td'],
+            replacement: function (content: string, node: any) {
+                const index = Array.prototype.indexOf.call(node.parentNode.childNodes, node);
+                const prefix = index === 0 ? '| ' : ' ';
+                const cellContent = provider.serializeTableCellForMarkdown(node, content);
+                return prefix + cellContent + ' |';
+            }
+        });
+
         // Add custom rule for list items to use 2-space indentation
         this.turndownService.addRule('listItem', {
             filter: 'li',
@@ -214,6 +225,69 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 return result;
             }
         });
+    }
+
+    private sanitizeTableCellText(value: string): string {
+        return (value || '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;')
+            .replace(/\|/g, '&#124;');
+    }
+
+    private serializeTableCellForMarkdown(node: any, convertedContent: string): string {
+        const rawText = String(node?.textContent || '').replace(/\r\n?/g, '\n');
+        const splitByBreakTokens = rawText
+            .split(/<br\s*\/?>/gi)
+            .flatMap((part) => part.split('\n'));
+        const lines = splitByBreakTokens
+            .map((line) => line.replace(/[ \t\f\v]+/g, ' ').trim());
+
+        // Keep leading empty lines to preserve intentional first-line breaks in table cells.
+        while (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+
+        if (lines.length === 0) {
+            return '';
+        }
+
+        const nonEmptyLines = lines.filter((line) => line !== '');
+        if (nonEmptyLines.length > 0) {
+            const taskMatches = nonEmptyLines.map((line) => line.match(/^[-*]\s+\[( |x|X)\]\s*(.*)$/));
+            if (taskMatches.every(Boolean)) {
+                const items = taskMatches.map((match) => {
+                    const checked = match![1].toLowerCase() === 'x';
+                    const text = this.sanitizeTableCellText((match![2] || '').trim());
+                    const marker = checked ? '[x]' : '[ ]';
+                    return `<li>${text ? `${marker} ${text}` : marker}</li>`;
+                });
+                return `<ul>${items.join('')}</ul>`;
+            }
+
+            const bulletMatches = nonEmptyLines.map((line) => line.match(/^[-*]\s+(.*)$/));
+            if (bulletMatches.every(Boolean)) {
+                const items = bulletMatches.map((match) => `<li>${this.sanitizeTableCellText((match![1] || '').trim())}</li>`);
+                return `<ul>${items.join('')}</ul>`;
+            }
+
+            const orderedMatches = nonEmptyLines.map((line) => line.match(/^(\d+)\.\s+(.*)$/));
+            if (orderedMatches.every(Boolean)) {
+                const start = Number.parseInt(orderedMatches[0]![1], 10);
+                const startAttr = Number.isFinite(start) && start > 1 ? ` start="${start}"` : '';
+                const items = orderedMatches.map((match) => `<li>${this.sanitizeTableCellText((match![2] || '').trim())}</li>`);
+                return `<ol${startAttr}>${items.join('')}</ol>`;
+            }
+        }
+
+        const normalizedContent = String(convertedContent || '')
+            .replace(/\r\n?/g, '\n')
+            .replace(/\n+/g, '<br>')
+            .trim();
+        if (normalizedContent !== '') {
+            return normalizedContent.replace(/\|/g, '\\|');
+        }
+        return lines.map((line) => this.sanitizeTableCellText(line)).join('<br>');
     }
 
     public async resolveCustomTextEditor(
