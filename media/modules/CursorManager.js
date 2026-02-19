@@ -218,6 +218,22 @@ export class CursorManager {
         return false;
     }
 
+    _isIgnorableBoundaryNode(node) {
+        if (!node) {
+            return true;
+        }
+        if (node.nodeType === Node.TEXT_NODE) {
+            return this._isIgnorableTextNode(node);
+        }
+        if (node.nodeType !== Node.ELEMENT_NODE) {
+            return true;
+        }
+        if (node.tagName === 'BR') {
+            return true;
+        }
+        return this._isNavigationExcludedElement(node);
+    }
+
     _insertTextNodeIntoListItem(listItem, textNode) {
         if (!listItem || !textNode) {
             return;
@@ -1108,14 +1124,7 @@ export class CursorManager {
 
         let candidate = container.childNodes[offset] || null;
         while (candidate) {
-            if (candidate.nodeType === Node.TEXT_NODE) {
-                if (!this._isIgnorableTextNode(candidate)) {
-                    return null;
-                }
-                candidate = candidate.nextSibling;
-                continue;
-            }
-            if (candidate.nodeType === Node.ELEMENT_NODE && this._isNavigationExcludedElement(candidate)) {
+            if (this._isIgnorableBoundaryNode(candidate)) {
                 candidate = candidate.nextSibling;
                 continue;
             }
@@ -1133,7 +1142,12 @@ export class CursorManager {
         const offset = range.startOffset;
 
         if (container.nodeType === Node.TEXT_NODE) {
-            if (offset > 0) {
+            const text = container.textContent || '';
+            let probeOffset = Math.max(0, Math.min(offset, text.length));
+            while (probeOffset > 0 && this._isInlineBoundaryChar(text[probeOffset - 1])) {
+                probeOffset--;
+            }
+            if (probeOffset > 0) {
                 return null;
             }
             const sibling = this._getPrevSiblingForNavigation(container);
@@ -1147,15 +1161,7 @@ export class CursorManager {
         let index = offset - 1;
         let candidate = index >= 0 ? container.childNodes[index] : null;
         while (candidate) {
-            if (candidate.nodeType === Node.TEXT_NODE) {
-                if (!this._isIgnorableTextNode(candidate)) {
-                    return null;
-                }
-                index--;
-                candidate = index >= 0 ? container.childNodes[index] : null;
-                continue;
-            }
-            if (candidate.nodeType === Node.ELEMENT_NODE && this._isNavigationExcludedElement(candidate)) {
+            if (this._isIgnorableBoundaryNode(candidate)) {
                 index--;
                 candidate = index >= 0 ? container.childNodes[index] : null;
                 continue;
@@ -1478,7 +1484,34 @@ export class CursorManager {
             return false;
         }
         const expectedOffset = boundary === 'before' ? index : index + 1;
-        return range.startContainer === parent && range.startOffset === expectedOffset;
+        if (range.startContainer !== parent) {
+            return false;
+        }
+        if (range.startOffset === expectedOffset) {
+            return true;
+        }
+
+        if (boundary === 'after' && range.startOffset > expectedOffset) {
+            for (let i = expectedOffset; i < range.startOffset; i++) {
+                const between = parent.childNodes[i];
+                if (!this._isIgnorableBoundaryNode(between)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        if (boundary === 'before' && range.startOffset < expectedOffset) {
+            for (let i = range.startOffset; i < expectedOffset; i++) {
+                const between = parent.childNodes[i];
+                if (!this._isIgnorableBoundaryNode(between)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        return false;
     }
 
     _normalizeCollapsedImageAnchor(selection, direction = 'forward') {
@@ -7296,6 +7329,14 @@ export class CursorManager {
         const selectedImage = this._getSelectedImageNode(range);
         if (selectedImage) {
             const newRange = document.createRange();
+            try {
+                newRange.setStart(selectedImage, 0);
+                newRange.collapse(true);
+                applyRange(newRange);
+                return true;
+            } catch (e) {
+                // Fall back to boundary placement if the engine rejects collapsed ranges in IMG.
+            }
             if (this._collapseRangeBeforeNode(newRange, selectedImage)) {
                 applyRange(newRange);
                 return true;

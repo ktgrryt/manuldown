@@ -5325,9 +5325,12 @@ import { SearchManager } from './modules/SearchManager.js';
     }
 
     function handleBackspaceKeydown(e, context) {
-        const { range } = context;
+        const { selection, range } = context;
         // Backspace (Ctrl+H) または Delete
         const key = e.key.toLowerCase();
+        const isCtrlH = isMac && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && key === 'h';
+        const isBackwardDelete = e.key === 'Backspace' || isCtrlH;
+        const isForwardDelete = e.key === 'Delete';
         const labelTarget = range && range.startContainer
             ? (range.startContainer.nodeType === Node.ELEMENT_NODE
                 ? range.startContainer
@@ -5337,7 +5340,6 @@ import { SearchManager } from './modules/SearchManager.js';
             ? labelTarget.closest('.code-block-language.editing')
             : null;
         if (editingLabel) {
-            const isCtrlH = isMac && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && key === 'h';
             if (isCtrlH) {
                 e.preventDefault();
                 e.stopPropagation();
@@ -5359,7 +5361,7 @@ import { SearchManager } from './modules/SearchManager.js';
             }
             return false;
         }
-        if ((e.key === 'Backspace' || e.key === 'Delete' || (isMac && e.ctrlKey && key === 'h')) && !e.metaKey && !e.altKey) {
+        if ((isBackwardDelete || isForwardDelete) && !e.metaKey && !e.altKey) {
             if (tableManager.handleBackspaceKeydown(e)) {
                 return true;
             }
@@ -5379,9 +5381,6 @@ import { SearchManager } from './modules/SearchManager.js';
                 e.preventDefault();
                 stateManager.saveState();
                 const checkboxListItem = checkboxForBS.parentElement;
-                const isBackwardDelete =
-                    e.key === 'Backspace' ||
-                    (isMac && e.ctrlKey && key === 'h');
                 if (isBackwardDelete && replaceCheckboxListItemWithEmptyLineInTableCell(checkboxListItem)) {
                     return true;
                 }
@@ -5405,8 +5404,28 @@ import { SearchManager } from './modules/SearchManager.js';
                 return true;
             }
 
+            if (isBackwardDelete) {
+                const imageAtRightEdge = getBackspaceTargetImageAtRightEdge(range);
+                if (imageAtRightEdge) {
+                    e.preventDefault();
+                    const activeSelection = selection || window.getSelection();
+                    if (activeSelection) {
+                        stateManager.saveState();
+                        if (deleteImageAtCaretForCtrlK(imageAtRightEdge, activeSelection)) {
+                            domUtils.ensureInlineCodeSpaces();
+                            domUtils.cleanupGhostStyles();
+                            tableManager.wrapTables();
+                            applyImageRenderSizes();
+                            hideImageResizeOverlaySafely();
+                            notifyChangeImmediate();
+                            return true;
+                        }
+                    }
+                }
+            }
+
             // Deleteキーの場合はデフォルト動作を許可
-            if (e.key === 'Delete') {
+            if (isForwardDelete) {
                 return false;
             }
 
@@ -6832,6 +6851,60 @@ import { SearchManager } from './modules/SearchManager.js';
         return anchor;
     }
 
+    function getImageRightCaretTextAnchor(image, options = {}) {
+        if (!image || !editor.contains(image)) {
+            return null;
+        }
+        const { create = false } = options;
+        const caretAnchor = getImageCaretAnchorNode(image) || image;
+        if (!caretAnchor || !caretAnchor.parentNode) {
+            return null;
+        }
+
+        const nextSibling = caretAnchor.nextSibling;
+        if (nextSibling && nextSibling.nodeType === Node.TEXT_NODE) {
+            const raw = nextSibling.textContent || '';
+            if (raw === '' || raw.replace(/[\u200B\uFEFF]/g, '') === '') {
+                if (raw === '') {
+                    nextSibling.textContent = '\u200B';
+                }
+                return nextSibling;
+            }
+            return null;
+        }
+
+        if (!create) {
+            return null;
+        }
+
+        const spacer = document.createTextNode('\u200B');
+        caretAnchor.parentNode.insertBefore(spacer, nextSibling || null);
+        return spacer;
+    }
+
+    function createAfterImageCaretRange(image, options = {}) {
+        if (!image || !editor.contains(image)) {
+            return null;
+        }
+        const { ensureTextAnchor = false } = options;
+        const caretAnchor = getImageCaretAnchorNode(image) || image;
+        if (!caretAnchor || !caretAnchor.parentNode) {
+            return null;
+        }
+
+        const textAnchor = getImageRightCaretTextAnchor(image, { create: ensureTextAnchor });
+        const range = document.createRange();
+        if (textAnchor && textAnchor.nodeType === Node.TEXT_NODE) {
+            const text = textAnchor.textContent || '';
+            const offset = text.length > 0 ? Math.min(1, text.length) : 0;
+            range.setStart(textAnchor, offset);
+        } else {
+            range.setStartAfter(caretAnchor);
+        }
+        range.collapse(true);
+        return range;
+    }
+
     function createAfterImageRangeIfRightSide(image, x, y, requireRightEdge) {
         if (!image || !editor.contains(image)) {
             return null;
@@ -6855,15 +6928,7 @@ import { SearchManager } from './modules/SearchManager.js';
             return null;
         }
 
-        const caretAnchor = getImageCaretAnchorNode(image) || image;
-        if (!caretAnchor.parentNode) {
-            return null;
-        }
-
-        const range = document.createRange();
-        range.setStartAfter(caretAnchor);
-        range.collapse(true);
-        return range;
+        return createAfterImageCaretRange(image, { ensureTextAnchor: false });
     }
 
     function createBeforeImageRangeIfLeftSide(image, x, y, requireLeftEdge) {
@@ -6926,7 +6991,7 @@ import { SearchManager } from './modules/SearchManager.js';
         if (side === 'left') {
             range.setStartBefore(caretAnchor);
         } else {
-            range.setStartAfter(caretAnchor);
+            return createAfterImageCaretRange(image, { ensureTextAnchor: false });
         }
         range.collapse(true);
         return range;
@@ -7006,7 +7071,7 @@ import { SearchManager } from './modules/SearchManager.js';
         if (!blockElement || blockElement === editor) {
             for (const child of editor.children) {
                 if (child.tagName === 'IMG') {
-                    const range = createBeforeImageRangeIfLeftSide(child, x, y, true);
+                    const range = createBeforeImageRangeIfLeftSide(child, x, y, false);
                     if (range) return range;
                 }
             }
@@ -7052,7 +7117,7 @@ import { SearchManager } from './modules/SearchManager.js';
         if (!blockElement || blockElement === editor) {
             for (const child of editor.children) {
                 if (child.tagName === 'IMG') {
-                    const range = createAfterImageRangeIfRightSide(child, x, y, true);
+                    const range = createAfterImageRangeIfRightSide(child, x, y, false);
                     if (range) return range;
                 }
             }
@@ -9180,6 +9245,136 @@ import { SearchManager } from './modules/SearchManager.js';
         };
     }
 
+    function isCollapsedRangeAtImageLeftEdge(targetRange, image) {
+        if (!targetRange || !targetRange.collapsed || !image || image.tagName !== 'IMG') {
+            return false;
+        }
+        const caretAnchor = getImageCaretAnchorNode(image) || image;
+        if (!caretAnchor || !caretAnchor.parentNode) {
+            return false;
+        }
+        const boundaryRange = document.createRange();
+        try {
+            boundaryRange.setStartBefore(caretAnchor);
+            boundaryRange.collapse(true);
+        } catch (e) {
+            return false;
+        }
+        const caretRange = targetRange.cloneRange();
+        caretRange.collapse(true);
+        return rangesShareSameCaretPosition(caretRange, boundaryRange);
+    }
+
+    function isCollapsedRangeAtImageRightEdge(targetRange, image) {
+        if (!targetRange || !targetRange.collapsed || !image || image.tagName !== 'IMG') {
+            return false;
+        }
+        const caretAnchor = getImageCaretAnchorNode(image) || image;
+        if (!caretAnchor || !caretAnchor.parentNode) {
+            return false;
+        }
+        const caretRange = targetRange.cloneRange();
+        caretRange.collapse(true);
+        const boundaryRange = createAfterImageCaretRange(image, { ensureTextAnchor: false });
+        if (boundaryRange && rangesShareSameCaretPosition(caretRange, boundaryRange)) {
+            return true;
+        }
+
+        const nextSibling = caretAnchor.nextSibling;
+        if (!nextSibling || nextSibling.nodeType !== Node.TEXT_NODE) {
+            return false;
+        }
+        const text = nextSibling.textContent || '';
+        const boundaryOnlyText = text === '' || text.replace(/[\u200B\uFEFF]/g, '') === '';
+        if (!boundaryOnlyText) {
+            return false;
+        }
+        return caretRange.startContainer === nextSibling &&
+            caretRange.startOffset >= 0 &&
+            caretRange.startOffset <= text.length;
+    }
+
+    function getBackspaceTargetImageAtRightEdge(range) {
+        if (!range || !range.collapsed) return null;
+
+        const directImage =
+            range.startContainer &&
+                range.startContainer.nodeType === Node.ELEMENT_NODE &&
+                range.startContainer.tagName === 'IMG'
+                ? range.startContainer
+                : null;
+
+        const imageBehind = (cursorManager && typeof cursorManager._getImageBehindFromCollapsedRange === 'function')
+            ? cursorManager._getImageBehindFromCollapsedRange(range)
+            : null;
+
+        const candidate = directImage || imageBehind;
+        if (!candidate || candidate.nodeType !== Node.ELEMENT_NODE || candidate.tagName !== 'IMG') {
+            return null;
+        }
+        if (!editor.contains(candidate)) {
+            return null;
+        }
+
+        return isCollapsedRangeAtImageRightEdge(range, candidate) ? candidate : null;
+    }
+
+    function getCtrlKTargetImageAtLeftEdge(range) {
+        if (!range || !range.collapsed) return null;
+
+        const directImage =
+            range.startContainer &&
+                range.startContainer.nodeType === Node.ELEMENT_NODE &&
+                range.startContainer.tagName === 'IMG'
+                ? range.startContainer
+                : null;
+
+        const imageAhead = (cursorManager && typeof cursorManager._getImageAheadFromCollapsedRange === 'function')
+            ? cursorManager._getImageAheadFromCollapsedRange(range)
+            : null;
+
+        const candidate = directImage || imageAhead;
+        if (!candidate || candidate.nodeType !== Node.ELEMENT_NODE || candidate.tagName !== 'IMG') {
+            return null;
+        }
+        if (!editor.contains(candidate)) {
+            return null;
+        }
+
+        if (range.startContainer === candidate && range.startOffset === 0) {
+            return candidate;
+        }
+
+        return isCollapsedRangeAtImageLeftEdge(range, candidate) ? candidate : null;
+    }
+
+    function deleteImageAtCaretForCtrlK(image, selection) {
+        if (!image || image.tagName !== 'IMG' || !image.isConnected || !editor.contains(image)) {
+            return false;
+        }
+
+        let target = image;
+        const parentLink = image.parentElement;
+        if (parentLink && parentLink.tagName === 'A' && parentLink.childNodes.length === 1) {
+            target = parentLink;
+        }
+
+        const parentNode = target.parentNode;
+        if (!parentNode) {
+            return false;
+        }
+
+        const nextSibling = target.nextSibling;
+        const prevSibling = target.previousSibling;
+        target.remove();
+
+        hideImageResizeOverlaySafely();
+        focusEditorWithoutScroll();
+        placeCaretAfterImageRemoval(parentNode, nextSibling, prevSibling);
+        scheduleEditorOverflowStateUpdate();
+        return true;
+    }
+
     function buildCtrlKKillRange(selection, range) {
         if (!selection || !range) return null;
         if (!range.collapsed) {
@@ -9389,6 +9584,22 @@ import { SearchManager } from './modules/SearchManager.js';
         }
 
         if (range.collapsed) {
+            const imageAtLeftEdge = getCtrlKTargetImageAtLeftEdge(range);
+            if (imageAtLeftEdge) {
+                stateManager.saveState();
+                emacsKillBuffer = createMarkdownImageSyntaxFromElement(imageAtLeftEdge);
+                if (deleteImageAtCaretForCtrlK(imageAtLeftEdge, selection)) {
+                    domUtils.ensureInlineCodeSpaces();
+                    domUtils.cleanupGhostStyles();
+                    tableManager.wrapTables();
+                    applyImageRenderSizes();
+                    hideImageResizeOverlaySafely();
+                    finalizeCtrlKDeleteTurn();
+                    notifyChangeImmediate();
+                    return true;
+                }
+            }
+
             const emptyTopLevelBlockquote = getTopLevelBlockquoteForCtrlK(range);
             if (isCtrlKTargetBlockquoteEmpty(emptyTopLevelBlockquote)) {
                 stateManager.saveState();
@@ -11785,6 +11996,19 @@ import { SearchManager } from './modules/SearchManager.js';
             newRange.collapse(true);
             selection.removeAllRanges();
             selection.addRange(newRange);
+        };
+
+        const setCaretToImageRightEdge = (selection, image) => {
+            if (!selection || !image || image.tagName !== 'IMG' || !editor.contains(image)) {
+                return false;
+            }
+            const range = createAfterImageCaretRange(image, { ensureTextAnchor: true });
+            if (!range) {
+                return false;
+            }
+            selection.removeAllRanges();
+            selection.addRange(range);
+            return true;
         };
 
         const insertPlainTextPreservingLineBreaks = (text) => {
@@ -14261,13 +14485,10 @@ import { SearchManager } from './modules/SearchManager.js';
                                     block.parentNode.appendChild(imageParagraph);
                                 }
 
-                                const newRange = document.createRange();
-                                newRange.setStartAfter(imageParagraph);
-                                newRange.collapse(true);
-                                selection.removeAllRanges();
-                                selection.addRange(newRange);
+                                getImageRightCaretTextAnchor(img, { create: true });
+                                setCaretAfterNode(selection, imageParagraph);
 
-                                notifyChange();
+                                notifyChangeImmediate();
                                 break;
                             }
                         }
@@ -14275,12 +14496,16 @@ import { SearchManager } from './modules/SearchManager.js';
                         range.deleteContents();
                         range.insertNode(img);
 
-                        range.setStartAfter(img);
-                        range.collapse(true);
-                        selection.removeAllRanges();
-                        selection.addRange(range);
+                        if (img.parentNode === editor) {
+                            const imageParagraph = document.createElement('p');
+                            editor.insertBefore(imageParagraph, img);
+                            imageParagraph.appendChild(img);
+                        }
+                        if (!setCaretToImageRightEdge(selection, img)) {
+                            setCaretAfterNode(selection, img);
+                        }
 
-                        notifyChange();
+                        notifyChangeImmediate();
                     }
                 }
                 break;
