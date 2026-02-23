@@ -3,7 +3,7 @@
   "displayName": "ManulDown",
   "description": "WYSIWYG editor for Markdown files in VSCode",
   "icon": "images/icon.png",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "publisher": "ktgrryt",
   "license": "MIT",
   "repository": {
@@ -211,16 +211,16 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile",
-    "lint": "eslint src --ext ts"
+    "lint": "eslint src"
   },
   "devDependencies": {
     "@types/node": "20.x",
     "@types/turndown": "^5.0.6",
     "@types/vscode": "^1.85.0",
-    "@typescript-eslint/eslint-plugin": "^6.15.0",
-    "@typescript-eslint/parser": "^6.15.0",
+    "@typescript-eslint/eslint-plugin": "^8.56.0",
+    "@typescript-eslint/parser": "^8.56.0",
     "@vscode/test-electron": "^2.3.8",
-    "eslint": "^8.56.0",
+    "eslint": "^10.0.0",
     "typescript": "^5.3.3"
     
   },

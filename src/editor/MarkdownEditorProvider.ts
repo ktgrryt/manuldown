@@ -1304,6 +1304,16 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     private convertWebviewUrisToRelativePaths(html: string, document: vscode.TextDocument): string {
         // Convert webview URIs and absolute paths back to relative paths for images
         return html.replace(/<img([^>]*?)src="([^"]+)"([^>]*?)>/g, (match, before, src, after) => {
+            const removeMdPathAttribute = (value: string): string => value.replace(/\sdata-md-path="[^"]*"/gi, '');
+            const sanitizedBefore = removeMdPathAttribute(before);
+            const sanitizedAfter = removeMdPathAttribute(after);
+
+            // Prefer the original markdown path when present.
+            const markdownPathMatch = `${before}${after}`.match(/\sdata-md-path="([^"]+)"/i);
+            if (markdownPathMatch && markdownPathMatch[1].trim() !== '') {
+                const markdownPath = markdownPathMatch[1].trim();
+                return `<img${sanitizedBefore}src="${markdownPath}"${sanitizedAfter}>`;
+            }
 
             // Decode URL-encoded src
             let decodedSrc = src;
@@ -1367,12 +1377,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     }
                 }
 
-                // Get alt text
-                const altMatch = match.match(/alt="([^"]*)"/);
-                const alt = altMatch ? altMatch[1] : '';
-
-
-                return `<img${before}src="${relativePath}" alt="${alt}"${after}>`;
+                return `<img${sanitizedBefore}src="${relativePath}"${sanitizedAfter}>`;
             } catch (error) {
                 console.error('[convertWebviewUrisToRelativePaths] Error converting path to relative:', error);
                 return match;

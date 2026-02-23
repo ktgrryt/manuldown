@@ -14425,88 +14425,126 @@ import { SearchManager } from './modules/SearchManager.js';
             case 'insertImage':
                 {
                     const selection = window.getSelection();
-                    if (selection && selection.rangeCount === 0) {
+                    let range = null;
+                    if (selection && selection.rangeCount > 0) {
+                        const candidateRange = selection.getRangeAt(0);
+                        if (editor.contains(candidateRange.commonAncestorContainer)) {
+                            range = candidateRange;
+                        }
+                    }
+
+                    if (!range) {
                         const fallbackRange = document.createRange();
                         fallbackRange.selectNodeContents(editor);
                         fallbackRange.collapse(false);
-                        selection.removeAllRanges();
-                        selection.addRange(fallbackRange);
+                        range = fallbackRange;
+                        if (selection) {
+                            selection.removeAllRanges();
+                            selection.addRange(fallbackRange);
+                        }
                     }
-                    if (selection && selection.rangeCount > 0) {
-                        const range = selection.getRangeAt(0);
-                        const img = document.createElement('img');
-                        img.src = message.src;
-                        img.alt = 'image';
-                        applyImageRenderSizeFromAlt(img);
 
-                        const isCollapsedTextCaret = (() => {
-                            if (!selection.isCollapsed) return false;
-                            const container = range.startContainer;
-                            if (container.nodeType === Node.TEXT_NODE) {
-                                return true;
-                            }
-                            if (container.nodeType !== Node.ELEMENT_NODE) {
-                                return false;
-                            }
-                            if (container === editor) {
-                                return false;
-                            }
-                            const block = domUtils.isBlockElement(container)
-                                ? container
-                                : (() => {
-                                    let current = container.parentElement;
-                                    while (current && current !== editor && !domUtils.isBlockElement(current)) {
-                                        current = current.parentElement;
-                                    }
-                                    return current;
-                                })();
-                            if (!block || block === editor) {
-                                return false;
-                            }
-                            const meaningfulText = (block.textContent || '').replace(/[\u200B\u00A0]/g, '').trim();
-                            return meaningfulText.length > 0;
-                        })();
+                    if (!range) {
+                        break;
+                    }
 
-                        if (isCollapsedTextCaret) {
-                            let block = range.startContainer.nodeType === Node.ELEMENT_NODE
-                                ? range.startContainer
-                                : range.startContainer.parentElement;
-                            while (block && block !== editor && !domUtils.isBlockElement(block)) {
-                                block = block.parentElement;
-                            }
+                    const markdown = typeof message.markdown === 'string' ? message.markdown : '';
+                    const markdownMatch = markdown.match(/^!\[[^\]]*]\((?:<([^>]+)>|([^\s)]+))(?:\s+["'][^"']*["'])?\)$/);
+                    const markdownPath = markdownMatch ? (markdownMatch[1] || markdownMatch[2] || '').trim() : '';
 
-                            if (block && block !== editor && block.parentNode) {
-                                const imageParagraph = document.createElement('p');
-                                imageParagraph.appendChild(img);
+                    const img = document.createElement('img');
+                    const imageSrc = (typeof message.src === 'string' && message.src.trim() !== '') ? message.src : markdownPath;
+                    if (imageSrc) {
+                        img.src = imageSrc;
+                    }
+                    img.alt = 'image';
+                    if (markdownPath) {
+                        img.setAttribute('data-md-path', markdownPath);
+                    }
+                    applyImageRenderSizeFromAlt(img);
 
-                                if (block.nextSibling) {
-                                    block.parentNode.insertBefore(imageParagraph, block.nextSibling);
-                                } else {
-                                    block.parentNode.appendChild(imageParagraph);
+                    const isCollapsedTextCaret = (() => {
+                        if (!selection || !selection.isCollapsed) return false;
+                        const container = range.startContainer;
+                        if (container.nodeType === Node.TEXT_NODE) {
+                            return true;
+                        }
+                        if (container.nodeType !== Node.ELEMENT_NODE) {
+                            return false;
+                        }
+                        if (container === editor) {
+                            return false;
+                        }
+                        const block = domUtils.isBlockElement(container)
+                            ? container
+                            : (() => {
+                                let current = container.parentElement;
+                                while (current && current !== editor && !domUtils.isBlockElement(current)) {
+                                    current = current.parentElement;
                                 }
+                                return current;
+                            })();
+                        if (!block || block === editor) {
+                            return false;
+                        }
+                        const meaningfulText = (block.textContent || '').replace(/[\u200B\u00A0]/g, '').trim();
+                        return meaningfulText.length > 0;
+                    })();
 
-                                getImageRightCaretTextAnchor(img, { create: true });
-                                setCaretAfterNode(selection, imageParagraph);
-
-                                notifyChangeImmediate();
-                                break;
-                            }
+                    if (isCollapsedTextCaret) {
+                        let block = range.startContainer.nodeType === Node.ELEMENT_NODE
+                            ? range.startContainer
+                            : range.startContainer.parentElement;
+                        while (block && block !== editor && !domUtils.isBlockElement(block)) {
+                            block = block.parentElement;
                         }
 
-                        range.deleteContents();
-                        range.insertNode(img);
-
-                        if (img.parentNode === editor) {
+                        if (block && block !== editor && block.parentNode) {
                             const imageParagraph = document.createElement('p');
-                            editor.insertBefore(imageParagraph, img);
                             imageParagraph.appendChild(img);
+
+                            if (block.nextSibling) {
+                                block.parentNode.insertBefore(imageParagraph, block.nextSibling);
+                            } else {
+                                block.parentNode.appendChild(imageParagraph);
+                            }
+
+                            getImageRightCaretTextAnchor(img, { create: true });
+                            if (selection) {
+                                setCaretAfterNode(selection, imageParagraph);
+                            }
+
+                            notifyChangeImmediate();
+                            break;
                         }
-                        if (!setCaretToImageRightEdge(selection, img)) {
+                    }
+
+                    range.deleteContents();
+                    range.insertNode(img);
+
+                    let insertedImageBlock = null;
+                    if (img.parentNode === editor) {
+                        const imageParagraph = document.createElement('p');
+                        editor.insertBefore(imageParagraph, img);
+                        imageParagraph.appendChild(img);
+                        insertedImageBlock = imageParagraph;
+                    } else if (img.parentElement && domUtils.isBlockElement(img.parentElement)) {
+                        insertedImageBlock = img.parentElement;
+                    }
+
+                    if (selection) {
+                        const shouldPlaceCaretAfterBlock =
+                            insertedImageBlock &&
+                            insertedImageBlock !== editor &&
+                            isImageOnlyBlockElement(insertedImageBlock);
+                        if (shouldPlaceCaretAfterBlock) {
+                            setCaretAfterNode(selection, insertedImageBlock);
+                        } else if (!setCaretToImageRightEdge(selection, img)) {
                             setCaretAfterNode(selection, img);
                         }
-
-                        notifyChangeImmediate();
                     }
+
+                    notifyChangeImmediate();
                 }
                 break;
             case 'tableCommand':
