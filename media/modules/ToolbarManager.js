@@ -26,6 +26,11 @@ export class ToolbarManager {
             'codeblock',
             'table',
         ]);
+        this.headingLevelCommands = new Set([
+            'h1',
+            'h2',
+            'h3',
+        ]);
     }
 
     /**
@@ -74,6 +79,16 @@ export class ToolbarManager {
         const isTableCellRestrictedCommand =
             !!command && this.tableCellRestrictedCommands.has(command);
         if (isTableCellRestrictedCommand && this.isSelectionInTableCellContext()) {
+            return;
+        }
+
+        if (command === 'bold' && this.isSelectionInHeadingContext()) {
+            this.updateToolbarState();
+            return;
+        }
+
+        if (this.headingLevelCommands.has(command) && this.getActiveHeadingCommand() === command) {
+            this.updateToolbarState();
             return;
         }
 
@@ -143,13 +158,25 @@ export class ToolbarManager {
 
     updateCommandAvailability() {
         const inTableCellContext = this.isSelectionInTableCellContext();
+        const inHeadingContext = this.isSelectionInHeadingContext();
+        const activeHeadingCommand = this.getActiveHeadingCommand();
 
-        this.tableCellRestrictedCommands.forEach((command) => {
-            const button = this.commandButtons.get(command);
-            if (!button) return;
-            button.disabled = inTableCellContext;
-            button.classList.toggle('is-disabled', inTableCellContext);
-            if (inTableCellContext) {
+        this.commandButtons.forEach((button, command) => {
+            const disabledByTable = this.tableCellRestrictedCommands.has(command) && inTableCellContext;
+            const disabledBoldInHeading = command === 'bold' && inHeadingContext;
+            const disabledSameHeadingLevel =
+                this.headingLevelCommands.has(command) &&
+                !!activeHeadingCommand &&
+                activeHeadingCommand === command;
+            const isCurrentHeadingLevel =
+                this.headingLevelCommands.has(command) &&
+                !!activeHeadingCommand &&
+                activeHeadingCommand === command;
+            const isDisabled = disabledByTable || disabledBoldInHeading || disabledSameHeadingLevel;
+            button.disabled = isDisabled;
+            button.classList.toggle('is-disabled', isDisabled);
+            button.classList.toggle('is-current-heading', isCurrentHeadingLevel);
+            if (isDisabled) {
                 button.setAttribute('aria-disabled', 'true');
             } else {
                 button.removeAttribute('aria-disabled');
@@ -163,7 +190,10 @@ export class ToolbarManager {
             const button = this.commandButtons.get(command);
             if (!button) return;
 
-            const isActive = shouldReflectActiveState && this.isNativeCommandActive(nativeCommand);
+            const isActive =
+                !button.disabled &&
+                shouldReflectActiveState &&
+                this.isNativeCommandActive(nativeCommand);
             button.classList.toggle('is-active', isActive);
             button.setAttribute('aria-pressed', isActive ? 'true' : 'false');
         });
@@ -189,6 +219,86 @@ export class ToolbarManager {
         const element = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
         if (!element) return false;
         return !!element.closest('td, th');
+    }
+
+    isSelectionInHeadingContext() {
+        const selection = window.getSelection();
+        if (!selection || selection.rangeCount === 0) {
+            return false;
+        }
+
+        const headingSelector = 'h1, h2, h3, h4, h5, h6';
+
+        for (let i = 0; i < selection.rangeCount; i++) {
+            const range = selection.getRangeAt(i);
+            if (!this.editor.contains(range.startContainer) && !this.editor.contains(range.endContainer)) {
+                continue;
+            }
+
+            if (this._isNodeInHeading(range.startContainer) || this._isNodeInHeading(range.endContainer)) {
+                return true;
+            }
+
+            if (range.collapsed) {
+                continue;
+            }
+
+            const headings = this.editor.querySelectorAll(headingSelector);
+            for (const heading of headings) {
+                try {
+                    if (range.intersectsNode(heading)) {
+                        return true;
+                    }
+                } catch (_error) {
+                    // noop
+                }
+            }
+        }
+
+        return false;
+    }
+
+    getActiveHeadingCommand() {
+        const selection = window.getSelection();
+        if (!selection || selection.rangeCount === 0) {
+            return null;
+        }
+
+        for (let i = 0; i < selection.rangeCount; i++) {
+            const range = selection.getRangeAt(i);
+            if (!this.editor.contains(range.startContainer) && !this.editor.contains(range.endContainer)) {
+                continue;
+            }
+
+            const startHeading = this._getHeadingElementFromNode(range.startContainer);
+            if (startHeading) {
+                const command = startHeading.tagName.toLowerCase();
+                return this.headingLevelCommands.has(command) ? command : null;
+            }
+
+            const endHeading = this._getHeadingElementFromNode(range.endContainer);
+            if (endHeading) {
+                const command = endHeading.tagName.toLowerCase();
+                return this.headingLevelCommands.has(command) ? command : null;
+            }
+        }
+
+        return null;
+    }
+
+    _isNodeInHeading(node) {
+        return !!this._getHeadingElementFromNode(node);
+    }
+
+    _getHeadingElementFromNode(node) {
+        if (!node) return null;
+        const element = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+        if (!element) return null;
+        const heading = element.closest('h1, h2, h3, h4, h5, h6');
+        if (!heading || !this.editor.contains(heading)) {
+            return null;
+        }
+        return heading;
     }
 
     isSelectionInsideEditor() {

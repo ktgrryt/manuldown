@@ -107,6 +107,25 @@ body {
     border-color: transparent;
 }
 
+.toolbar-btn.is-current-heading,
+.toolbar-btn.is-current-heading:disabled,
+.toolbar-btn.is-current-heading.is-disabled {
+    opacity: 1;
+    background-color: var(--vscode-inputOption-activeBackground, rgba(0, 100, 200, 0.38));
+    color: var(--vscode-inputOption-activeForeground, var(--vscode-editor-foreground));
+    border-color: var(--vscode-inputOption-activeBorder, var(--vscode-focusBorder));
+}
+
+.toolbar-btn.is-current-heading:hover,
+.toolbar-btn.is-current-heading:focus-visible,
+.toolbar-btn.is-current-heading:disabled:hover,
+.toolbar-btn.is-current-heading.is-disabled:hover,
+.toolbar-btn.is-current-heading:disabled:focus-visible,
+.toolbar-btn.is-current-heading.is-disabled:focus-visible {
+    background-color: var(--vscode-inputOption-activeBackground, rgba(0, 100, 200, 0.48));
+    border-color: var(--vscode-inputOption-activeBorder, var(--vscode-focusBorder));
+}
+
 .toolbar-separator {
     width: 1px;
     height: 20px;
