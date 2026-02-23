@@ -77,6 +77,18 @@ body {
     border-color: var(--vscode-focusBorder);
 }
 
+.toolbar-btn.is-active {
+    background-color: var(--vscode-inputOption-activeBackground, rgba(0, 100, 200, 0.38));
+    color: var(--vscode-inputOption-activeForeground, var(--vscode-editor-foreground));
+    border-color: var(--vscode-inputOption-activeBorder, var(--vscode-focusBorder));
+}
+
+.toolbar-btn.is-active:hover,
+.toolbar-btn.is-active:focus-visible {
+    background-color: var(--vscode-inputOption-activeBackground, rgba(0, 100, 200, 0.48));
+    border-color: var(--vscode-inputOption-activeBorder, var(--vscode-focusBorder));
+}
+
 .toolbar-btn:disabled,
 .toolbar-btn.is-disabled {
     opacity: 0.45;

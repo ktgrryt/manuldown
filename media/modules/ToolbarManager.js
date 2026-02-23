@@ -13,6 +13,11 @@ export class ToolbarManager {
         this.onInsertCodeBlock = options.onInsertCodeBlock || null;
         this.onInsertCheckbox = options.onInsertCheckbox || null;
         this.commandButtons = new Map();
+        this.activeStateCommands = new Map([
+            ['bold', 'bold'],
+            ['italic', 'italic'],
+            ['strikethrough', 'strikeThrough'],
+        ]);
         this.tableCellRestrictedCommands = new Set([
             'h1',
             'h2',
@@ -32,6 +37,9 @@ export class ToolbarManager {
             const command = button.getAttribute('data-command');
             if (command) {
                 this.commandButtons.set(command, button);
+                if (this.activeStateCommands.has(command)) {
+                    button.setAttribute('aria-pressed', 'false');
+                }
             }
             button.addEventListener('click', (e) => {
                 e.preventDefault();
@@ -44,14 +52,15 @@ export class ToolbarManager {
             });
         });
 
-        const updateAvailability = () => this.updateCommandAvailability();
-        document.addEventListener('selectionchange', updateAvailability);
-        this.editor.addEventListener('keyup', updateAvailability);
-        this.editor.addEventListener('mouseup', updateAvailability);
-        this.editor.addEventListener('input', updateAvailability);
-        this.editor.addEventListener('focus', updateAvailability);
+        const updateToolbarState = () => this.updateToolbarState();
+        document.addEventListener('selectionchange', updateToolbarState);
+        this.editor.addEventListener('keyup', updateToolbarState);
+        this.editor.addEventListener('mouseup', updateToolbarState);
+        this.editor.addEventListener('input', updateToolbarState);
+        this.editor.addEventListener('focus', updateToolbarState);
+        this.editor.addEventListener('blur', updateToolbarState);
 
-        this.updateCommandAvailability();
+        this.updateToolbarState();
     }
 
     /**
@@ -122,6 +131,13 @@ export class ToolbarManager {
                 this.formatBlock('blockquote');
                 break;
         }
+
+        this.updateToolbarState();
+    }
+
+    updateToolbarState() {
+        this.updateCommandAvailability();
+        this.updateCommandActiveStates();
     }
 
     updateCommandAvailability() {
@@ -137,6 +153,18 @@ export class ToolbarManager {
             } else {
                 button.removeAttribute('aria-disabled');
             }
+        });
+    }
+
+    updateCommandActiveStates() {
+        const shouldReflectActiveState = this.isSelectionInsideEditor();
+        this.activeStateCommands.forEach((nativeCommand, command) => {
+            const button = this.commandButtons.get(command);
+            if (!button) return;
+
+            const isActive = shouldReflectActiveState && this.isNativeCommandActive(nativeCommand);
+            button.classList.toggle('is-active', isActive);
+            button.setAttribute('aria-pressed', isActive ? 'true' : 'false');
         });
     }
 
@@ -160,6 +188,34 @@ export class ToolbarManager {
         const element = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
         if (!element) return false;
         return !!element.closest('td, th');
+    }
+
+    isSelectionInsideEditor() {
+        const selection = window.getSelection();
+        if (!selection || selection.rangeCount === 0) {
+            return false;
+        }
+
+        for (let i = 0; i < selection.rangeCount; i++) {
+            const range = selection.getRangeAt(i);
+            if (this.editor.contains(range.startContainer) || this.editor.contains(range.endContainer)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    isNativeCommandActive(nativeCommand) {
+        if (typeof document.queryCommandState !== 'function') {
+            return false;
+        }
+
+        try {
+            return !!document.queryCommandState(nativeCommand);
+        } catch (_error) {
+            return false;
+        }
     }
 
     /**
