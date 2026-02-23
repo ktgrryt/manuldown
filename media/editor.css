@@ -1019,10 +1019,17 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
     top: var(--editor-pad-top);
     left: var(--editor-pad-left);
     right: var(--editor-pad-right);
+    font-size: inherit;
+    line-height: inherit;
     pointer-events: none;
     user-select: none;
     color: var(--vscode-descriptionForeground);
     opacity: 0.5;
+}
+
+#editor.is-empty > * {
+    margin-top: 0;
+    margin-bottom: 0;
 }
 
 /* Table of Contents */

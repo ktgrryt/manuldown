@@ -4181,11 +4181,19 @@ import { SearchManager } from './modules/SearchManager.js';
                         editor.focus();
 
                         const newRange = document.createRange();
-                        const firstNode = domUtils.getFirstTextNode(p);
-                        if (firstNode) {
-                            newRange.setStart(firstNode, 0);
+                        if (isEditorEffectivelyEmpty()) {
+                            // Keep empty-state caret at editor origin so it aligns with placeholder text.
+                            while (editor.firstChild) {
+                                editor.removeChild(editor.firstChild);
+                            }
+                            newRange.setStart(editor, 0);
                         } else {
-                            newRange.setStart(p, 0);
+                            const firstNode = domUtils.getFirstTextNode(p);
+                            if (firstNode) {
+                                newRange.setStart(firstNode, 0);
+                            } else {
+                                newRange.setStart(p, 0);
+                            }
                         }
                         newRange.collapse(true);
                         selection.removeAllRanges();
@@ -6277,7 +6285,15 @@ import { SearchManager } from './modules/SearchManager.js';
         }
 
         const nr = document.createRange();
-        nr.setStart(p, 0);
+        if (isEditorEffectivelyEmpty()) {
+            // Keep empty-state caret anchored to editor origin so it lines up with placeholder text.
+            while (editor.firstChild) {
+                editor.removeChild(editor.firstChild);
+            }
+            nr.setStart(editor, 0);
+        } else {
+            nr.setStart(p, 0);
+        }
         nr.collapse(true);
         sel.removeAllRanges();
         sel.addRange(nr);
