@@ -6707,7 +6707,7 @@ import { SearchManager } from './modules/SearchManager.js';
         return false;
     }
 
-    function getNearestTextRectForBlockClickByY(blockElement, y) {
+    function getNearestTextRectForBlockClickByY(blockElement, y, x = null) {
         if (!blockElement || blockElement.nodeType !== Node.ELEMENT_NODE) {
             return null;
         }
@@ -6744,8 +6744,9 @@ import { SearchManager } from './modules/SearchManager.js';
             false
         );
 
+        const hasX = Number.isFinite(x);
         let bestMatch = null;
-        let bestScore = Number.POSITIVE_INFINITY;
+        let bestMetrics = null;
         let textNode;
         while (textNode = walker.nextNode()) {
             const textRange = document.createRange();
@@ -6766,14 +6767,55 @@ import { SearchManager } from './modules/SearchManager.js';
                     ? rect.top - y
                     : (y > rect.bottom ? y - rect.bottom : 0);
                 const centerDistance = Math.abs((rect.top + rect.bottom) / 2 - y);
-                const score = verticalOutsideDistance * 1000 + centerDistance;
+                const horizontalOutsideDistance = hasX
+                    ? (x < rect.left ? rect.left - x : (x > rect.right ? x - rect.right : 0))
+                    : 0;
+                const horizontalCenterDistance = hasX
+                    ? Math.abs((rect.left + rect.right) / 2 - x)
+                    : 0;
+                const metrics = {
+                    verticalOutsideDistance,
+                    centerDistance,
+                    horizontalOutsideDistance,
+                    horizontalCenterDistance
+                };
 
-                if (!bestMatch || score < bestScore || (score === bestScore && rect.right > bestMatch.rect.right)) {
+                let isBetter = !bestMatch;
+                if (!isBetter && bestMetrics) {
+                    isBetter = metrics.verticalOutsideDistance < bestMetrics.verticalOutsideDistance;
+                }
+                if (!isBetter && bestMetrics &&
+                    metrics.verticalOutsideDistance === bestMetrics.verticalOutsideDistance) {
+                    isBetter = metrics.centerDistance < bestMetrics.centerDistance;
+                }
+                if (!isBetter && hasX && bestMetrics &&
+                    metrics.verticalOutsideDistance === bestMetrics.verticalOutsideDistance &&
+                    metrics.centerDistance === bestMetrics.centerDistance) {
+                    isBetter = metrics.horizontalOutsideDistance < bestMetrics.horizontalOutsideDistance;
+                }
+                if (!isBetter && hasX && bestMetrics &&
+                    metrics.verticalOutsideDistance === bestMetrics.verticalOutsideDistance &&
+                    metrics.centerDistance === bestMetrics.centerDistance &&
+                    metrics.horizontalOutsideDistance === bestMetrics.horizontalOutsideDistance) {
+                    isBetter = metrics.horizontalCenterDistance < bestMetrics.horizontalCenterDistance;
+                }
+                if (!isBetter && bestMatch && bestMetrics &&
+                    metrics.verticalOutsideDistance === bestMetrics.verticalOutsideDistance &&
+                    metrics.centerDistance === bestMetrics.centerDistance &&
+                    (!hasX || (
+                        metrics.horizontalOutsideDistance === bestMetrics.horizontalOutsideDistance &&
+                        metrics.horizontalCenterDistance === bestMetrics.horizontalCenterDistance
+                    )) &&
+                    rect.right > bestMatch.rect.right) {
+                    isBetter = true;
+                }
+
+                if (isBetter) {
                     bestMatch = {
                         textNode,
                         rect
                     };
-                    bestScore = score;
+                    bestMetrics = metrics;
                 }
             }
         }
@@ -6834,9 +6876,12 @@ import { SearchManager } from './modules/SearchManager.js';
         }
 
         const minProbeX = rect.left + 0.5;
-        const maxProbeX = rect.right - 0.5;
+        const outsideProbePx = Math.max(2, Math.min(8, (rect.width || 0) * 0.2));
         const probeY = rect.top + Math.max(1, Math.min((rect.height || 0) * 0.5, Math.max(1, (rect.height || 0) - 1)));
         const rawProbeXs = [
+            rect.right + outsideProbePx,
+            rect.right + 2,
+            rect.right + 1,
             rect.right - 1,
             rect.right - 2,
             rect.right - 4,
@@ -6845,7 +6890,9 @@ import { SearchManager } from './modules/SearchManager.js';
         ];
         const probeXs = Array.from(new Set(rawProbeXs
             .filter((value) => Number.isFinite(value))
-            .map((value) => Math.max(minProbeX, Math.min(maxProbeX, value)))));
+            .map((value) => Math.max(minProbeX, value))));
+
+        let bestRange = null;
 
         for (const probeX of probeXs) {
             const candidateRange = getCaretRangeFromPoint(probeX, probeY);
@@ -6855,7 +6902,21 @@ import { SearchManager } from './modules/SearchManager.js';
             if (!isRangeVerticallyAlignedWithRect(candidateRange, rect)) {
                 continue;
             }
-            return candidateRange;
+            if (!bestRange) {
+                bestRange = candidateRange.cloneRange();
+                continue;
+            }
+            try {
+                if (candidateRange.compareBoundaryPoints(Range.START_TO_START, bestRange) > 0) {
+                    bestRange = candidateRange.cloneRange();
+                }
+            } catch (_error) {
+                // Keep the current best range when boundary comparison is unavailable.
+            }
+        }
+
+        if (bestRange) {
+            return bestRange;
         }
 
         if (textMatch.textNode && textMatch.textNode.nodeType === Node.TEXT_NODE) {
@@ -7014,14 +7075,15 @@ import { SearchManager } from './modules/SearchManager.js';
             return null;
         }
 
-        const nearestTextMatch = getNearestTextRectForBlockClickByY(blockElement, y);
+        const nearestTextMatch = getNearestTextRectForBlockClickByY(blockElement, y, x);
         if (!nearestTextMatch || !nearestTextMatch.rect) {
             return null;
         }
         const nearestTextRect = nearestTextMatch.rect;
 
         const rectWidth = Math.max(0, nearestTextRect.width || 0);
-        const leftSideTolerancePx = Math.max(2, Math.min(10, rectWidth * 0.35));
+        // Treat only near/outside-left clicks as loose-side clicks; keep normal text clicks native.
+        const leftSideTolerancePx = 1.5;
         if (x > nearestTextRect.left + leftSideTolerancePx) {
             return null;
         }
@@ -7045,14 +7107,15 @@ import { SearchManager } from './modules/SearchManager.js';
         }
         const tag = blockElement.tagName;
 
-        const nearestTextMatch = getNearestTextRectForBlockClickByY(blockElement, y);
+        const nearestTextMatch = getNearestTextRectForBlockClickByY(blockElement, y, x);
         if (!nearestTextMatch || !nearestTextMatch.rect) {
             return null;
         }
         const nearestTextRect = nearestTextMatch.rect;
 
         const rectWidth = Math.max(0, nearestTextRect.width || 0);
-        const rightSideTolerancePx = Math.max(2, Math.min(10, rectWidth * 0.35));
+        // Treat only near/outside-right clicks as loose-side clicks; keep normal text clicks native.
+        const rightSideTolerancePx = 1.5;
         if (x < nearestTextRect.right - rightSideTolerancePx) {
             return null;
         }

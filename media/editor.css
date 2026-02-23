@@ -27,6 +27,8 @@ body {
     gap: 4px;
     overflow-x: auto;
     scrollbar-width: thin;
+    position: relative;
+    z-index: 1200;
 }
 
 .toolbar::-webkit-scrollbar {

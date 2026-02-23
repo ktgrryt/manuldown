@@ -863,9 +863,17 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             let markdown = this.turndownService.turndown(html);
 
             // Post-process the markdown to fix indentation and spacing
-            // 0. Replace EMPTYLINE placeholder with empty line.
-            // This also handles blockquote placeholders like "> EMPTYLINE"
-            // by reducing them to a bare ">" quote line.
+            // 0. Replace EMPTYLINE placeholder with an empty line.
+            // NOTE:
+            // Turndown emits paragraph separators around block placeholders:
+            //   A\n\nEMPTYLINE\n\nB
+            // Replacing EMPTYLINE with "" keeps the line slot and becomes:
+            //   A\n\n\n\nB
+            // which adds one extra blank line on every round-trip.
+            //
+            // For non-blockquote placeholders, remove the marker line itself.
+            // For blockquote placeholders like "> EMPTYLINE", keep a bare ">"
+            // to preserve an empty quoted line.
             const linesWithEmptyLineMarkers = markdown.split('\n');
             for (let i = 0; i < linesWithEmptyLineMarkers.length; i++) {
                 const emptyLineMatch = linesWithEmptyLineMarkers[i].match(/^(\s*(?:>\s*)*)EMPTYLINE\s*$/);
@@ -873,7 +881,13 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     continue;
                 }
                 const blockquotePrefix = emptyLineMatch[1];
-                linesWithEmptyLineMarkers[i] = blockquotePrefix ? blockquotePrefix.replace(/\s+$/, '') : '';
+                const hasBlockquotePrefix = blockquotePrefix.replace(/\s/g, '') !== '';
+                if (hasBlockquotePrefix) {
+                    linesWithEmptyLineMarkers[i] = blockquotePrefix.replace(/\s+$/, '');
+                } else {
+                    linesWithEmptyLineMarkers.splice(i, 1);
+                    i--;
+                }
             }
             markdown = linesWithEmptyLineMarkers.join('\n');
 
