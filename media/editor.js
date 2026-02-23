@@ -23,6 +23,7 @@ import { SearchManager } from './modules/SearchManager.js';
     let pendingCtrlKDeleteSync = false;
     let pendingListMouseAdjustment = null;
     let pendingMouseDriftCorrection = null;
+    let manualPointerSelection = null;
     let lastPointerCaretIntentTs = 0;
     let lastPointerCheckboxClickTs = 0;
     let lastCtrlNavKeydownTs = 0;
@@ -7333,6 +7334,128 @@ import { SearchManager } from './modules/SearchManager.js';
         return getNearestBlockBoundaryRangeByY(y);
     }
 
+    function createDirectionalSelectionRange(anchorRange, focusRange) {
+        if (!anchorRange || !focusRange) {
+            return null;
+        }
+
+        const anchorNode = anchorRange.startContainer;
+        const focusNode = focusRange.startContainer;
+        if (!anchorNode || !focusNode) {
+            return null;
+        }
+        if (!editor.contains(anchorNode) || !editor.contains(focusNode)) {
+            return null;
+        }
+
+        try {
+            const anchorPoint = document.createRange();
+            anchorPoint.setStart(anchorNode, anchorRange.startOffset);
+            anchorPoint.collapse(true);
+
+            const focusPoint = document.createRange();
+            focusPoint.setStart(focusNode, focusRange.startOffset);
+            focusPoint.collapse(true);
+
+            const anchorBeforeOrEqual =
+                anchorPoint.compareBoundaryPoints(Range.START_TO_START, focusPoint) <= 0;
+
+            const orderedRange = document.createRange();
+            if (anchorBeforeOrEqual) {
+                orderedRange.setStart(anchorNode, anchorRange.startOffset);
+                orderedRange.setEnd(focusNode, focusRange.startOffset);
+            } else {
+                orderedRange.setStart(focusNode, focusRange.startOffset);
+                orderedRange.setEnd(anchorNode, anchorRange.startOffset);
+            }
+            return orderedRange;
+        } catch (_error) {
+            return null;
+        }
+    }
+
+    function getManualDragFocusRangeFromPoint(x, y) {
+        const pointRange = getCaretRangeFromPoint(x, y);
+        if (pointRange && editor.contains(pointRange.startContainer)) {
+            return pointRange;
+        }
+
+        const hoveredElement = document.elementFromPoint(x, y);
+        if (hoveredElement && editor.contains(hoveredElement)) {
+            const looseLeftRange = getLooseLeftSideTextClickRange(x, y, hoveredElement, pointRange);
+            if (looseLeftRange) {
+                return looseLeftRange;
+            }
+
+            const looseRightRange = getLooseRightSideTextClickRange(x, y, hoveredElement, pointRange);
+            if (looseRightRange) {
+                return looseRightRange;
+            }
+
+            const imageRange = getImageCaretRangeFromHorizontalClick(x, y, hoveredElement);
+            if (imageRange) {
+                return imageRange;
+            }
+
+            const stableRange = getStableGapClickRange(x, y, hoveredElement, pointRange);
+            if (stableRange) {
+                return stableRange;
+            }
+        }
+
+        return getNearestBlockBoundaryRangeByY(y);
+    }
+
+    function beginManualPointerSelection(e, anchorRange) {
+        if (!anchorRange || e.button !== 0 || e.shiftKey) {
+            manualPointerSelection = null;
+            return;
+        }
+
+        manualPointerSelection = {
+            anchorRange: anchorRange.cloneRange(),
+            startX: e.clientX,
+            startY: e.clientY,
+            moved: false
+        };
+    }
+
+    function updateManualPointerSelection(clientX, clientY) {
+        if (!manualPointerSelection) {
+            return;
+        }
+
+        if (!manualPointerSelection.moved) {
+            const moved =
+                Math.abs(clientX - manualPointerSelection.startX) > 3 ||
+                Math.abs(clientY - manualPointerSelection.startY) > 3;
+            if (!moved) {
+                return;
+            }
+            manualPointerSelection.moved = true;
+        }
+
+        const focusRange = getManualDragFocusRangeFromPoint(clientX, clientY);
+        if (!focusRange) {
+            return;
+        }
+
+        const selectionRange = createDirectionalSelectionRange(
+            manualPointerSelection.anchorRange,
+            focusRange
+        );
+        if (!selectionRange) {
+            return;
+        }
+
+        const selection = window.getSelection();
+        if (!selection) {
+            return;
+        }
+        selection.removeAllRanges();
+        selection.addRange(selectionRange);
+    }
+
     function hasCodeBlockLineBelow(range, codeBlock) {
         if (!range || !codeBlock) return null;
         const rect = cursorManager._getCaretRect(range);
@@ -13354,6 +13477,7 @@ import { SearchManager } from './modules/SearchManager.js';
             if (isUpdating) return;
             pendingListMouseAdjustment = null;
             pendingMouseDriftCorrection = null;
+            manualPointerSelection = null;
 
             // 左クリックのみ処理
             if (e.button !== 0) return;
@@ -13407,6 +13531,7 @@ import { SearchManager } from './modules/SearchManager.js';
                     if (!selection) return;
                     selection.removeAllRanges();
                     selection.addRange(looseLeftSideRange);
+                    beginManualPointerSelection(e, looseLeftSideRange);
                     return;
                 }
 
@@ -13418,6 +13543,7 @@ import { SearchManager } from './modules/SearchManager.js';
                     if (!selection) return;
                     selection.removeAllRanges();
                     selection.addRange(looseRightSideRange);
+                    beginManualPointerSelection(e, looseRightSideRange);
                     return;
                 }
             }
@@ -13430,6 +13556,7 @@ import { SearchManager } from './modules/SearchManager.js';
                 if (!selection) return;
                 selection.removeAllRanges();
                 selection.addRange(stabilizedGapRange);
+                beginManualPointerSelection(e, stabilizedGapRange);
                 return;
             }
 
@@ -13601,6 +13728,7 @@ import { SearchManager } from './modules/SearchManager.js';
                     if (!selection) return;
                     selection.removeAllRanges();
                     selection.addRange(newRange.cloneRange());
+                    beginManualPointerSelection(e, newRange);
                     return;
                 }
 
@@ -13628,9 +13756,19 @@ import { SearchManager } from './modules/SearchManager.js';
                     pendingMouseDriftCorrection.moved = true;
                 }
             }
+            if (manualPointerSelection) {
+                if ((e.buttons & 1) !== 1) {
+                    manualPointerSelection = null;
+                } else {
+                    updateManualPointerSelection(e.clientX, e.clientY);
+                }
+            }
         });
 
         document.addEventListener('mouseup', (e) => {
+            if (e.button === 0) {
+                manualPointerSelection = null;
+            }
             const pendingList = pendingListMouseAdjustment;
             pendingListMouseAdjustment = null;
             if (pendingList) {
