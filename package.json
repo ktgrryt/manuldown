@@ -188,6 +188,13 @@
           "default": true,
           "description": "Automatically show the table of contents when headings exist."
         },
+        "manulDown.toc.scrollDuration": {
+          "type": "number",
+          "default": 120,
+          "minimum": 0,
+          "maximum": 2000,
+          "description": "Scroll duration in milliseconds when jumping to a heading from the table of contents (0 = instant)."
+        },
         "manulDown.openByDefault": {
           "type": "boolean",
           "default": true,

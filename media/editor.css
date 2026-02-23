@@ -14,7 +14,13 @@ body {
     color: var(--vscode-editor-foreground);
     position: relative;
     --toc-panel-width: 150px;
+    --toc-resizer-hit-width: 8px;
     --search-bar-edge-gap: 20px;
+}
+
+body.toc-resizing {
+    cursor: col-resize;
+    user-select: none;
 }
 
 .toolbar {
@@ -162,7 +168,6 @@ body {
     line-height: 1.6;
     font-size: 14px;
     caret-color: var(--vscode-editorCursor-foreground, var(--vscode-editor-foreground));
-    transition: margin-right 0.2s ease;
     position: relative;
 }
 
@@ -178,21 +183,20 @@ body {
     width: 15px;
     pointer-events: none;
     opacity: 0;
-    transition: opacity 0.12s ease, right 0.2s ease;
+    transition: opacity 0.12s ease;
     z-index: 10;
-}
-
-#editor.toc-visible + #editor-scrollbar-indicator {
-    right: var(--toc-panel-width);
-}
-
-body[data-toc-enabled="false"] #editor.toc-visible + #editor-scrollbar-indicator {
-    right: 0;
 }
 
 #editor-scrollbar-indicator.visible {
     opacity: 1;
     pointer-events: auto;
+}
+
+body.toc-resizing #editor,
+body.toc-resizing #editor-scrollbar-indicator,
+body.toc-resizing #toc-container,
+body.toc-resizing #toc-resizer {
+    transition: none;
 }
 
 #editor-scrollbar-thumb {
@@ -221,10 +225,6 @@ body[data-platform="mac"].scrollbar-dragging #editor-scrollbar-thumb {
     cursor: default;
 }
 
-#editor.toc-visible {
-    margin-right: var(--toc-panel-width);
-}
-
 body[data-toolbar-visible="false"] .toolbar {
     display: none;
 }
@@ -233,12 +233,11 @@ body[data-toolbar-visible="false"] #editor {
     --editor-pad-top: 20px;
 }
 
-body[data-toc-enabled="false"] #editor,
-body[data-toc-enabled="false"] #editor.toc-visible {
-    margin-right: 0;
+body[data-toc-enabled="false"] #toc-container {
+    display: none;
 }
 
-body[data-toc-enabled="false"] #toc-container {
+body[data-toc-enabled="false"] #toc-resizer {
     display: none;
 }
 
@@ -1027,6 +1026,42 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
 }
 
 /* Table of Contents */
+#toc-resizer {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    right: max(0px, calc(var(--toc-panel-width) - (var(--toc-resizer-hit-width) / 2)));
+    width: var(--toc-resizer-hit-width);
+    cursor: col-resize;
+    z-index: 1000;
+    display: none;
+    outline: none;
+    transition: right 0.2s ease;
+}
+
+body[data-toc-visible="true"] #toc-resizer {
+    display: block;
+}
+
+#toc-resizer::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: calc((var(--toc-resizer-hit-width) / 2) - 0.5px);
+    width: 1px;
+    background: var(--vscode-editorGroup-border);
+    opacity: 0.45;
+    transition: opacity 0.1s ease, background-color 0.1s ease;
+}
+
+#toc-resizer:hover::before,
+#toc-resizer:focus-visible::before,
+body.toc-resizing #toc-resizer::before {
+    opacity: 1;
+    background: var(--vscode-focusBorder, var(--vscode-textLink-foreground));
+}
+
 #toc-container {
     position: absolute;
     top: 0;
@@ -1043,10 +1078,11 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
 
 #toc-container.hidden {
     transform: translateX(100%);
+    pointer-events: none;
 }
 
 #toc-container.no-headings {
-    display: none;
+    pointer-events: none;
 }
 
 #toc-header {
@@ -1391,7 +1427,7 @@ body.image-resizing * {
     position: absolute;
     top: 0;
     right: var(--search-bar-edge-gap);
-    z-index: 100;
+    z-index: 1001;
     display: flex;
     align-items: center;
     gap: 4px;
@@ -1402,12 +1438,7 @@ body.image-resizing * {
     border-radius: 0 0 4px 4px;
     box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
     font-size: 12px;
-    transition: right 0.2s ease;
-}
-
-/* Keep search bar clear of TOC panel when headings make TOC visible */
-body[data-toc-enabled="true"] #editor.toc-visible ~ .search-bar {
-    right: calc(var(--toc-panel-width) + var(--search-bar-edge-gap));
+    transition: none;
 }
 
 .search-bar-input-container {

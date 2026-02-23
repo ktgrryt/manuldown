@@ -20,10 +20,14 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     private static readonly maxCustomSlashCommands = 200;
     private static readonly maxCustomSlashTemplateBytes = 128 * 1024;
     private static readonly customSlashCommandCacheTtlMs = 2000;
+    private static readonly defaultTocPanelWidthPx = 150;
+    private static readonly minTocPanelWidthPx = 0;
+    private static readonly maxTocPanelWidthPx = 480;
     private turndownService: TurndownService;
     private webviewPanels = new Map<string, vscode.WebviewPanel>();
     private lastActivePanel: vscode.WebviewPanel | null = null;
     private customSlashCommandCache: { loadedAt: number; items: CustomSlashCommandTemplate[] } | null = null;
+    private tocPanelWidthPx = MarkdownEditorProvider.defaultTocPanelWidthPx;
     public explicitlyRequested = false;
 
     constructor(private readonly context: vscode.ExtensionContext) {
@@ -439,6 +443,9 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                             vscode.env.openExternal(vscode.Uri.parse(message.url));
                         }
                         break;
+                    case 'tocPanelWidthChanged':
+                        this.updateSharedTocPanelWidth(message.width);
+                        break;
                 }
             }
         );
@@ -484,6 +491,36 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         if (!panel) return false;
         panel.webview.postMessage(message);
         return true;
+    }
+
+    private normalizeTocPanelWidth(width: unknown): number {
+        if (typeof width !== 'number' || !Number.isFinite(width)) {
+            return this.tocPanelWidthPx;
+        }
+        const roundedWidth = Math.round(width);
+        return Math.max(
+            MarkdownEditorProvider.minTocPanelWidthPx,
+            Math.min(MarkdownEditorProvider.maxTocPanelWidthPx, roundedWidth)
+        );
+    }
+
+    private updateSharedTocPanelWidth(width: unknown): void {
+        const nextWidth = this.normalizeTocPanelWidth(width);
+        if (nextWidth === this.tocPanelWidthPx) {
+            return;
+        }
+        this.tocPanelWidthPx = nextWidth;
+        this.postSettingsToAllPanels();
+    }
+
+    private postSettingsToAllPanels(): void {
+        const settings = this.getWebviewSettings();
+        for (const panel of this.webviewPanels.values()) {
+            panel.webview.postMessage({
+                type: 'settings',
+                settings,
+            });
+        }
     }
 
     private getActiveWebviewPanel(): vscode.WebviewPanel | null {
@@ -1399,11 +1436,24 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         });
     }
 
-    private getWebviewSettings(): { toolbarVisible: boolean; tocEnabled: boolean; useVsCodeCtrlP: boolean; listDashStyle: boolean } {
+    private getWebviewSettings(): {
+        toolbarVisible: boolean;
+        tocEnabled: boolean;
+        tocScrollDuration: number;
+        tocPanelWidth: number;
+        useVsCodeCtrlP: boolean;
+        listDashStyle: boolean;
+    } {
         const config = vscode.workspace.getConfiguration('manulDown');
+        const configuredTocScrollDuration = config.get<number>('toc.scrollDuration', 120);
+        const tocScrollDuration = Number.isFinite(configuredTocScrollDuration)
+            ? Math.max(0, Math.min(2000, Math.round(configuredTocScrollDuration)))
+            : 120;
         return {
             toolbarVisible: config.get<boolean>('toolbar.visible', true),
             tocEnabled: config.get<boolean>('toc.enabled', true),
+            tocScrollDuration,
+            tocPanelWidth: this.tocPanelWidthPx,
             useVsCodeCtrlP: true,
             listDashStyle: config.get<boolean>('list.dashStyle', false),
         };
@@ -1501,6 +1551,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         <div id="editor-scrollbar-indicator" aria-hidden="true">
             <div id="editor-scrollbar-thumb"></div>
         </div>
+        <div id="toc-resizer" role="separator" aria-orientation="vertical" aria-label="Resize table of contents panel" tabindex="0"></div>
         <div id="toc-container">
             <div id="toc-header">Index</div>
             <div id="toc-content">

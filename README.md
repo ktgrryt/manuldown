@@ -130,6 +130,7 @@ You can change the following options from VSCode settings (`Ctrl+,` / `Cmd+,`):
 | --- | --- | --- |
 | `manulDown.toolbar.visible` | `true` | Show the toolbar |
 | `manulDown.toc.enabled` | `true` | Automatically show the table of contents when headings exist |
+| `manulDown.toc.scrollDuration` | `120` | TOC click scroll duration in ms (`0` for instant jump) |
 | `manulDown.openByDefault` | `true` | Open Markdown files with ManulDown by default (updates `workbench.editorAssociations` immediately) |
 | `manulDown.keepTabOpenOnExplorerClick` | `true` | Keep ManulDown tabs open when opening Markdown from Explorer (prevents preview-tab replacement) |
 | `manulDown.list.dashStyle` | `false` | Use `-` as the bullet marker style |

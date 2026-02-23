@@ -30,15 +30,35 @@ import { SearchManager } from './modules/SearchManager.js';
     let lastCtrlNavCommandTs = 0;
     let lastCtrlNavDirection = null;
     let scrollbarDragState = null;
+    let tocResizeState = null;
     let emacsKillBuffer = '';
     let suppressNextNativeCtrlKDelete = false;
 
     const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
+    const TOC_PANEL_DEFAULT_WIDTH = 150;
+    const TOC_PANEL_MIN_WIDTH = 0;
+    const TOC_PANEL_MAX_WIDTH = 480;
+
+    function normalizeTocScrollDuration(value) {
+        if (typeof value !== 'number' || !Number.isFinite(value)) {
+            return 120;
+        }
+        return Math.max(0, Math.min(2000, Math.round(value)));
+    }
+
+    function normalizeTocPanelWidth(value) {
+        if (typeof value !== 'number' || !Number.isFinite(value)) {
+            return TOC_PANEL_DEFAULT_WIDTH;
+        }
+        return Math.max(TOC_PANEL_MIN_WIDTH, Math.min(TOC_PANEL_MAX_WIDTH, Math.round(value)));
+    }
 
     const initialSettings = window.__manulDownSettings || {};
     const settingsState = {
         toolbarVisible: initialSettings.toolbarVisible !== false,
         tocEnabled: initialSettings.tocEnabled !== false,
+        tocScrollDuration: normalizeTocScrollDuration(initialSettings.tocScrollDuration),
+        tocPanelWidth: normalizeTocPanelWidth(initialSettings.tocPanelWidth),
         useVsCodeCtrlP: initialSettings.useVsCodeCtrlP !== false,
         listDashStyle: initialSettings.listDashStyle === true
     };
@@ -171,6 +191,14 @@ import { SearchManager } from './modules/SearchManager.js';
         document.body.dataset.platform = isMac ? 'mac' : 'other';
     };
     syncBodySettings();
+    document.body.dataset.tocVisible = 'false';
+
+    const applyTocPanelWidth = () => {
+        document.body.style.setProperty('--toc-panel-width', `${settingsState.tocPanelWidth}px`);
+    };
+    applyTocPanelWidth();
+
+    const isTocVisible = () => document.body.dataset.tocVisible === 'true';
 
     const syncToolbarBulletLabel = () => {
         const ulBtn = document.querySelector('.toolbar-btn[data-command="ul"]');
@@ -183,6 +211,7 @@ import { SearchManager } from './modules/SearchManager.js';
     const tocContainer = document.getElementById('toc-container');
     const tocContent = document.getElementById('toc-content');
     const tocEmpty = document.getElementById('toc-empty');
+    const tocResizer = document.getElementById('toc-resizer');
     const editorScrollbarIndicator = document.getElementById('editor-scrollbar-indicator');
     const editorScrollbarThumb = document.getElementById('editor-scrollbar-thumb');
 
@@ -194,7 +223,8 @@ import { SearchManager } from './modules/SearchManager.js';
     const markdownConverter = new MarkdownConverter(editor, domUtils);
     const codeBlockManager = new CodeBlockManager(editor, cursorManager, vscode);
     const tocManager = new TableOfContentsManager(editor, tocContainer, tocContent, tocEmpty, {
-        enabled: settingsState.tocEnabled
+        enabled: settingsState.tocEnabled,
+        scrollDuration: settingsState.tocScrollDuration
     });
     const tableManager = new TableManager(editor, domUtils, stateManager);
     const searchManager = new SearchManager(editor);
@@ -213,6 +243,12 @@ import { SearchManager } from './modules/SearchManager.js';
         if (typeof nextSettings.tocEnabled === 'boolean') {
             settingsState.tocEnabled = nextSettings.tocEnabled;
         }
+        if (typeof nextSettings.tocScrollDuration === 'number') {
+            settingsState.tocScrollDuration = normalizeTocScrollDuration(nextSettings.tocScrollDuration);
+        }
+        if (typeof nextSettings.tocPanelWidth === 'number') {
+            settingsState.tocPanelWidth = normalizeTocPanelWidth(nextSettings.tocPanelWidth);
+        }
         if (typeof nextSettings.useVsCodeCtrlP === 'boolean') {
             settingsState.useVsCodeCtrlP = nextSettings.useVsCodeCtrlP;
         }
@@ -220,8 +256,10 @@ import { SearchManager } from './modules/SearchManager.js';
             settingsState.listDashStyle = nextSettings.listDashStyle;
         }
         syncBodySettings();
+        applyTocPanelWidth();
         syncToolbarBulletLabel();
         tocManager.setEnabled(settingsState.tocEnabled);
+        tocManager.setScrollDuration(settingsState.tocScrollDuration);
         scheduleEditorOverflowStateUpdate();
     }
 
@@ -12020,6 +12058,102 @@ import { SearchManager } from './modules/SearchManager.js';
 
             document.addEventListener('mouseup', stopScrollbarDrag);
             window.addEventListener('blur', stopScrollbarDrag);
+        }
+
+        if (tocResizer) {
+            const applyTocWidthFromClientX = (clientX) => {
+                const editorContainer = editor.parentElement;
+                if (!editorContainer) {
+                    return false;
+                }
+                const containerRect = editorContainer.getBoundingClientRect();
+                const rawWidth = containerRect.right - clientX;
+                const nextWidth = normalizeTocPanelWidth(rawWidth);
+                if (nextWidth === settingsState.tocPanelWidth) {
+                    return false;
+                }
+                settingsState.tocPanelWidth = nextWidth;
+                applyTocPanelWidth();
+                scheduleEditorOverflowStateUpdate();
+                return true;
+            };
+
+            const stopTocResize = (commit = true) => {
+                if (!tocResizeState) return;
+                const shouldCommit = commit && tocResizeState.changed;
+                tocResizeState = null;
+                document.body.classList.remove('toc-resizing');
+                if (shouldCommit) {
+                    vscode.postMessage({
+                        type: 'tocPanelWidthChanged',
+                        width: settingsState.tocPanelWidth
+                    });
+                }
+            };
+
+            tocResizer.addEventListener('mousedown', (e) => {
+                if (e.button !== 0) return;
+                if (!settingsState.tocEnabled || !isTocVisible()) return;
+
+                tocResizeState = { changed: false };
+                document.body.classList.add('toc-resizing');
+
+                e.preventDefault();
+                e.stopPropagation();
+            });
+
+            document.addEventListener('mousemove', (e) => {
+                if (!tocResizeState) return;
+                if ((e.buttons & 1) !== 1) {
+                    stopTocResize(true);
+                    return;
+                }
+                if (applyTocWidthFromClientX(e.clientX)) {
+                    tocResizeState.changed = true;
+                }
+                e.preventDefault();
+            });
+
+            document.addEventListener('mouseup', () => stopTocResize(true));
+            window.addEventListener('mouseout', (e) => {
+                if (!tocResizeState) return;
+                if (e.relatedTarget === null) {
+                    stopTocResize(true);
+                }
+            });
+            window.addEventListener('blur', () => stopTocResize(true));
+
+            tocResizer.addEventListener('keydown', (e) => {
+                if (!settingsState.tocEnabled || !isTocVisible()) return;
+                const step = e.shiftKey ? 24 : 12;
+                const key = e.key;
+                let delta = 0;
+
+                if (key === 'ArrowLeft') {
+                    delta = step;
+                } else if (key === 'ArrowRight') {
+                    delta = -step;
+                } else {
+                    return;
+                }
+
+                const nextWidth = normalizeTocPanelWidth(settingsState.tocPanelWidth + delta);
+                if (nextWidth === settingsState.tocPanelWidth) {
+                    e.preventDefault();
+                    return;
+                }
+
+                settingsState.tocPanelWidth = nextWidth;
+                applyTocPanelWidth();
+                scheduleEditorOverflowStateUpdate();
+                vscode.postMessage({
+                    type: 'tocPanelWidthChanged',
+                    width: settingsState.tocPanelWidth
+                });
+
+                e.preventDefault();
+                e.stopPropagation();
+            });
         }
 
         document.addEventListener('keydown', (e) => {

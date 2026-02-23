@@ -20,12 +20,17 @@ export class TableOfContentsManager {
         this.scrollRaf = null;
         this.onScroll = null;
         this.activeOffset = 12;
+        this.scrollAnimationRaf = null;
+        this.revealRaf = null;
+        this.scrollDuration = this.normalizeScrollDuration(options.scrollDuration);
     }
 
     /**
      * 目次機能をセットアップ
      */
     setup() {
+        this.setTocVisibleState(false);
+
         // エディタの変更時に目次を更新
         const updateTOCDebounced = () => {
             if (this.tocUpdateTimeout) {
@@ -80,12 +85,18 @@ export class TableOfContentsManager {
         this.update();
     }
 
+    setScrollDuration(duration) {
+        this.scrollDuration = this.normalizeScrollDuration(duration);
+    }
+
     /**
      * 目次を非表示にする
      */
     hide() {
+        this.cancelPendingReveal();
         this.tocContainer.classList.add('hidden');
-        this.editor.classList.remove('toc-visible');
+        this.setTocVisibleState(false);
+        this.cancelScrollAnimation();
         this.clearActive();
     }
 
@@ -93,6 +104,8 @@ export class TableOfContentsManager {
      * 目次を更新
      */
     update() {
+        this.cancelPendingReveal();
+
         if (!this.enabled) {
             this.hide();
             return;
@@ -104,7 +117,7 @@ export class TableOfContentsManager {
             this.tocContent.innerHTML = '<div id="toc-empty">No headings yet</div>';
             this.tocContainer.classList.add('no-headings');
             this.tocContainer.classList.add('hidden');
-            this.editor.classList.remove('toc-visible');
+            this.setTocVisibleState(false);
             this.headings = [];
             this.tocItems = [];
             this.headingTops = [];
@@ -113,9 +126,12 @@ export class TableOfContentsManager {
         }
 
         // 見出しがある場合は目次を表示
+        const wasHidden = this.tocContainer.classList.contains('hidden');
         this.tocContainer.classList.remove('no-headings');
-        this.tocContainer.classList.remove('hidden');
-        this.editor.classList.add('toc-visible');
+        if (!wasHidden) {
+            this.tocContainer.classList.remove('hidden');
+            this.setTocVisibleState(true);
+        }
 
         this.tocContent.innerHTML = '';
         this.clearActive();
@@ -151,7 +167,16 @@ export class TableOfContentsManager {
         });
 
         this.refreshHeadingPositions();
-        this.updateActiveFromScroll(true);
+        this.updateActiveFromScroll(true, { scrollIntoView: !wasHidden });
+
+        if (wasHidden) {
+            // Keep the hidden start state for one frame so the browser can animate in.
+            this.revealRaf = requestAnimationFrame(() => {
+                this.revealRaf = null;
+                this.setTocVisibleState(true);
+                this.tocContainer.classList.remove('hidden');
+            });
+        }
     }
 
     /**
@@ -159,10 +184,13 @@ export class TableOfContentsManager {
      * @param {HTMLElement} heading - スクロール先の見出し要素
      */
     scrollToHeading(heading) {
-        heading.scrollIntoView({
-            behavior: 'smooth',
-            block: 'start'
-        });
+        if (!heading || !this.editor.contains(heading)) return;
+        const editorRect = this.editor.getBoundingClientRect();
+        const headingRect = heading.getBoundingClientRect();
+        const rawTargetScrollTop = this.editor.scrollTop + (headingRect.top - editorRect.top);
+        const maxScrollTop = Math.max(0, this.editor.scrollHeight - this.editor.clientHeight);
+        const targetScrollTop = Math.max(0, Math.min(maxScrollTop, rawTargetScrollTop));
+        this.scrollEditorTo(targetScrollTop, this.scrollDuration);
         
         // スクロール先を示すために見出しをフラッシュ
         const originalBackground = heading.style.backgroundColor;
@@ -200,7 +228,7 @@ export class TableOfContentsManager {
         });
     }
 
-    updateActiveFromScroll(force = false) {
+    updateActiveFromScroll(force = false, { scrollIntoView = true } = {}) {
         if (!this.enabled || this.headings.length === 0) {
             this.clearActive();
             return;
@@ -225,7 +253,7 @@ export class TableOfContentsManager {
         }
 
         if (force || nextIndex !== this.activeIndex) {
-            this.setActiveIndex(nextIndex, { scrollIntoView: true });
+            this.setActiveIndex(nextIndex, { scrollIntoView });
         }
     }
 
@@ -247,6 +275,62 @@ export class TableOfContentsManager {
             item.classList.remove('active');
         });
         this.activeIndex = -1;
+    }
+
+    setTocVisibleState(visible) {
+        document.body.dataset.tocVisible = visible ? 'true' : 'false';
+    }
+
+    normalizeScrollDuration(duration) {
+        if (typeof duration !== 'number' || !Number.isFinite(duration)) {
+            return 120;
+        }
+        return Math.max(0, Math.min(2000, Math.round(duration)));
+    }
+
+    cancelScrollAnimation() {
+        if (this.scrollAnimationRaf !== null) {
+            cancelAnimationFrame(this.scrollAnimationRaf);
+            this.scrollAnimationRaf = null;
+        }
+    }
+
+    cancelPendingReveal() {
+        if (this.revealRaf !== null) {
+            cancelAnimationFrame(this.revealRaf);
+            this.revealRaf = null;
+        }
+    }
+
+    scrollEditorTo(targetScrollTop, duration) {
+        this.cancelScrollAnimation();
+        if (duration <= 0) {
+            this.editor.scrollTop = targetScrollTop;
+            return;
+        }
+
+        const startScrollTop = this.editor.scrollTop;
+        const distance = targetScrollTop - startScrollTop;
+        if (Math.abs(distance) < 1) {
+            this.editor.scrollTop = targetScrollTop;
+            return;
+        }
+
+        const startTime = performance.now();
+        const step = (now) => {
+            const elapsed = now - startTime;
+            const progress = Math.min(1, elapsed / duration);
+            const easedProgress = 1 - Math.pow(1 - progress, 3);
+            this.editor.scrollTop = Math.round(startScrollTop + (distance * easedProgress));
+            if (progress < 1) {
+                this.scrollAnimationRaf = requestAnimationFrame(step);
+                return;
+            }
+            this.editor.scrollTop = targetScrollTop;
+            this.scrollAnimationRaf = null;
+        };
+
+        this.scrollAnimationRaf = requestAnimationFrame(step);
     }
 }
 
