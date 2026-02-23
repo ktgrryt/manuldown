@@ -1485,10 +1485,10 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         <button class="toolbar-btn" data-command="checkbox" title="Task List">
             &#9745; List
         </button>
+        <div class="toolbar-separator"></div>
         <button class="toolbar-btn" data-command="quote" title="Quote">
             &gt; Quote
         </button>
-        <div class="toolbar-separator"></div>
         <button class="toolbar-btn" data-command="codeblock" title="Insert Code Block">
             Code
         </button>

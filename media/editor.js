@@ -4014,7 +4014,7 @@ import { SearchManager } from './modules/SearchManager.js';
             const textNodes = domUtils.getTextNodes(listItem);
 
             // カーソルがリストアイテムの先頭にあるかチェック
-            let isAtStart = false;
+            let isAtStart = isRangeAtListItemStart(range, listItem);
 
             if (textNodes.length > 0) {
                 const firstTextNode = textNodes[0];
