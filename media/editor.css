@@ -77,16 +77,23 @@ body {
     border-color: var(--vscode-focusBorder);
 }
 
-.toolbar-btn.is-active {
-    background-color: var(--vscode-inputOption-activeBackground, rgba(0, 100, 200, 0.38));
-    color: var(--vscode-inputOption-activeForeground, var(--vscode-editor-foreground));
-    border-color: var(--vscode-inputOption-activeBorder, var(--vscode-focusBorder));
+.toolbar-btn.is-active,
+.toolbar-btn.is-active:disabled,
+.toolbar-btn.is-active.is-disabled {
+    opacity: 0.85;
+    background-color: var(--vscode-list-hoverBackground);
+    color: var(--vscode-editor-foreground);
+    border-color: var(--vscode-editorGroup-border);
 }
 
 .toolbar-btn.is-active:hover,
-.toolbar-btn.is-active:focus-visible {
-    background-color: var(--vscode-inputOption-activeBackground, rgba(0, 100, 200, 0.48));
-    border-color: var(--vscode-inputOption-activeBorder, var(--vscode-focusBorder));
+.toolbar-btn.is-active:focus-visible,
+.toolbar-btn.is-active:disabled:hover,
+.toolbar-btn.is-active.is-disabled:hover,
+.toolbar-btn.is-active:disabled:focus-visible,
+.toolbar-btn.is-active.is-disabled:focus-visible {
+    background-color: var(--vscode-list-hoverBackground);
+    border-color: var(--vscode-editorGroup-border);
 }
 
 .toolbar-btn:disabled,
@@ -110,10 +117,10 @@ body {
 .toolbar-btn.is-current-heading,
 .toolbar-btn.is-current-heading:disabled,
 .toolbar-btn.is-current-heading.is-disabled {
-    opacity: 1;
-    background-color: var(--vscode-inputOption-activeBackground, rgba(0, 100, 200, 0.38));
-    color: var(--vscode-inputOption-activeForeground, var(--vscode-editor-foreground));
-    border-color: var(--vscode-inputOption-activeBorder, var(--vscode-focusBorder));
+    opacity: 0.85;
+    background-color: var(--vscode-list-hoverBackground);
+    color: var(--vscode-editor-foreground);
+    border-color: var(--vscode-editorGroup-border);
 }
 
 .toolbar-btn.is-current-heading:hover,
@@ -122,8 +129,8 @@ body {
 .toolbar-btn.is-current-heading.is-disabled:hover,
 .toolbar-btn.is-current-heading:disabled:focus-visible,
 .toolbar-btn.is-current-heading.is-disabled:focus-visible {
-    background-color: var(--vscode-inputOption-activeBackground, rgba(0, 100, 200, 0.48));
-    border-color: var(--vscode-inputOption-activeBorder, var(--vscode-focusBorder));
+    background-color: var(--vscode-list-hoverBackground);
+    border-color: var(--vscode-editorGroup-border);
 }
 
 .toolbar-separator {

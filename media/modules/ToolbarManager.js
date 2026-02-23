@@ -18,6 +18,14 @@ export class ToolbarManager {
             ['italic', 'italic'],
             ['strikethrough', 'strikeThrough'],
         ]);
+        this.contextStateCommands = new Set([
+            'ul',
+            'ol',
+            'checkbox',
+            'quote',
+            'codeblock',
+            'table',
+        ]);
         this.tableCellRestrictedCommands = new Set([
             'h1',
             'h2',
@@ -42,7 +50,7 @@ export class ToolbarManager {
             const command = button.getAttribute('data-command');
             if (command) {
                 this.commandButtons.set(command, button);
-                if (this.activeStateCommands.has(command)) {
+                if (this.activeStateCommands.has(command) || this.contextStateCommands.has(command)) {
                     button.setAttribute('aria-pressed', 'false');
                 }
             }
@@ -57,7 +65,10 @@ export class ToolbarManager {
             });
         });
 
-        const updateAvailability = () => this.updateCommandAvailability();
+        const updateAvailability = () => {
+            this.updateCommandAvailability();
+            this.updateCommandContextStates();
+        };
         const updateToolbarState = () => this.updateToolbarState();
         document.addEventListener('selectionchange', updateAvailability);
         this.editor.addEventListener('keyup', updateToolbarState);
@@ -153,6 +164,7 @@ export class ToolbarManager {
 
     updateToolbarState() {
         this.updateCommandAvailability();
+        this.updateCommandContextStates();
         this.updateCommandActiveStates();
     }
 
@@ -199,6 +211,77 @@ export class ToolbarManager {
         });
     }
 
+    updateCommandContextStates() {
+        const shouldReflectState = this.isSelectionInsideEditor();
+        const states = shouldReflectState ? this.getContextCommandStates() : {};
+
+        this.contextStateCommands.forEach((command) => {
+            const button = this.commandButtons.get(command);
+            if (!button) return;
+
+            const isActive = !!states[command];
+            button.classList.toggle('is-active', isActive);
+            button.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+        });
+    }
+
+    getContextCommandStates() {
+        const states = {
+            ul: false,
+            ol: false,
+            checkbox: false,
+            quote: false,
+            codeblock: false,
+            table: false,
+        };
+
+        const selection = window.getSelection();
+        if (!selection || selection.rangeCount === 0) {
+            return states;
+        }
+
+        if (this.isSelectionInTableCellContext()) {
+            states.table = true;
+        }
+
+        for (let i = 0; i < selection.rangeCount; i++) {
+            const range = selection.getRangeAt(i);
+            if (!this.editor.contains(range.startContainer) && !this.editor.contains(range.endContainer)) {
+                continue;
+            }
+
+            const nodes = [range.startContainer, range.endContainer];
+            nodes.forEach((node) => {
+                const list = this._getClosestListForNode(node);
+                if (list) {
+                    if (list.tagName === 'UL') {
+                        states.ul = true;
+                    } else if (list.tagName === 'OL') {
+                        states.ol = true;
+                    }
+                }
+
+                if (this._getClosestCheckboxListItem(node)) {
+                    states.checkbox = true;
+                }
+
+                if (this._isNodeInBlockquote(node)) {
+                    states.quote = true;
+                }
+
+                if (this._isNodeInCodeBlock(node)) {
+                    states.codeblock = true;
+                }
+
+                if (this._isNodeInTable(node)) {
+                    states.table = true;
+                }
+            });
+        }
+
+        return states;
+    }
+
     isSelectionInTableCellContext() {
         const selection = window.getSelection();
         if (selection && selection.rangeCount > 0) {
@@ -219,6 +302,63 @@ export class ToolbarManager {
         const element = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
         if (!element) return false;
         return !!element.closest('td, th');
+    }
+
+    _getElementFromNode(node) {
+        if (!node) return null;
+        return node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+    }
+
+    _getClosestListForNode(node) {
+        const element = this._getElementFromNode(node);
+        if (!element) return null;
+        const list = element.closest('ul, ol');
+        if (!list || !this.editor.contains(list)) {
+            return null;
+        }
+        return list;
+    }
+
+    _getClosestCheckboxListItem(node) {
+        const element = this._getElementFromNode(node);
+        if (!element) return null;
+        const listItem = element.closest('li');
+        if (!listItem || !this.editor.contains(listItem)) {
+            return null;
+        }
+        const checkbox = listItem.querySelector(':scope > input[type="checkbox"]');
+        return checkbox ? listItem : null;
+    }
+
+    _isNodeInBlockquote(node) {
+        const element = this._getElementFromNode(node);
+        if (!element) return false;
+        const blockquote = element.closest('blockquote');
+        return !!blockquote && this.editor.contains(blockquote);
+    }
+
+    _isNodeInCodeBlock(node) {
+        const element = this._getElementFromNode(node);
+        if (!element) return false;
+
+        const pre = element.closest('pre');
+        if (pre && this.editor.contains(pre)) {
+            return true;
+        }
+
+        const toolbarElement = element.closest('.code-block-toolbar, .code-block-language');
+        if (toolbarElement && this.editor.contains(toolbarElement)) {
+            return true;
+        }
+
+        return false;
+    }
+
+    _isNodeInTable(node) {
+        const element = this._getElementFromNode(node);
+        if (!element) return false;
+        const tableElement = element.closest('table, td, th, .md-table-wrapper');
+        return !!tableElement && this.editor.contains(tableElement);
     }
 
     isSelectionInHeadingContext() {
