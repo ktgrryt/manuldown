@@ -3,7 +3,7 @@
   "displayName": "ManulDown",
   "description": "WYSIWYG editor for Markdown files in VSCode",
   "icon": "images/icon.png",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "publisher": "ktgrryt",
   "license": "MIT",
   "repository": {
@@ -14,7 +14,7 @@
     "url": "https://github.com/ktgrryt/manuldown/issues"
   },
   "homepage": "https://github.com/ktgrryt/manuldown#readme",
-  "keywords": [
+  "keywor∞ds": [
     "markdown",
     "wysiwyg",
     "editor",

@@ -941,9 +941,19 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
 
 #editor blockquote {
     border-left: 4px solid var(--vscode-editorGroup-border);
-    padding-left: 1em;
-    margin: 0.5em 0;
-    color: var(--vscode-descriptionForeground);
+    background-color: var(--vscode-textCodeBlock-background, rgba(127, 127, 127, 0.12));
+    border-radius: 0 4px 4px 0;
+    padding: 0.35em 0.9em;
+    margin: 0.65em 0;
+    color: var(--vscode-editor-foreground);
+}
+
+#editor blockquote > :first-child {
+    margin-top: 0;
+}
+
+#editor blockquote > :last-child {
+    margin-bottom: 0;
 }
 
 #editor a {
