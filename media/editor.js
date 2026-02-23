@@ -6743,7 +6743,7 @@ import { SearchManager } from './modules/SearchManager.js';
             false
         );
 
-        let bestRect = null;
+        let bestMatch = null;
         let bestScore = Number.POSITIVE_INFINITY;
         let textNode;
         while (textNode = walker.nextNode()) {
@@ -6767,50 +6767,302 @@ import { SearchManager } from './modules/SearchManager.js';
                 const centerDistance = Math.abs((rect.top + rect.bottom) / 2 - y);
                 const score = verticalOutsideDistance * 1000 + centerDistance;
 
-                if (!bestRect || score < bestScore || (score === bestScore && rect.right > bestRect.right)) {
-                    bestRect = rect;
+                if (!bestMatch || score < bestScore || (score === bestScore && rect.right > bestMatch.rect.right)) {
+                    bestMatch = {
+                        textNode,
+                        rect
+                    };
                     bestScore = score;
                 }
             }
         }
 
-        return bestRect;
+        return bestMatch;
     }
 
-    function getLooseRightSideTextClickRange(x, y, clickedElement, pointRange) {
-        if (!clickedElement || clickedElement === editor) {
+    function isCollapsedRangeInsideBlock(range, blockElement) {
+        if (!range || !range.collapsed || !blockElement) {
+            return false;
+        }
+        const container = range.startContainer;
+        return !!container && (container === blockElement || blockElement.contains(container));
+    }
+
+    function getCaretRectFromRange(range) {
+        if (!range) return null;
+        const rectFromManager = cursorManager && typeof cursorManager._getCaretRect === 'function'
+            ? cursorManager._getCaretRect(range)
+            : null;
+        if (rectFromManager &&
+            Number.isFinite(rectFromManager.top) &&
+            Number.isFinite(rectFromManager.bottom)) {
+            return rectFromManager;
+        }
+        const rects = range.getClientRects ? range.getClientRects() : null;
+        if (rects && rects.length > 0) {
+            return rects[0];
+        }
+        return range.getBoundingClientRect ? range.getBoundingClientRect() : null;
+    }
+
+    function isRangeVerticallyAlignedWithRect(range, rect) {
+        if (!range || !rect) return false;
+        if (!Number.isFinite(rect.top) || !Number.isFinite(rect.bottom)) return false;
+        const caretRect = getCaretRectFromRange(range);
+        if (!caretRect ||
+            !Number.isFinite(caretRect.top) ||
+            !Number.isFinite(caretRect.bottom)) {
+            return true;
+        }
+        const caretCenterY = (caretRect.top + caretRect.bottom) / 2;
+        const rectCenterY = (rect.top + rect.bottom) / 2;
+        const tolerance = Math.max(6, (rect.height || 0) * 0.75);
+        return Math.abs(caretCenterY - rectCenterY) <= tolerance;
+    }
+
+    function createRightSideLineEndRangeFromTextMatch(blockElement, textMatch) {
+        if (!blockElement || !textMatch || !textMatch.rect) {
             return null;
         }
-        if (domUtils.getParentElement(clickedElement, 'TD') || domUtils.getParentElement(clickedElement, 'TH')) {
+        const rect = textMatch.rect;
+        if (!Number.isFinite(rect.left) ||
+            !Number.isFinite(rect.right) ||
+            !Number.isFinite(rect.top) ||
+            !Number.isFinite(rect.bottom)) {
             return null;
         }
 
-        const blockElement = getClosestBlockElement(clickedElement);
-        if (!blockElement || blockElement === editor) {
-            return null;
+        const minProbeX = rect.left + 0.5;
+        const maxProbeX = rect.right - 0.5;
+        const probeY = rect.top + Math.max(1, Math.min((rect.height || 0) * 0.5, Math.max(1, (rect.height || 0) - 1)));
+        const rawProbeXs = [
+            rect.right - 1,
+            rect.right - 2,
+            rect.right - 4,
+            rect.left + (rect.width || 0) * 0.95,
+            rect.left + (rect.width || 0) * 0.85
+        ];
+        const probeXs = Array.from(new Set(rawProbeXs
+            .filter((value) => Number.isFinite(value))
+            .map((value) => Math.max(minProbeX, Math.min(maxProbeX, value)))));
+
+        for (const probeX of probeXs) {
+            const candidateRange = getCaretRangeFromPoint(probeX, probeY);
+            if (!isCollapsedRangeInsideBlock(candidateRange, blockElement)) {
+                continue;
+            }
+            if (!isRangeVerticallyAlignedWithRect(candidateRange, rect)) {
+                continue;
+            }
+            return candidateRange;
         }
 
+        if (textMatch.textNode && textMatch.textNode.nodeType === Node.TEXT_NODE) {
+            const fallbackRange = document.createRange();
+            fallbackRange.setStart(textMatch.textNode, (textMatch.textNode.textContent || '').length);
+            fallbackRange.collapse(true);
+            return fallbackRange;
+        }
+        return null;
+    }
+
+    function isSupportedBlockForLooseSideClick(blockElement) {
+        if (!blockElement || blockElement === editor || blockElement.nodeType !== Node.ELEMENT_NODE) {
+            return false;
+        }
+        if (domUtils.getParentElement(blockElement, 'TD') || domUtils.getParentElement(blockElement, 'TH')) {
+            return false;
+        }
         const tag = blockElement.tagName;
-        const isSupportedBlock = tag === 'P' || tag === 'LI' || tag === 'DIV' || tag === 'BLOCKQUOTE' || /^H[1-6]$/.test(tag);
-        if (!isSupportedBlock) {
+        return tag === 'P' || tag === 'LI' || tag === 'DIV' || tag === 'BLOCKQUOTE' || /^H[1-6]$/.test(tag);
+    }
+
+    function getVerticalDistanceScoreForBlock(blockElement, y) {
+        if (!blockElement || !Number.isFinite(y) || !blockElement.getBoundingClientRect) {
+            return Number.POSITIVE_INFINITY;
+        }
+        const rect = blockElement.getBoundingClientRect();
+        if (!rect || (!rect.width && !rect.height)) {
+            return Number.POSITIVE_INFINITY;
+        }
+        const verticalOutsideDistance = y < rect.top
+            ? rect.top - y
+            : (y > rect.bottom ? y - rect.bottom : 0);
+        const centerDistance = Math.abs((rect.top + rect.bottom) / 2 - y);
+        return verticalOutsideDistance * 1000 + centerDistance;
+    }
+
+    function pickCloserSupportedBlockByY(currentBlock, candidateBlock, y) {
+        if (!isSupportedBlockForLooseSideClick(candidateBlock)) {
+            return currentBlock;
+        }
+        if (!isSupportedBlockForLooseSideClick(currentBlock)) {
+            return candidateBlock;
+        }
+        const currentScore = getVerticalDistanceScoreForBlock(currentBlock, y);
+        const candidateScore = getVerticalDistanceScoreForBlock(candidateBlock, y);
+        return candidateScore < currentScore ? candidateBlock : currentBlock;
+    }
+
+    function getNearestSupportedBlockForLooseSideByY(y) {
+        if (!Number.isFinite(y)) {
+            return null;
+        }
+        let bestBlock = null;
+        for (const child of Array.from(editor.children || [])) {
+            if (!isSupportedBlockForLooseSideClick(child)) {
+                continue;
+            }
+            bestBlock = pickCloserSupportedBlockByY(bestBlock, child, y);
+        }
+        return bestBlock;
+    }
+
+    function resolveBlockForLooseSideTextClick(y, clickedElement, pointRange) {
+        if (!clickedElement) {
+            return null;
+        }
+
+        const isEditorGapClick = clickedElement === editor;
+        if (!isEditorGapClick &&
+            (domUtils.getParentElement(clickedElement, 'TD') || domUtils.getParentElement(clickedElement, 'TH'))) {
+            return null;
+        }
+
+        let blockElement = isEditorGapClick ? null : getClosestBlockElement(clickedElement);
+        if ((!blockElement || blockElement === editor) && pointRange && pointRange.startContainer) {
+            const pointContainer = pointRange.startContainer;
+            if (pointContainer === editor && editor && editor.childNodes) {
+                const nodes = editor.childNodes;
+                const offset = Math.max(0, Math.min(pointRange.startOffset, nodes.length));
+                const nextBlock = getNearestTopLevelElementFromIndex(nodes, offset, 1);
+                const prevBlock = getNearestTopLevelElementFromIndex(nodes, offset - 1, -1);
+                blockElement = pickCloserSupportedBlockByY(nextBlock, prevBlock, y);
+            } else {
+                blockElement = getClosestBlockElement(pointContainer);
+            }
+        }
+        if ((!blockElement || blockElement === editor) && isEditorGapClick) {
+            blockElement = getNearestSupportedBlockForLooseSideByY(y);
+        }
+        if (!isSupportedBlockForLooseSideClick(blockElement)) {
             return null;
         }
 
         const pointContainer = pointRange && pointRange.startContainer ? pointRange.startContainer : null;
-        if (pointContainer &&
+        if (!isEditorGapClick &&
+            pointContainer &&
             pointContainer !== editor &&
             pointContainer !== blockElement &&
             !blockElement.contains(pointContainer)) {
             return null;
         }
 
-        const nearestTextRect = getNearestTextRectForBlockClickByY(blockElement, y);
-        if (!nearestTextRect) {
+        return blockElement;
+    }
+
+    function createLeftSideLineStartRangeFromTextMatch(blockElement, textMatch) {
+        if (!blockElement || !textMatch || !textMatch.rect) {
+            return null;
+        }
+        const rect = textMatch.rect;
+        if (!Number.isFinite(rect.left) ||
+            !Number.isFinite(rect.right) ||
+            !Number.isFinite(rect.top) ||
+            !Number.isFinite(rect.bottom)) {
             return null;
         }
 
-        const rightSideTolerancePx = 10;
+        const minProbeX = rect.left + 0.5;
+        const maxProbeX = rect.right - 0.5;
+        const probeY = rect.top + Math.max(1, Math.min((rect.height || 0) * 0.5, Math.max(1, (rect.height || 0) - 1)));
+        const rawProbeXs = [
+            rect.left + 1,
+            rect.left + 2,
+            rect.left + 4,
+            rect.left + (rect.width || 0) * 0.05,
+            rect.left + (rect.width || 0) * 0.15
+        ];
+        const probeXs = Array.from(new Set(rawProbeXs
+            .filter((value) => Number.isFinite(value))
+            .map((value) => Math.max(minProbeX, Math.min(maxProbeX, value)))));
+
+        for (const probeX of probeXs) {
+            const candidateRange = getCaretRangeFromPoint(probeX, probeY);
+            if (!isCollapsedRangeInsideBlock(candidateRange, blockElement)) {
+                continue;
+            }
+            if (!isRangeVerticallyAlignedWithRect(candidateRange, rect)) {
+                continue;
+            }
+            return candidateRange;
+        }
+
+        if (textMatch.textNode && textMatch.textNode.nodeType === Node.TEXT_NODE) {
+            const fallbackRange = document.createRange();
+            fallbackRange.setStart(textMatch.textNode, 0);
+            fallbackRange.collapse(true);
+            return fallbackRange;
+        }
+        return null;
+    }
+
+    function getLooseLeftSideTextClickRange(x, y, clickedElement, pointRange) {
+        const blockElement = resolveBlockForLooseSideTextClick(y, clickedElement, pointRange);
+        if (!blockElement) {
+            return null;
+        }
+
+        const nearestTextMatch = getNearestTextRectForBlockClickByY(blockElement, y);
+        if (!nearestTextMatch || !nearestTextMatch.rect) {
+            return null;
+        }
+        const nearestTextRect = nearestTextMatch.rect;
+
+        const rectWidth = Math.max(0, nearestTextRect.width || 0);
+        const leftSideTolerancePx = Math.max(2, Math.min(10, rectWidth * 0.35));
+        if (x > nearestTextRect.left + leftSideTolerancePx) {
+            return null;
+        }
+
+        const rightSideGuardPx = Math.max(1, Math.min(6, rectWidth * 0.3));
+        if (x >= nearestTextRect.right - rightSideGuardPx) {
+            return null;
+        }
+
+        const lineStartRange = createLeftSideLineStartRangeFromTextMatch(blockElement, nearestTextMatch);
+        if (lineStartRange) {
+            return lineStartRange;
+        }
+        return createCollapsedRangeAtElementBoundary(blockElement, 'start');
+    }
+
+    function getLooseRightSideTextClickRange(x, y, clickedElement, pointRange) {
+        const blockElement = resolveBlockForLooseSideTextClick(y, clickedElement, pointRange);
+        if (!blockElement) {
+            return null;
+        }
+        const tag = blockElement.tagName;
+
+        const nearestTextMatch = getNearestTextRectForBlockClickByY(blockElement, y);
+        if (!nearestTextMatch || !nearestTextMatch.rect) {
+            return null;
+        }
+        const nearestTextRect = nearestTextMatch.rect;
+
+        const rectWidth = Math.max(0, nearestTextRect.width || 0);
+        const rightSideTolerancePx = Math.max(2, Math.min(10, rectWidth * 0.35));
         if (x < nearestTextRect.right - rightSideTolerancePx) {
+            return null;
+        }
+
+        const rightHalfThreshold = nearestTextRect.left + rectWidth * 0.6;
+        if (x < rightHalfThreshold) {
+            return null;
+        }
+
+        const leftSideGuardPx = Math.max(1, Math.min(6, rectWidth * 0.3));
+        if (x <= nearestTextRect.left + leftSideGuardPx) {
             return null;
         }
 
@@ -6822,6 +7074,11 @@ import { SearchManager } from './modules/SearchManager.js';
                 range.collapse(true);
                 return range;
             }
+        }
+
+        const lineEndRange = createRightSideLineEndRangeFromTextMatch(blockElement, nearestTextMatch);
+        if (lineEndRange) {
+            return lineEndRange;
         }
 
         return createCollapsedRangeAtElementBoundary(blockElement, 'end');
@@ -6905,94 +7162,16 @@ import { SearchManager } from './modules/SearchManager.js';
         return range;
     }
 
-    function createAfterImageRangeIfRightSide(image, x, y, requireRightEdge) {
+    function createBeforeImageCaretRange(image) {
         if (!image || !editor.contains(image)) {
             return null;
         }
-        const rect = image.getBoundingClientRect ? image.getBoundingClientRect() : null;
-        if (!rect || rect.width <= 0 || rect.height <= 0) {
-            return null;
-        }
-
-        const verticalTolerancePx = 6;
-        if (y < rect.top - verticalTolerancePx || y > rect.bottom + verticalTolerancePx) {
-            return null;
-        }
-
-        const rightHalfThreshold = rect.left + rect.width * 0.5;
-        if (requireRightEdge) {
-            if (x < rect.right - 2) {
-                return null;
-            }
-        } else if (x < rightHalfThreshold) {
-            return null;
-        }
-
-        return createAfterImageCaretRange(image, { ensureTextAnchor: false });
-    }
-
-    function createBeforeImageRangeIfLeftSide(image, x, y, requireLeftEdge) {
-        if (!image || !editor.contains(image)) {
-            return null;
-        }
-        const rect = image.getBoundingClientRect ? image.getBoundingClientRect() : null;
-        if (!rect || rect.width <= 0 || rect.height <= 0) {
-            return null;
-        }
-
-        const verticalTolerancePx = 6;
-        if (y < rect.top - verticalTolerancePx || y > rect.bottom + verticalTolerancePx) {
-            return null;
-        }
-
-        const leftHalfThreshold = rect.left + rect.width * 0.5;
-        if (requireLeftEdge) {
-            if (x > rect.left + 2) {
-                return null;
-            }
-        } else if (x > leftHalfThreshold) {
-            return null;
-        }
-
         const caretAnchor = getImageCaretAnchorNode(image) || image;
-        if (!caretAnchor.parentNode) {
+        if (!caretAnchor || !caretAnchor.parentNode) {
             return null;
         }
-
         const range = document.createRange();
         range.setStartBefore(caretAnchor);
-        range.collapse(true);
-        return range;
-    }
-
-    function createImageEdgeRangeFromImageOnlyBlock(image, x, side) {
-        if (!image || !editor.contains(image)) {
-            return null;
-        }
-        const rect = image.getBoundingClientRect ? image.getBoundingClientRect() : null;
-        if (!rect || rect.width <= 0 || rect.height <= 0) {
-            return null;
-        }
-
-        const centerX = rect.left + rect.width * 0.5;
-        if (side === 'left' && x > centerX) {
-            return null;
-        }
-        if (side === 'right' && x < centerX) {
-            return null;
-        }
-
-        const caretAnchor = getImageCaretAnchorNode(image) || image;
-        if (!caretAnchor.parentNode) {
-            return null;
-        }
-
-        const range = document.createRange();
-        if (side === 'left') {
-            range.setStartBefore(caretAnchor);
-        } else {
-            return createAfterImageCaretRange(image, { ensureTextAnchor: false });
-        }
         range.collapse(true);
         return range;
     }
@@ -7008,42 +7187,52 @@ import { SearchManager } from './modules/SearchManager.js';
         return images[0];
     }
 
-    function getNearestSingleImageFromImageOnlyBlockByY(y) {
+    function getImageUnderRowFromEditor(y) {
         if (!Number.isFinite(y)) {
             return null;
         }
 
-        const candidates = Array.from(editor.querySelectorAll('p, div, li, blockquote'));
-        let nearestImage = null;
-        let nearestDistance = Number.POSITIVE_INFINITY;
-        const maxVerticalDistancePx = 28;
+        let bestImage = null;
+        let bestDistance = Number.POSITIVE_INFINITY;
+        const verticalTolerancePx = 10;
 
-        for (const block of candidates) {
-            if (!block || block.nodeType !== Node.ELEMENT_NODE) continue;
-            if (domUtils.getParentElement(block, 'TD') || domUtils.getParentElement(block, 'TH')) continue;
+        for (const child of Array.from(editor.children || [])) {
+            if (!child || child.nodeType !== Node.ELEMENT_NODE) {
+                continue;
+            }
 
-            const image = getSingleImageFromImageOnlyBlock(block);
-            if (!image) continue;
+            let image = null;
+            if (child.tagName === 'IMG') {
+                image = child;
+            } else {
+                image = getSingleImageFromImageOnlyBlock(child);
+            }
+            if (!image || !editor.contains(image)) {
+                continue;
+            }
 
-            const rect = block.getBoundingClientRect ? block.getBoundingClientRect() : null;
-            if (!rect || (!rect.width && !rect.height)) continue;
+            const rect = image.getBoundingClientRect ? image.getBoundingClientRect() : null;
+            if (!rect || rect.width <= 0 || rect.height <= 0) {
+                continue;
+            }
+
+            if (y < rect.top - verticalTolerancePx || y > rect.bottom + verticalTolerancePx) {
+                continue;
+            }
 
             const distance = y < rect.top
                 ? rect.top - y
                 : (y > rect.bottom ? y - rect.bottom : 0);
-            if (distance < nearestDistance) {
-                nearestDistance = distance;
-                nearestImage = image;
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                bestImage = image;
             }
         }
 
-        if (nearestDistance > maxVerticalDistancePx) {
-            return null;
-        }
-        return nearestImage;
+        return bestImage;
     }
 
-    function getLeftEdgeImageCaretRangeFromClick(x, y, clickedElement) {
+    function resolveDirectImageFromClickContext(clickedElement) {
         if (!clickedElement) {
             return null;
         }
@@ -7051,88 +7240,58 @@ import { SearchManager } from './modules/SearchManager.js';
         const clickedImage = clickedElement.tagName === 'IMG'
             ? clickedElement
             : (clickedElement.closest ? clickedElement.closest('img') : null);
-        const directImageRange = createBeforeImageRangeIfLeftSide(clickedImage, x, y, false);
-        if (directImageRange) {
-            return directImageRange;
+        if (clickedImage && editor.contains(clickedImage)) {
+            return clickedImage;
         }
 
         const blockElement = getClosestBlockElement(clickedElement);
         const imageInCurrentBlock = getSingleImageFromImageOnlyBlock(blockElement);
         if (imageInCurrentBlock) {
-            const blockEdgeRange = createImageEdgeRangeFromImageOnlyBlock(imageInCurrentBlock, x, 'left');
-            if (blockEdgeRange) {
-                return blockEdgeRange;
-            }
-            return createBeforeImageRangeIfLeftSide(imageInCurrentBlock, x, y, false);
+            return imageInCurrentBlock;
+        }
+        return null;
+    }
+
+    function resolveImageFromClickContext(clickedElement, y = null) {
+        const directImage = resolveDirectImageFromClickContext(clickedElement);
+        if (directImage) {
+            return directImage;
         }
 
-        // Handle images that are direct children of the editor (no block wrapper,
-        // e.g. when an image is pasted into an empty document).
-        if (!blockElement || blockElement === editor) {
-            for (const child of editor.children) {
-                if (child.tagName === 'IMG') {
-                    const range = createBeforeImageRangeIfLeftSide(child, x, y, false);
-                    if (range) return range;
-                }
-            }
-        }
-
-        const nearestImage = getNearestSingleImageFromImageOnlyBlockByY(y);
-        if (nearestImage) {
-            const blockEdgeRange = createImageEdgeRangeFromImageOnlyBlock(nearestImage, x, 'left');
-            if (blockEdgeRange) {
-                return blockEdgeRange;
-            }
-            return createBeforeImageRangeIfLeftSide(nearestImage, x, y, false);
+        if (clickedElement === editor) {
+            return getImageUnderRowFromEditor(y);
         }
 
         return null;
     }
 
-    function getRightEdgeImageCaretRangeFromClick(x, y, clickedElement) {
-        if (!clickedElement) {
+    function getImageCaretRangeFromHorizontalClick(x, y, clickedElement) {
+        if (!Number.isFinite(x) || !Number.isFinite(y) || !clickedElement) {
+            return null;
+        }
+        const directImage = resolveDirectImageFromClickContext(clickedElement);
+        const image = directImage || resolveImageFromClickContext(clickedElement, y);
+        if (!image) {
             return null;
         }
 
-        const clickedImage = clickedElement.tagName === 'IMG'
-            ? clickedElement
-            : (clickedElement.closest ? clickedElement.closest('img') : null);
-        const directImageRange = createAfterImageRangeIfRightSide(clickedImage, x, y, false);
-        if (directImageRange) {
-            return directImageRange;
+        const rect = image.getBoundingClientRect ? image.getBoundingClientRect() : null;
+        if (!rect || rect.width <= 0 || rect.height <= 0) {
+            return null;
         }
 
-        const blockElement = getClosestBlockElement(clickedElement);
-        const imageInCurrentBlock = getSingleImageFromImageOnlyBlock(blockElement);
-        if (imageInCurrentBlock) {
-            const blockEdgeRange = createImageEdgeRangeFromImageOnlyBlock(imageInCurrentBlock, x, 'right');
-            if (blockEdgeRange) {
-                return blockEdgeRange;
-            }
-            return createAfterImageRangeIfRightSide(imageInCurrentBlock, x, y, false);
-        }
-
-        // Handle images that are direct children of the editor (no block wrapper,
-        // e.g. when an image is pasted into an empty document).
-        if (!blockElement || blockElement === editor) {
-            for (const child of editor.children) {
-                if (child.tagName === 'IMG') {
-                    const range = createAfterImageRangeIfRightSide(child, x, y, false);
-                    if (range) return range;
-                }
+        if (!directImage) {
+            const verticalTolerancePx = 10;
+            if (y < rect.top - verticalTolerancePx || y > rect.bottom + verticalTolerancePx) {
+                return null;
             }
         }
 
-        const nearestImage = getNearestSingleImageFromImageOnlyBlockByY(y);
-        if (nearestImage) {
-            const blockEdgeRange = createImageEdgeRangeFromImageOnlyBlock(nearestImage, x, 'right');
-            if (blockEdgeRange) {
-                return blockEdgeRange;
-            }
-            return createAfterImageRangeIfRightSide(nearestImage, x, y, false);
+        const centerX = rect.left + rect.width * 0.5;
+        if (x <= centerX) {
+            return createBeforeImageCaretRange(image);
         }
-
-        return null;
+        return createAfterImageCaretRange(image, { ensureTextAnchor: false });
     }
 
     function getStableGapClickRange(x, y, clickedElement, pointRange) {
@@ -13220,8 +13379,8 @@ import { SearchManager } from './modules/SearchManager.js';
             if (!clickedElement || !editor.contains(clickedElement)) return;
 
             if (!e.shiftKey) {
-                const imageLeftEdgeRange = getLeftEdgeImageCaretRangeFromClick(x, y, clickedElement);
-                if (imageLeftEdgeRange) {
+                const imageHorizontalRange = getImageCaretRangeFromHorizontalClick(x, y, clickedElement);
+                if (imageHorizontalRange) {
                     e.preventDefault();
                     if (document.activeElement !== editor) {
                         try {
@@ -13233,41 +13392,24 @@ import { SearchManager } from './modules/SearchManager.js';
                     const selection = window.getSelection();
                     if (!selection) return;
                     selection.removeAllRanges();
-                    selection.addRange(imageLeftEdgeRange);
-                    return;
-                }
-
-                const imageRightEdgeRange = getRightEdgeImageCaretRangeFromClick(x, y, clickedElement);
-                if (imageRightEdgeRange) {
-                    e.preventDefault();
-                    if (document.activeElement !== editor) {
-                        try {
-                            editor.focus({ preventScroll: true });
-                        } catch (focusError) {
-                            editor.focus();
-                        }
-                    }
-                    const selection = window.getSelection();
-                    if (!selection) return;
-                    selection.removeAllRanges();
-                    selection.addRange(imageRightEdgeRange);
+                    selection.addRange(imageHorizontalRange);
                     return;
                 }
             }
 
             const pointRange = getCaretRangeFromPoint(x, y);
-            const stabilizedGapRange = getStableGapClickRange(x, y, clickedElement, pointRange);
-            if (stabilizedGapRange) {
-                e.preventDefault();
-                focusEditorWithoutScroll();
-                const selection = window.getSelection();
-                if (!selection) return;
-                selection.removeAllRanges();
-                selection.addRange(stabilizedGapRange);
-                return;
-            }
-
             if (!e.shiftKey) {
+                const looseLeftSideRange = getLooseLeftSideTextClickRange(x, y, clickedElement, pointRange);
+                if (looseLeftSideRange) {
+                    e.preventDefault();
+                    focusEditorWithoutScroll();
+                    const selection = window.getSelection();
+                    if (!selection) return;
+                    selection.removeAllRanges();
+                    selection.addRange(looseLeftSideRange);
+                    return;
+                }
+
                 const looseRightSideRange = getLooseRightSideTextClickRange(x, y, clickedElement, pointRange);
                 if (looseRightSideRange) {
                     e.preventDefault();
@@ -13278,6 +13420,17 @@ import { SearchManager } from './modules/SearchManager.js';
                     selection.addRange(looseRightSideRange);
                     return;
                 }
+            }
+
+            const stabilizedGapRange = getStableGapClickRange(x, y, clickedElement, pointRange);
+            if (stabilizedGapRange) {
+                e.preventDefault();
+                focusEditorWithoutScroll();
+                const selection = window.getSelection();
+                if (!selection) return;
+                selection.removeAllRanges();
+                selection.addRange(stabilizedGapRange);
+                return;
             }
 
             if (clickedElement === editor) {
@@ -14042,9 +14195,11 @@ import { SearchManager } from './modules/SearchManager.js';
                 const clickY = typeof e.clientY === 'number' ? e.clientY : null;
 
                 if (!e.shiftKey && Number.isFinite(clickX) && Number.isFinite(clickY)) {
-                    const edgeRange =
-                        getLeftEdgeImageCaretRangeFromClick(clickX, clickY, clickedElement || image) ||
-                        getRightEdgeImageCaretRangeFromClick(clickX, clickY, clickedElement || image);
+                    const edgeRange = getImageCaretRangeFromHorizontalClick(
+                        clickX,
+                        clickY,
+                        clickedElement || image
+                    );
                     if (edgeRange) {
                         const selection = window.getSelection();
                         if (selection) {
