@@ -329,6 +329,12 @@ export class ToolbarManager {
         if (!list || !this.editor.contains(list)) {
             return null;
         }
+        const hasDirectListItem = Array.from(list.children || []).some(
+            (child) => child && child.tagName === 'LI'
+        );
+        if (!hasDirectListItem) {
+            return null;
+        }
         return list;
     }
 

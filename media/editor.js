@@ -2905,6 +2905,8 @@ import { SearchManager } from './modules/SearchManager.js';
 
     // Update list item classes based on content
     function updateListItemClasses() {
+        cleanupEmptyListContainers(true);
+
         const listItems = editor.querySelectorAll('li');
         const selection = window.getSelection();
         let activeListItem = null;
@@ -5755,14 +5757,29 @@ import { SearchManager } from './modules/SearchManager.js';
         if (!block) return false;
         const text = (block.textContent || '').replace(/[\u200B\u00A0]/g, '').trim();
         if (text !== '') return false;
-        const hasNonBrElement = Array.from(block.childNodes).some(node => {
+        const hasMeaningfulElement = Array.from(block.childNodes).some(node => {
             if (node.nodeType !== Node.ELEMENT_NODE) return false;
             const el = node;
             if (el.tagName === 'BR') return false;
             if (el.getAttribute && el.getAttribute('data-exclude-from-markdown') === 'true') return false;
-            return true;
+            if (el.tagName === 'IMG' ||
+                el.tagName === 'HR' ||
+                el.tagName === 'TABLE' ||
+                el.tagName === 'UL' ||
+                el.tagName === 'OL' ||
+                el.tagName === 'INPUT' ||
+                el.tagName === 'PRE' ||
+                el.tagName === 'BLOCKQUOTE') {
+                return true;
+            }
+            const elementText = (el.textContent || '').replace(/[\u200B\u00A0]/g, '').trim();
+            if (elementText !== '') return true;
+            if (typeof el.querySelector === 'function') {
+                return !!el.querySelector('img,hr,table,ul,ol,input,pre,blockquote');
+            }
+            return false;
         });
-        return !hasNonBrElement;
+        return !hasMeaningfulElement;
     }
 
     function handleEmptyLineAboveCodeBlockNav(range, selection, direction) {
@@ -6890,6 +6907,103 @@ import { SearchManager } from './modules/SearchManager.js';
     function hasMeaningfulTextContent(value) {
         if (typeof value !== 'string') return false;
         return value.replace(/[\u200B\u00A0\uFEFF]/g, '').trim() !== '';
+    }
+
+    function listHasDirectListItems(listElement) {
+        if (!listElement || (listElement.tagName !== 'UL' && listElement.tagName !== 'OL')) {
+            return false;
+        }
+        return Array.from(listElement.children || []).some(
+            (child) => child && child.tagName === 'LI'
+        );
+    }
+
+    function cleanupEmptyListContainers(preserveSelection = true) {
+        const emptyLists = Array.from(editor.querySelectorAll('ul, ol')).filter(
+            (list) => !listHasDirectListItems(list)
+        );
+        if (emptyLists.length === 0) {
+            return false;
+        }
+
+        const selection = preserveSelection ? window.getSelection() : null;
+        const currentRange = (selection && selection.rangeCount > 0)
+            ? selection.getRangeAt(0).cloneRange()
+            : null;
+
+        let focusEmptyList = null;
+        if (currentRange) {
+            const focusElement = currentRange.startContainer.nodeType === Node.ELEMENT_NODE
+                ? currentRange.startContainer
+                : currentRange.startContainer.parentElement;
+            const closestList = focusElement && focusElement.closest
+                ? focusElement.closest('ul, ol')
+                : null;
+            if (closestList && emptyLists.includes(closestList)) {
+                focusEmptyList = closestList;
+            }
+        }
+
+        let fallbackRange = null;
+        if (focusEmptyList) {
+            const nextElement = focusEmptyList.nextElementSibling;
+            const prevElement = focusEmptyList.previousElementSibling;
+            if (nextElement && editor.contains(nextElement)) {
+                fallbackRange = createCollapsedRangeAtElementBoundary(nextElement, 'start');
+            } else if (prevElement && editor.contains(prevElement)) {
+                fallbackRange = createCollapsedRangeAtElementBoundary(prevElement, 'end');
+            } else {
+                const parent = focusEmptyList.parentElement;
+                if (parent && parent !== editor && editor.contains(parent)) {
+                    fallbackRange = createCollapsedRangeAtElementBoundary(parent, 'end');
+                }
+            }
+        }
+
+        emptyLists.forEach((list) => list.remove());
+
+        if (!preserveSelection || !selection) {
+            return true;
+        }
+
+        const hasValidSelection = selection.rangeCount > 0 &&
+            editor.contains(selection.getRangeAt(0).commonAncestorContainer);
+        if (hasValidSelection) {
+            return true;
+        }
+
+        if (fallbackRange) {
+            applySelectionRange(selection, fallbackRange);
+            return true;
+        }
+
+        if (editor.childNodes.length === 0) {
+            const p = document.createElement('p');
+            p.appendChild(document.createElement('br'));
+            editor.appendChild(p);
+            const range = document.createRange();
+            range.setStart(p, 0);
+            range.collapse(true);
+            applySelectionRange(selection, range);
+            return true;
+        }
+
+        const firstElement = Array.from(editor.childNodes || []).find(
+            (node) => node && node.nodeType === Node.ELEMENT_NODE
+        );
+        if (firstElement) {
+            const range = createCollapsedRangeAtElementBoundary(firstElement, 'start');
+            if (range) {
+                applySelectionRange(selection, range);
+                return true;
+            }
+        }
+
+        const range = document.createRange();
+        range.setStart(editor, 0);
+        range.collapse(true);
+        applySelectionRange(selection, range);
+        return true;
     }
 
     function getClosestBlockElement(node) {
@@ -10229,6 +10343,32 @@ import { SearchManager } from './modules/SearchManager.js';
             return false;
         }
 
+        const selectedLabel = getSelectedCodeBlockLanguageLabel();
+        if (selectedLabel) {
+            const pre = selectedLabel.closest ? selectedLabel.closest('pre') : null;
+            if (pre && editor.contains(pre)) {
+                stateManager.saveState();
+
+                const code = pre.querySelector('code');
+                if (code) {
+                    const codeText = cursorManager.getCodeBlockText(code);
+                    emacsKillBuffer = codeText.replace(/[\u200B\uFEFF]/g, '');
+                } else {
+                    emacsKillBuffer = '\n';
+                }
+
+                deleteCodeBlock(pre, selection);
+                domUtils.ensureInlineCodeSpaces();
+                domUtils.cleanupGhostStyles();
+                tableManager.wrapTables();
+                applyImageRenderSizes();
+                hideImageResizeOverlaySafely();
+                finalizeCtrlKDeleteTurn();
+                notifyChangeImmediate();
+                return true;
+            }
+        }
+
         if (range.collapsed) {
             const imageAtLeftEdge = getCtrlKTargetImageAtLeftEdge(range);
             if (imageAtLeftEdge) {
@@ -10680,6 +10820,9 @@ import { SearchManager } from './modules/SearchManager.js';
             suppressNextNativeCtrlKDelete = false;
             const selection = window.getSelection();
             if (!selection || !selection.rangeCount) return false;
+            cleanupEmptyListContainers(true);
+            if (!selection.rangeCount) return false;
+
             const range = selection.getRangeAt(0);
             if (!editor.contains(range.commonAncestorContainer)) return false;
 
@@ -11510,20 +11653,12 @@ import { SearchManager } from './modules/SearchManager.js';
             const isBackspace = e.key === 'Backspace' || e.key === 'Delete' ||
                 (isMac && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && key === 'h');
             if (isCtrlK) {
-                const pre = selectedLabel.closest ? selectedLabel.closest('pre') : null;
-                const code = pre ? pre.querySelector('code') : null;
-                if (pre && code) {
-                    const codeText = cursorManager.getCodeBlockText(code);
-                    const normalized = codeText.replace(/[\u200B\uFEFF]/g, '');
-                    if (normalized.trim() === '') {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        stateManager.saveState();
-                        deleteCodeBlock(pre, selection);
-                        notifyChangeImmediate();
-                        return;
-                    }
+                e.preventDefault();
+                e.stopPropagation();
+                if (performCtrlKDeleteFromRange(selection, range)) {
+                    return;
                 }
+                return;
             }
             if (isBackspace) {
                 e.preventDefault();
