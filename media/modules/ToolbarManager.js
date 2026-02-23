@@ -54,6 +54,10 @@ export class ToolbarManager {
                     button.setAttribute('aria-pressed', 'false');
                 }
             }
+            // Keep caret/selection in the editor when clicking toolbar buttons.
+            button.addEventListener('mousedown', (e) => {
+                e.preventDefault();
+            });
             button.addEventListener('click', (e) => {
                 e.preventDefault();
                 const command = button.getAttribute('data-command');
@@ -146,10 +150,18 @@ export class ToolbarManager {
                 this.formatBlock('h3');
                 break;
             case 'ul':
-                document.execCommand('insertUnorderedList', false, null);
+                if (!this.convertCheckboxListItemToListType('ul')) {
+                    const marker = this._placeCollapsedCaretMarker();
+                    document.execCommand('insertUnorderedList', false, null);
+                    this._restoreCollapsedCaretMarker(marker);
+                }
                 break;
             case 'ol':
-                document.execCommand('insertOrderedList', false, null);
+                if (!this.convertCheckboxListItemToListType('ol')) {
+                    const marker = this._placeCollapsedCaretMarker();
+                    document.execCommand('insertOrderedList', false, null);
+                    this._restoreCollapsedCaretMarker(marker);
+                }
                 break;
             case 'checkbox':
                 this.insertCheckboxList();
@@ -252,17 +264,18 @@ export class ToolbarManager {
 
             const nodes = [range.startContainer, range.endContainer];
             nodes.forEach((node) => {
-                const list = this._getClosestListForNode(node);
-                if (list) {
-                    if (list.tagName === 'UL') {
-                        states.ul = true;
-                    } else if (list.tagName === 'OL') {
-                        states.ol = true;
-                    }
-                }
-
-                if (this._getClosestCheckboxListItem(node)) {
+                const checkboxListItem = this._getClosestCheckboxListItem(node);
+                if (checkboxListItem) {
                     states.checkbox = true;
+                } else {
+                    const list = this._getClosestListForNode(node);
+                    if (list) {
+                        if (list.tagName === 'UL') {
+                            states.ul = true;
+                        } else if (list.tagName === 'OL') {
+                            states.ol = true;
+                        }
+                    }
                 }
 
                 if (this._isNodeInBlockquote(node)) {
@@ -328,6 +341,299 @@ export class ToolbarManager {
         }
         const checkbox = listItem.querySelector(':scope > input[type="checkbox"]');
         return checkbox ? listItem : null;
+    }
+
+    _getFirstDirectTextNode(listItem) {
+        if (!listItem) return null;
+        const walker = document.createTreeWalker(listItem, NodeFilter.SHOW_TEXT, null);
+        let node;
+        while ((node = walker.nextNode())) {
+            let current = node.parentElement;
+            let inSublist = false;
+            while (current && current !== listItem) {
+                if (current.tagName === 'UL' || current.tagName === 'OL') {
+                    inSublist = true;
+                    break;
+                }
+                current = current.parentElement;
+            }
+            if (!inSublist) {
+                return node;
+            }
+        }
+        return null;
+    }
+
+    _getDirectTextNodes(listItem) {
+        if (!listItem) return [];
+        const nodes = [];
+        const walker = document.createTreeWalker(listItem, NodeFilter.SHOW_TEXT, null);
+        let node;
+        while ((node = walker.nextNode())) {
+            let current = node.parentElement;
+            let inSublist = false;
+            while (current && current !== listItem) {
+                if (current.tagName === 'UL' || current.tagName === 'OL') {
+                    inSublist = true;
+                    break;
+                }
+                current = current.parentElement;
+            }
+            if (!inSublist) {
+                nodes.push(node);
+            }
+        }
+        return nodes;
+    }
+
+    _getCollapsedDirectTextOffset(listItem, range) {
+        if (!listItem || !range || !range.collapsed) return null;
+        if (!listItem.contains(range.startContainer) && range.startContainer !== listItem) return null;
+
+        const directTextNodes = this._getDirectTextNodes(listItem);
+        if (directTextNodes.length === 0) {
+            return 0;
+        }
+
+        let accumulated = 0;
+        for (const node of directTextNodes) {
+            const length = (node.textContent || '').length;
+            if (range.startContainer === node) {
+                return accumulated + Math.max(0, Math.min(range.startOffset, length));
+            }
+            accumulated += length;
+        }
+
+        if (range.startContainer === listItem) {
+            return range.startOffset <= 1 ? 0 : accumulated;
+        }
+
+        try {
+            const firstNode = directTextNodes[0];
+            const probeRange = document.createRange();
+            probeRange.setStart(firstNode, 0);
+            probeRange.setEnd(range.startContainer, range.startOffset);
+            return Math.max(0, probeRange.toString().length);
+        } catch (_error) {
+            return null;
+        }
+    }
+
+    _setCollapsedDirectTextOffset(listItem, absoluteOffset) {
+        if (!listItem) return false;
+        const selection = window.getSelection();
+        if (!selection) return false;
+
+        const safeOffset = Math.max(0, Number.isFinite(absoluteOffset) ? absoluteOffset : 0);
+        let directTextNodes = this._getDirectTextNodes(listItem);
+
+        if (directTextNodes.length === 0) {
+            const anchor = document.createTextNode('');
+            const firstSublist = Array.from(listItem.children || []).find(
+                (child) => child.tagName === 'UL' || child.tagName === 'OL'
+            );
+            if (firstSublist) {
+                listItem.insertBefore(anchor, firstSublist);
+            } else {
+                listItem.appendChild(anchor);
+            }
+            directTextNodes = [anchor];
+        }
+
+        let remaining = safeOffset;
+        let targetNode = directTextNodes[directTextNodes.length - 1];
+        let targetOffset = (targetNode.textContent || '').length;
+        for (const node of directTextNodes) {
+            const length = (node.textContent || '').length;
+            if (remaining <= length) {
+                targetNode = node;
+                targetOffset = remaining;
+                break;
+            }
+            remaining -= length;
+        }
+
+        const range = document.createRange();
+        range.setStart(targetNode, Math.max(0, Math.min(targetOffset, (targetNode.textContent || '').length)));
+        range.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        return true;
+    }
+
+    _normalizeListItemTextAfterCheckboxRemoval(listItem) {
+        const firstDirectTextNode = this._getFirstDirectTextNode(listItem);
+        if (!firstDirectTextNode) return 0;
+        const text = firstDirectTextNode.textContent || '';
+        const normalized = text.replace(/^[ \u00A0\u200B]/, '');
+        if (normalized === '') {
+            firstDirectTextNode.remove();
+            return text.length > 0 ? -1 : 0;
+        } else if (normalized !== text) {
+            firstDirectTextNode.textContent = normalized;
+            return -(text.length - normalized.length);
+        }
+        return 0;
+    }
+
+    _ensureListItemTextAnchor(listItem) {
+        if (!listItem) return null;
+        let textNode = this._getFirstDirectTextNode(listItem);
+        if (textNode) return textNode;
+
+        const anchor = document.createTextNode('');
+        const firstSublist = Array.from(listItem.children || []).find(
+            (child) => child.tagName === 'UL' || child.tagName === 'OL'
+        );
+        if (firstSublist) {
+            listItem.insertBefore(anchor, firstSublist);
+        } else {
+            listItem.appendChild(anchor);
+        }
+        return anchor;
+    }
+
+    _convertListItemType(listItem, targetTagName) {
+        if (!listItem || !targetTagName) return;
+        const parentList = listItem.parentElement;
+        if (!parentList || (parentList.tagName !== 'UL' && parentList.tagName !== 'OL')) return;
+        if (parentList.tagName === targetTagName) return;
+        if (!parentList.parentElement) return;
+
+        const targetList = document.createElement(targetTagName);
+
+        if (!listItem.previousElementSibling && !listItem.nextElementSibling) {
+            parentList.replaceWith(targetList);
+            targetList.appendChild(listItem);
+            return;
+        }
+
+        const parent = parentList.parentElement;
+        const trailingList = listItem.nextElementSibling
+            ? document.createElement(parentList.tagName)
+            : null;
+
+        if (trailingList) {
+            let nextItem = listItem.nextElementSibling;
+            while (nextItem) {
+                const itemToMove = nextItem;
+                nextItem = nextItem.nextElementSibling;
+                trailingList.appendChild(itemToMove);
+            }
+        }
+
+        parent.insertBefore(targetList, parentList.nextSibling);
+        targetList.appendChild(listItem);
+
+        if (trailingList && trailingList.children.length > 0) {
+            parent.insertBefore(trailingList, targetList.nextSibling);
+        }
+
+        if (parentList.children.length === 0) {
+            parentList.remove();
+        }
+    }
+
+    _dispatchEditorInputEvent() {
+        this.editor.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+
+    _placeCollapsedCaretMarker() {
+        const selection = window.getSelection();
+        if (!selection || selection.rangeCount === 0 || !selection.isCollapsed) {
+            return null;
+        }
+
+        const range = selection.getRangeAt(0);
+        if (!this.editor.contains(range.startContainer)) {
+            return null;
+        }
+
+        const marker = document.createComment('md-caret-marker');
+        range.insertNode(marker);
+
+        const afterRange = document.createRange();
+        afterRange.setStartAfter(marker);
+        afterRange.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(afterRange);
+
+        return marker;
+    }
+
+    _restoreCollapsedCaretMarker(marker) {
+        if (!marker) return false;
+        if (!marker.parentNode || !this.editor.contains(marker)) {
+            try {
+                marker.remove();
+            } catch (_error) {
+                // noop
+            }
+            return false;
+        }
+
+        const selection = window.getSelection();
+        if (!selection) {
+            marker.remove();
+            return false;
+        }
+
+        const range = document.createRange();
+        range.setStartBefore(marker);
+        range.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        marker.remove();
+        return true;
+    }
+
+    convertCheckboxListItemToListType(command) {
+        if (command !== 'ul' && command !== 'ol') return false;
+
+        const selection = window.getSelection();
+        if (!selection || selection.rangeCount === 0) return false;
+
+        const range = selection.getRangeAt(0);
+        if (!this.editor.contains(range.startContainer) && !this.editor.contains(range.endContainer)) {
+            return false;
+        }
+
+        const listItem =
+            this._getClosestCheckboxListItem(range.startContainer) ||
+            this._getClosestCheckboxListItem(range.endContainer);
+        if (!listItem) return false;
+        const preservedOffset = this._getCollapsedDirectTextOffset(listItem, range);
+
+        const checkbox = listItem.querySelector(':scope > input[type="checkbox"]');
+        if (!checkbox) return false;
+        checkbox.remove();
+        const normalizationDelta = this._normalizeListItemTextAfterCheckboxRemoval(listItem);
+        const restoredOffset = typeof preservedOffset === 'number'
+            ? Math.max(0, preservedOffset + normalizationDelta)
+            : null;
+
+        const targetTagName = command === 'ol' ? 'OL' : 'UL';
+        this._convertListItemType(listItem, targetTagName);
+
+        const activeListItem = listItem.isConnected ? listItem : null;
+        if (!activeListItem) {
+            this._dispatchEditorInputEvent();
+            return true;
+        }
+
+        if (typeof restoredOffset === 'number') {
+            this._setCollapsedDirectTextOffset(activeListItem, restoredOffset);
+        } else {
+            const targetNode = this._ensureListItemTextAnchor(activeListItem);
+            const newRange = document.createRange();
+            newRange.setStart(targetNode, 0);
+            newRange.collapse(true);
+            selection.removeAllRanges();
+            selection.addRange(newRange);
+        }
+
+        this._dispatchEditorInputEvent();
+        return true;
     }
 
     _isNodeInBlockquote(node) {

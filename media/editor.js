@@ -957,47 +957,47 @@ import { SearchManager } from './modules/SearchManager.js';
         return /^H[1-6]$/.test(tag);
     }
 
-    function getDirectNodesFromEditor(range) {
-        if (!range) return [];
+    function getDirectNodesFromEditor(range, root = editor) {
+        if (!range || !root) return [];
         let startNode = null;
 
-        if (range.startContainer === editor) {
-            startNode = editor.childNodes[range.startOffset] || null;
+        if (range.startContainer === root) {
+            startNode = root.childNodes[range.startOffset] || null;
         } else if (range.startContainer.nodeType === Node.TEXT_NODE &&
-            range.startContainer.parentElement === editor) {
+            range.startContainer.parentElement === root) {
             startNode = range.startContainer;
         } else if (range.startContainer.nodeType === Node.ELEMENT_NODE &&
-            range.startContainer.parentElement === editor) {
+            range.startContainer.parentElement === root) {
             startNode = range.startContainer;
         } else {
             let current = range.startContainer.nodeType === Node.ELEMENT_NODE
                 ? range.startContainer
                 : range.startContainer.parentElement;
-            while (current && current !== editor) {
-                if (current.parentElement === editor) {
+            while (current && current !== root) {
+                if (current.parentElement === root) {
                     startNode = current;
                     break;
                 }
-                if (domUtils.isBlockElement(current)) return [];
+                if (isBlockElement(current)) return [];
                 current = current.parentElement;
             }
         }
 
         if (!startNode) return [];
-        if (startNode.nodeType === Node.ELEMENT_NODE && domUtils.isBlockElement(startNode)) return [];
+        if (startNode.nodeType === Node.ELEMENT_NODE && isBlockElement(startNode)) return [];
 
-        let startIndex = Array.prototype.indexOf.call(editor.childNodes, startNode);
+        let startIndex = Array.prototype.indexOf.call(root.childNodes, startNode);
         if (startIndex < 0) return [];
         while (startIndex > 0) {
-            const prev = editor.childNodes[startIndex - 1];
-            if (prev.nodeType === Node.ELEMENT_NODE && domUtils.isBlockElement(prev)) break;
+            const prev = root.childNodes[startIndex - 1];
+            if (prev.nodeType === Node.ELEMENT_NODE && isBlockElement(prev)) break;
             startIndex -= 1;
         }
 
         const nodes = [];
-        for (let i = startIndex; i < editor.childNodes.length; i++) {
-            const node = editor.childNodes[i];
-            if (node.nodeType === Node.ELEMENT_NODE && domUtils.isBlockElement(node)) break;
+        for (let i = startIndex; i < root.childNodes.length; i++) {
+            const node = root.childNodes[i];
+            if (node.nodeType === Node.ELEMENT_NODE && isBlockElement(node)) break;
             nodes.push(node);
         }
         return nodes;
@@ -1045,6 +1045,149 @@ import { SearchManager } from './modules/SearchManager.js';
             lastMeaningfulTextNode = node;
         }
         return lastMeaningfulTextNode;
+    }
+
+    function getDirectTextNodes(listItem) {
+        if (!listItem) return [];
+        const nodes = [];
+        const walker = document.createTreeWalker(listItem, NodeFilter.SHOW_TEXT, null);
+        let node;
+        while (node = walker.nextNode()) {
+            let current = node.parentElement;
+            let inSublist = false;
+            while (current && current !== listItem) {
+                if (current.tagName === 'UL' || current.tagName === 'OL') {
+                    inSublist = true;
+                    break;
+                }
+                current = current.parentElement;
+            }
+            if (!inSublist) {
+                nodes.push(node);
+            }
+        }
+        return nodes;
+    }
+
+    function getCollapsedDirectTextOffsetInListItem(listItem, range) {
+        if (!listItem || !range || !range.collapsed) return null;
+        if (!listItem.contains(range.startContainer) && range.startContainer !== listItem) return null;
+
+        const directTextNodes = getDirectTextNodes(listItem);
+        if (directTextNodes.length === 0) {
+            return 0;
+        }
+
+        let accumulated = 0;
+        for (const node of directTextNodes) {
+            const length = (node.textContent || '').length;
+            if (range.startContainer === node) {
+                return accumulated + Math.max(0, Math.min(range.startOffset, length));
+            }
+            accumulated += length;
+        }
+
+        if (range.startContainer === listItem) {
+            return range.startOffset <= 1 ? 0 : accumulated;
+        }
+
+        try {
+            const firstNode = directTextNodes[0];
+            const probeRange = document.createRange();
+            probeRange.setStart(firstNode, 0);
+            probeRange.setEnd(range.startContainer, range.startOffset);
+            return Math.max(0, probeRange.toString().length);
+        } catch (_error) {
+            return null;
+        }
+    }
+
+    function setCaretAtCollapsedDirectTextOffsetInListItem(listItem, absoluteOffset) {
+        if (!listItem) return false;
+        const selection = window.getSelection();
+        if (!selection) return false;
+
+        const safeOffset = Math.max(0, Number.isFinite(absoluteOffset) ? absoluteOffset : 0);
+        let directTextNodes = getDirectTextNodes(listItem);
+
+        if (directTextNodes.length === 0) {
+            const anchorNode = document.createTextNode(hasCheckboxAtStart(listItem) ? '\u200B' : '');
+            const firstSublist = Array.from(listItem.children || []).find(
+                child => child.tagName === 'UL' || child.tagName === 'OL'
+            );
+            if (firstSublist) {
+                listItem.insertBefore(anchorNode, firstSublist);
+            } else {
+                listItem.appendChild(anchorNode);
+            }
+            directTextNodes = [anchorNode];
+        }
+
+        let remaining = safeOffset;
+        let targetNode = directTextNodes[directTextNodes.length - 1];
+        let targetOffset = (targetNode.textContent || '').length;
+
+        for (const node of directTextNodes) {
+            const length = (node.textContent || '').length;
+            if (remaining <= length) {
+                targetNode = node;
+                targetOffset = remaining;
+                break;
+            }
+            remaining -= length;
+        }
+
+        const firstCheckboxTextNode = hasCheckboxAtStart(listItem)
+            ? getFirstDirectTextNodeAfterCheckbox(listItem)
+            : null;
+        if (firstCheckboxTextNode && targetNode === firstCheckboxTextNode) {
+            const minOffset = getCheckboxTextMinOffset(listItem);
+            targetOffset = Math.max(minOffset, targetOffset);
+        }
+
+        const range = document.createRange();
+        range.setStart(targetNode, Math.max(0, Math.min(targetOffset, (targetNode.textContent || '').length)));
+        range.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        return true;
+    }
+
+    function setCaretAtCollapsedTextOffsetInElement(element, absoluteOffset) {
+        if (!element) return false;
+        const selection = window.getSelection();
+        if (!selection) return false;
+
+        const safeOffset = Math.max(0, Number.isFinite(absoluteOffset) ? absoluteOffset : 0);
+        const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT, null);
+        let node;
+        let remaining = safeOffset;
+        let lastNode = null;
+
+        while (node = walker.nextNode()) {
+            lastNode = node;
+            const length = (node.textContent || '').length;
+            if (remaining <= length) {
+                const range = document.createRange();
+                range.setStart(node, remaining);
+                range.collapse(true);
+                selection.removeAllRanges();
+                selection.addRange(range);
+                return true;
+            }
+            remaining -= length;
+        }
+
+        const range = document.createRange();
+        if (lastNode) {
+            range.setStart(lastNode, (lastNode.textContent || '').length);
+        } else {
+            range.setStart(element, 0);
+        }
+        range.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        return true;
     }
 
     function getFirstDirectTextNode(listItem) {
@@ -1910,50 +2053,195 @@ import { SearchManager } from './modules/SearchManager.js';
         while (currentBlock && currentBlock !== traversalBoundary) {
             if (currentBlock.tagName === 'LI') {
                 stateManager.saveState();
+                const preservedDirectOffset = getCollapsedDirectTextOffsetInListItem(currentBlock, range);
 
                 let checkbox = currentBlock.querySelector(':scope > input[type="checkbox"]');
-                if (!checkbox) {
-                    checkbox = createCheckboxElement();
-                    currentBlock.insertBefore(checkbox, currentBlock.firstChild);
-                }
+                if (checkbox) {
+                    const parentList = currentBlock.parentElement;
+                    const grandParentItem = parentList ? parentList.parentElement : null;
 
-                ensureCheckboxLeadingSpace(currentBlock);
-
-                requestAnimationFrame(() => {
-                    const sel = window.getSelection();
-                    if (!sel) return;
-                    const newRange = document.createRange();
-                    let targetNode = getFirstDirectTextNodeAfterCheckbox(currentBlock);
-                    if (!targetNode) {
-                        ensureCheckboxLeadingSpace(currentBlock);
-                        targetNode = getFirstDirectTextNodeAfterCheckbox(currentBlock);
-                    }
-                    if (targetNode) {
-                        const minOffset = getCheckboxTextMinOffset(currentBlock);
-                        newRange.setStart(targetNode, minOffset);
+                    if (grandParentItem && grandParentItem.tagName === 'LI') {
+                        const textNode = range.startContainer.nodeType === Node.TEXT_NODE
+                            ? range.startContainer
+                            : (getFirstDirectTextNodeAfterCheckbox(currentBlock) || getFirstDirectTextNode(currentBlock));
+                        const offset = range.startOffset;
+                        listManager.outdentListItem(currentBlock, textNode, offset);
+                        requestAnimationFrame(() => {
+                            updateListItemClasses();
+                            correctCheckboxCursorPosition();
+                        });
                     } else {
-                        const fallbackAnchor = document.createTextNode('\u200B');
-                        const firstSublist = Array.from(currentBlock.children || []).find(
-                            child => child.tagName === 'UL' || child.tagName === 'OL'
-                        );
-                        if (firstSublist) {
-                            currentBlock.insertBefore(fallbackAnchor, firstSublist);
-                        } else {
-                            currentBlock.appendChild(fallbackAnchor);
+                        checkbox.remove();
+                        let normalizationDelta = 0;
+                        const firstDirectTextNode = getFirstDirectTextNode(currentBlock) || domUtils.getFirstTextNode(currentBlock);
+                        if (firstDirectTextNode && firstDirectTextNode.nodeType === Node.TEXT_NODE) {
+                            const text = firstDirectTextNode.textContent || '';
+                            const normalized = text.replace(/^[ \u00A0\u200B]/, '');
+                            if (normalized === '') {
+                                firstDirectTextNode.remove();
+                                if (text.length > 0) {
+                                    normalizationDelta = -1;
+                                }
+                            } else if (normalized !== text) {
+                                firstDirectTextNode.textContent = normalized;
+                                normalizationDelta = -(text.length - normalized.length);
+                            }
                         }
-                        newRange.setStart(fallbackAnchor, 0);
+                        const restoredParagraphOffset = typeof preservedDirectOffset === 'number'
+                            ? Math.max(0, preservedDirectOffset + normalizationDelta)
+                            : null;
+                        const p = document.createElement('p');
+                        p.innerHTML = currentBlock.innerHTML;
+                        if (p.innerHTML.trim() === '' || p.textContent.trim() === '') {
+                            p.innerHTML = '<br>';
+                        }
+
+                        if (currentBlock.previousElementSibling || currentBlock.nextElementSibling) {
+                            if (currentBlock.nextElementSibling) {
+                                const newList = document.createElement(parentList.tagName);
+                                let nextItem = currentBlock.nextElementSibling;
+                                while (nextItem) {
+                                    const itemToMove = nextItem;
+                                    nextItem = nextItem.nextElementSibling;
+                                    newList.appendChild(itemToMove);
+                                }
+                                parentList.parentElement.insertBefore(p, parentList.nextSibling);
+                                parentList.parentElement.insertBefore(newList, p.nextSibling);
+                            } else {
+                                parentList.parentElement.insertBefore(p, parentList.nextSibling);
+                            }
+                            currentBlock.remove();
+                            if (parentList.children.length === 0) {
+                                parentList.remove();
+                            }
+                        } else {
+                            parentList.replaceWith(p);
+                        }
+
+                        requestAnimationFrame(() => {
+                            const sel = window.getSelection();
+                            if (!sel) return;
+                            if (typeof restoredParagraphOffset === 'number') {
+                                setCaretAtCollapsedTextOffsetInElement(p, restoredParagraphOffset);
+                            } else {
+                                const newRange = document.createRange();
+                                const firstNode = domUtils.getFirstTextNode(p);
+                                if (firstNode) {
+                                    newRange.setStart(firstNode, 0);
+                                } else {
+                                    newRange.setStart(p, 0);
+                                }
+                                newRange.collapse(true);
+                                sel.removeAllRanges();
+                                sel.addRange(newRange);
+                            }
+                            editor.focus();
+                            updateListItemClasses();
+                        });
                     }
-                    newRange.collapse(true);
-                    sel.removeAllRanges();
-                    sel.addRange(newRange);
-                    editor.focus();
-                    updateListItemClasses();
+                    pendingSlashCheckboxCaretListItem = null;
                     notifyChange();
-                    pendingSlashCheckboxCaretListItem = currentBlock;
-                    setTimeout(() => {
-                        correctCheckboxCursorPosition();
-                    }, 0);
-                });
+                } else {
+                    checkbox = createCheckboxElement();
+                    const parentList = currentBlock.parentElement;
+                    const parentOfList = parentList ? parentList.parentElement : null;
+                    const shouldSplitOrderedList =
+                        !!(parentList && parentList.tagName === 'OL' && parentOfList);
+                    const firstDirectTextBefore = getFirstDirectTextNode(currentBlock);
+                    const willTrimLeadingSeparator =
+                        !!(firstDirectTextBefore && /^[ \u00A0]/.test(firstDirectTextBefore.textContent || ''));
+                    const restoredDirectOffset = (() => {
+                        if (typeof preservedDirectOffset !== 'number') return null;
+                        if (!willTrimLeadingSeparator || preservedDirectOffset <= 0) return preservedDirectOffset;
+                        return Math.max(0, preservedDirectOffset - 1);
+                    })();
+
+                    if (shouldSplitOrderedList) {
+                        const trailingItems = [];
+                        let nextItem = currentBlock.nextElementSibling;
+                        while (nextItem) {
+                            const itemToMove = nextItem;
+                            nextItem = nextItem.nextElementSibling;
+                            trailingItems.push(itemToMove);
+                        }
+
+                        const checkboxList = document.createElement('ul');
+                        checkboxList.appendChild(currentBlock);
+                        currentBlock.insertBefore(checkbox, currentBlock.firstChild);
+                        ensureCheckboxLeadingSpace(currentBlock);
+
+                        let trailingList = null;
+                        if (trailingItems.length > 0) {
+                            trailingList = document.createElement('ol');
+                            trailingItems.forEach((item) => trailingList.appendChild(item));
+                            trailingList.removeAttribute('start');
+                            Array.from(trailingList.children || []).forEach((item) => item.removeAttribute('value'));
+                        }
+
+                        if (parentList.children.length === 0) {
+                            parentList.replaceWith(checkboxList);
+                        } else {
+                            parentOfList.insertBefore(checkboxList, parentList.nextSibling);
+                        }
+
+                        if (trailingList && trailingList.children.length > 0) {
+                            parentOfList.insertBefore(trailingList, checkboxList.nextSibling);
+                        }
+                    } else {
+                        currentBlock.insertBefore(checkbox, currentBlock.firstChild);
+                        ensureCheckboxLeadingSpace(currentBlock);
+                    }
+
+                    requestAnimationFrame(() => {
+                        const sel = window.getSelection();
+                        if (!sel) return;
+                        if (
+                            typeof restoredDirectOffset === 'number' &&
+                            setCaretAtCollapsedDirectTextOffsetInListItem(currentBlock, restoredDirectOffset)
+                        ) {
+                            editor.focus();
+                            updateListItemClasses();
+                            notifyChange();
+                            pendingSlashCheckboxCaretListItem = currentBlock;
+                            setTimeout(() => {
+                                correctCheckboxCursorPosition();
+                            }, 0);
+                            return;
+                        }
+
+                        const newRange = document.createRange();
+                        let targetNode = getFirstDirectTextNodeAfterCheckbox(currentBlock);
+                        if (!targetNode) {
+                            ensureCheckboxLeadingSpace(currentBlock);
+                            targetNode = getFirstDirectTextNodeAfterCheckbox(currentBlock);
+                        }
+                        if (targetNode) {
+                            const minOffset = getCheckboxTextMinOffset(currentBlock);
+                            newRange.setStart(targetNode, minOffset);
+                        } else {
+                            const fallbackAnchor = document.createTextNode('\u200B');
+                            const firstSublist = Array.from(currentBlock.children || []).find(
+                                child => child.tagName === 'UL' || child.tagName === 'OL'
+                            );
+                            if (firstSublist) {
+                                currentBlock.insertBefore(fallbackAnchor, firstSublist);
+                            } else {
+                                currentBlock.appendChild(fallbackAnchor);
+                            }
+                            newRange.setStart(fallbackAnchor, 0);
+                        }
+                        newRange.collapse(true);
+                        sel.removeAllRanges();
+                        sel.addRange(newRange);
+                        editor.focus();
+                        updateListItemClasses();
+                        notifyChange();
+                        pendingSlashCheckboxCaretListItem = currentBlock;
+                        setTimeout(() => {
+                            correctCheckboxCursorPosition();
+                        }, 0);
+                    });
+                }
                 if (hadOnlyPlaceholderBreaks) {
                     cleanupPlaceholderArtifactsInCell(tableCellBoundary);
                 }
@@ -1980,10 +2268,26 @@ import { SearchManager } from './modules/SearchManager.js';
         }
 
         if (topBlock && topBlock !== traversalBoundary && isBlockElement(topBlock)) {
-            const nodesToMove = Array.from(topBlock.childNodes);
-            nodesToMove.forEach(node => li.appendChild(node));
-            ensureCheckboxLeadingSpace(li);
-            topBlock.replaceWith(ul);
+            const hasDirectBlockChildren = Array.from(topBlock.childNodes || []).some(
+                (node) => node.nodeType === Node.ELEMENT_NODE && isBlockElement(node)
+            );
+            if (hasDirectBlockChildren) {
+                const nodesToMove = getDirectNodesFromEditor(range, topBlock);
+                if (nodesToMove.length > 0) {
+                    topBlock.insertBefore(ul, nodesToMove[0]);
+                    nodesToMove.forEach(node => li.appendChild(node));
+                    ensureCheckboxLeadingSpace(li);
+                } else {
+                    range.deleteContents();
+                    range.insertNode(ul);
+                    ensureCheckboxLeadingSpace(li);
+                }
+            } else {
+                const nodesToMove = Array.from(topBlock.childNodes);
+                nodesToMove.forEach(node => li.appendChild(node));
+                ensureCheckboxLeadingSpace(li);
+                topBlock.replaceWith(ul);
+            }
         } else {
             if (traversalBoundary !== editor) {
                 range.deleteContents();
