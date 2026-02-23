@@ -52,8 +52,9 @@ export class ToolbarManager {
             });
         });
 
+        const updateAvailability = () => this.updateCommandAvailability();
         const updateToolbarState = () => this.updateToolbarState();
-        document.addEventListener('selectionchange', updateToolbarState);
+        document.addEventListener('selectionchange', updateAvailability);
         this.editor.addEventListener('keyup', updateToolbarState);
         this.editor.addEventListener('mouseup', updateToolbarState);
         this.editor.addEventListener('input', updateToolbarState);

@@ -5439,9 +5439,6 @@ import { SearchManager } from './modules/SearchManager.js';
             handleBackspace();
             const removedStrike = cleanupEmptyStrikeAtSelection() || cleanupEmptyStrikes();
             if (removedStrike) {
-                if (!isSelectionInStrike()) {
-                    clearStrikeThroughState();
-                }
                 notifyChange();
             }
             return true;
@@ -11723,7 +11720,6 @@ import { SearchManager } from './modules/SearchManager.js';
                     const inserted = insertPlainTextAtSelection(e.data || '');
                     pendingStrikeCleanup = false;
                     if (inserted) {
-                        clearStrikeThroughState();
                         updateListItemClasses();
 
                         const selection = window.getSelection();
@@ -11755,9 +11751,6 @@ import { SearchManager } from './modules/SearchManager.js';
                     pendingStrikeCleanup = true;
                 }
                 cleanupEmptyStrikes();
-                if (!isSelectionInStrike()) {
-                    clearStrikeThroughState();
-                }
             }
         });
 
@@ -11817,9 +11810,6 @@ import { SearchManager } from './modules/SearchManager.js';
                     if (removedStrike) {
                         pendingStrikeCleanup = true;
                     }
-                    if (!isSelectionInStrike()) {
-                        clearStrikeThroughState();
-                    }
                 } else if (pendingDeleteListItem) {
                     pendingDeleteListItem = null;
                 }
@@ -11848,11 +11838,7 @@ import { SearchManager } from './modules/SearchManager.js';
                     if (!isInCodeBlock) {
                         if (pendingStrikeCleanup) {
                             pendingStrikeCleanup = false;
-                            if (unwrapStrikeAtSelection()) {
-                                clearStrikeThroughState();
-                            } else {
-                                clearStrikeThroughState();
-                            }
+                            unwrapStrikeAtSelection();
                         }
                         // 変換を早めに実行（入力後のラグを減らす）
                         scheduleMarkdownConversion(() => {

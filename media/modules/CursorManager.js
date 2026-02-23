@@ -3359,10 +3359,91 @@ export class CursorManager {
                             return;
                         }
                     }
+                    const currentRectForEmptyUp = getVisualCaretRectForRange(range);
+                    const baseXForEmptyUp = currentRectForEmptyUp
+                        ? (currentRectForEmptyUp.left || currentRectForEmptyUp.x || 0)
+                        : 0;
+
+                    if (prevElement.tagName === 'LI' &&
+                        this._placeCursorInListItemAtX(prevElement, baseXForEmptyUp, 'up', selection)) {
+                        return;
+                    }
+
+                    // 空行から上移動する場合は、前ブロックの先頭ではなく最終表示行へ移動する。
+                    const prevLines = getVisualLinesForBlock(prevElement);
+                    if (prevLines.length > 0 && document.caretRangeFromPoint) {
+                        const targetLine = prevLines[prevLines.length - 1];
+                        const targetHeight = Math.max(1, targetLine.bottom - targetLine.top);
+                        const targetY = targetLine.top + Math.max(1, Math.min(targetHeight * 0.5, targetHeight - 1));
+                        const atTargetLineStart = baseXForEmptyUp <= (targetLine.left + 2);
+                        const xCandidates = atTargetLineStart
+                            ? [
+                                targetLine.left + 0.5,
+                                targetLine.left + 1.5,
+                                baseXForEmptyUp,
+                                baseXForEmptyUp + 1
+                            ]
+                            : [
+                                Math.max(targetLine.left + 0.5, Math.min(targetLine.right - 0.5, baseXForEmptyUp)),
+                                baseXForEmptyUp,
+                                targetLine.left + 0.5
+                            ];
+
+                        let selectedRange = null;
+                        let selectedScore = Infinity;
+                        const tried = new Set();
+                        for (const x of xCandidates) {
+                            if (!Number.isFinite(x)) {
+                                continue;
+                            }
+                            const key = Math.round(x * 10) / 10;
+                            if (tried.has(key)) {
+                                continue;
+                            }
+                            tried.add(key);
+                            const probeRange = document.caretRangeFromPoint(x, targetY);
+                            if (!probeRange || !prevElement.contains(probeRange.startContainer)) {
+                                continue;
+                            }
+                            const probeRect = getVisualCaretRectForRange(probeRange);
+                            if (!probeRect) {
+                                continue;
+                            }
+                            const probeTop = probeRect.top || probeRect.y || 0;
+                            if (probeTop < targetLine.top - 3 || probeTop > targetLine.bottom + 3) {
+                                continue;
+                            }
+                            const probeLeft = probeRect.left || probeRect.x || 0;
+                            const score = atTargetLineStart ? probeLeft : Math.abs(probeLeft - baseXForEmptyUp);
+                            if (!selectedRange || score < selectedScore) {
+                                selectedRange = probeRange;
+                                selectedScore = score;
+                            }
+                        }
+
+                        if (atTargetLineStart) {
+                            const lineStartCaret = findLineStartCaretInBlock(prevElement, targetLine);
+                            if (lineStartCaret) {
+                                const startRange = document.createRange();
+                                startRange.setStart(lineStartCaret.node, lineStartCaret.offset);
+                                startRange.collapse(true);
+                                selection.removeAllRanges();
+                                selection.addRange(startRange);
+                                return;
+                            }
+                        }
+
+                        if (selectedRange) {
+                            selection.removeAllRanges();
+                            selection.addRange(selectedRange);
+                            return;
+                        }
+                    }
+
                     const newRange = document.createRange();
-                    const firstNode = this._getFirstNavigableTextNode(prevElement);
-                    if (firstNode) {
-                        newRange.setStart(firstNode, 0);
+                    const lastNode = this._getLastNavigableTextNode(prevElement);
+                    if (lastNode) {
+                        newRange.setStart(lastNode, 0);
                     } else {
                         newRange.setStart(prevElement, 0);
                     }
@@ -6849,17 +6930,8 @@ export class CursorManager {
                         const text = sibling.textContent || '';
                         const firstOffset = this._getFirstNonZwspOffset(text);
                         if (firstOffset !== null) {
-                            let targetOffset = firstOffset;
-                            const previousInlineCode = currentNode.previousSibling;
-                            const fromInlineCodeOutsideRight = this._isInlineCodeBoundaryPlaceholder(currentNode) &&
-                                !!(previousInlineCode &&
-                                    previousInlineCode.nodeType === Node.ELEMENT_NODE &&
-                                    previousInlineCode.tagName === 'CODE' &&
-                                    !this.domUtils.getParentElement(previousInlineCode, 'PRE'));
-                            if (fromInlineCodeOutsideRight) {
-                                // ArrowRight/Ctrl+F should consume one character from outside-right.
-                                targetOffset = Math.min(firstOffset + 1, text.length);
-                            }
+                            // Consume one visible character when crossing inline-style boundaries.
+                            const targetOffset = Math.min(firstOffset + 1, text.length);
                             range.setStart(sibling, targetOffset);
                             range.collapse(true);
                             applyRange(range);
@@ -6880,7 +6952,7 @@ export class CursorManager {
                             const text = textNode.textContent || '';
                             const firstOffset = this._getFirstNonZwspOffset(text);
                             if (firstOffset !== null) {
-                                range.setStart(textNode, firstOffset);
+                                range.setStart(textNode, Math.min(firstOffset + 1, text.length));
                                 range.collapse(true);
                                 applyRange(range);
                                 return true;
@@ -6899,7 +6971,7 @@ export class CursorManager {
                             const text = fallback.textContent || '';
                             const firstOffset = this._getFirstNonZwspOffset(text);
                             if (firstOffset !== null) {
-                                range.setStart(fallback, firstOffset);
+                                range.setStart(fallback, Math.min(firstOffset + 1, text.length));
                                 range.collapse(true);
                                 applyRange(range);
                                 return true;
@@ -6932,17 +7004,8 @@ export class CursorManager {
                         const text = sibling.textContent || '';
                         const firstOffset = this._getFirstNonZwspOffset(text);
                         if (firstOffset !== null) {
-                            let targetOffset = firstOffset;
-                            const previousInlineCode = currentNode.previousSibling;
-                            const fromInlineCodeOutsideRight = this._isInlineCodeBoundaryPlaceholder(currentNode) &&
-                                !!(previousInlineCode &&
-                                    previousInlineCode.nodeType === Node.ELEMENT_NODE &&
-                                    previousInlineCode.tagName === 'CODE' &&
-                                    !this.domUtils.getParentElement(previousInlineCode, 'PRE'));
-                            if (fromInlineCodeOutsideRight) {
-                                // ArrowRight/Ctrl+F should consume one character from outside-right.
-                                targetOffset = Math.min(firstOffset + 1, text.length);
-                            }
+                            // Consume one visible character when crossing inline-style boundaries.
+                            const targetOffset = Math.min(firstOffset + 1, text.length);
                             range.setStart(sibling, targetOffset);
                             range.collapse(true);
                             applyRange(range);
@@ -6987,7 +7050,7 @@ export class CursorManager {
                             const text = textNode.textContent || '';
                             const firstOffset = this._getFirstNonZwspOffset(text);
                             if (firstOffset !== null) {
-                                range.setStart(textNode, firstOffset);
+                                range.setStart(textNode, Math.min(firstOffset + 1, text.length));
                                 range.collapse(true);
                                 applyRange(range);
                                 return true;
@@ -7006,7 +7069,7 @@ export class CursorManager {
                             const text = fallback.textContent || '';
                             const firstOffset = this._getFirstNonZwspOffset(text);
                             if (firstOffset !== null) {
-                                range.setStart(fallback, firstOffset);
+                                range.setStart(fallback, Math.min(firstOffset + 1, text.length));
                                 range.collapse(true);
                                 applyRange(range);
                                 return true;
@@ -7150,7 +7213,7 @@ export class CursorManager {
                     const text = nextSibling.textContent || '';
                     const firstOffset = this._getFirstNonZwspOffset(text);
                     if (firstOffset !== null) {
-                        range.setStart(nextSibling, firstOffset);
+                        range.setStart(nextSibling, Math.min(firstOffset + 1, text.length));
                         range.collapse(true);
                         moved = true;
                     }
@@ -7168,7 +7231,7 @@ export class CursorManager {
                             const text = textNode.textContent || '';
                             const firstOffset = this._getFirstNonZwspOffset(text);
                             if (firstOffset !== null) {
-                                range.setStart(textNode, firstOffset);
+                                range.setStart(textNode, Math.min(firstOffset + 1, text.length));
                                 range.collapse(true);
                                 moved = true;
                             }
@@ -7193,7 +7256,13 @@ export class CursorManager {
                     const text = nextNode.textContent || '';
                     const firstOffset = this._getFirstNonZwspOffset(text);
                     if (firstOffset !== null) {
-                        range.setStart(nextNode, firstOffset);
+                        const originBlock = getCurrentBlockForNode(node);
+                        const targetBlock = getCurrentBlockForNode(nextNode);
+                        const consumeInlineBoundaryChar = !!originBlock && originBlock === targetBlock;
+                        const targetOffset = consumeInlineBoundaryChar
+                            ? Math.min(firstOffset + 1, text.length)
+                            : firstOffset;
+                        range.setStart(nextNode, targetOffset);
                         range.collapse(true);
                         moved = true;
                         break;
@@ -7554,9 +7623,8 @@ export class CursorManager {
                         const text = sibling.textContent || '';
                         const lastOffset = this._getLastNonZwspOffset(text);
                         if (lastOffset !== null) {
-                            const targetOffset = nextIsInlineCode
-                                ? lastOffset
-                                : Math.min(lastOffset + 1, text.length);
+                            // Consume one visible character when crossing inline-style boundaries.
+                            const targetOffset = lastOffset;
                             range.setStart(sibling, targetOffset);
                             range.collapse(true);
                             applyRange(range);
@@ -7568,9 +7636,7 @@ export class CursorManager {
                             const text = textNode.textContent || '';
                             const lastOffset = this._getLastNonZwspOffset(text);
                             if (lastOffset !== null) {
-                                const targetOffset = nextIsInlineCode
-                                    ? lastOffset
-                                    : Math.min(lastOffset + 1, text.length);
+                                const targetOffset = lastOffset;
                                 range.setStart(textNode, targetOffset);
                                 range.collapse(true);
                                 applyRange(range);
@@ -7582,9 +7648,7 @@ export class CursorManager {
                             const text = fallback.textContent || '';
                             const lastOffset = this._getLastNonZwspOffset(text);
                             if (lastOffset !== null) {
-                                const targetOffset = nextIsInlineCode
-                                    ? lastOffset
-                                    : Math.min(lastOffset + 1, text.length);
+                                const targetOffset = lastOffset;
                                 range.setStart(fallback, targetOffset);
                                 range.collapse(true);
                                 applyRange(range);
@@ -7635,7 +7699,7 @@ export class CursorManager {
                         const text = sibling.textContent || '';
                         const lastOffset = this._getLastNonZwspOffset(text);
                         if (lastOffset !== null) {
-                            range.setStart(sibling, lastOffset + 1);
+                            range.setStart(sibling, lastOffset);
                             range.collapse(true);
                             applyRange(range);
                             return true;
@@ -7646,7 +7710,7 @@ export class CursorManager {
                             const text = textNode.textContent || '';
                             const lastOffset = this._getLastNonZwspOffset(text);
                             if (lastOffset !== null) {
-                                range.setStart(textNode, Math.min(lastOffset + 1, text.length));
+                                range.setStart(textNode, lastOffset);
                                 range.collapse(true);
                                 applyRange(range);
                                 return true;
@@ -7657,7 +7721,7 @@ export class CursorManager {
                             const text = fallback.textContent || '';
                             const lastOffset = this._getLastNonZwspOffset(text);
                             if (lastOffset !== null) {
-                                range.setStart(fallback, lastOffset + 1);
+                                range.setStart(fallback, lastOffset);
                                 range.collapse(true);
                                 applyRange(range);
                                 return true;
@@ -7770,24 +7834,7 @@ export class CursorManager {
                     const text = prevSibling.textContent || '';
                     const lastOffset = this._getLastNonZwspOffset(text);
                     if (lastOffset !== null) {
-                        let targetOffset = Math.min(lastOffset + 1, text.length);
-                        // When caret is at an element boundary after "inline-code + text",
-                        // avoid a visual no-op step and consume one visible char immediately.
-                        let prevMeaningfulSibling = prevSibling.previousSibling;
-                        while (prevMeaningfulSibling &&
-                            prevMeaningfulSibling.nodeType === Node.TEXT_NODE &&
-                            (prevMeaningfulSibling.textContent || '').replace(/[\u200B\uFEFF]/g, '') === '') {
-                            prevMeaningfulSibling = prevMeaningfulSibling.previousSibling;
-                        }
-                        const fromInlineCodeTail = !!(
-                            prevMeaningfulSibling &&
-                            prevMeaningfulSibling.nodeType === Node.ELEMENT_NODE &&
-                            prevMeaningfulSibling.tagName === 'CODE' &&
-                            !this.domUtils.getParentElement(prevMeaningfulSibling, 'PRE')
-                        );
-                        if (fromInlineCodeTail) {
-                            targetOffset = lastOffset;
-                        }
+                        const targetOffset = lastOffset;
                         range.setStart(prevSibling, targetOffset);
                         range.collapse(true);
                         moved = true;
@@ -7798,7 +7845,7 @@ export class CursorManager {
                         const text = textNode.textContent || '';
                         const lastOffset = this._getLastNonZwspOffset(text);
                         if (lastOffset !== null) {
-                            range.setStart(textNode, Math.min(lastOffset + 1, text.length));
+                            range.setStart(textNode, lastOffset);
                             range.collapse(true);
                             moved = true;
                         }
@@ -7831,7 +7878,13 @@ export class CursorManager {
                     const text = prevNode.textContent || '';
                     const lastOffset = this._getLastNonZwspOffset(text);
                     if (lastOffset !== null) {
-                        range.setStart(prevNode, lastOffset + 1);
+                        const originBlock = getCurrentBlockForNode(node);
+                        const targetBlock = getCurrentBlockForNode(prevNode);
+                        const consumeInlineBoundaryChar = !!originBlock && originBlock === targetBlock;
+                        const targetOffset = consumeInlineBoundaryChar
+                            ? lastOffset
+                            : Math.min(lastOffset + 1, text.length);
+                        range.setStart(prevNode, targetOffset);
                         range.collapse(true);
                         moved = true;
                         break;
