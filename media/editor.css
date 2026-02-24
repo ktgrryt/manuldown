@@ -1229,7 +1229,7 @@ body.toc-resizing #toc-resizer::before {
     border: 1px solid var(--vscode-focusBorder);
     pointer-events: none;
     box-sizing: border-box;
-    z-index: 1100;
+    z-index: 998;
 }
 
 .image-resize-handle {

@@ -726,6 +726,21 @@ import { SearchManager } from './modules/SearchManager.js';
         return true;
     }
 
+    function clearImageSelectionForLayoutResize() {
+        const selection = window.getSelection();
+        if (!selection || !selection.rangeCount) return;
+
+        const range = selection.getRangeAt(0);
+        const selectedImage = getSelectedImageNodeFromRange(range);
+        if (!selectedImage) return;
+
+        const caretRange = createAfterImageCaretRange(selectedImage, { ensureTextAnchor: true });
+        selection.removeAllRanges();
+        if (caretRange) {
+            selection.addRange(caretRange);
+        }
+    }
+
     let caretScrollRaf = null;
     const caretScrollMargin = 8;
 
@@ -11681,9 +11696,15 @@ import { SearchManager } from './modules/SearchManager.js';
 
         // Ctrl+F (右に移動) - macOS/Emacsスタイル
         if (isCtrlF) {
+            const selectedCodeBlockLabel = getSelectedCodeBlockLanguageLabel();
             {
                 const selection = window.getSelection();
-                if (selection && selection.rangeCount > 0 && !selection.isCollapsed) {
+                if (
+                    selection &&
+                    selection.rangeCount > 0 &&
+                    !selection.isCollapsed &&
+                    !selectedCodeBlockLabel
+                ) {
                     let collapsed = false;
                     if (typeof selection.collapseToEnd === 'function') {
                         try {
@@ -12551,6 +12572,8 @@ import { SearchManager } from './modules/SearchManager.js';
                 if (e.button !== 0) return;
                 if (!settingsState.tocEnabled || !isTocVisible()) return;
 
+                hideImageResizeOverlay();
+                clearImageSelectionForLayoutResize();
                 tocResizeState = { changed: false };
                 document.body.classList.add('toc-resizing');
 
@@ -12593,6 +12616,8 @@ import { SearchManager } from './modules/SearchManager.js';
                     return;
                 }
 
+                hideImageResizeOverlay();
+                clearImageSelectionForLayoutResize();
                 const nextWidth = normalizeTocPanelWidth(settingsState.tocPanelWidth + delta);
                 if (nextWidth === settingsState.tocPanelWidth) {
                     e.preventDefault();
