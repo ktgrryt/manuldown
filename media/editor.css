@@ -15,6 +15,7 @@ body {
     position: relative;
     --toc-panel-width: 150px;
     --toc-resizer-hit-width: 8px;
+    --toc-content-offset: 0px;
     --search-bar-edge-gap: 20px;
 }
 
@@ -157,7 +158,7 @@ body.toc-resizing {
 #editor {
     flex: 1;
     --editor-pad-top: 40px;
-    --editor-pad-right: 20px;
+    --editor-pad-right: calc(20px + var(--toc-content-offset));
     --editor-pad-bottom: clamp(120px, 45vh, 420px);
     --editor-pad-left: 20px;
     padding: var(--editor-pad-top) var(--editor-pad-right) var(--editor-pad-bottom) var(--editor-pad-left);
@@ -179,11 +180,11 @@ body.toc-resizing {
     position: absolute;
     top: 0;
     bottom: 0;
-    right: 0;
+    right: var(--toc-content-offset);
     width: 15px;
     pointer-events: none;
     opacity: 0;
-    transition: opacity 0.12s ease;
+    transition: opacity 0.12s ease, right 0.2s ease;
     z-index: 10;
 }
 
@@ -239,6 +240,10 @@ body[data-toc-enabled="false"] #toc-container {
 
 body[data-toc-enabled="false"] #toc-resizer {
     display: none;
+}
+
+body[data-toc-visible="true"] {
+    --toc-content-offset: var(--toc-panel-width);
 }
 
 #editor:focus {
@@ -1433,7 +1438,7 @@ body.image-resizing * {
 .search-bar {
     position: absolute;
     top: 0;
-    right: var(--search-bar-edge-gap);
+    right: calc(var(--search-bar-edge-gap) + var(--toc-content-offset));
     z-index: 1001;
     display: flex;
     align-items: center;
