@@ -7398,14 +7398,10 @@ export class CursorManager {
         const selectedImage = this._getSelectedImageNode(range);
         if (selectedImage) {
             const newRange = document.createRange();
-            try {
-                newRange.setStart(selectedImage, 0);
-                newRange.collapse(true);
-                applyRange(newRange);
-                return true;
-            } catch (e) {
-                // Fall back to boundary placement if the engine rejects collapsed ranges in IMG.
-            }
+            // Keep backward navigation deterministic:
+            // image selected -> image left edge (outside).
+            // Avoid a transient collapsed range inside IMG that can look like
+            // the left edge appears twice.
             if (this._collapseRangeBeforeNode(newRange, selectedImage)) {
                 applyRange(newRange);
                 return true;

@@ -7824,7 +7824,9 @@ import { SearchManager } from './modules/SearchManager.js';
         if (x <= centerX) {
             return createBeforeImageCaretRange(image);
         }
-        return createAfterImageCaretRange(image, { ensureTextAnchor: false });
+        // Ensure a stable right-edge caret for image lines that also contain <br>
+        // (e.g. hard line breaks right after image markdown).
+        return createAfterImageCaretRange(image, { ensureTextAnchor: true });
     }
 
     function getStableGapClickRange(x, y, clickedElement, pointRange) {
