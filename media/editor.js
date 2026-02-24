@@ -4437,6 +4437,28 @@ import { SearchManager } from './modules/SearchManager.js';
             }
         }
 
+        const currentBlockForHrSelection = getCurrentBlock(container);
+        if (currentBlockForHrSelection && range.collapsed) {
+            const isRemovableEmptyLineBlock =
+                currentBlockForHrSelection.parentElement === editor &&
+                /^(P|DIV|H[1-6])$/.test(currentBlockForHrSelection.tagName) &&
+                isEffectivelyEmptyBlock(currentBlockForHrSelection);
+            if (isRemovableEmptyLineBlock) {
+                const prev = currentBlockForHrSelection.previousElementSibling;
+                if (prev && prev.tagName === 'HR') {
+                    currentBlockForHrSelection.remove();
+
+                    const hrRange = document.createRange();
+                    hrRange.selectNode(prev);
+                    selection.removeAllRanges();
+                    selection.addRange(hrRange);
+
+                    notifyChange();
+                    return true;
+                }
+            }
+        }
+
         // コードブロック内かチェック（PRE境界にカーソルがあるケースも含む）
         let startCodeBlock = domUtils.getParentElement(range.startContainer, 'CODE');
         let endCodeBlock = domUtils.getParentElement(range.endContainer, 'CODE');
@@ -10920,7 +10942,11 @@ import { SearchManager } from './modules/SearchManager.js';
                             }
 
                             if (nextElement) {
-                                if (wrapper) {
+                                if (nextElement.tagName === 'HR') {
+                                    const hrRange = document.createRange();
+                                    hrRange.selectNode(nextElement);
+                                    applySelectionRange(selection, hrRange);
+                                } else if (wrapper) {
                                     const leftEdge = wrapper.querySelector('.md-table-edge-left');
                                     if (leftEdge) {
                                         tableManager._setCursorToEdge(leftEdge, false);
