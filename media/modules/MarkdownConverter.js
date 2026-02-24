@@ -659,8 +659,18 @@ export class MarkdownConverter {
             blockquote.appendChild(p);
 
             const parent = textNode.parentElement;
+            const parentIsTableCell = !!(
+                parent && (parent.tagName === 'TD' || parent.tagName === 'TH')
+            );
             if (parent && parent !== this.editor) {
-                parent.replaceWith(blockquote);
+                const splitInserted = this.splitParagraphAndInsertBlock(textNode, blockquote);
+                if (splitInserted) {
+                    // inserted as sibling blocks around the original paragraph
+                } else if (!parentIsTableCell) {
+                    parent.replaceWith(blockquote);
+                } else {
+                    textNode.parentNode.replaceChild(blockquote, textNode);
+                }
             } else {
                 textNode.parentNode.replaceChild(blockquote, textNode);
             }
