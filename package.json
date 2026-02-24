@@ -69,6 +69,11 @@
         "category": "ManulDown"
       },
       {
+        "command": "manulDown.cursorRight",
+        "title": "Cursor Right (ManulDown)",
+        "category": "ManulDown"
+      },
+      {
         "command": "manulDown.table.insertRowAbove",
         "title": "Table: Insert Row Above",
         "category": "ManulDown"
@@ -125,6 +130,12 @@
         "key": "ctrl+p",
         "mac": "ctrl+p",
         "when": "activeCustomEditorId == 'manulDown.editor'"
+      },
+      {
+        "command": "manulDown.cursorRight",
+        "key": "ctrl+f",
+        "mac": "ctrl+f",
+        "when": "isMac && activeCustomEditorId == 'manulDown.editor'"
       },
       {
         "command": "manulDown.table.insertRowAbove",

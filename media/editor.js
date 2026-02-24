@@ -6960,7 +6960,18 @@ import { SearchManager } from './modules/SearchManager.js';
 
     function hasMeaningfulTextContent(value) {
         if (typeof value !== 'string') return false;
-        return value.replace(/[\u200B\u00A0\uFEFF]/g, '').trim() !== '';
+        const raw = String(value);
+        const hasPlaceholderSignal =
+            /&ZeroWidthSpace;/i.test(raw) ||
+            /[\u200B\uFEFF]/.test(raw);
+        const normalized = raw
+            .replace(/&ZeroWidthSpace;/gi, '')
+            .replace(/[\u200B\u00A0\uFEFF]/g, '')
+            .trim();
+        if (hasPlaceholderSignal && normalized.replace(/["']/g, '').trim() === '') {
+            return false;
+        }
+        return normalized !== '';
     }
 
     function listHasDirectListItems(listElement) {
@@ -7654,8 +7665,20 @@ import { SearchManager } from './modules/SearchManager.js';
         const nextSibling = caretAnchor.nextSibling;
         if (nextSibling && nextSibling.nodeType === Node.TEXT_NODE) {
             const raw = nextSibling.textContent || '';
-            if (raw === '' || raw.replace(/[\u200B\uFEFF]/g, '') === '') {
+            const compact = raw.replace(/[\u00A0\s]/g, '');
+            const hasPlaceholderSignal =
+                /&ZeroWidthSpace;/i.test(compact) ||
+                /[\u200B\uFEFF]/.test(compact);
+            const normalized = compact
+                .replace(/&ZeroWidthSpace;/gi, '')
+                .replace(/[\u200B\uFEFF]/g, '');
+            const boundaryOnly =
+                normalized === '' ||
+                (hasPlaceholderSignal && normalized.replace(/["']/g, '') === '');
+            if (boundaryOnly) {
                 if (raw === '') {
+                    nextSibling.textContent = '\u200B';
+                } else if (raw !== '\u200B') {
                     nextSibling.textContent = '\u200B';
                 }
                 return nextSibling;
@@ -7672,6 +7695,18 @@ import { SearchManager } from './modules/SearchManager.js';
         return spacer;
     }
 
+    function shouldCreateImageRightTextAnchor(image) {
+        if (!image || image.tagName !== 'IMG' || !editor.contains(image)) {
+            return false;
+        }
+        const blockElement = getClosestBlockElement(image);
+        if (!blockElement || blockElement === editor) {
+            return true;
+        }
+        const singleImage = getSingleImageFromImageOnlyBlock(blockElement);
+        return singleImage !== image;
+    }
+
     function createAfterImageCaretRange(image, options = {}) {
         if (!image || !editor.contains(image)) {
             return null;
@@ -7682,12 +7717,11 @@ import { SearchManager } from './modules/SearchManager.js';
             return null;
         }
 
-        const textAnchor = getImageRightCaretTextAnchor(image, { create: ensureTextAnchor });
+        const allowTextAnchorCreation = ensureTextAnchor && shouldCreateImageRightTextAnchor(image);
+        const textAnchor = getImageRightCaretTextAnchor(image, { create: allowTextAnchorCreation });
         const range = document.createRange();
         if (textAnchor && textAnchor.nodeType === Node.TEXT_NODE) {
-            const text = textAnchor.textContent || '';
-            const offset = text.length > 0 ? Math.min(1, text.length) : 0;
-            range.setStart(textAnchor, offset);
+            range.setStart(textAnchor, 0);
         } else {
             range.setStartAfter(caretAnchor);
         }
@@ -7720,6 +7754,53 @@ import { SearchManager } from './modules/SearchManager.js';
         return images[0];
     }
 
+    function isFiniteRectLike(rect) {
+        return !!(
+            rect &&
+            Number.isFinite(rect.left) &&
+            Number.isFinite(rect.right) &&
+            Number.isFinite(rect.top) &&
+            Number.isFinite(rect.bottom)
+        );
+    }
+
+    function isRenderableRectLike(rect) {
+        if (!isFiniteRectLike(rect)) {
+            return false;
+        }
+        const width = Number.isFinite(rect.width) ? rect.width : (rect.right - rect.left);
+        const height = Number.isFinite(rect.height) ? rect.height : (rect.bottom - rect.top);
+        return width > 0 && height > 0;
+    }
+
+    function getImageCandidateRowRect(image, blockElement) {
+        if (!image) {
+            return null;
+        }
+
+        const imageRect = image.getBoundingClientRect ? image.getBoundingClientRect() : null;
+        if (isRenderableRectLike(imageRect)) {
+            return imageRect;
+        }
+
+        const caretAnchor = getImageCaretAnchorNode(image);
+        if (caretAnchor && caretAnchor !== image && caretAnchor.getBoundingClientRect) {
+            const anchorRect = caretAnchor.getBoundingClientRect();
+            if (isRenderableRectLike(anchorRect)) {
+                return anchorRect;
+            }
+        }
+
+        const blockRect = blockElement && blockElement.getBoundingClientRect
+            ? blockElement.getBoundingClientRect()
+            : null;
+        if (isRenderableRectLike(blockRect)) {
+            return blockRect;
+        }
+
+        return null;
+    }
+
     function getImageUnderRowFromEditor(y) {
         if (!Number.isFinite(y)) {
             return null;
@@ -7727,6 +7808,7 @@ import { SearchManager } from './modules/SearchManager.js';
 
         let bestImage = null;
         let bestDistance = Number.POSITIVE_INFINITY;
+        let bestCenterDistance = Number.POSITIVE_INFINITY;
         const verticalTolerancePx = 10;
 
         for (const child of Array.from(editor.children || [])) {
@@ -7744,20 +7826,22 @@ import { SearchManager } from './modules/SearchManager.js';
                 continue;
             }
 
-            const rect = image.getBoundingClientRect ? image.getBoundingClientRect() : null;
-            if (!rect || rect.width <= 0 || rect.height <= 0) {
+            const rowRect = getImageCandidateRowRect(image, child);
+            if (!rowRect) {
                 continue;
             }
 
-            if (y < rect.top - verticalTolerancePx || y > rect.bottom + verticalTolerancePx) {
+            if (y < rowRect.top - verticalTolerancePx || y > rowRect.bottom + verticalTolerancePx) {
                 continue;
             }
 
-            const distance = y < rect.top
-                ? rect.top - y
-                : (y > rect.bottom ? y - rect.bottom : 0);
-            if (distance < bestDistance) {
+            const distance = y < rowRect.top
+                ? rowRect.top - y
+                : (y > rowRect.bottom ? y - rowRect.bottom : 0);
+            const centerDistance = Math.abs(y - ((rowRect.top + rowRect.bottom) * 0.5));
+            if (distance < bestDistance || (distance === bestDistance && centerDistance < bestCenterDistance)) {
                 bestDistance = distance;
+                bestCenterDistance = centerDistance;
                 bestImage = image;
             }
         }
@@ -7791,6 +7875,15 @@ import { SearchManager } from './modules/SearchManager.js';
             return directImage;
         }
 
+        // elementFromPoint can occasionally resolve to a nearby/non-image element
+        // right after insertion. Fall back to row-based image detection.
+        if (Number.isFinite(y)) {
+            const rowImage = getImageUnderRowFromEditor(y);
+            if (rowImage) {
+                return rowImage;
+            }
+        }
+
         if (clickedElement === editor) {
             return getImageUnderRowFromEditor(y);
         }
@@ -7809,23 +7902,62 @@ import { SearchManager } from './modules/SearchManager.js';
         }
 
         const rect = image.getBoundingClientRect ? image.getBoundingClientRect() : null;
-        if (!rect || rect.width <= 0 || rect.height <= 0) {
-            return null;
-        }
+        const hasRenderableRect = isRenderableRectLike(rect);
 
         if (!directImage) {
-            const verticalTolerancePx = 10;
-            if (y < rect.top - verticalTolerancePx || y > rect.bottom + verticalTolerancePx) {
-                return null;
+            const blockElement = getClosestBlockElement(image);
+            const verticalRect = hasRenderableRect
+                ? rect
+                : getImageCandidateRowRect(image, blockElement);
+            if (verticalRect) {
+                const verticalTolerancePx = 10;
+                if (y < verticalRect.top - verticalTolerancePx || y > verticalRect.bottom + verticalTolerancePx) {
+                    return null;
+                }
             }
         }
 
-        const centerX = rect.left + rect.width * 0.5;
+        let centerX = hasRenderableRect
+            ? (rect.left + rect.right) * 0.5
+            : NaN;
+        if (!Number.isFinite(centerX)) {
+            const blockElement = getClosestBlockElement(image);
+            const rowRect = getImageCandidateRowRect(image, blockElement);
+            if (rowRect && Number.isFinite(rowRect.left) && Number.isFinite(rowRect.right)) {
+                centerX = (rowRect.left + rowRect.right) * 0.5;
+            }
+        }
+        if (!Number.isFinite(centerX)) {
+            const caretAnchor = getImageCaretAnchorNode(image) || image;
+            const anchorRect = caretAnchor && caretAnchor.getBoundingClientRect
+                ? caretAnchor.getBoundingClientRect()
+                : null;
+            if (anchorRect && Number.isFinite(anchorRect.left) && Number.isFinite(anchorRect.right)) {
+                centerX = (anchorRect.left + anchorRect.right) * 0.5;
+            }
+        }
+        if (!Number.isFinite(centerX)) {
+            // Prefer right-edge behavior when geometry is temporarily unstable.
+            centerX = x - 1;
+        }
+
+        if (hasRenderableRect) {
+            const rectWidth = Math.max(0, rect.right - rect.left);
+            const edgeSnapPx = Math.max(1, Math.min(8, rectWidth * 0.2));
+            if (x <= rect.left + edgeSnapPx) {
+                return createBeforeImageCaretRange(image);
+            }
+            if (x >= rect.right - edgeSnapPx) {
+                return createAfterImageCaretRange(image, { ensureTextAnchor: true });
+            }
+        }
+
         if (x <= centerX) {
             return createBeforeImageCaretRange(image);
         }
-        // Ensure a stable right-edge caret for image lines that also contain <br>
-        // (e.g. hard line breaks right after image markdown).
+        // For pointer placement, prefer a concrete text anchor after image.
+        // This avoids WebView engines collapsing setStartAfter(img) to a nearby
+        // non-right-edge position just after insertion.
         return createAfterImageCaretRange(image, { ensureTextAnchor: true });
     }
 
@@ -9014,6 +9146,34 @@ import { SearchManager } from './modules/SearchManager.js';
             return true;
         }
         if (e.key === 'ArrowDown' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
+            {
+                const selection = window.getSelection();
+                if (selection && selection.rangeCount > 0) {
+                    const range = selection.getRangeAt(0);
+                    if (range.collapsed &&
+                        range.startContainer &&
+                        range.startContainer.nodeType === Node.ELEMENT_NODE &&
+                        range.startContainer.tagName === 'IMG' &&
+                        editor.contains(range.startContainer)) {
+                        if (setCaretToImageRightEdge(selection, range.startContainer)) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            return true;
+                        }
+                    }
+                    const selectedImage = getSelectedImageNodeFromRange(range) ||
+                        ((cursorManager && typeof cursorManager._getSelectedImageNode === 'function')
+                            ? cursorManager._getSelectedImageNode(range)
+                            : null);
+                    if (selectedImage) {
+                        if (setCaretToImageRightEdge(selection, selectedImage)) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            return true;
+                        }
+                    }
+                }
+            }
             // 空のチェックボックス行では、隣接する次行へ1ステップずつ移動する
             {
                 const selection = window.getSelection();
@@ -9645,6 +9805,39 @@ import { SearchManager } from './modules/SearchManager.js';
                     }
                 }
             }
+            {
+                const selection = window.getSelection();
+                if (selection && selection.rangeCount > 0) {
+                    const range = selection.getRangeAt(0);
+                    const selectedImage = getSelectedImageNodeFromRange(range) ||
+                        ((cursorManager && typeof cursorManager._getSelectedImageNode === 'function')
+                            ? cursorManager._getSelectedImageNode(range)
+                            : null);
+                    if (selectedImage) {
+                        const leftEdgeRange = createBeforeImageCaretRange(selectedImage);
+                        if (leftEdgeRange) {
+                            e.preventDefault();
+                            selection.removeAllRanges();
+                            selection.addRange(leftEdgeRange);
+                            return true;
+                        }
+                    }
+                    if (range.collapsed) {
+                        const imageAtRightEdge = getBackspaceTargetImageAtRightEdge(range);
+                        if (imageAtRightEdge) {
+                            e.preventDefault();
+                            if (selectImageNode(imageAtRightEdge)) {
+                                return true;
+                            }
+                            const fallbackRange = document.createRange();
+                            fallbackRange.selectNode(imageAtRightEdge);
+                            selection.removeAllRanges();
+                            selection.addRange(fallbackRange);
+                            return true;
+                        }
+                    }
+                }
+            }
             if (cursorManager.moveCursorBackward(notifyChange)) {
                 e.preventDefault();
                 return true;
@@ -9697,6 +9890,46 @@ import { SearchManager } from './modules/SearchManager.js';
                         notifyChange();
                         setTimeout(() => correctCheckboxCursorPosition(), 0);
                         return true;
+                    }
+                }
+            }
+            {
+                const selection = window.getSelection();
+                if (selection && selection.rangeCount > 0) {
+                    const range = selection.getRangeAt(0);
+                    if (range.collapsed &&
+                        range.startContainer &&
+                        range.startContainer.nodeType === Node.ELEMENT_NODE &&
+                        range.startContainer.tagName === 'IMG' &&
+                        editor.contains(range.startContainer)) {
+                        if (setCaretToImageRightEdge(selection, range.startContainer)) {
+                            e.preventDefault();
+                            return true;
+                        }
+                    }
+                    const selectedImage = getSelectedImageNodeFromRange(range) ||
+                        ((cursorManager && typeof cursorManager._getSelectedImageNode === 'function')
+                            ? cursorManager._getSelectedImageNode(range)
+                            : null);
+                    if (selectedImage) {
+                        if (setCaretToImageRightEdge(selection, selectedImage)) {
+                            e.preventDefault();
+                            return true;
+                        }
+                    }
+                    if (range.collapsed) {
+                        const imageAtLeftEdge = getCtrlKTargetImageAtLeftEdge(range);
+                        if (imageAtLeftEdge) {
+                            e.preventDefault();
+                            if (selectImageNode(imageAtLeftEdge)) {
+                                return true;
+                            }
+                            const fallbackRange = document.createRange();
+                            fallbackRange.selectNode(imageAtLeftEdge);
+                            selection.removeAllRanges();
+                            selection.addRange(fallbackRange);
+                            return true;
+                        }
                     }
                 }
             }
@@ -9848,7 +10081,7 @@ import { SearchManager } from './modules/SearchManager.js';
         return !!cursorManager._placeCursorBeforeInlineCodeElement(codeElement, selection);
     }
 
-    const ctrlNavSuppressWindowMs = 80;
+    const ctrlNavSuppressWindowMs = 200;
 
     function recordCtrlNavHandled(direction, fromCommand) {
         if (!direction) return;
@@ -10162,6 +10395,102 @@ import { SearchManager } from './modules/SearchManager.js';
         }
 
         return isCollapsedRangeAtImageLeftEdge(range, candidate) ? candidate : null;
+    }
+
+    function getSelectedImageNodeFromRange(range) {
+        if (!range || range.collapsed) {
+            return null;
+        }
+        const isSameElementContainerSelection =
+            range.startContainer === range.endContainer &&
+            range.startContainer.nodeType === Node.ELEMENT_NODE;
+
+        if (isSameElementContainerSelection) {
+            const container = range.startContainer;
+            const isDirectSingleNodeSelection = range.endOffset === range.startOffset + 1;
+            if (isDirectSingleNodeSelection) {
+                const selected = container.childNodes[range.startOffset];
+                if (selected && selected.nodeType === Node.ELEMENT_NODE) {
+                    if (selected.tagName === 'IMG' && editor.contains(selected)) {
+                        return selected;
+                    }
+                    if (selected.tagName === 'A' && selected.childNodes && selected.childNodes.length === 1) {
+                        const child = selected.firstChild;
+                        if (child && child.nodeType === Node.ELEMENT_NODE && child.tagName === 'IMG' && editor.contains(child)) {
+                            return child;
+                        }
+                    }
+                }
+            }
+
+            const isWholeContainerSelection = container !== editor &&
+                range.startOffset === 0 &&
+                range.endOffset === (container.childNodes ? container.childNodes.length : 0);
+            if (isWholeContainerSelection) {
+                if (container.tagName === 'A' && container.childNodes && container.childNodes.length === 1) {
+                    const child = container.firstChild;
+                    if (child && child.nodeType === Node.ELEMENT_NODE && child.tagName === 'IMG' && editor.contains(child)) {
+                        return child;
+                    }
+                }
+
+                const images = Array.from(container.querySelectorAll ? container.querySelectorAll('img') : []).filter(
+                    (img) => img && editor.contains(img)
+                );
+                if (images.length === 1) {
+                    const clone = container.cloneNode(true);
+                    if (clone.querySelectorAll) {
+                        clone.querySelectorAll('img').forEach((img) => img.remove());
+                    }
+                    if (!hasMeaningfulTextContent(clone.textContent || '')) {
+                        return images[0];
+                    }
+                }
+            }
+        }
+
+        const scopeRoot = range.commonAncestorContainer &&
+            range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE
+            ? range.commonAncestorContainer
+            : range.commonAncestorContainer?.parentElement;
+        const scopedImages = Array.from((scopeRoot && scopeRoot.querySelectorAll)
+            ? scopeRoot.querySelectorAll('img')
+            : []).filter((img) => img && editor.contains(img));
+        if (!scopedImages.length) {
+            return null;
+        }
+
+        const coveredImages = [];
+        for (const image of scopedImages) {
+            const anchor = getImageCaretAnchorNode(image) || image;
+            if (!anchor || !anchor.parentNode) {
+                continue;
+            }
+            try {
+                const nodeRange = document.createRange();
+                nodeRange.selectNode(anchor);
+                const containsStart = range.compareBoundaryPoints(Range.START_TO_START, nodeRange) <= 0;
+                const containsEnd = range.compareBoundaryPoints(Range.END_TO_END, nodeRange) >= 0;
+                if (containsStart && containsEnd) {
+                    coveredImages.push(image);
+                }
+            } catch (e) {
+                // ignore invalid range comparisons
+            }
+        }
+        if (coveredImages.length !== 1) {
+            return null;
+        }
+
+        const selectedText = (range.toString() || '')
+            .replace(/&ZeroWidthSpace;/gi, '')
+            .replace(/[\u200B\uFEFF\u00A0]/g, '')
+            .trim();
+        if (selectedText !== '') {
+            return null;
+        }
+
+        return coveredImages[0];
     }
 
     function deleteImageAtCaretForCtrlK(image, selection) {
@@ -10924,30 +11253,42 @@ import { SearchManager } from './modules/SearchManager.js';
     function handleEmacsNavKeydown(e) {
         if (!isMac) return false;
         const ctrlKey = e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
-        const key = e.key.toLowerCase();
+        const key = typeof e.key === 'string' ? e.key.toLowerCase() : '';
+        const code = typeof e.code === 'string' ? e.code.toLowerCase() : '';
+        const keyCode = typeof e.keyCode === 'number'
+            ? e.keyCode
+            : (typeof e.which === 'number' ? e.which : null);
+        const isCtrlP = ctrlKey && (key === 'p' || code === 'keyp' || keyCode === 80);
+        const isCtrlN = ctrlKey && (key === 'n' || code === 'keyn' || keyCode === 78);
+        const isCtrlB = ctrlKey && (key === 'b' || code === 'keyb' || keyCode === 66);
+        const isCtrlF = ctrlKey && (key === 'f' || code === 'keyf' || keyCode === 70);
         const fromCommand = !!e.__fromCommand;
-        const directionMap = {
-            p: 'up',
-            n: 'down',
-            b: 'left',
-            f: 'right',
-        };
-        const direction = directionMap[key] || null;
-        const syncDirection = direction === 'up' || direction === 'down' ? direction : null;
+        const direction = isCtrlP
+            ? 'up'
+            : isCtrlN
+                ? 'down'
+                : isCtrlB
+                    ? 'left'
+                    : isCtrlF
+                        ? 'right'
+                        : null;
+        const navDirection = direction;
 
-        if (!fromCommand && syncDirection && shouldSuppressKeydownNav(syncDirection)) {
+        if (!fromCommand && navDirection && shouldSuppressKeydownNav(navDirection)) {
             e.preventDefault();
             e.stopPropagation();
             return true;
         }
 
-        if (ctrlKey && direction) {
+        // Ctrl+* navigation first shares the arrow path for deterministic caret stepping.
+        // Ctrl+F has dedicated image-edge fallbacks below, so skip this generic path.
+        if (ctrlKey && direction && direction !== 'right') {
             const arrowEvent = createArrowNavEventFromDirection(direction, e.repeat);
             if (arrowEvent && handleArrowKeydown(arrowEvent)) {
                 e.preventDefault();
                 e.stopPropagation();
-                if (syncDirection) {
-                    recordCtrlNavHandled(syncDirection, fromCommand);
+                if (navDirection) {
+                    recordCtrlNavHandled(navDirection, fromCommand);
                 }
                 return true;
             }
@@ -10955,20 +11296,20 @@ import { SearchManager } from './modules/SearchManager.js';
                 moveSelectionWithNativeNav(direction)) {
                 e.preventDefault();
                 e.stopPropagation();
-                if (syncDirection) {
-                    recordCtrlNavHandled(syncDirection, fromCommand);
+                if (navDirection) {
+                    recordCtrlNavHandled(navDirection, fromCommand);
                 }
                 return true;
             }
         }
 
         if (tableManager.handleCtrlNavKeydown(e)) {
-            if (syncDirection) {
-                recordCtrlNavHandled(syncDirection, fromCommand);
+            if (navDirection) {
+                recordCtrlNavHandled(navDirection, fromCommand);
             }
             return true;
         }
-        if (ctrlKey && key === 'p') {
+        if (isCtrlP) {
             const selection = window.getSelection();
             if (selection && selection.rangeCount > 0) {
                 const range = selection.getRangeAt(0);
@@ -10980,7 +11321,7 @@ import { SearchManager } from './modules/SearchManager.js';
                 }
             }
         }
-        if (settingsState.useVsCodeCtrlP && ctrlKey && key === 'p' && !fromCommand) {
+        if (settingsState.useVsCodeCtrlP && isCtrlP && !fromCommand) {
             const selection = window.getSelection();
             if (!selection || !selection.rangeCount) {
                 return false;
@@ -11018,7 +11359,7 @@ import { SearchManager } from './modules/SearchManager.js';
             }
         }
         // Ctrl+P (上に移動) - macOS/Emacsスタイル
-        if (ctrlKey && key === 'p') {
+        if (isCtrlP) {
             // チェックボックス上でCtrl+P → 上のリストアイテムのチェックボックスへ移動
             const cbOnCursorP = isCursorOnCheckbox();
             if (cbOnCursorP) {
@@ -11116,7 +11457,7 @@ import { SearchManager } from './modules/SearchManager.js';
         }
 
         // Ctrl+N (下に移動) - macOS/Emacsスタイル
-        if (ctrlKey && key === 'n') {
+        if (isCtrlN) {
             // チェックボックス上でCtrl+N → 下のリストアイテムのチェックボックスへ移動
             const cbOnCursorN = isCursorOnCheckbox();
             if (cbOnCursorN) {
@@ -11214,7 +11555,7 @@ import { SearchManager } from './modules/SearchManager.js';
         }
 
         // Ctrl+B (左に移動) - macOS/Emacsスタイル
-        if (ctrlKey && key === 'b') {
+        if (isCtrlB) {
             const selectedLabel = getSelectedCodeBlockLanguageLabel();
             if (selectedLabel) {
                 e.preventDefault();
@@ -11339,7 +11680,40 @@ import { SearchManager } from './modules/SearchManager.js';
         }
 
         // Ctrl+F (右に移動) - macOS/Emacsスタイル
-        if (e.ctrlKey && e.key === 'f' && !e.shiftKey && !e.metaKey && !e.altKey) {
+        if (isCtrlF) {
+            {
+                const selection = window.getSelection();
+                if (selection && selection.rangeCount > 0 && !selection.isCollapsed) {
+                    let collapsed = false;
+                    if (typeof selection.collapseToEnd === 'function') {
+                        try {
+                            selection.collapseToEnd();
+                            collapsed = true;
+                        } catch (_err) {
+                            collapsed = false;
+                        }
+                    }
+                    if (!collapsed) {
+                        const range = selection.getRangeAt(0).cloneRange();
+                        range.collapse(false);
+                        collapsed = applySelectionRange(selection, range);
+                    }
+                    if (collapsed) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        recordCtrlNavHandled('right', fromCommand);
+                        return true;
+                    }
+                }
+            }
+            const arrowEvent = createArrowNavEventFromDirection('right', e.repeat);
+            if (arrowEvent && handleArrowKeydown(arrowEvent)) {
+                e.preventDefault();
+                e.stopPropagation();
+                recordCtrlNavHandled('right', fromCommand);
+                return true;
+            }
+            recordCtrlNavHandled('right', fromCommand);
             // チェックボックス上でCtrl+F → 下のリストアイテムのチェックボックスへ移動
             const cbOnCursorF = isCursorOnCheckbox();
             if (cbOnCursorF) {
@@ -11394,6 +11768,46 @@ import { SearchManager } from './modules/SearchManager.js';
                         notifyChange();
                         setTimeout(() => correctCheckboxCursorPosition(), 0);
                         return true;
+                    }
+                }
+            }
+            {
+                const selection = window.getSelection();
+                if (selection && selection.rangeCount > 0) {
+                    const range = selection.getRangeAt(0);
+                    if (range.collapsed &&
+                        range.startContainer &&
+                        range.startContainer.nodeType === Node.ELEMENT_NODE &&
+                        range.startContainer.tagName === 'IMG' &&
+                        editor.contains(range.startContainer)) {
+                        if (setCaretToImageRightEdge(selection, range.startContainer)) {
+                            e.preventDefault();
+                            return true;
+                        }
+                    }
+                    const selectedImage = getSelectedImageNodeFromRange(range) ||
+                        ((cursorManager && typeof cursorManager._getSelectedImageNode === 'function')
+                            ? cursorManager._getSelectedImageNode(range)
+                            : null);
+                    if (selectedImage) {
+                        if (setCaretToImageRightEdge(selection, selectedImage)) {
+                            e.preventDefault();
+                            return true;
+                        }
+                    }
+                    if (range.collapsed) {
+                        const imageAtLeftEdge = getCtrlKTargetImageAtLeftEdge(range);
+                        if (imageAtLeftEdge) {
+                            e.preventDefault();
+                            if (selectImageNode(imageAtLeftEdge)) {
+                                return true;
+                            }
+                            const fallbackRange = document.createRange();
+                            fallbackRange.selectNode(imageAtLeftEdge);
+                            selection.removeAllRanges();
+                            selection.addRange(fallbackRange);
+                            return true;
+                        }
                     }
                 }
             }
@@ -11514,9 +11928,18 @@ import { SearchManager } from './modules/SearchManager.js';
     }
 
     function createCommandNavEvent(direction) {
-        const key = direction === 'up' ? 'p' : 'n';
+        const keyMap = {
+            up: 'p',
+            down: 'n',
+            left: 'b',
+            right: 'f'
+        };
+        const key = keyMap[direction] || 'n';
         return {
             key,
+            code: `Key${key.toUpperCase()}`,
+            keyCode: key.toUpperCase().charCodeAt(0),
+            which: key.toUpperCase().charCodeAt(0),
             ctrlKey: true,
             metaKey: false,
             altKey: false,
@@ -11639,6 +12062,21 @@ import { SearchManager } from './modules/SearchManager.js';
         }
 
         if (handleSlashCommandKeydown(e)) {
+            return;
+        }
+
+        const isCtrlFNavigation = isMac &&
+            e.ctrlKey &&
+            !e.metaKey &&
+            !e.altKey &&
+            !e.shiftKey &&
+            (
+                (typeof e.key === 'string' && e.key.toLowerCase() === 'f') ||
+                (typeof e.code === 'string' && e.code.toLowerCase() === 'keyf') ||
+                e.keyCode === 70 ||
+                e.which === 70
+            );
+        if (isCtrlFNavigation && handleEmacsNavKeydown(e)) {
             return;
         }
 
@@ -14139,7 +14577,17 @@ import { SearchManager } from './modules/SearchManager.js';
             const y = e.clientY;
 
             // クリック位置の要素を取得
-            const clickedElement = document.elementFromPoint(x, y);
+            const elementAtPoint = document.elementFromPoint(x, y);
+            const eventTargetElement = pointerTarget && pointerTarget.nodeType === Node.ELEMENT_NODE
+                ? pointerTarget
+                : (pointerTarget && pointerTarget.parentElement ? pointerTarget.parentElement : null);
+            const clickedElement = (
+                (!elementAtPoint || !editor.contains(elementAtPoint) || elementAtPoint === editor) &&
+                eventTargetElement &&
+                editor.contains(eventTargetElement)
+            )
+                ? eventTargetElement
+                : elementAtPoint;
             if (!clickedElement || !editor.contains(clickedElement)) return;
 
             if (!e.shiftKey) {
@@ -15496,6 +15944,12 @@ import { SearchManager } from './modules/SearchManager.js';
                         handleEmacsNavKeydown(createCommandNavEvent('up'));
                         setTimeout(() => correctCheckboxCursorPosition(), 0);
                     }
+                }
+                if (message.direction === 'right') {
+                    if (shouldSuppressCommandNav('right')) {
+                        break;
+                    }
+                    handleEmacsNavKeydown(createCommandNavEvent('right'));
                 }
                 if (message.direction === 'down') {
                     if (shouldSuppressCommandNav('down')) {

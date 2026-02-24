@@ -90,6 +90,21 @@ export function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(cursorUpCommand);
 
+    const cursorRightCommand = vscode.commands.registerCommand(
+        'manulDown.cursorRight',
+        () => {
+            const posted = provider.postMessageToActiveEditor({
+                type: 'cursorMove',
+                direction: 'right',
+            });
+            if (!posted) {
+                vscode.window.showInformationMessage('Open a ManulDown editor to use cursor navigation.');
+            }
+        }
+    );
+
+    context.subscriptions.push(cursorRightCommand);
+
     const tableCommands = [
         { id: 'manulDown.table.insertRowAbove', command: 'insertRowAbove' },
         { id: 'manulDown.table.insertRowBelow', command: 'insertRowBelow' },

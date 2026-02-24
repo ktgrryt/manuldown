@@ -983,10 +983,11 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
 }
 
 #editor img {
-    max-width: min(100%, 820px);
+    --image-caret-edge-gap: 2px;
+    max-width: min(820px, calc(100% - (var(--image-caret-edge-gap) * 2)));
     height: auto;
     display: block;
-    margin: 0.5em 0;
+    margin: 0.5em var(--image-caret-edge-gap);
     border-radius: 3px;
     border: 1px solid var(--vscode-editorGroup-border);
     cursor: pointer;

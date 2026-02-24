@@ -111,6 +111,84 @@ export class CursorManager {
         return char === '\u200B' || char === '\uFEFF';
     }
 
+    _getImageCaretAnchorNode(image) {
+        if (!image || image.nodeType !== Node.ELEMENT_NODE || image.tagName !== 'IMG') {
+            return null;
+        }
+        let anchor = image;
+        let current = image.parentElement;
+        while (current && current !== this.editor) {
+            if (current.tagName === 'A' && current.childNodes && current.childNodes.length === 1) {
+                anchor = current;
+                current = current.parentElement;
+                continue;
+            }
+            break;
+        }
+        return anchor;
+    }
+
+    _getImageRightEdgeTextAnchor(image, options = {}) {
+        if (!image || image.nodeType !== Node.ELEMENT_NODE || image.tagName !== 'IMG') {
+            return null;
+        }
+        if (!this.editor || !this.editor.contains(image)) {
+            return null;
+        }
+
+        const { create = false } = options;
+        const caretAnchor = this._getImageCaretAnchorNode(image) || image;
+        if (!caretAnchor || !caretAnchor.parentNode) {
+            return null;
+        }
+
+        const nextSibling = caretAnchor.nextSibling;
+        if (nextSibling && nextSibling.nodeType === Node.TEXT_NODE) {
+            const raw = nextSibling.textContent || '';
+            const compact = raw.replace(/[\u00A0\s]/g, '');
+            const hasPlaceholderSignal =
+                /&ZeroWidthSpace;/i.test(compact) ||
+                /[\u200B\uFEFF]/.test(compact);
+            const normalized = compact
+                .replace(/&ZeroWidthSpace;/gi, '')
+                .replace(/[\u200B\uFEFF]/g, '');
+            const boundaryOnly =
+                normalized === '' ||
+                (hasPlaceholderSignal && normalized.replace(/["']/g, '') === '');
+            if (boundaryOnly) {
+                if (raw !== '\u200B') {
+                    nextSibling.textContent = '\u200B';
+                }
+                return nextSibling;
+            }
+            return null;
+        }
+
+        if (!create) {
+            return null;
+        }
+
+        const spacer = document.createTextNode('\u200B');
+        caretAnchor.parentNode.insertBefore(spacer, nextSibling || null);
+        return spacer;
+    }
+
+    _shouldCreateImageRightEdgeTextAnchor(image) {
+        if (!image || image.nodeType !== Node.ELEMENT_NODE || image.tagName !== 'IMG') {
+            return false;
+        }
+        let block = image.parentElement;
+        while (block && block !== this.editor && !this.domUtils.isBlockElement(block)) {
+            block = block.parentElement;
+        }
+        if (!block || block === this.editor) {
+            return true;
+        }
+        const leadingImage = this._getLeadingImageInBlock(block);
+        const trailingImage = this._getTrailingImageInBlock(block);
+        return !(leadingImage === image && trailingImage === image);
+    }
+
     _isIgnorableTextNode(node) {
         if (!node || node.nodeType !== Node.TEXT_NODE) {
             return false;
@@ -133,7 +211,15 @@ export class CursorManager {
             return true;
         }
         const rawText = node.textContent || '';
-        const text = rawText.replace(/[\u200B\u00A0\uFEFF]/g, '');
+        const hasPlaceholderSignal =
+            /&ZeroWidthSpace;/i.test(rawText) ||
+            /[\u200B\uFEFF]/.test(rawText);
+        const text = rawText
+            .replace(/&ZeroWidthSpace;/gi, '')
+            .replace(/[\u200B\u00A0\uFEFF]/g, '');
+        if (hasPlaceholderSignal && text.replace(/["'\s]/g, '') === '') {
+            return true;
+        }
         if (text.trim() !== '') {
             return false;
         }
@@ -1106,6 +1192,10 @@ export class CursorManager {
         const offset = range.startOffset;
 
         if (container.nodeType === Node.TEXT_NODE) {
+            if (this._isIgnorableTextNode(container)) {
+                const sibling = this._getNextSiblingForNavigation(container);
+                return this._getImageFromNavigationCandidate(sibling);
+            }
             const text = container.textContent || '';
             let probeOffset = Math.max(0, Math.min(offset, text.length));
             while (probeOffset < text.length && this._isInlineBoundaryChar(text[probeOffset])) {
@@ -1142,6 +1232,10 @@ export class CursorManager {
         const offset = range.startOffset;
 
         if (container.nodeType === Node.TEXT_NODE) {
+            if (this._isIgnorableTextNode(container)) {
+                const sibling = this._getPrevSiblingForNavigation(container);
+                return this._getImageFromNavigationCandidate(sibling);
+            }
             const text = container.textContent || '';
             let probeOffset = Math.max(0, Math.min(offset, text.length));
             while (probeOffset > 0 && this._isInlineBoundaryChar(text[probeOffset - 1])) {
@@ -1176,36 +1270,86 @@ export class CursorManager {
         if (!range || range.collapsed) {
             return null;
         }
-        if (range.startContainer !== range.endContainer) {
-            return null;
-        }
-        if (range.startContainer.nodeType !== Node.ELEMENT_NODE) {
-            return null;
-        }
+        const isSameElementContainerSelection =
+            range.startContainer === range.endContainer &&
+            range.startContainer.nodeType === Node.ELEMENT_NODE;
 
-        const container = range.startContainer;
+        if (isSameElementContainerSelection) {
+            const container = range.startContainer;
 
-        if (range.endOffset === range.startOffset + 1) {
-            const selected = container.childNodes[range.startOffset];
-            const selectedImage = this._getImageFromNavigationCandidate(selected);
-            if (selectedImage) {
-                return selectedImage;
+            if (range.endOffset === range.startOffset + 1) {
+                const selected = container.childNodes[range.startOffset];
+                const selectedImage = this._getImageFromNavigationCandidate(selected);
+                if (selectedImage) {
+                    return selectedImage;
+                }
+            }
+
+            // Some engines can report "whole wrapper selected" for image-only wrappers.
+            const isWholeContainerSelection =
+                container !== this.editor &&
+                range.startOffset === 0 &&
+                range.endOffset === (container.childNodes ? container.childNodes.length : 0);
+            if (isWholeContainerSelection) {
+                const wrappedImage = this._getImageFromNavigationCandidate(container);
+                if (wrappedImage) {
+                    return wrappedImage;
+                }
             }
         }
 
-        // Some engines can report "whole wrapper selected" for image-only wrappers.
-        const isWholeContainerSelection =
-            container !== this.editor &&
-            range.startOffset === 0 &&
-            range.endOffset === (container.childNodes ? container.childNodes.length : 0);
-        if (isWholeContainerSelection) {
-            const wrappedImage = this._getImageFromNavigationCandidate(container);
-            if (wrappedImage) {
-                return wrappedImage;
-            }
+        // Fallback: ranges that fully contain a single image wrapper (with only
+        // placeholder text around it) should still behave as "image selected".
+        const scopeRoot = range.commonAncestorContainer &&
+            range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE
+            ? range.commonAncestorContainer
+            : range.commonAncestorContainer?.parentElement;
+        const scopedImages = Array.from((scopeRoot && scopeRoot.querySelectorAll)
+            ? scopeRoot.querySelectorAll('img')
+            : []);
+        if (!scopedImages.length) {
+            return null;
         }
 
-        return null;
+        const coveredImages = [];
+        for (const image of scopedImages) {
+            if (!image || image.tagName !== 'IMG' || !this.editor.contains(image)) {
+                continue;
+            }
+            const anchor = this._getImageCaretAnchorNode(image) || image;
+            if (!anchor || !anchor.parentNode) {
+                continue;
+            }
+            try {
+                const nodeRange = document.createRange();
+                nodeRange.selectNode(anchor);
+                const containsStart = range.compareBoundaryPoints(Range.START_TO_START, nodeRange) <= 0;
+                const containsEnd = range.compareBoundaryPoints(Range.END_TO_END, nodeRange) >= 0;
+                if (containsStart && containsEnd) {
+                    coveredImages.push(image);
+                }
+            } catch (e) {
+                // ignore invalid range comparisons
+            }
+        }
+        if (coveredImages.length !== 1) {
+            return null;
+        }
+
+        let selectedText = '';
+        try {
+            selectedText = (range.toString() || '')
+                .replace(/&ZeroWidthSpace;/gi, '')
+                .replace(/[\u200B\uFEFF\u00A0]/g, '')
+                .trim();
+        } catch (e) {
+            selectedText = '';
+        }
+        if (selectedText !== '') {
+            return null;
+        }
+
+        return coveredImages[0];
     }
 
     _setForwardImageStep(image, container, offset) {
@@ -1450,8 +1594,24 @@ export class CursorManager {
         if (!range || !node || !node.parentNode) {
             return false;
         }
-        const parent = node.parentNode;
-        const index = Array.prototype.indexOf.call(parent.childNodes, node);
+
+        let targetNode = node;
+        if (targetNode.nodeType === Node.ELEMENT_NODE && targetNode.tagName === 'IMG') {
+            const shouldCreateTextAnchor = this._shouldCreateImageRightEdgeTextAnchor(targetNode);
+            const rightEdgeAnchor = this._getImageRightEdgeTextAnchor(targetNode, { create: shouldCreateTextAnchor });
+            if (rightEdgeAnchor && rightEdgeAnchor.nodeType === Node.TEXT_NODE) {
+                range.setStart(rightEdgeAnchor, 0);
+                range.collapse(true);
+                return true;
+            }
+            const caretAnchor = this._getImageCaretAnchorNode(targetNode);
+            if (caretAnchor && caretAnchor.parentNode) {
+                targetNode = caretAnchor;
+            }
+        }
+
+        const parent = targetNode.parentNode;
+        const index = Array.prototype.indexOf.call(parent.childNodes, targetNode);
         if (index < 0) {
             return false;
         }
@@ -1464,8 +1624,16 @@ export class CursorManager {
         if (!range || !node || !node.parentNode) {
             return false;
         }
-        const parent = node.parentNode;
-        const index = Array.prototype.indexOf.call(parent.childNodes, node);
+        let targetNode = node;
+        if (targetNode.nodeType === Node.ELEMENT_NODE && targetNode.tagName === 'IMG') {
+            const caretAnchor = this._getImageCaretAnchorNode(targetNode);
+            if (caretAnchor && caretAnchor.parentNode) {
+                targetNode = caretAnchor;
+            }
+        }
+
+        const parent = targetNode.parentNode;
+        const index = Array.prototype.indexOf.call(parent.childNodes, targetNode);
         if (index < 0) {
             return false;
         }
@@ -1478,12 +1646,58 @@ export class CursorManager {
         if (!range || !range.collapsed || !node || !node.parentNode) {
             return false;
         }
-        const parent = node.parentNode;
-        const index = Array.prototype.indexOf.call(parent.childNodes, node);
+
+        let targetNode = node;
+        const imageNode = (node.nodeType === Node.ELEMENT_NODE && node.tagName === 'IMG')
+            ? node
+            : null;
+        if (imageNode) {
+            const caretAnchor = this._getImageCaretAnchorNode(imageNode);
+            if (caretAnchor && caretAnchor.parentNode) {
+                targetNode = caretAnchor;
+            }
+        }
+
+        const parent = targetNode.parentNode;
+        const index = Array.prototype.indexOf.call(parent.childNodes, targetNode);
         if (index < 0) {
             return false;
         }
         const expectedOffset = boundary === 'before' ? index : index + 1;
+
+        if (boundary === 'after' && imageNode) {
+            const rightEdgeAnchor = this._getImageRightEdgeTextAnchor(imageNode, { create: false });
+            if (rightEdgeAnchor &&
+                range.startContainer === rightEdgeAnchor &&
+                range.startOffset >= 0 &&
+                range.startOffset <= (rightEdgeAnchor.textContent || '').length) {
+                return true;
+            }
+        }
+        if (boundary === 'before' && imageNode) {
+            const caretAnchor = this._getImageCaretAnchorNode(imageNode) || imageNode;
+            const leftEdgeAnchor = caretAnchor ? caretAnchor.previousSibling : null;
+            if (leftEdgeAnchor && leftEdgeAnchor.nodeType === Node.TEXT_NODE) {
+                const raw = leftEdgeAnchor.textContent || '';
+                const compact = raw.replace(/[\u00A0\s]/g, '');
+                const hasPlaceholderSignal =
+                    /&ZeroWidthSpace;/i.test(compact) ||
+                    /[\u200B\uFEFF]/.test(compact);
+                const normalized = compact
+                    .replace(/&ZeroWidthSpace;/gi, '')
+                    .replace(/[\u200B\uFEFF]/g, '');
+                const boundaryOnly =
+                    normalized === '' ||
+                    (hasPlaceholderSignal && normalized.replace(/["']/g, '') === '');
+                if (boundaryOnly &&
+                    range.startContainer === leftEdgeAnchor &&
+                    range.startOffset >= 0 &&
+                    range.startOffset <= raw.length) {
+                    return true;
+                }
+            }
+        }
+
         if (range.startContainer !== parent) {
             return false;
         }
@@ -3109,6 +3323,29 @@ export class CursorManager {
             return;
         }
 
+        // 画像全体選択で↑ → 画像左エッジ（画像直前）
+        const selectedImageForUp = this._getSelectedImageNode(range);
+        if (selectedImageForUp) {
+            const imageLeftRange = document.createRange();
+            if (this._collapseRangeBeforeNode(imageLeftRange, selectedImageForUp)) {
+                selection.removeAllRanges();
+                selection.addRange(imageLeftRange);
+                return;
+            }
+        }
+
+        // 画像右エッジ（画像直後）で↑ → 画像全体選択
+        if (range.collapsed) {
+            const imageBehind = this._getImageBehindFromCollapsedRange(range);
+            if (imageBehind && this._isCollapsedRangeAtNodeBoundary(range, imageBehind, 'after')) {
+                const imageRange = document.createRange();
+                imageRange.selectNode(imageBehind);
+                selection.removeAllRanges();
+                selection.addRange(imageRange);
+                return;
+            }
+        }
+
         // 画像左エッジ（画像直前）からの↑は、画像選択に入らず前ブロック末尾へ移動する。
         // 上行 <-> 画像左エッジ の往復を安定化する。
         if (range.collapsed) {
@@ -3347,13 +3584,13 @@ export class CursorManager {
                         selection.addRange(newRange);
                         return;
                     }
-                    // Empty line directly below an image should move to the image left edge.
-                    // Placing the caret at element offset 0 can land before wrapper whitespace
-                    // in some engines, which appears as jumping to the line above the image.
+                    // Empty line directly below an image should move to the image right edge.
+                    // This keeps vertical navigation symmetric:
+                    // below-line -> image right edge -> image selection -> image left edge.
                     const imageTarget = this._getImageFromNavigationCandidate(prevElement);
                     if (imageTarget) {
                         const imageRange = document.createRange();
-                        if (this._collapseRangeBeforeNode(imageRange, imageTarget)) {
+                        if (this._collapseRangeAfterNode(imageRange, imageTarget)) {
                             selection.removeAllRanges();
                             selection.addRange(imageRange);
                             return;
@@ -4487,10 +4724,44 @@ export class CursorManager {
 
         this._normalizeSelectionForNavigation(selection);
         normalizeCollapsedBoundaryToTextNode();
+        if (this._normalizeCollapsedImageAnchor(selection, 'forward')) {
+            return;
+        }
         range = selection.getRangeAt(0);
         container = range.startContainer;
         originContainer = range.startContainer;
         originOffset = range.startOffset;
+        // Prioritize image-step transitions before broader block/list fallbacks.
+        // This guarantees:
+        // image-left-edge -> image-selected -> image-right-edge -> next-line.
+        const selectedImageEarlyForDown = this._getSelectedImageNode(range);
+        if (selectedImageEarlyForDown) {
+            const imageRightRange = document.createRange();
+            if (this._collapseRangeAfterNode(imageRightRange, selectedImageEarlyForDown)) {
+                selection.removeAllRanges();
+                selection.addRange(imageRightRange);
+                return;
+            }
+        }
+        if (range.collapsed) {
+            const imageAhead = this._getImageAheadFromCollapsedRange(range);
+            if (imageAhead) {
+                const imageBlock = getBlockFromContainer(imageAhead);
+                const leadingImage = imageBlock
+                    ? this._getLeadingImageInBlock(imageBlock)
+                    : (imageAhead.parentElement === this.editor ? imageAhead : null);
+                const isAtImageLeftEdge =
+                    leadingImage === imageAhead &&
+                    this._isCollapsedRangeAtNodeBoundary(range, imageAhead, 'before');
+                if (isAtImageLeftEdge) {
+                    const imageRange = document.createRange();
+                    imageRange.selectNode(imageAhead);
+                    selection.removeAllRanges();
+                    selection.addRange(imageRange);
+                    return;
+                }
+            }
+        }
         const originCodeBlock = this.domUtils.getParentElement(container, 'CODE');
         const originPreBlock = originCodeBlock ? this.domUtils.getParentElement(originCodeBlock, 'PRE') : null;
         const originTopLevelBlock = getTopLevelBlockForNavigation(container, range.startOffset);
@@ -4883,6 +5154,17 @@ export class CursorManager {
             return false;
         };
 
+        // 画像全体選択で↓ → 画像右エッジ（画像直後）
+        const selectedImageForDown = this._getSelectedImageNode(range);
+        if (selectedImageForDown) {
+            const imageRightRange = document.createRange();
+            if (this._collapseRangeAfterNode(imageRightRange, selectedImageForDown)) {
+                selection.removeAllRanges();
+                selection.addRange(imageRightRange);
+                return;
+            }
+        }
+
         // 画像右エッジ（画像直後）からの↓は、次ブロック先頭へ移動する。
         // 空行が続くケースで視覚プローブが不安定になってもカーソルを見失わないようにする。
         if (range.collapsed) {
@@ -4898,33 +5180,20 @@ export class CursorManager {
                     if (nextAfterImage && moveToBlockStart(nextAfterImage)) {
                         return;
                     }
-                    if (!nextAfterImage && boundaryNode && boundaryNode.parentElement) {
-                        const newP = document.createElement('p');
-                        newP.appendChild(document.createElement('br'));
-                        if (boundaryNode.nextSibling) {
-                            boundaryNode.parentElement.insertBefore(newP, boundaryNode.nextSibling);
-                        } else {
-                            boundaryNode.parentElement.appendChild(newP);
-                        }
-                        const newRange = document.createRange();
-                        newRange.setStart(newP, 0);
-                        newRange.collapse(true);
-                        selection.removeAllRanges();
-                        selection.addRange(newRange);
-                        if (notifyCallback) notifyCallback();
+                    if (!nextAfterImage) {
                         return;
                     }
                 }
             }
         }
 
-        // 画像左エッジ（画像直前）からの↓は、画像選択へ入らず次ブロックへ進む。
-        // 上行 -> 画像左エッジ -> 下行 の1ステップ移動を保証する。
+        // 画像左エッジ（画像直前）からの↓は、画像全体選択へ移動する。
+        // 期待する順序:
+        // 上行 -> 画像左エッジ -> 画像全体 -> 画像右エッジ -> 下行
         if (range.collapsed) {
             const imageAhead = this._getImageAheadFromCollapsedRange(range);
             if (imageAhead) {
                 const imageBlock = getBlockFromContainer(imageAhead);
-                const imageBoundary = imageBlock || imageAhead;
                 const leadingImage = imageBlock
                     ? this._getLeadingImageInBlock(imageBlock)
                     : (imageAhead.parentElement === this.editor ? imageAhead : null);
@@ -4933,30 +5202,11 @@ export class CursorManager {
                     this._isCollapsedRangeAtNodeBoundary(range, imageAhead, 'before');
 
                 if (isAtImageLeftEdge) {
-                    if (imageBlock && moveToNextLineWithinImageBlock(imageAhead, imageBlock)) {
-                        return;
-                    }
-                    const nextAfterImage = this._getNextNavigableElementInDocument(imageBoundary);
-                    if (nextAfterImage && moveToBlockStart(nextAfterImage)) {
-                        return;
-                    }
-
-                    if (imageBoundary && imageBoundary.parentElement) {
-                        const newP = document.createElement('p');
-                        newP.appendChild(document.createElement('br'));
-                        if (imageBoundary.nextSibling) {
-                            imageBoundary.parentElement.insertBefore(newP, imageBoundary.nextSibling);
-                        } else {
-                            imageBoundary.parentElement.appendChild(newP);
-                        }
-                        const newRange = document.createRange();
-                        newRange.setStart(newP, 0);
-                        newRange.collapse(true);
-                        selection.removeAllRanges();
-                        selection.addRange(newRange);
-                        if (notifyCallback) notifyCallback();
-                        return;
-                    }
+                    const imageRange = document.createRange();
+                    imageRange.selectNode(imageAhead);
+                    selection.removeAllRanges();
+                    selection.addRange(imageRange);
+                    return;
                 }
             }
         }
@@ -6616,13 +6866,19 @@ export class CursorManager {
         if (this._consumePendingForwardInlineCodeEntry(selection)) {
             return true;
         }
-        // Some WebView engines occasionally normalize a collapsed caret around an image
-        // as startContainer=IMG. Treat it as "left edge" so forward keeps:
-        // left edge -> image selected -> right edge.
+        // Some WebView engines occasionally normalize image selections to a
+        // collapsed caret with startContainer=IMG. If we re-select the image
+        // here, the caret can get stuck and never reach the right edge.
+        // Normalize directly to "after image" first.
         if (range.collapsed &&
             node &&
             node.nodeType === Node.ELEMENT_NODE &&
             node.tagName === 'IMG') {
+            const edgeRange = document.createRange();
+            if (this._collapseRangeAfterNode(edgeRange, node)) {
+                applyRange(edgeRange);
+                return true;
+            }
             const imageRange = document.createRange();
             imageRange.selectNode(node);
             selection.removeAllRanges();
@@ -6639,6 +6895,13 @@ export class CursorManager {
         // 画像右エッジ（画像直後）では、次の行（次ブロック）先頭へ進む。
         if (range.collapsed) {
             const imageBehind = this._getImageBehindFromCollapsedRange(range);
+            if (imageBehind && !this._isCollapsedRangeAtNodeBoundary(range, imageBehind, 'after')) {
+                const edgeRange = document.createRange();
+                if (this._collapseRangeAfterNode(edgeRange, imageBehind)) {
+                    applyRange(edgeRange);
+                    return true;
+                }
+            }
             if (imageBehind && this._isCollapsedRangeAtNodeBoundary(range, imageBehind, 'after')) {
                 const imageBlock = getCurrentBlockForNode(imageBehind);
                 const trailingImage = imageBlock
