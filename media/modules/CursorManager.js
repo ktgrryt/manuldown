@@ -4731,37 +4731,6 @@ export class CursorManager {
         container = range.startContainer;
         originContainer = range.startContainer;
         originOffset = range.startOffset;
-        // Prioritize image-step transitions before broader block/list fallbacks.
-        // This guarantees:
-        // image-left-edge -> image-selected -> image-right-edge -> next-line.
-        const selectedImageEarlyForDown = this._getSelectedImageNode(range);
-        if (selectedImageEarlyForDown) {
-            const imageRightRange = document.createRange();
-            if (this._collapseRangeAfterNode(imageRightRange, selectedImageEarlyForDown)) {
-                selection.removeAllRanges();
-                selection.addRange(imageRightRange);
-                return;
-            }
-        }
-        if (range.collapsed) {
-            const imageAhead = this._getImageAheadFromCollapsedRange(range);
-            if (imageAhead) {
-                const imageBlock = getBlockFromContainer(imageAhead);
-                const leadingImage = imageBlock
-                    ? this._getLeadingImageInBlock(imageBlock)
-                    : (imageAhead.parentElement === this.editor ? imageAhead : null);
-                const isAtImageLeftEdge =
-                    leadingImage === imageAhead &&
-                    this._isCollapsedRangeAtNodeBoundary(range, imageAhead, 'before');
-                if (isAtImageLeftEdge) {
-                    const imageRange = document.createRange();
-                    imageRange.selectNode(imageAhead);
-                    selection.removeAllRanges();
-                    selection.addRange(imageRange);
-                    return;
-                }
-            }
-        }
         const originCodeBlock = this.domUtils.getParentElement(container, 'CODE');
         const originPreBlock = originCodeBlock ? this.domUtils.getParentElement(originCodeBlock, 'PRE') : null;
         const originTopLevelBlock = getTopLevelBlockForNavigation(container, range.startOffset);
@@ -5187,9 +5156,8 @@ export class CursorManager {
             }
         }
 
-        // 画像左エッジ（画像直前）からの↓は、画像全体選択へ移動する。
-        // 期待する順序:
-        // 上行 -> 画像左エッジ -> 画像全体 -> 画像右エッジ -> 下行
+        // 画像左エッジ（画像直前）からの↓は、画像の1行下へ移動する。
+        // 画像のみの行では次ブロック先頭、同一ブロック内に明示改行(<br>)があればその次行へ。
         if (range.collapsed) {
             const imageAhead = this._getImageAheadFromCollapsedRange(range);
             if (imageAhead) {
@@ -5197,15 +5165,33 @@ export class CursorManager {
                 const leadingImage = imageBlock
                     ? this._getLeadingImageInBlock(imageBlock)
                     : (imageAhead.parentElement === this.editor ? imageAhead : null);
+                const trailingImage = imageBlock
+                    ? this._getTrailingImageInBlock(imageBlock)
+                    : (imageAhead.parentElement === this.editor ? imageAhead : null);
                 const isAtImageLeftEdge =
                     leadingImage === imageAhead &&
                     this._isCollapsedRangeAtNodeBoundary(range, imageAhead, 'before');
 
                 if (isAtImageLeftEdge) {
-                    const imageRange = document.createRange();
-                    imageRange.selectNode(imageAhead);
-                    selection.removeAllRanges();
-                    selection.addRange(imageRange);
+                    if (trailingImage === imageAhead) {
+                        if (moveToNextLineWithinImageBlock(imageAhead, imageBlock)) {
+                            return;
+                        }
+                        const boundaryNode = imageBlock || imageAhead;
+                        const nextAfterImage = this._getNextNavigableElementInDocument(boundaryNode);
+                        if (nextAfterImage && moveToBlockStart(nextAfterImage)) {
+                            return;
+                        }
+                        if (!nextAfterImage) {
+                            return;
+                        }
+                    }
+                    const imageRightRange = document.createRange();
+                    if (this._collapseRangeAfterNode(imageRightRange, imageAhead)) {
+                        selection.removeAllRanges();
+                        selection.addRange(imageRightRange);
+                        return;
+                    }
                     return;
                 }
             }
