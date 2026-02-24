@@ -7015,6 +7015,15 @@ export class CursorManager {
 
         const currentListItem = this._getListItemFromContainer(node, offset, 'down') ||
             this.domUtils.getParentElement(node, 'LI');
+        const isInlineCodeOutsideRightPlaceholder = !!(
+            node &&
+            node.nodeType === Node.TEXT_NODE &&
+            this._isInlineCodeBoundaryPlaceholder(node) &&
+            node.previousSibling &&
+            node.previousSibling.nodeType === Node.ELEMENT_NODE &&
+            node.previousSibling.tagName === 'CODE' &&
+            !this.domUtils.getParentElement(node.previousSibling, 'PRE')
+        );
         if (currentListItem && range.collapsed) {
             const lastDirectText = this._getLastDirectTextNode(currentListItem);
             let isAtListEnd = false;
@@ -7029,6 +7038,12 @@ export class CursorManager {
                     const lastNonZwsp = this._getLastNonZwspOffset(text);
                     const logicalEndOffset = lastNonZwsp === null ? 0 : Math.min(text.length, lastNonZwsp + 1);
                     isAtListEnd = offset >= logicalEndOffset;
+                } else if (
+                    isInlineCodeOutsideRightPlaceholder &&
+                    currentListItem.contains(node)
+                ) {
+                    // Treat the outside-right inline-code placeholder as list-end.
+                    isAtListEnd = true;
                 }
             } else if (node === currentListItem) {
                 isAtListEnd = offset >= currentListItem.childNodes.length;
@@ -7068,7 +7083,15 @@ export class CursorManager {
                 }
                 const listBoundary = outerList || currentListItem;
                 const nextElementAfterList = this._getNextNavigableElementInDocument(listBoundary);
-                if (nextElementAfterList && moveToBlockStart(nextElementAfterList)) {
+                let targetAfterList = nextElementAfterList;
+                if (isInlineCodeOutsideRightPlaceholder) {
+                    while (targetAfterList && shouldTreatAsHorizontalEmptyBlock(targetAfterList)) {
+                        const nextAfterEmpty = this._getNextNavigableElementInDocument(targetAfterList);
+                        if (!nextAfterEmpty) break;
+                        targetAfterList = nextAfterEmpty;
+                    }
+                }
+                if (targetAfterList && moveToBlockStart(targetAfterList)) {
                     return true;
                 }
             }
@@ -7666,6 +7689,24 @@ export class CursorManager {
             }
             return true;
         };
+        const placeCursorAtListItemLogicalEnd = (listItem) => {
+            if (!listItem || listItem.tagName !== 'LI') {
+                return false;
+            }
+            if (this._placeCursorAfterTrailingInlineCode(listItem, selection)) {
+                return true;
+            }
+            const textNode = this._getLastDirectTextNode(listItem) || this._getFirstDirectTextNode(listItem);
+            if (textNode) {
+                const newRange = document.createRange();
+                newRange.setStart(textNode, textNode.textContent.length);
+                newRange.collapse(true);
+                applyRange(newRange);
+                return true;
+            }
+            this._placeCursorInEmptyListItem(listItem, selection, 'up');
+            return true;
+        };
         const moveToBlockEnd = (block) => {
             if (!block || block.nodeType !== Node.ELEMENT_NODE) {
                 return false;
@@ -7676,6 +7717,13 @@ export class CursorManager {
                 selection.removeAllRanges();
                 selection.addRange(hrRange);
                 return true;
+            }
+            if (block.tagName === 'UL' || block.tagName === 'OL') {
+                const listItems = block.querySelectorAll('li');
+                const targetLi = listItems.length > 0 ? listItems[listItems.length - 1] : null;
+                if (targetLi) {
+                    return placeCursorAtListItemLogicalEnd(targetLi);
+                }
             }
             if (this._placeCursorAfterTrailingInlineCode(block, selection)) {
                 return true;
@@ -7774,16 +7822,7 @@ export class CursorManager {
                 const listItems = prevBlock.querySelectorAll('li');
                 const targetLi = listItems.length > 0 ? listItems[listItems.length - 1] : null;
                 if (targetLi) {
-                    const targetNode = this._getLastDirectTextNode(targetLi) || this._getFirstDirectTextNode(targetLi);
-                    if (targetNode) {
-                        const newRange = document.createRange();
-                        newRange.setStart(targetNode, targetNode.textContent.length);
-                        newRange.collapse(true);
-                        applyRange(newRange);
-                        return true;
-                    }
-                    this._placeCursorInEmptyListItem(targetLi, selection, 'up');
-                    return true;
+                    return placeCursorAtListItemLogicalEnd(targetLi);
                 }
             }
             if (moveToBlockEnd(prevBlock)) {
@@ -7847,6 +7886,9 @@ export class CursorManager {
                         if (parentLi === prevListItem) {
                             const currentText = (currentListItem.textContent || '').replace(/[\u200B\uFEFF\u00A0]/g, '').trim();
                             if (currentText === '') {
+                                if (this._placeCursorAfterTrailingInlineCode(prevListItem, selection)) {
+                                    return true;
+                                }
                                 const lastTextNode = this._getLastDirectTextNode(prevListItem);
                                 if (lastTextNode) {
                                     const newRange = document.createRange();
@@ -7868,21 +7910,7 @@ export class CursorManager {
                             }
                         }
                     }
-                    const textNode = this._getLastDirectTextNode(prevListItem) || this._getFirstDirectTextNode(prevListItem);
-                    if (textNode) {
-                        const newRange = document.createRange();
-                        newRange.setStart(textNode, textNode.textContent.length);
-                        newRange.collapse(true);
-                        applyRange(newRange);
-                        return true;
-                    }
-                    const textNodeFallback = document.createTextNode('\u00A0');
-                    this._insertTextNodeIntoListItem(prevListItem, textNodeFallback);
-                    const newRange = document.createRange();
-                    newRange.setStart(textNodeFallback, textNodeFallback.textContent.length);
-                    newRange.collapse(true);
-                    applyRange(newRange);
-                    return true;
+                    return placeCursorAtListItemLogicalEnd(prevListItem);
                 }
 
                 const listContainer = currentListItem.parentElement;

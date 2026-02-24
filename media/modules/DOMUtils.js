@@ -248,10 +248,38 @@ export class DOMUtils {
         // このクリーンアップは、ブラウザが自動生成した不要な空のリストアイテムのみを対象とする
         const listItems = clone.querySelectorAll('li');
         listItems.forEach(li => {
+            const hasMeaningfulInlineSibling = (node) => {
+                if (!node) return false;
+                if (node.nodeType === Node.TEXT_NODE) {
+                    const text = (node.textContent || '').replace(/[\u200B\uFEFF]/g, '');
+                    return text.trim() !== '';
+                }
+                if (node.nodeType !== Node.ELEMENT_NODE) return false;
+                const tag = node.tagName;
+                if (tag === 'UL' || tag === 'OL' || tag === 'BR') {
+                    return false;
+                }
+                return true;
+            };
+
+            const shouldPreserveWhitespaceSeparator = (textNode) => {
+                if (!textNode || textNode.nodeType !== Node.TEXT_NODE) return false;
+                const raw = textNode.textContent || '';
+                if (raw === '') return false;
+                if (/[\r\n\t\f\v]/.test(raw)) return false;
+                if (raw.replace(/[\u200B\uFEFF]/g, '') === '') return false;
+                return hasMeaningfulInlineSibling(textNode.previousSibling) &&
+                    hasMeaningfulInlineSibling(textNode.nextSibling);
+            };
+
             // まず、空白のみのテキストノードとBRタグを削除
             const childNodesToRemove = [];
             for (let child of li.childNodes) {
                 if (child.nodeType === Node.TEXT_NODE && child.textContent.trim() === '') {
+                    // Keep separator spaces between inline siblings (e.g. `code` + " " + `code`).
+                    if (shouldPreserveWhitespaceSeparator(child)) {
+                        continue;
+                    }
                     childNodesToRemove.push(child);
                 } else if (child.nodeType === Node.ELEMENT_NODE && child.tagName === 'BR') {
                     childNodesToRemove.push(child);
