@@ -48,6 +48,14 @@ export class MarkdownDocument {
             // Pattern: <p></p> or <p>\s*</p>
             html = html.replace(/<p>\s*<\/p>/gi, '<p><br></p>');
 
+            // Normalize image-only paragraphs that include trailing spaces from Markdown
+            // lines like "![...](...)  ". Those spaces become text nodes after IMG and can
+            // create a phantom blank line / unstable caret behavior around image right edge.
+            html = html.replace(
+                /<p>\s*((?:<a\b[^>]*>\s*)?<img\b[^>]*>(?:\s*<\/a>)?)\s*<\/p>/gi,
+                '<p>$1</p>'
+            );
+
             // Fix empty blockquotes generated from ">" so they stay visible/editable.
             // marked outputs: <blockquote></blockquote> with no paragraph children.
             html = html.replace(/<blockquote>\s*<\/blockquote>/gi, '<blockquote><p><br></p></blockquote>');

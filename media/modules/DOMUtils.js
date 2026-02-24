@@ -417,9 +417,15 @@ export class DOMUtils {
             }
         });
 
-        if (activeCode && activeOffset !== null && selection) {
+        if (
+            activeCode &&
+            activeOffset !== null &&
+            selection &&
+            activeCode.isConnected &&
+            this.editor.contains(activeCode)
+        ) {
             const textNode = activeCode.firstChild;
-            if (textNode && textNode.nodeType === Node.TEXT_NODE) {
+            if (textNode && textNode.nodeType === Node.TEXT_NODE && textNode.isConnected) {
                 const rawText = textNode.textContent || '';
                 const normalizedLength = rawText.replace(/[\u200B\uFEFF]/g, '').length;
                 let targetOffset = normalizedLength === 0 ? rawText.length : Math.min(activeOffset, normalizedLength);

@@ -16,6 +16,7 @@ import { SearchManager } from './modules/SearchManager.js';
     const editor = document.getElementById('editor');
     let isUpdating = false;
     let isComposing = false;
+    let lastCompositionEndTs = 0;
     let notifyTimeout = null;
     let pendingDeleteListItem = null;
     let pendingStrikeCleanup = false;
@@ -38,6 +39,7 @@ import { SearchManager } from './modules/SearchManager.js';
     const TOC_PANEL_DEFAULT_WIDTH = 150;
     const TOC_PANEL_MIN_WIDTH = 0;
     const TOC_PANEL_MAX_WIDTH = 480;
+    const IME_ENTER_CONFIRM_GRACE_MS = 80;
 
     function normalizeTocScrollDuration(value) {
         if (typeof value !== 'number' || !Number.isFinite(value)) {
@@ -5475,6 +5477,25 @@ import { SearchManager } from './modules/SearchManager.js';
     function handlePlainEnterKeydown(e, context) {
         const { selection, range, container, listItem } = context;
         if (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && !listItem) {
+            const keyCode = typeof e.keyCode === 'number'
+                ? e.keyCode
+                : (typeof e.which === 'number' ? e.which : 0);
+            const isCompositionConfirmEnter = (
+                e.isComposing ||
+                isComposing ||
+                keyCode === 229 ||
+                (lastCompositionEndTs > 0 && (Date.now() - lastCompositionEndTs) <= IME_ENTER_CONFIRM_GRACE_MS)
+            );
+            if (isCompositionConfirmEnter) {
+                // IME確定時のEnterは改行/段落分割に使わない。
+                // 直後の疑似Enterだけ抑止し、編集中の確定キーはネイティブに任せる。
+                if (!e.isComposing && !isComposing && keyCode !== 229) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                }
+                return true;
+            }
+
             // 見出し行頭でEnterされた場合は、空の見出しを作らず空段落を見出しの前に挿入
             if (range && range.collapsed) {
                 let heading = container.nodeType === Node.ELEMENT_NODE
@@ -7694,6 +7715,8 @@ import { SearchManager } from './modules/SearchManager.js';
             return null;
         }
         const { create = false } = options;
+        const useZwspAnchor = shouldUseZwspImageRightTextAnchor(image);
+        const preferredAnchorText = useZwspAnchor ? '\u200B' : '';
         const caretAnchor = getImageCaretAnchorNode(image) || image;
         if (!caretAnchor || !caretAnchor.parentNode) {
             return null;
@@ -7713,10 +7736,8 @@ import { SearchManager } from './modules/SearchManager.js';
                 normalized === '' ||
                 (hasPlaceholderSignal && normalized.replace(/["']/g, '') === '');
             if (boundaryOnly) {
-                if (raw === '') {
-                    nextSibling.textContent = '\u200B';
-                } else if (raw !== '\u200B') {
-                    nextSibling.textContent = '\u200B';
+                if (raw !== preferredAnchorText) {
+                    nextSibling.textContent = preferredAnchorText;
                 }
                 return nextSibling;
             }
@@ -7727,7 +7748,7 @@ import { SearchManager } from './modules/SearchManager.js';
             return null;
         }
 
-        const spacer = document.createTextNode('\u200B');
+        const spacer = document.createTextNode(preferredAnchorText);
         caretAnchor.parentNode.insertBefore(spacer, nextSibling || null);
         return spacer;
     }
@@ -7735,6 +7756,13 @@ import { SearchManager } from './modules/SearchManager.js';
     function shouldCreateImageRightTextAnchor(image) {
         if (!image || image.tagName !== 'IMG' || !editor.contains(image)) {
             return false;
+        }
+        return true;
+    }
+
+    function shouldUseZwspImageRightTextAnchor(image) {
+        if (!image || image.tagName !== 'IMG' || !editor.contains(image)) {
+            return true;
         }
         const blockElement = getClosestBlockElement(image);
         if (!blockElement || blockElement === editor) {
@@ -10405,6 +10433,49 @@ import { SearchManager } from './modules/SearchManager.js';
         return isCollapsedRangeAtImageRightEdge(range, candidate) ? candidate : null;
     }
 
+    function moveCaretToParagraphAfterImageRightEdgeForTextInput() {
+        const selection = window.getSelection();
+        if (!selection || !selection.rangeCount || !selection.isCollapsed) {
+            return false;
+        }
+
+        const range = selection.getRangeAt(0);
+        const imageAtRightEdge = getBackspaceTargetImageAtRightEdge(range);
+        if (!imageAtRightEdge) {
+            return false;
+        }
+
+        const imageBlock = getClosestBlockElement(imageAtRightEdge);
+        if (!imageBlock || imageBlock === editor || !isImageOnlyBlockElement(imageBlock) || !imageBlock.parentNode) {
+            return false;
+        }
+
+        let targetParagraph = imageBlock.nextElementSibling;
+        if (targetParagraph && targetParagraph.tagName === 'P' && !isImageOnlyBlockElement(targetParagraph)) {
+            const existingParagraphRange = createCollapsedRangeAtElementBoundary(targetParagraph, 'start');
+            if (existingParagraphRange) {
+                return applySelectionRange(selection, existingParagraphRange);
+            }
+        }
+
+        const canReuseExistingEmptyParagraph =
+            targetParagraph &&
+            targetParagraph.tagName === 'P' &&
+            isEffectivelyEmptyBlock(targetParagraph);
+
+        if (!canReuseExistingEmptyParagraph) {
+            targetParagraph = document.createElement('p');
+            targetParagraph.appendChild(document.createElement('br'));
+            imageBlock.parentNode.insertBefore(targetParagraph, imageBlock.nextSibling || null);
+        }
+
+        const targetRange = createCollapsedRangeAtElementBoundary(targetParagraph, 'start');
+        if (!targetRange) {
+            return false;
+        }
+        return applySelectionRange(selection, targetRange);
+    }
+
     function getCtrlKTargetImageAtLeftEdge(range) {
         if (!range || !range.collapsed) return null;
 
@@ -11180,9 +11251,16 @@ import { SearchManager } from './modules/SearchManager.js';
         // コードブロック内の場合、削除後に空になるかチェック
         const killCodeBlock = domUtils.getParentElement(killRange.startContainer, 'CODE');
         const killPreBlock = killCodeBlock ? domUtils.getParentElement(killCodeBlock, 'PRE') : null;
+        const deleteStartContainer = killRange.startContainer;
+        const deleteStartOffset = killRange.startOffset;
+        const fallbackStartBlockBeforeDelete = getCtrlKLineContainerFromRange(killRange);
 
         killRange.deleteContents();
-        const startBlockAfterFallbackDelete = getClosestBlockElement(killRange.startContainer);
+        const startBlockAfterFallbackDelete =
+            getClosestBlockElement(killRange.startContainer) ||
+            (fallbackStartBlockBeforeDelete && editor.contains(fallbackStartBlockBeforeDelete)
+                ? fallbackStartBlockBeforeDelete
+                : null);
         if (startBlockAfterFallbackDelete) {
             cleanupEmptyAnchorsInBlock(startBlockAfterFallbackDelete);
             ensureBlockHasCaretPlaceholder(startBlockAfterFallbackDelete);
@@ -11217,9 +11295,41 @@ import { SearchManager } from './modules/SearchManager.js';
         }
 
         const caretRange = document.createRange();
-        caretRange.setStart(killRange.startContainer, killRange.startOffset);
-        caretRange.collapse(true);
-        applySelectionRange(selection, caretRange);
+        const tryPlaceCaret = (container, offset) => {
+            if (!container || !editor.contains(container)) return false;
+            try {
+                if (container.nodeType === Node.TEXT_NODE) {
+                    const textLength = (container.textContent || '').length;
+                    caretRange.setStart(container, Math.max(0, Math.min(offset, textLength)));
+                } else if (container.nodeType === Node.ELEMENT_NODE) {
+                    const childCount = container.childNodes ? container.childNodes.length : 0;
+                    caretRange.setStart(container, Math.max(0, Math.min(offset, childCount)));
+                } else {
+                    return false;
+                }
+                caretRange.collapse(true);
+                return applySelectionRange(selection, caretRange);
+            } catch (e) {
+                return false;
+            }
+        };
+
+        let caretPlaced = tryPlaceCaret(killRange.startContainer, killRange.startOffset);
+        if (!caretPlaced && deleteStartContainer !== killRange.startContainer) {
+            caretPlaced = tryPlaceCaret(deleteStartContainer, deleteStartOffset);
+        }
+        if (!caretPlaced && startBlockAfterFallbackDelete) {
+            const firstNode = getPreferredFirstTextNodeForElement(startBlockAfterFallbackDelete);
+            if (firstNode) {
+                caretPlaced = tryPlaceCaret(firstNode, 0);
+            }
+            if (!caretPlaced) {
+                caretPlaced = tryPlaceCaret(startBlockAfterFallbackDelete, 0);
+            }
+        }
+        if (!caretPlaced) {
+            placeCaretAtEditorStart();
+        }
 
         domUtils.ensureInlineCodeSpaces();
         domUtils.cleanupGhostStyles();
@@ -12698,12 +12808,14 @@ import { SearchManager } from './modules/SearchManager.js';
         // IME composition
         editor.addEventListener('compositionstart', (e) => {
             isComposing = true;
+            lastCompositionEndTs = 0;
             tableManager.handleEdgeCompositionStart();
             hideSlashCommandMenu();
         });
 
         editor.addEventListener('compositionend', (e) => {
             isComposing = false;
+            lastCompositionEndTs = Date.now();
             if (tableManager.handleEdgeCompositionEnd()) {
                 return;
             }
@@ -12757,6 +12869,8 @@ import { SearchManager } from './modules/SearchManager.js';
                 e.inputType === 'insertText' ||
                 e.inputType === 'insertCompositionText';
             if (isInsertTextInput) {
+                moveCaretToParagraphAfterImageRightEdgeForTextInput();
+
                 if (e.inputType === 'insertText' && !isComposing && !e.isComposing && typeof e.data === 'string' && e.data.length > 0) {
                     const selection = window.getSelection();
                     const range = selection && selection.rangeCount ? selection.getRangeAt(0) : null;

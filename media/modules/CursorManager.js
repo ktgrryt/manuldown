@@ -137,6 +137,8 @@ export class CursorManager {
         }
 
         const { create = false } = options;
+        const useZwspAnchor = this._shouldUseZwspImageRightEdgeTextAnchor(image);
+        const preferredAnchorText = useZwspAnchor ? '\u200B' : '';
         const caretAnchor = this._getImageCaretAnchorNode(image) || image;
         if (!caretAnchor || !caretAnchor.parentNode) {
             return null;
@@ -156,8 +158,8 @@ export class CursorManager {
                 normalized === '' ||
                 (hasPlaceholderSignal && normalized.replace(/["']/g, '') === '');
             if (boundaryOnly) {
-                if (raw !== '\u200B') {
-                    nextSibling.textContent = '\u200B';
+                if (raw !== preferredAnchorText) {
+                    nextSibling.textContent = preferredAnchorText;
                 }
                 return nextSibling;
             }
@@ -168,7 +170,7 @@ export class CursorManager {
             return null;
         }
 
-        const spacer = document.createTextNode('\u200B');
+        const spacer = document.createTextNode(preferredAnchorText);
         caretAnchor.parentNode.insertBefore(spacer, nextSibling || null);
         return spacer;
     }
@@ -176,6 +178,13 @@ export class CursorManager {
     _shouldCreateImageRightEdgeTextAnchor(image) {
         if (!image || image.nodeType !== Node.ELEMENT_NODE || image.tagName !== 'IMG') {
             return false;
+        }
+        return true;
+    }
+
+    _shouldUseZwspImageRightEdgeTextAnchor(image) {
+        if (!image || image.nodeType !== Node.ELEMENT_NODE || image.tagName !== 'IMG') {
+            return true;
         }
         let block = image.parentElement;
         while (block && block !== this.editor && !this.domUtils.isBlockElement(block)) {
@@ -6852,6 +6861,60 @@ export class CursorManager {
         if (this._consumePendingForwardInlineCodeEntry(selection)) {
             return true;
         }
+        const tryEnterInlineCodeFromOutsideLeft = () => {
+            if (!selection || !selection.rangeCount || !selection.isCollapsed) {
+                return false;
+            }
+            const currentRange = selection.getRangeAt(0);
+            const currentContainer = currentRange.startContainer;
+            const currentCode = this.domUtils.getParentElement(currentContainer, 'CODE');
+            const currentPre = currentCode ? this.domUtils.getParentElement(currentCode, 'PRE') : null;
+            if (currentCode && !currentPre) {
+                return false;
+            }
+
+            let targetInlineCode = null;
+            if (currentContainer && currentContainer.nodeType === Node.TEXT_NODE) {
+                const nextSibling = currentContainer.nextSibling;
+                if (nextSibling &&
+                    nextSibling.nodeType === Node.ELEMENT_NODE &&
+                    nextSibling.tagName === 'CODE' &&
+                    !this.domUtils.getParentElement(nextSibling, 'PRE')) {
+                    targetInlineCode = nextSibling;
+                }
+            } else if (currentContainer && currentContainer.nodeType === Node.ELEMENT_NODE) {
+                const candidate = currentContainer.childNodes[currentRange.startOffset] || null;
+                if (candidate &&
+                    candidate.nodeType === Node.ELEMENT_NODE &&
+                    candidate.tagName === 'CODE' &&
+                    !this.domUtils.getParentElement(candidate, 'PRE')) {
+                    targetInlineCode = candidate;
+                } else if (candidate &&
+                    candidate.nodeType === Node.TEXT_NODE &&
+                    this._isInlineCodeBoundaryPlaceholder(candidate)) {
+                    const nextSibling = candidate.nextSibling;
+                    if (nextSibling &&
+                        nextSibling.nodeType === Node.ELEMENT_NODE &&
+                        nextSibling.tagName === 'CODE' &&
+                        !this.domUtils.getParentElement(nextSibling, 'PRE')) {
+                        targetInlineCode = nextSibling;
+                    }
+                }
+            }
+
+            if (!targetInlineCode) {
+                return false;
+            }
+            if (!this._isRangeOutsideLeftOfInlineCode(currentRange, targetInlineCode)) {
+                return false;
+            }
+
+            this._clearPendingForwardInlineCodeEntry();
+            return this._placeCursorInsideInlineCodeStart(targetInlineCode, selection);
+        };
+        if (tryEnterInlineCodeFromOutsideLeft()) {
+            return true;
+        }
         // Some WebView engines occasionally normalize image selections to a
         // collapsed caret with startContainer=IMG. If we re-select the image
         // here, the caret can get stuck and never reach the right edge.
@@ -7643,6 +7706,27 @@ export class CursorManager {
             applyRange(targetRange);
             return true;
         };
+        const setRangeToInlineCodeEnd = (targetRange, codeElement) => {
+            if (!targetRange || !codeElement || codeElement.nodeType !== Node.ELEMENT_NODE || codeElement.tagName !== 'CODE') {
+                return false;
+            }
+            if (this.domUtils.getParentElement(codeElement, 'PRE')) {
+                return false;
+            }
+            const textNode = this.domUtils.getLastTextNode(codeElement);
+            if (!textNode) {
+                return false;
+            }
+            const text = textNode.textContent || '';
+            const lastOffset = this._getLastNonZwspOffset(text);
+            if (lastOffset === null) {
+                return false;
+            }
+            const targetOffset = Math.min(lastOffset + 1, text.length);
+            targetRange.setStart(textNode, targetOffset);
+            targetRange.collapse(true);
+            return true;
+        };
 
         const selectedImage = this._getSelectedImageNode(range);
         if (selectedImage) {
@@ -7876,6 +7960,10 @@ export class CursorManager {
                             return true;
                         }
                     } else if (sibling.nodeType === Node.ELEMENT_NODE) {
+                        if (setRangeToInlineCodeEnd(range, sibling)) {
+                            applyRange(range);
+                            return true;
+                        }
                         const textNode = this._getLastNavigableTextNode(sibling);
                         if (textNode) {
                             const text = textNode.textContent || '';
@@ -7950,6 +8038,10 @@ export class CursorManager {
                             return true;
                         }
                     } else if (sibling.nodeType === Node.ELEMENT_NODE) {
+                        if (setRangeToInlineCodeEnd(range, sibling)) {
+                            applyRange(range);
+                            return true;
+                        }
                         const textNode = this._getLastNavigableTextNode(sibling);
                         if (textNode) {
                             const text = textNode.textContent || '';
@@ -8085,14 +8177,18 @@ export class CursorManager {
                         moved = true;
                     }
                 } else if (prevSibling.nodeType === Node.ELEMENT_NODE) {
-                    const textNode = this._getLastNavigableTextNode(prevSibling);
-                    if (textNode) {
-                        const text = textNode.textContent || '';
-                        const lastOffset = this._getLastNonZwspOffset(text);
-                        if (lastOffset !== null) {
-                            range.setStart(textNode, lastOffset);
-                            range.collapse(true);
-                            moved = true;
+                    if (setRangeToInlineCodeEnd(range, prevSibling)) {
+                        moved = true;
+                    } else {
+                        const textNode = this._getLastNavigableTextNode(prevSibling);
+                        if (textNode) {
+                            const text = textNode.textContent || '';
+                            const lastOffset = this._getLastNonZwspOffset(text);
+                            if (lastOffset !== null) {
+                                range.setStart(textNode, lastOffset);
+                                range.collapse(true);
+                                moved = true;
+                            }
                         }
                     }
                 }
