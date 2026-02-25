@@ -7638,6 +7638,9 @@ import { SearchManager } from './modules/SearchManager.js';
         if (!blockElement) {
             return null;
         }
+        if (blockElement.querySelector && blockElement.querySelector('code:not(pre code)')) {
+            return null;
+        }
 
         const nearestTextMatch = getNearestTextRectForBlockClickByY(blockElement, y, x);
         if (!nearestTextMatch || !nearestTextMatch.rect) {
@@ -7667,6 +7670,9 @@ import { SearchManager } from './modules/SearchManager.js';
     function getLooseRightSideTextClickRange(x, y, clickedElement, pointRange) {
         const blockElement = resolveBlockForLooseSideTextClick(y, clickedElement, pointRange);
         if (!blockElement) {
+            return null;
+        }
+        if (blockElement.querySelector && blockElement.querySelector('code:not(pre code)')) {
             return null;
         }
         const tag = blockElement.tagName;
@@ -7719,6 +7725,43 @@ import { SearchManager } from './modules/SearchManager.js';
         return !domUtils.getParentElement(node, 'PRE');
     }
 
+    function isMeaningfulTextNodeOutsideInlineCode(node) {
+        if (!node || node.nodeType !== Node.TEXT_NODE) {
+            return false;
+        }
+        if (!hasMeaningfulTextContent(node.textContent || '')) {
+            return false;
+        }
+        return !isInlineCodeNode(domUtils.getParentElement(node, 'CODE'));
+    }
+
+    function isPointRangeClearlyOutsideInlineCode(pointRange) {
+        if (!pointRange || !pointRange.collapsed) {
+            return false;
+        }
+
+        const container = pointRange.startContainer;
+        if (!container) {
+            return false;
+        }
+
+        if (isMeaningfulTextNodeOutsideInlineCode(container)) {
+            return true;
+        }
+
+        if (container.nodeType !== Node.ELEMENT_NODE || !container.childNodes) {
+            return false;
+        }
+
+        const beforeNode = pointRange.startOffset > 0
+            ? container.childNodes[pointRange.startOffset - 1]
+            : null;
+        const afterNode = container.childNodes[pointRange.startOffset] || null;
+
+        return isMeaningfulTextNodeOutsideInlineCode(beforeNode) ||
+            isMeaningfulTextNodeOutsideInlineCode(afterNode);
+    }
+
     function resolveInlineCodeFromClickContext(clickedElement, pointRange = null, x = null, y = null) {
         if (!clickedElement) {
             return null;
@@ -7749,7 +7792,7 @@ import { SearchManager } from './modules/SearchManager.js';
                 if (isInlineCodeNode(nearestCode) && nearestTextMatch && nearestTextMatch.rect) {
                     const rect = nearestTextMatch.rect;
                     const width = Math.max(1, rect.right - rect.left);
-                    const rightEdgeTolerancePx = Math.max(1, Math.min(8, width * 0.25));
+                    const rightEdgeTolerancePx = Math.max(2, Math.min(6, width * 0.16));
                     if (x >= rect.right - rightEdgeTolerancePx) {
                         return nearestCode;
                     }
@@ -7818,99 +7861,61 @@ import { SearchManager } from './modules/SearchManager.js';
             return null;
         }
 
-        const isRightSideClickForRect = (rect) => {
-            if (!isRenderableRectLike(rect)) {
-                return false;
-            }
-            const rectWidth = Math.max(1, rect.right - rect.left);
-            const rightHalfThreshold = rect.left + rectWidth * 0.55;
-            const nearRightEdgeThreshold = rect.right - Math.max(1, Math.min(8, rectWidth * 0.25));
-            return x >= rightHalfThreshold || x >= nearRightEdgeThreshold;
-        };
-
-        const codeElement = resolveInlineCodeFromClickContext(clickedElement, pointRange, x, y);
-        const blockElement =
-            resolveBlockForLooseSideTextClick(y, clickedElement, pointRange) ||
-            getClosestBlockElement(clickedElement) ||
-            (codeElement ? getClosestBlockElement(codeElement) : null);
-        if (codeElement) {
-            const rect = codeElement.getBoundingClientRect ? codeElement.getBoundingClientRect() : null;
-            if (isRenderableRectLike(rect)) {
-                const verticalTolerancePx = Math.max(12, Math.min(48, (rect.height || 0) * 1.5));
-                const inVerticalBand = y >= rect.top - verticalTolerancePx && y <= rect.bottom + verticalTolerancePx;
-                if (inVerticalBand && isRightSideClickForRect(rect)) {
-                    return createAfterInlineCodeCaretRange(codeElement, { createPlaceholder: true });
-                }
-            }
-        }
-
-        // Fallback 1: inspect inline-code elements in the same block directly.
-        // This catches clicks in visual gaps between wrapped lines where pointRange
-        // can be normalized to a non-code text position.
-        if (blockElement && blockElement !== editor && typeof blockElement.querySelectorAll === 'function') {
-            let bestInlineCode = null;
-            let bestMetrics = null;
-            const candidates = Array.from(blockElement.querySelectorAll('code'));
-            for (const candidate of candidates) {
-                if (!isInlineCodeNode(candidate) || !editor.contains(candidate)) {
-                    continue;
-                }
-                const rect = candidate.getBoundingClientRect ? candidate.getBoundingClientRect() : null;
-                if (!isRenderableRectLike(rect)) {
-                    continue;
-                }
-                const verticalTolerancePx = Math.max(12, Math.min(56, (rect.height || 0) * 2));
-                if (y < rect.top - verticalTolerancePx || y > rect.bottom + verticalTolerancePx) {
-                    continue;
-                }
-                if (!isRightSideClickForRect(rect)) {
-                    continue;
-                }
-
-                const verticalOutsideDistance = y < rect.top
-                    ? rect.top - y
-                    : (y > rect.bottom ? y - rect.bottom : 0);
-                const horizontalOutsideDistance = x < rect.left
-                    ? rect.left - x
-                    : (x > rect.right ? x - rect.right : 0);
-                const metrics = { verticalOutsideDistance, horizontalOutsideDistance };
-                let isBetter = !bestInlineCode;
-                if (!isBetter && bestMetrics) {
-                    isBetter = metrics.verticalOutsideDistance < bestMetrics.verticalOutsideDistance;
-                }
-                if (!isBetter && bestMetrics &&
-                    metrics.verticalOutsideDistance === bestMetrics.verticalOutsideDistance) {
-                    isBetter = metrics.horizontalOutsideDistance < bestMetrics.horizontalOutsideDistance;
-                }
-                if (isBetter) {
-                    bestInlineCode = candidate;
-                    bestMetrics = metrics;
-                }
-            }
-            if (bestInlineCode) {
-                return createAfterInlineCodeCaretRange(bestInlineCode, { createPlaceholder: true });
-            }
-        }
-
-        // Fallback: use nearest visual text row in the same block so clicks slightly
-        // above/below the code row still resolve to outside-right of that inline code.
-        if (!blockElement || blockElement === editor) {
+        const directCode = isInlineCodeNode(clickedElement)
+            ? clickedElement
+            : (clickedElement.closest ? clickedElement.closest('code') : null);
+        if (!isInlineCodeNode(directCode) || !editor.contains(directCode)) {
             return null;
         }
 
-        const nearestTextMatch = getNearestTextRectForBlockClickByY(blockElement, y, x);
-        if (!nearestTextMatch || !nearestTextMatch.textNode || !nearestTextMatch.rect) {
-            return null;
-        }
-        if (!isRightSideClickForRect(nearestTextMatch.rect)) {
-            return null;
-        }
-        const nearestInlineCode = domUtils.getParentElement(nearestTextMatch.textNode, 'CODE');
-        if (!isInlineCodeNode(nearestInlineCode)) {
+        // If browser already resolved to a non-code text node, keep native placement.
+        if (isPointRangeClearlyOutsideInlineCode(pointRange)) {
             return null;
         }
 
-        return createAfterInlineCodeCaretRange(nearestInlineCode, { createPlaceholder: true });
+        const rect = directCode.getBoundingClientRect ? directCode.getBoundingClientRect() : null;
+        if (!isRenderableRectLike(rect)) {
+            return null;
+        }
+
+        const verticalTolerancePx = Math.max(12, Math.min(48, (rect.height || 0) * 1.5));
+        const inVerticalBand = y >= rect.top - verticalTolerancePx && y <= rect.bottom + verticalTolerancePx;
+        if (!inVerticalBand) {
+            return null;
+        }
+
+        let textRightEdge = null;
+        const textNode = directCode.firstChild && directCode.firstChild.nodeType === Node.TEXT_NODE
+            ? directCode.firstChild
+            : null;
+        if (textNode) {
+            try {
+                const textRange = document.createRange();
+                textRange.selectNodeContents(textNode);
+                const textRects = textRange.getClientRects ? Array.from(textRange.getClientRects()) : [];
+                const textRect = textRects.find((candidateRect) => isRenderableRectLike(candidateRect)) ||
+                    (textRange.getBoundingClientRect && isRenderableRectLike(textRange.getBoundingClientRect())
+                        ? textRange.getBoundingClientRect()
+                        : null);
+                if (textRect && Number.isFinite(textRect.right)) {
+                    textRightEdge = textRect.right;
+                }
+            } catch (_error) {
+                textRightEdge = null;
+            }
+        }
+
+        const rectWidth = Math.max(1, rect.right - rect.left);
+        const insideRightEdgeSnapPx = Math.max(2, Math.min(6, rectWidth * 0.16));
+        const fallbackThreshold = rect.right - insideRightEdgeSnapPx;
+        const rightSideThreshold = Number.isFinite(textRightEdge)
+            ? textRightEdge + 0.5
+            : fallbackThreshold;
+        if (x < rightSideThreshold) {
+            return null;
+        }
+
+        return createAfterInlineCodeCaretRange(directCode, { createPlaceholder: true });
     }
 
     function isImageOnlyBlockElement(blockElement) {
@@ -15077,7 +15082,9 @@ import { SearchManager } from './modules/SearchManager.js';
             }
 
             const pointRange = getCaretRangeFromPoint(x, y);
-            if (!e.shiftKey) {
+            const isEditorGapClick = clickedElement === editor;
+
+            if (!e.shiftKey && isEditorGapClick) {
                 const inlineCodeRightRange = getInlineCodeCaretRangeFromHorizontalClick(x, y, clickedElement, pointRange);
                 if (inlineCodeRightRange) {
                     e.preventDefault();
@@ -15121,7 +15128,9 @@ import { SearchManager } from './modules/SearchManager.js';
                 }
             }
 
-            const stabilizedGapRange = getStableGapClickRange(x, y, clickedElement, pointRange);
+            const stabilizedGapRange = isEditorGapClick
+                ? getStableGapClickRange(x, y, clickedElement, pointRange)
+                : null;
             if (stabilizedGapRange) {
                 e.preventDefault();
                 focusEditorWithoutScroll();
