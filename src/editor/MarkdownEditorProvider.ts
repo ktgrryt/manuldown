@@ -756,6 +756,23 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             // Remove zero-width markers used for caret placement
             html = html.replace(/[\u200B\uFEFF]/g, '');
 
+            // Restore markdown hard break for image lines that were split into
+            // separate paragraphs for stable caret navigation in the webview.
+            html = html.replace(
+                /<p\b([^>]*)data-mdw-image-hardbreak\s*=\s*(["'])true\2([^>]*)>\s*([\s\S]*?)\s*<\/p>\s*<p\b[^>]*>\s*([\s\S]*?)\s*<\/p>/gi,
+                (match, _before, _quote, _after, imageSegment, trailingSegment) => {
+                    const normalizedImage = (imageSegment || '').trim();
+                    const normalizedTrailing = (trailingSegment || '').trim();
+                    if (!normalizedImage || !/<img\b/i.test(normalizedImage)) {
+                        return match;
+                    }
+                    if (!normalizedTrailing) {
+                        return `<p>${normalizedImage}</p>`;
+                    }
+                    return `<p>${normalizedImage}<br>${normalizedTrailing}</p>`;
+                }
+            );
+
             // Drop empty anchors left by contenteditable when link text was deleted.
             // Keep links that wrap images so image links still round-trip.
             html = html.replace(/<a\b([^>]*)>([\s\S]*?)<\/a>/gi, (match, _attrs, content) => {

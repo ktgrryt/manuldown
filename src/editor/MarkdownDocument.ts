@@ -4,6 +4,7 @@ import * as path from 'path';
 
 export class MarkdownDocument {
     private static readonly blanklineMarkerHtml = '<p data-mdw-blankline="true"><br></p>';
+    private static readonly imageHardBreakMarkerAttr = 'data-mdw-image-hardbreak="true"';
 
     constructor(
         private readonly document: vscode.TextDocument,
@@ -47,6 +48,23 @@ export class MarkdownDocument {
             // Fix empty paragraphs: Ensure they have height by adding <br>
             // Pattern: <p></p> or <p>\s*</p>
             html = html.replace(/<p>\s*<\/p>/gi, '<p><br></p>');
+
+            // Treat "image + hard break + text" as separate paragraphs so caret
+            // navigation behaves like a blank line exists between them.
+            html = html.replace(
+                /<p>\s*((?:<a\b[^>]*>\s*)?<img\b[^>]*>(?:\s*<\/a>)?)\s*<br\s*\/?>\s*([\s\S]*?)\s*<\/p>/gi,
+                (match, imageSegment, trailingContent) => {
+                    const normalizedImage = (imageSegment || '').trim();
+                    const normalizedTrailing = (trailingContent || '').trim();
+                    if (!normalizedImage) {
+                        return match;
+                    }
+                    if (!normalizedTrailing) {
+                        return `<p>${normalizedImage}</p>`;
+                    }
+                    return `<p ${MarkdownDocument.imageHardBreakMarkerAttr}>${normalizedImage}</p><p>${normalizedTrailing}</p>`;
+                }
+            );
 
             // Normalize image-only paragraphs that include trailing spaces from Markdown
             // lines like "![...](...)  ". Those spaces become text nodes after IMG and can
