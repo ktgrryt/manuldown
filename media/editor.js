@@ -12295,18 +12295,15 @@ import { SearchManager } from './modules/SearchManager.js';
         }
 
         let atInlineCodeEnd = false;
-        let hasCursorInfo = false;
         try {
             const tempRange = document.createRange();
             tempRange.selectNodeContents(codeElement);
             tempRange.setEnd(range.startContainer, range.startOffset);
-            const offset = tempRange.toString().replace(/\u200B/g, '').length;
-            const total = (codeElement.textContent || '').replace(/\u200B/g, '').length;
-            hasCursorInfo = true;
+            const offset = tempRange.toString().replace(/[\u200B\uFEFF]/g, '').length;
+            const total = (codeElement.textContent || '').replace(/[\u200B\uFEFF]/g, '').length;
             atInlineCodeEnd = offset >= total;
         } catch (e) {
             atInlineCodeEnd = false;
-            hasCursorInfo = false;
         }
         if (!atInlineCodeEnd) {
             try {
@@ -12318,7 +12315,7 @@ import { SearchManager } from './modules/SearchManager.js';
                 atInlineCodeEnd = false;
             }
         }
-        if (!atInlineCodeEnd && !hasCursorInfo) {
+        if (!atInlineCodeEnd) {
             const container = range.startContainer;
             const offset = range.startOffset;
             if (container === codeElement) {
@@ -12328,9 +12325,9 @@ import { SearchManager } from './modules/SearchManager.js';
                 if (text.length === 0) {
                     atInlineCodeEnd = true;
                 } else {
-                    // Safari/WebView can report one-char-short offset when a leading ZWSP exists.
-                    // Keep that tolerance only when the legacy leading ZWSP is present.
-                    const threshold = text[0] === '\u200B'
+                    // Safari/WebView can report one-char-short offset when a leading
+                    // boundary marker exists. Allow the same tolerance for FEFF too.
+                    const threshold = (text[0] === '\u200B' || text[0] === '\uFEFF')
                         ? Math.max(0, text.length - 1)
                         : text.length;
                     if (offset >= threshold) {
@@ -12353,7 +12350,7 @@ import { SearchManager } from './modules/SearchManager.js';
         let placeholder = null;
         if (immediateNext && immediateNext.nodeType === Node.TEXT_NODE) {
             const text = immediateNext.textContent || '';
-            if (text.replace(/\u200B/g, '') === '') {
+            if (text.replace(/[\u200B\uFEFF]/g, '') === '') {
                 placeholder = immediateNext;
             }
         }

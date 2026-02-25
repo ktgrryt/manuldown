@@ -7225,7 +7225,7 @@ export class CursorManager {
                 typeof cursorInfo.total === 'number';
             const atInlineCodeEnd = (hasCursorInfo && cursorInfo.offset >= cursorInfo.total) ||
                 this._isRangeAtInlineCodeEnd(range, codeElement) ||
-                (!hasCursorInfo && this._isRangeNearInlineCodeEnd(range, codeElement));
+                this._isRangeNearInlineCodeEnd(range, codeElement);
             if (atInlineCodeEnd) {
                 const parent = codeElement.parentElement;
                 if (!parent) return false;
@@ -7848,6 +7848,69 @@ export class CursorManager {
             applyRange(targetRange);
             return true;
         };
+        const moveToInlineCodeOutsideRightFromTextStart = (textNode, inlineCodeElement) => {
+            if (!textNode || textNode.nodeType !== Node.TEXT_NODE) {
+                return false;
+            }
+            if (this._isInlineCodeBoundaryPlaceholder(textNode)) {
+                return false;
+            }
+            if (!inlineCodeElement ||
+                inlineCodeElement.nodeType !== Node.ELEMENT_NODE ||
+                inlineCodeElement.tagName !== 'CODE') {
+                return false;
+            }
+            if (this.domUtils.getParentElement(inlineCodeElement, 'PRE')) {
+                return false;
+            }
+            const parent = inlineCodeElement.parentElement;
+            if (!parent || textNode.parentNode !== parent) {
+                return false;
+            }
+
+            let placeholder = textNode.previousSibling;
+            if (!(placeholder &&
+                placeholder.nodeType === Node.TEXT_NODE &&
+                this._isInlineCodeBoundaryPlaceholder(placeholder) &&
+                placeholder.previousSibling === inlineCodeElement)) {
+                placeholder = document.createTextNode('\u200B');
+                parent.insertBefore(placeholder, textNode);
+            }
+
+            const targetRange = document.createRange();
+            targetRange.setStart(placeholder, (placeholder.textContent || '').length);
+            targetRange.collapse(true);
+            applyRange(targetRange);
+            return true;
+        };
+        const getPreviousInlineCodeSiblingForTextNode = (textNode) => {
+            if (!textNode || textNode.nodeType !== Node.TEXT_NODE) {
+                return null;
+            }
+            let prev = textNode.previousSibling;
+            while (prev &&
+                prev.nodeType === Node.TEXT_NODE &&
+                this._isInlineCodeBoundaryPlaceholder(prev)) {
+                prev = prev.previousSibling;
+            }
+            if (!prev ||
+                prev.nodeType !== Node.ELEMENT_NODE ||
+                prev.tagName !== 'CODE' ||
+                this.domUtils.getParentElement(prev, 'PRE')) {
+                return null;
+            }
+            return prev;
+        };
+        const isTextOffsetAtLogicalStart = (textNode, targetOffset) => {
+            if (!textNode || textNode.nodeType !== Node.TEXT_NODE) {
+                return false;
+            }
+            const text = textNode.textContent || '';
+            const firstVisibleOffset = this._getFirstNonZwspOffset(text);
+            return firstVisibleOffset === null
+                ? targetOffset <= 0
+                : targetOffset <= firstVisibleOffset;
+        };
 
         const selectedImage = this._getSelectedImageNode(range);
         if (selectedImage) {
@@ -7906,11 +7969,12 @@ export class CursorManager {
         // インラインコード要素内かチェック
         const codeElement = this.domUtils.getParentElement(node, 'CODE');
         const preBlock = codeElement ? this.domUtils.getParentElement(codeElement, 'PRE') : null;
+        let startedAtInlineCodeStart = false;
         if (codeElement && !preBlock) {
             const cursorInfo = this._getInlineCodeCursorInfo(range, codeElement);
-            const atInlineCodeStart = (cursorInfo && cursorInfo.offset <= 0) ||
+            startedAtInlineCodeStart = (cursorInfo && cursorInfo.offset <= 0) ||
                 this._isRangeAtInlineCodeStart(range, codeElement);
-            if (atInlineCodeStart) {
+            if (startedAtInlineCodeStart) {
                 this._debugInlineNav('backward-inside-left-to-outside-left', {});
                 if (moveFromInlineCodeStartToPreviousTextChar(codeElement)) {
                     return true;
@@ -8040,6 +8104,15 @@ export class CursorManager {
                 nextSibling.nodeType === Node.ELEMENT_NODE &&
                 nextSibling.tagName === 'CODE' &&
                 !this.domUtils.getParentElement(nextSibling, 'PRE'));
+            const previousInlineCodeSibling = getPreviousInlineCodeSiblingForTextNode(currentNode);
+            const atLogicalTextStart = isTextOffsetAtLogicalStart(currentNode, currentOffset);
+
+            if (!inInlineCode &&
+                previousInlineCodeSibling &&
+                atLogicalTextStart &&
+                moveToInlineCodeOutsideRightFromTextStart(currentNode, previousInlineCodeSibling)) {
+                return true;
+            }
 
             if (!inInlineCode && zwspOnly) {
                 const sibling = this._getPrevSiblingForNavigation(currentNode);
@@ -8240,6 +8313,36 @@ export class CursorManager {
             }
             if (currentOffset < 0) {
                 currentOffset = 0;
+            }
+
+            // テキスト先頭（論理位置）に着地した際は、必ず inline-code 外側右端を1ステップ挟む。
+            if (currentNode &&
+                currentNode.nodeType === Node.TEXT_NODE &&
+                !this.domUtils.getParentElement(currentNode, 'CODE')) {
+                const previousInlineCodeAtTarget = getPreviousInlineCodeSiblingForTextNode(currentNode);
+                if (previousInlineCodeAtTarget &&
+                    isTextOffsetAtLogicalStart(currentNode, currentOffset) &&
+                    moveToInlineCodeOutsideRightFromTextStart(currentNode, previousInlineCodeAtTarget)) {
+                    return true;
+                }
+            }
+
+            // WebView環境では inline-code 先頭（inside-left）が outside-left に
+            // 正規化されてしまうことがあるため、先頭着地時は明示的に inside-left を確定する。
+            if (!startedAtInlineCodeStart) {
+                const targetInlineCode = this.domUtils.getParentElement(currentNode, 'CODE');
+                const targetInlinePre = targetInlineCode ? this.domUtils.getParentElement(targetInlineCode, 'PRE') : null;
+                if (targetInlineCode && !targetInlinePre) {
+                    const tentativeRange = document.createRange();
+                    tentativeRange.setStart(currentNode, currentOffset);
+                    tentativeRange.collapse(true);
+                    const targetCursorInfo = this._getInlineCodeCursorInfo(tentativeRange, targetInlineCode);
+                    if (targetCursorInfo && targetCursorInfo.offset <= 0) {
+                        if (this._placeCursorInsideInlineCodeStart(targetInlineCode, selection)) {
+                            return true;
+                        }
+                    }
+                }
             }
 
             // カーソル位置が変わらない場合（行の先頭など）は前のブロックへの移動を試みる
