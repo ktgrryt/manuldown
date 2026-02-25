@@ -7818,6 +7818,36 @@ export class CursorManager {
             targetRange.collapse(true);
             return true;
         };
+        const moveFromInlineCodeStartToPreviousTextChar = (inlineCodeElement) => {
+            if (!inlineCodeElement ||
+                inlineCodeElement.nodeType !== Node.ELEMENT_NODE ||
+                inlineCodeElement.tagName !== 'CODE') {
+                return false;
+            }
+
+            let prevSibling = inlineCodeElement.previousSibling;
+            while (prevSibling &&
+                prevSibling.nodeType === Node.TEXT_NODE &&
+                this._isInlineCodeBoundaryPlaceholder(prevSibling)) {
+                prevSibling = prevSibling.previousSibling;
+            }
+            if (!prevSibling || prevSibling.nodeType !== Node.TEXT_NODE) {
+                return false;
+            }
+
+            const prevText = prevSibling.textContent || '';
+            const lastOffset = this._getLastNonZwspOffset(prevText);
+            if (lastOffset === null) {
+                return false;
+            }
+            const targetOffset = Math.min(lastOffset + 1, prevText.length);
+
+            const targetRange = document.createRange();
+            targetRange.setStart(prevSibling, targetOffset);
+            targetRange.collapse(true);
+            applyRange(targetRange);
+            return true;
+        };
 
         const selectedImage = this._getSelectedImageNode(range);
         if (selectedImage) {
@@ -7882,6 +7912,9 @@ export class CursorManager {
                 this._isRangeAtInlineCodeStart(range, codeElement);
             if (atInlineCodeStart) {
                 this._debugInlineNav('backward-inside-left-to-outside-left', {});
+                if (moveFromInlineCodeStartToPreviousTextChar(codeElement)) {
+                    return true;
+                }
                 if (this._placeCursorBeforeInlineCodeElement(codeElement, selection)) {
                     return true;
                 }

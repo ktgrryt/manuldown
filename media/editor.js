@@ -9231,6 +9231,58 @@ import { SearchManager } from './modules/SearchManager.js';
         }
     }
 
+    function isCaretAdjacentToInlineCode(range) {
+        if (!range || !range.collapsed) {
+            return false;
+        }
+        const container = range.startContainer;
+        if (!container) {
+            return false;
+        }
+
+        const isBoundaryOnlyTextNode = (node) =>
+            !!node &&
+            node.nodeType === Node.TEXT_NODE &&
+            (node.textContent || '').replace(/[\u200B\uFEFF]/g, '') === '';
+        const resolveInlineCodeCandidate = (node, direction) => {
+            let current = node;
+            while (current && isBoundaryOnlyTextNode(current)) {
+                current = direction === 'next' ? current.nextSibling : current.previousSibling;
+            }
+            return isInlineCodeNode(current) ? current : null;
+        };
+
+        if (container.nodeType === Node.TEXT_NODE) {
+            const text = container.textContent || '';
+            const safeOffset = Math.max(0, Math.min(range.startOffset, text.length));
+            const prefix = text.slice(0, safeOffset).replace(/[\u200B\uFEFF]/g, '');
+            const suffix = text.slice(safeOffset).replace(/[\u200B\uFEFF]/g, '');
+            if (suffix === '' && resolveInlineCodeCandidate(container.nextSibling, 'next')) {
+                return true;
+            }
+            if (prefix === '' && resolveInlineCodeCandidate(container.previousSibling, 'prev')) {
+                return true;
+            }
+            return false;
+        }
+
+        if (container.nodeType !== Node.ELEMENT_NODE) {
+            return false;
+        }
+
+        const childNodes = container.childNodes || [];
+        const safeOffset = Math.max(0, Math.min(range.startOffset, childNodes.length));
+        const nextNode = childNodes[safeOffset] || null;
+        if (resolveInlineCodeCandidate(nextNode, 'next')) {
+            return true;
+        }
+        const prevNode = safeOffset > 0 ? childNodes[safeOffset - 1] : null;
+        if (resolveInlineCodeCandidate(prevNode, 'prev')) {
+            return true;
+        }
+        return false;
+    }
+
     function shouldUseNativeArrowForTopLine(e) {
         if (e.key !== 'ArrowUp' && e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') {
             return false;
@@ -9268,6 +9320,10 @@ import { SearchManager } from './modules/SearchManager.js';
             return false;
         }
         if (domUtils.getParentElement(range.startContainer, 'PRE')) {
+            return false;
+        }
+        if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') &&
+            isCaretAdjacentToInlineCode(range)) {
             return false;
         }
         // 画像境界（左/右エッジ）では独自ナビゲーションを優先する。
