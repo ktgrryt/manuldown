@@ -457,7 +457,7 @@ export class MarkdownConverter {
 
         // 順序なしリスト構文をチェック - item / - [ ] task
         const ulMatch = normalizedText.match(/^\s*[-*]\s+(.*)$/);
-        if (ulMatch) {
+        if (!isInTableCell && ulMatch) {
             const rawContent = ulMatch[1] ?? '';
             const content = rawContent.trim() === '' ? '' : rawContent;
             const taskMatch = rawContent.match(/^\[( |x|X)\](.*)$/);
@@ -563,7 +563,7 @@ export class MarkdownConverter {
 
         // 順序付きリスト構文をチェック 1. item
         const olMatch = normalizedText.match(/^\s*\d+\.\s+(.*)$/);
-        if (olMatch) {
+        if (!isInTableCell && olMatch) {
             const rawContent = olMatch[1] ?? '';
             const content = rawContent.trim() === '' ? '' : rawContent;
 

@@ -256,34 +256,6 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             return '';
         }
 
-        const nonEmptyLines = lines.filter((line) => line !== '');
-        if (nonEmptyLines.length > 0) {
-            const taskMatches = nonEmptyLines.map((line) => line.match(/^[-*]\s+\[( |x|X)\]\s*(.*)$/));
-            if (taskMatches.every(Boolean)) {
-                const items = taskMatches.map((match) => {
-                    const checked = match![1].toLowerCase() === 'x';
-                    const text = this.sanitizeTableCellText((match![2] || '').trim());
-                    const marker = checked ? '[x]' : '[ ]';
-                    return `<li>${text ? `${marker} ${text}` : marker}</li>`;
-                });
-                return `<ul>${items.join('')}</ul>`;
-            }
-
-            const bulletMatches = nonEmptyLines.map((line) => line.match(/^[-*]\s+(.*)$/));
-            if (bulletMatches.every(Boolean)) {
-                const items = bulletMatches.map((match) => `<li>${this.sanitizeTableCellText((match![1] || '').trim())}</li>`);
-                return `<ul>${items.join('')}</ul>`;
-            }
-
-            const orderedMatches = nonEmptyLines.map((line) => line.match(/^(\d+)\.\s+(.*)$/));
-            if (orderedMatches.every(Boolean)) {
-                const start = Number.parseInt(orderedMatches[0]![1], 10);
-                const startAttr = Number.isFinite(start) && start > 1 ? ` start="${start}"` : '';
-                const items = orderedMatches.map((match) => `<li>${this.sanitizeTableCellText((match![2] || '').trim())}</li>`);
-                return `<ol${startAttr}>${items.join('')}</ol>`;
-            }
-        }
-
         const normalizedContent = String(convertedContent || '')
             .replace(/\r\n?/g, '\n')
             .replace(/\n+/g, '<br>')

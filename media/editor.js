@@ -2000,6 +2000,16 @@ import { SearchManager } from './modules/SearchManager.js';
                 editor.contains(targetRange.startContainer) &&
                 editor.contains(targetRange.endContainer)
             );
+        const isRangeInTableCell = (targetRange) =>
+            !!(
+                targetRange &&
+                (
+                    domUtils.getParentElement(targetRange.startContainer, 'TD') ||
+                    domUtils.getParentElement(targetRange.startContainer, 'TH') ||
+                    domUtils.getParentElement(targetRange.endContainer, 'TD') ||
+                    domUtils.getParentElement(targetRange.endContainer, 'TH')
+                )
+            );
 
         const getActiveSelectedTableCell = () => {
             const cell = editor.querySelector('.md-table-cell-selected, .md-table-structure-selected-cell');
@@ -2007,26 +2017,14 @@ import { SearchManager } from './modules/SearchManager.js';
             return (cell.tagName === 'TD' || cell.tagName === 'TH') ? cell : null;
         };
 
-        const placeCaretAtCellStart = (cell) => {
-            if (!cell) return null;
-            const newRange = document.createRange();
-            const textWalker = document.createTreeWalker(cell, NodeFilter.SHOW_TEXT, null);
-            const textNode = textWalker.nextNode();
-            if (textNode) {
-                newRange.setStart(textNode, 0);
-            } else {
-                newRange.setStart(cell, 0);
-            }
-            newRange.collapse(true);
-            selection.removeAllRanges();
-            selection.addRange(newRange);
-            return newRange;
-        };
+        const selectedCell = getActiveSelectedTableCell();
+        if (selectedCell) {
+            return;
+        }
 
         let range = selection.rangeCount ? selection.getRangeAt(0) : null;
-        const selectedCell = getActiveSelectedTableCell();
-        if (!isRangeInsideEditor(range) && selectedCell) {
-            range = placeCaretAtCellStart(selectedCell);
+        if (isRangeInTableCell(range)) {
+            return;
         }
         if (!isRangeInsideEditor(range)) return;
 
@@ -14007,6 +14005,15 @@ import { SearchManager } from './modules/SearchManager.js';
         };
 
         const isMarkdownTableSeparatorCell = (value) => /^:?-{3,}:?$/.test((value || '').trim());
+        const isRangeInTableCell = (range) => {
+            if (!range) return false;
+            return !!(
+                domUtils.getParentElement(range.startContainer, 'TD') ||
+                domUtils.getParentElement(range.startContainer, 'TH') ||
+                domUtils.getParentElement(range.endContainer, 'TD') ||
+                domUtils.getParentElement(range.endContainer, 'TH')
+            );
+        };
 
         const tryInsertMarkdownTableFromPastedText = (rawText) => {
             if (typeof rawText !== 'string') return false;
@@ -14289,6 +14296,9 @@ import { SearchManager } from './modules/SearchManager.js';
             if (!ctx) return false;
             const { selection, range } = ctx;
             if (isRangeInsideCodeBlock(range)) {
+                return false;
+            }
+            if (isRangeInTableCell(range)) {
                 return false;
             }
 
@@ -14703,6 +14713,12 @@ import { SearchManager } from './modules/SearchManager.js';
             const { selection, range } = ctx;
             if (isRangeInsideCodeBlock(range)) {
                 return false;
+            }
+            if (isRangeInTableCell(range)) {
+                const hasListSyntax = lines.some((line) => !!parseListLine(line));
+                if (hasListSyntax) {
+                    return false;
+                }
             }
 
             stateManager.saveState();
