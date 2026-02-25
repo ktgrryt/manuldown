@@ -692,6 +692,135 @@ export class MarkdownConverter {
 
         // URL自動リンク化をチェック（URLの後にスペースで確定）
         const textBeforeCursor = normalizedText.slice(0, normalizedCursorOffset);
+
+        // Markdown画像構文をチェック ![alt](src)
+        const markdownImageMatch = textBeforeCursor.match(/!\[([^\]\n]*)\]\(([^)\n]+)\)$/);
+        if (markdownImageMatch) {
+            const matchIndex = markdownImageMatch.index ?? -1;
+            const alt = (markdownImageMatch[1] || '')
+                .replace(/\\\]/g, ']')
+                .replace(/\\\[/g, '[');
+            const rawTarget = (markdownImageMatch[2] || '').trim();
+            const targetMatch = rawTarget.match(/^(<[^>]+>|[^\s]+)(?:\s+["'][^"']*["'])?$/);
+            let src = targetMatch ? targetMatch[1] : '';
+            if (src && src.startsWith('<') && src.endsWith('>')) {
+                src = src.slice(1, -1);
+            }
+            src = (src || '')
+                .replace(/\\\)/g, ')')
+                .replace(/\\\(/g, '(')
+                .trim();
+
+            if (src !== '') {
+                const beforeImage = normalizedText.slice(0, matchIndex);
+                const afterCursorText = normalizedText.slice(normalizedCursorOffset);
+
+                // コード内にいる場合はスキップ
+                const parentIsCode = textNode.parentNode && textNode.parentNode.tagName === 'CODE';
+                if (!parentIsCode) {
+                    const fragment = document.createDocumentFragment();
+
+                    if (beforeImage) {
+                        fragment.appendChild(document.createTextNode(beforeImage));
+                    }
+
+                    const image = document.createElement('img');
+                    image.setAttribute('src', src);
+                    image.setAttribute('alt', alt);
+                    fragment.appendChild(image);
+
+                    let trailingTextNode = null;
+                    if (afterCursorText) {
+                        trailingTextNode = document.createTextNode(afterCursorText);
+                        fragment.appendChild(trailingTextNode);
+                    }
+
+                    textNode.parentNode.replaceChild(fragment, textNode);
+
+                    // カーソルを画像の直後（後続テキストがあればその先頭）へ設定
+                    const newRange = document.createRange();
+                    if (trailingTextNode) {
+                        newRange.setStart(trailingTextNode, 0);
+                    } else {
+                        newRange.setStartAfter(image);
+                    }
+                    newRange.collapse(true);
+                    selection.removeAllRanges();
+                    selection.addRange(newRange);
+
+                    if (notifyCallback) notifyCallback();
+                    return true;
+                }
+            }
+        }
+
+        // Markdownリンク構文をチェック [text](url)
+        const markdownLinkMatch = textBeforeCursor.match(/\[([^\]\n]+)\]\(([^)\n]+)\)$/);
+        if (markdownLinkMatch) {
+            const matchIndex = markdownLinkMatch.index ?? -1;
+            const isImageSyntax = matchIndex > 0 && textBeforeCursor[matchIndex - 1] === '!';
+            if (!isImageSyntax) {
+                const label = (markdownLinkMatch[1] || '')
+                    .replace(/\\\]/g, ']')
+                    .replace(/\\\[/g, '[');
+                const rawTarget = (markdownLinkMatch[2] || '').trim();
+                const targetMatch = rawTarget.match(/^(<[^>]+>|[^\s]+)(?:\s+["'][^"']*["'])?$/);
+                let href = targetMatch ? targetMatch[1] : '';
+                if (href && href.startsWith('<') && href.endsWith('>')) {
+                    href = href.slice(1, -1);
+                }
+                href = (href || '')
+                    .replace(/\\\)/g, ')')
+                    .replace(/\\\(/g, '(')
+                    .trim();
+
+                if (label !== '' && href !== '') {
+                    const beforeLink = normalizedText.slice(0, matchIndex);
+                    const afterCursorText = normalizedText.slice(normalizedCursorOffset);
+
+                    // 既にリンク内またはコード内にいる場合はスキップ
+                    const parentLink = textNode.parentElement && textNode.parentElement.closest
+                        ? textNode.parentElement.closest('a')
+                        : null;
+                    const parentIsCode = textNode.parentNode && textNode.parentNode.tagName === 'CODE';
+                    if (!parentLink && !parentIsCode) {
+                        const fragment = document.createDocumentFragment();
+
+                        if (beforeLink) {
+                            fragment.appendChild(document.createTextNode(beforeLink));
+                        }
+
+                        const link = document.createElement('a');
+                        link.setAttribute('href', href);
+                        link.textContent = label;
+                        fragment.appendChild(link);
+
+                        let trailingTextNode = null;
+                        if (afterCursorText) {
+                            trailingTextNode = document.createTextNode(afterCursorText);
+                            fragment.appendChild(trailingTextNode);
+                        }
+
+                        textNode.parentNode.replaceChild(fragment, textNode);
+
+                        // カーソルをリンクの直後（後続テキストがあればその先頭）へ設定
+                        const newRange = document.createRange();
+                        if (trailingTextNode) {
+                            newRange.setStart(trailingTextNode, 0);
+                        } else {
+                            newRange.setStartAfter(link);
+                        }
+                        newRange.collapse(true);
+                        selection.removeAllRanges();
+                        selection.addRange(newRange);
+
+                        if (notifyCallback) notifyCallback();
+                        return true;
+                    }
+                }
+            }
+        }
+
         const urlAutoLinkMatch = textBeforeCursor.match(/(https?:\/\/[^\s]+)\s$/);
         if (urlAutoLinkMatch) {
             const url = urlAutoLinkMatch[1];
