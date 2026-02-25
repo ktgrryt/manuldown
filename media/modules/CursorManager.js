@@ -1478,9 +1478,26 @@ export class CursorManager {
                 return true;
             }
             const text = container.textContent || '';
+            const nextSibling = container.nextSibling;
+            const boundaryNext = (
+                nextSibling &&
+                nextSibling.nodeType === Node.TEXT_NODE &&
+                this._isInlineCodeBoundaryPlaceholder(nextSibling) &&
+                nextSibling.nextSibling === code
+            ) ? nextSibling : null;
             if (container.nextSibling === code) {
                 // If the caret is inside trailing boundary chars (ZWSP/FEFF) just before code,
                 // treat it as outside-left so the pending step can enter inside-left reliably.
+                let trailingBoundaryStart = text.length;
+                while (trailingBoundaryStart > 0 &&
+                    this._isInlineBoundaryChar(text[trailingBoundaryStart - 1])) {
+                    trailingBoundaryStart--;
+                }
+                if (offset >= trailingBoundaryStart) {
+                    return true;
+                }
+            }
+            if (boundaryNext) {
                 let trailingBoundaryStart = text.length;
                 while (trailingBoundaryStart > 0 &&
                     this._isInlineBoundaryChar(text[trailingBoundaryStart - 1])) {
@@ -6881,6 +6898,18 @@ export class CursorManager {
                     nextSibling.tagName === 'CODE' &&
                     !this.domUtils.getParentElement(nextSibling, 'PRE')) {
                     targetInlineCode = nextSibling;
+                } else if (
+                    nextSibling &&
+                    nextSibling.nodeType === Node.TEXT_NODE &&
+                    this._isInlineCodeBoundaryPlaceholder(nextSibling)
+                ) {
+                    const nextCode = nextSibling.nextSibling;
+                    if (nextCode &&
+                        nextCode.nodeType === Node.ELEMENT_NODE &&
+                        nextCode.tagName === 'CODE' &&
+                        !this.domUtils.getParentElement(nextCode, 'PRE')) {
+                        targetInlineCode = nextCode;
+                    }
                 }
             } else if (currentContainer && currentContainer.nodeType === Node.ELEMENT_NODE) {
                 const candidate = currentContainer.childNodes[currentRange.startOffset] || null;
@@ -7024,6 +7053,19 @@ export class CursorManager {
             node.previousSibling.tagName === 'CODE' &&
             !this.domUtils.getParentElement(node.previousSibling, 'PRE')
         );
+        const nextNavigableSiblingFromPlaceholder = isInlineCodeOutsideRightPlaceholder
+            ? this._getNextSiblingForNavigation(node)
+            : null;
+        const hasNavigableInlineContinuationInListItem = !!(
+            currentListItem &&
+            nextNavigableSiblingFromPlaceholder &&
+            currentListItem.contains(nextNavigableSiblingFromPlaceholder) &&
+            !(
+                nextNavigableSiblingFromPlaceholder.nodeType === Node.ELEMENT_NODE &&
+                (nextNavigableSiblingFromPlaceholder.tagName === 'UL' ||
+                    nextNavigableSiblingFromPlaceholder.tagName === 'OL')
+            )
+        );
         if (currentListItem && range.collapsed) {
             const lastDirectText = this._getLastDirectTextNode(currentListItem);
             let isAtListEnd = false;
@@ -7040,7 +7082,8 @@ export class CursorManager {
                     isAtListEnd = offset >= logicalEndOffset;
                 } else if (
                     isInlineCodeOutsideRightPlaceholder &&
-                    currentListItem.contains(node)
+                    currentListItem.contains(node) &&
+                    !hasNavigableInlineContinuationInListItem
                 ) {
                     // Treat the outside-right inline-code placeholder as list-end.
                     isAtListEnd = true;
