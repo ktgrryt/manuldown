@@ -23,6 +23,7 @@ import { SearchManager } from './modules/SearchManager.js';
     let pendingEmptyListItemInsert = null;
     let pendingCtrlKDeleteSync = false;
     let pendingListMouseAdjustment = null;
+    let pendingInlineCodeRightClickAdjustment = null;
     let pendingMouseDriftCorrection = null;
     let manualPointerSelection = null;
     let lastPointerCaretIntentTs = 0;
@@ -7713,6 +7714,207 @@ import { SearchManager } from './modules/SearchManager.js';
         return createCollapsedRangeAtElementBoundary(blockElement, 'end');
     }
 
+    function isInlineCodeNode(node) {
+        if (!node || node.nodeType !== Node.ELEMENT_NODE || node.tagName !== 'CODE') {
+            return false;
+        }
+        return !domUtils.getParentElement(node, 'PRE');
+    }
+
+    function resolveInlineCodeFromClickContext(clickedElement, pointRange = null, x = null, y = null) {
+        if (!clickedElement) {
+            return null;
+        }
+        const directCode = isInlineCodeNode(clickedElement)
+            ? clickedElement
+            : (clickedElement.closest ? clickedElement.closest('code') : null);
+        if (isInlineCodeNode(directCode) && editor.contains(directCode)) {
+            return directCode;
+        }
+
+        const pointContainer = pointRange && pointRange.startContainer ? pointRange.startContainer : null;
+        const pointCode = pointContainer ? domUtils.getParentElement(pointContainer, 'CODE') : null;
+        if (isInlineCodeNode(pointCode) && editor.contains(pointCode)) {
+            return pointCode;
+        }
+
+        if (Number.isFinite(x) && Number.isFinite(y)) {
+            const blockElement =
+                resolveBlockForLooseSideTextClick(y, clickedElement, pointRange) ||
+                getClosestBlockElement(clickedElement);
+            if (blockElement && blockElement !== editor) {
+                const nearestTextMatch = getNearestTextRectForBlockClickByY(blockElement, y, x);
+                const nearestTextNode = nearestTextMatch && nearestTextMatch.textNode
+                    ? nearestTextMatch.textNode
+                    : null;
+                const nearestCode = nearestTextNode ? domUtils.getParentElement(nearestTextNode, 'CODE') : null;
+                if (isInlineCodeNode(nearestCode) && nearestTextMatch && nearestTextMatch.rect) {
+                    const rect = nearestTextMatch.rect;
+                    const width = Math.max(1, rect.right - rect.left);
+                    const rightEdgeTolerancePx = Math.max(1, Math.min(8, width * 0.25));
+                    if (x >= rect.right - rightEdgeTolerancePx) {
+                        return nearestCode;
+                    }
+                }
+            }
+        }
+
+        return null;
+    }
+
+    function createAfterInlineCodeCaretRange(codeElement, options = {}) {
+        if (!isInlineCodeNode(codeElement) || !editor.contains(codeElement) || !codeElement.parentNode) {
+            return null;
+        }
+
+        const { createPlaceholder = true } = options;
+        const parent = codeElement.parentNode;
+        const nextSibling = codeElement.nextSibling;
+        let targetContainer = null;
+        let targetOffset = 0;
+
+        if (nextSibling && nextSibling.nodeType === Node.TEXT_NODE) {
+            const rawText = nextSibling.textContent || '';
+            const isBoundaryOnlyText = rawText === '' || rawText.replace(/[\u200B\uFEFF]/g, '') === '';
+            if (isBoundaryOnlyText) {
+                if (createPlaceholder && rawText.length === 0) {
+                    nextSibling.textContent = '\u200B';
+                }
+                targetContainer = nextSibling;
+                targetOffset = (nextSibling.textContent || '').length;
+            } else {
+                // Outside-right of inline code with following visible text means "before next text char".
+                targetContainer = nextSibling;
+                targetOffset = 0;
+            }
+        } else if (!nextSibling && createPlaceholder) {
+            const spacer = document.createTextNode('\u200B');
+            parent.appendChild(spacer);
+            targetContainer = spacer;
+            targetOffset = (spacer.textContent || '').length;
+        } else {
+            const childNodes = parent.childNodes ? Array.from(parent.childNodes) : [];
+            const codeIndex = childNodes.indexOf(codeElement);
+            if (codeIndex < 0) {
+                return null;
+            }
+            targetContainer = parent;
+            targetOffset = codeIndex + 1;
+        }
+
+        if (!targetContainer) {
+            return null;
+        }
+        const range = document.createRange();
+        try {
+            range.setStart(targetContainer, targetOffset);
+            range.collapse(true);
+            return range;
+        } catch (_error) {
+            return null;
+        }
+    }
+
+    function getInlineCodeCaretRangeFromHorizontalClick(x, y, clickedElement, pointRange) {
+        if (!Number.isFinite(x) || !Number.isFinite(y) || !clickedElement) {
+            return null;
+        }
+
+        const isRightSideClickForRect = (rect) => {
+            if (!isRenderableRectLike(rect)) {
+                return false;
+            }
+            const rectWidth = Math.max(1, rect.right - rect.left);
+            const rightHalfThreshold = rect.left + rectWidth * 0.55;
+            const nearRightEdgeThreshold = rect.right - Math.max(1, Math.min(8, rectWidth * 0.25));
+            return x >= rightHalfThreshold || x >= nearRightEdgeThreshold;
+        };
+
+        const codeElement = resolveInlineCodeFromClickContext(clickedElement, pointRange, x, y);
+        const blockElement =
+            resolveBlockForLooseSideTextClick(y, clickedElement, pointRange) ||
+            getClosestBlockElement(clickedElement) ||
+            (codeElement ? getClosestBlockElement(codeElement) : null);
+        if (codeElement) {
+            const rect = codeElement.getBoundingClientRect ? codeElement.getBoundingClientRect() : null;
+            if (isRenderableRectLike(rect)) {
+                const verticalTolerancePx = Math.max(12, Math.min(48, (rect.height || 0) * 1.5));
+                const inVerticalBand = y >= rect.top - verticalTolerancePx && y <= rect.bottom + verticalTolerancePx;
+                if (inVerticalBand && isRightSideClickForRect(rect)) {
+                    return createAfterInlineCodeCaretRange(codeElement, { createPlaceholder: true });
+                }
+            }
+        }
+
+        // Fallback 1: inspect inline-code elements in the same block directly.
+        // This catches clicks in visual gaps between wrapped lines where pointRange
+        // can be normalized to a non-code text position.
+        if (blockElement && blockElement !== editor && typeof blockElement.querySelectorAll === 'function') {
+            let bestInlineCode = null;
+            let bestMetrics = null;
+            const candidates = Array.from(blockElement.querySelectorAll('code'));
+            for (const candidate of candidates) {
+                if (!isInlineCodeNode(candidate) || !editor.contains(candidate)) {
+                    continue;
+                }
+                const rect = candidate.getBoundingClientRect ? candidate.getBoundingClientRect() : null;
+                if (!isRenderableRectLike(rect)) {
+                    continue;
+                }
+                const verticalTolerancePx = Math.max(12, Math.min(56, (rect.height || 0) * 2));
+                if (y < rect.top - verticalTolerancePx || y > rect.bottom + verticalTolerancePx) {
+                    continue;
+                }
+                if (!isRightSideClickForRect(rect)) {
+                    continue;
+                }
+
+                const verticalOutsideDistance = y < rect.top
+                    ? rect.top - y
+                    : (y > rect.bottom ? y - rect.bottom : 0);
+                const horizontalOutsideDistance = x < rect.left
+                    ? rect.left - x
+                    : (x > rect.right ? x - rect.right : 0);
+                const metrics = { verticalOutsideDistance, horizontalOutsideDistance };
+                let isBetter = !bestInlineCode;
+                if (!isBetter && bestMetrics) {
+                    isBetter = metrics.verticalOutsideDistance < bestMetrics.verticalOutsideDistance;
+                }
+                if (!isBetter && bestMetrics &&
+                    metrics.verticalOutsideDistance === bestMetrics.verticalOutsideDistance) {
+                    isBetter = metrics.horizontalOutsideDistance < bestMetrics.horizontalOutsideDistance;
+                }
+                if (isBetter) {
+                    bestInlineCode = candidate;
+                    bestMetrics = metrics;
+                }
+            }
+            if (bestInlineCode) {
+                return createAfterInlineCodeCaretRange(bestInlineCode, { createPlaceholder: true });
+            }
+        }
+
+        // Fallback: use nearest visual text row in the same block so clicks slightly
+        // above/below the code row still resolve to outside-right of that inline code.
+        if (!blockElement || blockElement === editor) {
+            return null;
+        }
+
+        const nearestTextMatch = getNearestTextRectForBlockClickByY(blockElement, y, x);
+        if (!nearestTextMatch || !nearestTextMatch.textNode || !nearestTextMatch.rect) {
+            return null;
+        }
+        if (!isRightSideClickForRect(nearestTextMatch.rect)) {
+            return null;
+        }
+        const nearestInlineCode = domUtils.getParentElement(nearestTextMatch.textNode, 'CODE');
+        if (!isInlineCodeNode(nearestInlineCode)) {
+            return null;
+        }
+
+        return createAfterInlineCodeCaretRange(nearestInlineCode, { createPlaceholder: true });
+    }
+
     function isImageOnlyBlockElement(blockElement) {
         if (!blockElement || blockElement.nodeType !== Node.ELEMENT_NODE) {
             return false;
@@ -14746,6 +14948,7 @@ import { SearchManager } from './modules/SearchManager.js';
         editor.addEventListener('mousedown', (e) => {
             if (isUpdating) return;
             pendingListMouseAdjustment = null;
+            pendingInlineCodeRightClickAdjustment = null;
             pendingMouseDriftCorrection = null;
             manualPointerSelection = null;
 
@@ -14803,6 +15006,24 @@ import { SearchManager } from './modules/SearchManager.js';
 
             const pointRange = getCaretRangeFromPoint(x, y);
             if (!e.shiftKey) {
+                const inlineCodeRightRange = getInlineCodeCaretRangeFromHorizontalClick(x, y, clickedElement, pointRange);
+                if (inlineCodeRightRange) {
+                    e.preventDefault();
+                    focusEditorWithoutScroll();
+                    const selection = window.getSelection();
+                    if (!selection) return;
+                    selection.removeAllRanges();
+                    selection.addRange(inlineCodeRightRange);
+                    pendingInlineCodeRightClickAdjustment = {
+                        startX: x,
+                        startY: y,
+                        moved: false,
+                        range: inlineCodeRightRange.cloneRange()
+                    };
+                    beginManualPointerSelection(e, inlineCodeRightRange);
+                    return;
+                }
+
                 const looseLeftSideRange = getLooseLeftSideTextClickRange(x, y, clickedElement, pointRange);
                 if (looseLeftSideRange) {
                     e.preventDefault();
@@ -15030,6 +15251,12 @@ import { SearchManager } from './modules/SearchManager.js';
                     pendingListMouseAdjustment.moved = true;
                 }
             }
+            if (pendingInlineCodeRightClickAdjustment) {
+                if (Math.abs(e.clientX - pendingInlineCodeRightClickAdjustment.startX) > 3 ||
+                    Math.abs(e.clientY - pendingInlineCodeRightClickAdjustment.startY) > 3) {
+                    pendingInlineCodeRightClickAdjustment.moved = true;
+                }
+            }
             if (pendingMouseDriftCorrection) {
                 if (Math.abs(e.clientX - pendingMouseDriftCorrection.startX) > 3 ||
                     Math.abs(e.clientY - pendingMouseDriftCorrection.startY) > 3) {
@@ -15048,6 +15275,17 @@ import { SearchManager } from './modules/SearchManager.js';
         document.addEventListener('mouseup', (e) => {
             if (e.button === 0) {
                 manualPointerSelection = null;
+            }
+            const pendingInlineCodeRight = pendingInlineCodeRightClickAdjustment;
+            pendingInlineCodeRightClickAdjustment = null;
+            if (pendingInlineCodeRight) {
+                if (e.button === 0 && !pendingInlineCodeRight.moved && pendingInlineCodeRight.range) {
+                    const selection = window.getSelection();
+                    if (selection) {
+                        selection.removeAllRanges();
+                        selection.addRange(pendingInlineCodeRight.range.cloneRange());
+                    }
+                }
             }
             const pendingList = pendingListMouseAdjustment;
             pendingListMouseAdjustment = null;
