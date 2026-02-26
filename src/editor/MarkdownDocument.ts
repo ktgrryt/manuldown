@@ -5,6 +5,7 @@ import * as path from 'path';
 export class MarkdownDocument {
     private static readonly blanklineMarkerHtml = '<p data-mdw-blankline="true"><br></p>';
     private static readonly imageHardBreakMarkerAttr = 'data-mdw-image-hardbreak="true"';
+    private static readonly blockquoteEmptyLineMarker = 'MDW-BLOCKQUOTE-EMPTYLINE-MARKER';
 
     constructor(
         private readonly document: vscode.TextDocument,
@@ -35,7 +36,8 @@ export class MarkdownDocument {
         try {
 
             const explicitBlockquoteMarkdown = this.breakLazyBlockquoteContinuations(markdown);
-            const preprocessedMarkdown = this.preserveExtraBlankLines(explicitBlockquoteMarkdown);
+            const blockquoteBlankPreservedMarkdown = this.preserveEmptyBlockquoteLines(explicitBlockquoteMarkdown);
+            const preprocessedMarkdown = this.preserveExtraBlankLines(blockquoteBlankPreservedMarkdown);
             let html = marked.parse(preprocessedMarkdown) as string;
 
 
@@ -48,6 +50,16 @@ export class MarkdownDocument {
             // Fix empty paragraphs: Ensure they have height by adding <br>
             // Pattern: <p></p> or <p>\s*</p>
             html = html.replace(/<p>\s*<\/p>/gi, '<p><br></p>');
+
+            // Restore explicit empty quote lines that were preserved with a marker.
+            const blockquoteEmptyLineMarkerPattern = new RegExp(
+                `<p>\\s*${MarkdownDocument.blockquoteEmptyLineMarker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*<\\/p>`,
+                'gi'
+            );
+            html = html.replace(
+                blockquoteEmptyLineMarkerPattern,
+                '<p><br></p>'
+            );
 
             // Treat "image + hard break + text" as separate paragraphs so caret
             // navigation behaves like a blank line exists between them.
@@ -196,6 +208,156 @@ export class MarkdownDocument {
 
         flushPendingBlankSegments();
         return output.join('');
+    }
+
+    private preserveEmptyBlockquoteLines(markdown: string): string {
+        const segments = markdown.match(/[^\n]*\n|[^\n]+$/g);
+        if (!segments || segments.length === 0) {
+            return markdown;
+        }
+
+        const output: string[] = [];
+        let inFence = false;
+        let fenceMarker: '`' | '~' | null = null;
+        let fenceLength = 0;
+        const getSegmentLineInfo = (segment: string): { line: string; lineEnding: string } => {
+            const lineEnding = segment.endsWith('\r\n')
+                ? '\r\n'
+                : (segment.endsWith('\n') ? '\n' : '');
+            const lineWithoutEnding = lineEnding
+                ? segment.slice(0, -lineEnding.length)
+                : segment;
+            return {
+                line: this.stripTrailingCarriageReturn(lineWithoutEnding),
+                lineEnding,
+            };
+        };
+        const emitEmptyBlockquoteMarker = (quotePrefix: string, lineEnding: string): void => {
+            const normalizedLineEnding = lineEnding || '\n';
+            output.push(`${quotePrefix}${normalizedLineEnding}`);
+            output.push(`${quotePrefix} ${MarkdownDocument.blockquoteEmptyLineMarker}${normalizedLineEnding}`);
+            output.push(`${quotePrefix}${normalizedLineEnding}`);
+        };
+
+        for (let i = 0; i < segments.length; i++) {
+            const segment = segments[i];
+            const { line } = getSegmentLineInfo(segment);
+
+            if (inFence) {
+                output.push(segment);
+                if (fenceMarker && this.isFenceClosingLine(line, fenceMarker, fenceLength)) {
+                    inFence = false;
+                    fenceMarker = null;
+                    fenceLength = 0;
+                }
+                continue;
+            }
+
+            const openingFence = this.parseFenceOpeningLine(line);
+            if (openingFence) {
+                output.push(segment);
+                inFence = true;
+                fenceMarker = openingFence.marker;
+                fenceLength = openingFence.length;
+                continue;
+            }
+
+            const parsedQuoteLine = this.parseBlockquoteLine(line);
+            if (!parsedQuoteLine || parsedQuoteLine.content.trim() !== '') {
+                output.push(segment);
+                continue;
+            }
+
+            const run: Array<{ hasTrailingSpace: boolean; lineEnding: string }> = [];
+            let j = i;
+            while (j < segments.length) {
+                const runLineInfo = getSegmentLineInfo(segments[j]);
+                const runParsedLine = this.parseBlockquoteLine(runLineInfo.line);
+                if (!runParsedLine ||
+                    runParsedLine.content.trim() !== '' ||
+                    runParsedLine.prefixTrimmed !== parsedQuoteLine.prefixTrimmed) {
+                    break;
+                }
+                run.push({
+                    hasTrailingSpace: runParsedLine.prefixRaw !== runParsedLine.prefixTrimmed,
+                    lineEnding: runLineInfo.lineEnding,
+                });
+                j++;
+            }
+
+            const prevParsedLine = i > 0
+                ? this.parseBlockquoteLine(getSegmentLineInfo(segments[i - 1]).line)
+                : null;
+            const nextParsedLine = j < segments.length
+                ? this.parseBlockquoteLine(getSegmentLineInfo(segments[j]).line)
+                : null;
+            const hasPrevContent = !!(
+                prevParsedLine &&
+                prevParsedLine.prefixTrimmed === parsedQuoteLine.prefixTrimmed &&
+                prevParsedLine.content.trim() !== ''
+            );
+            const hasNextContent = !!(
+                nextParsedLine &&
+                nextParsedLine.prefixTrimmed === parsedQuoteLine.prefixTrimmed &&
+                nextParsedLine.content.trim() !== ''
+            );
+
+            let emptyLineCount = run.length;
+            if (run.length > 1) {
+                const forms = run.map((entry) => entry.hasTrailingSpace ? 1 : 0);
+                const isAlternating = forms.every((form, index) => index === 0 || form !== forms[index - 1]);
+                let isCanonicalSerializedRun = false;
+                if (isAlternating) {
+                    if (hasPrevContent && hasNextContent) {
+                        // Between two content paragraphs, one visual empty line is serialized as:
+                        // "> ", ">", "> ".
+                        isCanonicalSerializedRun =
+                            forms[0] === 1 &&
+                            forms[forms.length - 1] === 1 &&
+                            run.length >= 3;
+                    } else if (!hasPrevContent && hasNextContent) {
+                        // Leading empty quote lines are serialized as:
+                        // ">", "> ", ">", "> ", ...
+                        isCanonicalSerializedRun =
+                            forms[0] === 0 &&
+                            run.length % 2 === 0;
+                    } else if (hasPrevContent && !hasNextContent) {
+                        // Trailing empty quote lines are serialized as:
+                        // "> ", ">", "> ", ">", ...
+                        isCanonicalSerializedRun =
+                            forms[0] === 1 &&
+                            run.length % 2 === 0;
+                    }
+                }
+                if (isCanonicalSerializedRun) {
+                    emptyLineCount = Math.floor(run.length / 2);
+                }
+            }
+
+            const markerLineEnding = run.length > 0
+                ? (run[run.length - 1].lineEnding || '\n')
+                : '\n';
+            for (let k = 0; k < emptyLineCount; k++) {
+                emitEmptyBlockquoteMarker(parsedQuoteLine.prefixTrimmed, markerLineEnding);
+            }
+
+            i = j - 1;
+        }
+
+        return output.join('');
+    }
+
+    private parseBlockquoteLine(line: string): { prefixRaw: string; prefixTrimmed: string; content: string } | null {
+        const match = line.match(/^( {0,3}(?:>[ \t]?)+)(.*)$/);
+        if (!match) {
+            return null;
+        }
+        const prefixRaw = match[1];
+        return {
+            prefixRaw,
+            prefixTrimmed: prefixRaw.replace(/[ \t]+$/, ''),
+            content: match[2] ?? '',
+        };
     }
 
     private breakLazyBlockquoteContinuations(markdown: string): string {

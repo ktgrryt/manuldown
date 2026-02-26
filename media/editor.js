@@ -1321,6 +1321,18 @@ import { SearchManager } from './modules/SearchManager.js';
 
     function getPreferredFirstTextNodeForElement(element) {
         if (!element || element.nodeType !== Node.ELEMENT_NODE) return null;
+        if (element.tagName === 'BLOCKQUOTE') {
+            const firstParagraph = element.querySelector(':scope > p');
+            if (firstParagraph) {
+                const firstParagraphText = (firstParagraph.textContent || '').replace(/[\u200B\u00A0]/g, '').trim();
+                const firstParagraphHasBr = !!firstParagraph.querySelector('br');
+                if (firstParagraphText === '' || firstParagraphHasBr) {
+                    // Keep caret on the first (possibly empty) quote line instead of
+                    // skipping to the next non-empty text node.
+                    return firstParagraph;
+                }
+            }
+        }
         if (element.tagName === 'UL' || element.tagName === 'OL') {
             const firstLi = element.querySelector('li');
             if (!firstLi) return null;
@@ -6266,6 +6278,80 @@ import { SearchManager } from './modules/SearchManager.js';
         return true;
     }
 
+    function getCtrlKTargetEmptyBlockquoteParagraph(range) {
+        if (!range || !range.collapsed) return null;
+
+        const blockquote = getTopLevelBlockquoteForCtrlK(range);
+        if (!blockquote) return null;
+
+        let paragraph = domUtils.getParentElement(range.startContainer, 'P');
+        if (!paragraph && range.startContainer === blockquote) {
+            const children = Array.from(blockquote.childNodes || []);
+            const safeOffset = Math.max(0, Math.min(range.startOffset, children.length));
+            const direct = children[safeOffset] || children[safeOffset - 1] || null;
+            if (direct && direct.nodeType === Node.ELEMENT_NODE && direct.tagName === 'P') {
+                paragraph = direct;
+            }
+        }
+
+        if (!paragraph || paragraph.parentElement !== blockquote) return null;
+        if (!isEffectivelyEmptyBlock(paragraph)) return null;
+
+        const nextElement = getNextElementSibling(paragraph);
+        const prevElement = getPreviousElementSibling(paragraph);
+        const nextInBlockquote = nextElement && nextElement.parentElement === blockquote ? nextElement : null;
+        const prevInBlockquote = prevElement && prevElement.parentElement === blockquote ? prevElement : null;
+        if (!nextInBlockquote && !prevInBlockquote) return null;
+
+        return {
+            blockquote,
+            paragraph,
+            nextElement: nextInBlockquote,
+            prevElement: prevInBlockquote
+        };
+    }
+
+    function deleteEmptyBlockquoteParagraphForCtrlK(context, selection) {
+        if (!context || !context.paragraph || !context.blockquote) return false;
+        const { blockquote, paragraph } = context;
+        if (!paragraph.parentElement || paragraph.parentElement !== blockquote) return false;
+
+        const nextElement = context.nextElement && context.nextElement.parentElement === blockquote
+            ? context.nextElement
+            : null;
+        const prevElement = context.prevElement && context.prevElement.parentElement === blockquote
+            ? context.prevElement
+            : null;
+
+        paragraph.remove();
+
+        const activeSelection = selection || window.getSelection();
+        if (!activeSelection) return true;
+
+        const newRange = document.createRange();
+        if (nextElement) {
+            const firstNode = getPreferredFirstTextNodeForElement(nextElement);
+            if (firstNode) {
+                newRange.setStart(firstNode, 0);
+            } else {
+                newRange.setStart(nextElement, 0);
+            }
+        } else if (prevElement) {
+            const lastNode = domUtils.getLastTextNode(prevElement);
+            if (lastNode) {
+                newRange.setStart(lastNode, lastNode.textContent.length);
+            } else {
+                newRange.setStart(prevElement, prevElement.childNodes.length);
+            }
+        } else {
+            newRange.setStart(blockquote, 0);
+        }
+
+        newRange.collapse(true);
+        applySelectionRange(activeSelection, newRange);
+        return true;
+    }
+
     function handleCtrlKEmptyLineBeforeTableKeydown(e, context) {
         if (!isMac) return false;
         if (!e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return false;
@@ -6304,6 +6390,18 @@ import { SearchManager } from './modules/SearchManager.js';
             finalizeCtrlKDeleteTurn();
             notifyChangeImmediate();
             return true;
+        }
+
+        const emptyBlockquoteParagraph = getCtrlKTargetEmptyBlockquoteParagraph(range);
+        if (emptyBlockquoteParagraph) {
+            e.preventDefault();
+            stateManager.saveState();
+            emacsKillBuffer = '\n';
+            if (deleteEmptyBlockquoteParagraphForCtrlK(emptyBlockquoteParagraph, window.getSelection())) {
+                finalizeCtrlKDeleteTurn();
+                notifyChangeImmediate();
+                return true;
+            }
         }
 
         const isEmptyBlock = /^(P|DIV|H[1-6])$/.test(block.tagName);
@@ -11362,6 +11460,22 @@ import { SearchManager } from './modules/SearchManager.js';
                 finalizeCtrlKDeleteTurn();
                 notifyChangeImmediate();
                 return true;
+            }
+
+            const emptyBlockquoteParagraph = getCtrlKTargetEmptyBlockquoteParagraph(range);
+            if (emptyBlockquoteParagraph) {
+                stateManager.saveState();
+                emacsKillBuffer = '\n';
+                if (deleteEmptyBlockquoteParagraphForCtrlK(emptyBlockquoteParagraph, selection)) {
+                    domUtils.ensureInlineCodeSpaces();
+                    domUtils.cleanupGhostStyles();
+                    tableManager.wrapTables();
+                    applyImageRenderSizes();
+                    hideImageResizeOverlaySafely();
+                    finalizeCtrlKDeleteTurn();
+                    notifyChangeImmediate();
+                    return true;
+                }
             }
 
             if (isCollapsedSelectionOnEmptyLineInTableCell(selection, range)) {
