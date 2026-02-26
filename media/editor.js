@@ -1932,12 +1932,141 @@ import { SearchManager } from './modules/SearchManager.js';
         return false;
     }
 
+    function isQuoteContainerBlockNode(node) {
+        if (!node || node.nodeType !== Node.ELEMENT_NODE) return false;
+        if (domUtils.isBlockElement(node)) return true;
+        return node.tagName === 'UL' || node.tagName === 'OL' || node.tagName === 'TABLE' || node.tagName === 'HR';
+    }
+
+    function appendFragmentToBlockquote(blockquote, fragment) {
+        if (!blockquote || !fragment) return;
+
+        const nodes = Array.from(fragment.childNodes || []);
+        let paragraph = null;
+
+        const ensureParagraph = () => {
+            if (!paragraph) {
+                paragraph = document.createElement('p');
+            }
+            return paragraph;
+        };
+
+        const flushParagraph = () => {
+            if (!paragraph) return;
+            const hasRenderable = Array.from(paragraph.childNodes || []).some((node) => isRenderableEditorNode(node));
+            if (!hasRenderable) {
+                paragraph.appendChild(document.createElement('br'));
+            }
+            blockquote.appendChild(paragraph);
+            paragraph = null;
+        };
+
+        for (const node of nodes) {
+            if (!node) continue;
+            if (node.nodeType === Node.TEXT_NODE &&
+                isIgnorableEditorTextValue(node.textContent || '') &&
+                !paragraph) {
+                continue;
+            }
+
+            if (isQuoteContainerBlockNode(node)) {
+                flushParagraph();
+                blockquote.appendChild(node);
+                continue;
+            }
+
+            ensureParagraph().appendChild(node);
+        }
+
+        flushParagraph();
+
+        const hasContent = Array.from(blockquote.childNodes || []).some((node) => isRenderableEditorNode(node));
+        if (!hasContent) {
+            const p = document.createElement('p');
+            p.appendChild(document.createElement('br'));
+            blockquote.appendChild(p);
+        }
+    }
+
+    function rangeIntersectsNodeSafely(range, node) {
+        if (!range || !node || typeof range.intersectsNode !== 'function') return false;
+        try {
+            return range.intersectsNode(node);
+        } catch (_e) {
+            return false;
+        }
+    }
+
+    function createLineExpandedQuoteRange(range) {
+        if (!range) return null;
+
+        const expandedRange = range.cloneRange();
+
+        const startProbe = range.cloneRange();
+        startProbe.collapse(true);
+        const startLine = getCtrlKLineContainerFromRange(startProbe);
+        if (startLine && startLine.parentNode && editor.contains(startLine)) {
+            expandedRange.setStartBefore(startLine);
+        }
+
+        const endProbe = range.cloneRange();
+        endProbe.collapse(false);
+        const endLine = getCtrlKLineContainerFromRange(endProbe);
+        if (endLine &&
+            endLine.parentNode &&
+            editor.contains(endLine) &&
+            rangeIntersectsNodeSafely(range, endLine)) {
+            expandedRange.setEndAfter(endLine);
+        }
+
+        return expandedRange;
+    }
+
+    function tryWrapQuoteFromSelection() {
+        const selection = window.getSelection();
+        if (!selection || !selection.rangeCount || selection.isCollapsed) return false;
+
+        const range = selection.getRangeAt(0);
+        if (!editor.contains(range.startContainer) || !editor.contains(range.endContainer)) {
+            return false;
+        }
+
+        stateManager.saveState();
+
+        const quoteRange = createLineExpandedQuoteRange(range) || range.cloneRange();
+        const fragment = quoteRange.extractContents();
+        const blockquote = document.createElement('blockquote');
+        appendFragmentToBlockquote(blockquote, fragment);
+        tableManager._insertNodeAsBlock(quoteRange, blockquote);
+
+        requestAnimationFrame(() => {
+            const sel = window.getSelection();
+            if (!sel) return;
+            const newRange = document.createRange();
+            const lastTextNode = domUtils.getLastTextNode(blockquote);
+            if (lastTextNode) {
+                const offset = (lastTextNode.textContent || '').length;
+                newRange.setStart(lastTextNode, offset);
+            } else {
+                newRange.setStart(blockquote, blockquote.childNodes.length);
+            }
+            newRange.collapse(true);
+            sel.removeAllRanges();
+            sel.addRange(newRange);
+            editor.focus();
+            notifyChange();
+        });
+
+        return true;
+    }
+
     function insertSlashQuote() {
         if (tryWrapQuoteAtCaret()) return;
         insertEmptyQuote();
     }
 
     function insertToolbarQuote() {
+        if (tryWrapQuoteFromSelection()) return;
         if (tryWrapQuoteAtCaret()) return;
         insertEmptyQuote();
     }
