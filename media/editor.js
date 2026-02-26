@@ -14086,6 +14086,116 @@ import { SearchManager } from './modules/SearchManager.js';
             const container = document.createElement('div');
             container.innerHTML = rawHtml;
             container.querySelectorAll('[data-exclude-from-markdown="true"]').forEach((node) => node.remove());
+
+            const autoLinkUrlTextNodesInContainer = (rootNode) => {
+                if (!rootNode) return;
+
+                const splitUrlAndTextTokens = (sourceText) => {
+                    const source = String(sourceText || '').replace(/\r\n?/g, '\n');
+                    const pattern = /https?:\/\/[^\s<>"'`]+/gi;
+                    const tokens = [];
+                    let lastIndex = 0;
+                    let match;
+
+                    const trimTrailingPunctuation = (value) => {
+                        let url = value;
+                        let trailing = '';
+
+                        while (url.length > 0 && /[.,!?;:。．、，！？]$/.test(url)) {
+                            trailing = url.slice(-1) + trailing;
+                            url = url.slice(0, -1);
+                        }
+
+                        while (url.endsWith(')')) {
+                            const opens = (url.match(/\(/g) || []).length;
+                            const closes = (url.match(/\)/g) || []).length;
+                            if (closes <= opens) break;
+                            trailing = ')' + trailing;
+                            url = url.slice(0, -1);
+                        }
+
+                        return { url, trailing };
+                    };
+
+                    while ((match = pattern.exec(source)) !== null) {
+                        const index = match.index;
+                        const matchedText = match[0] || '';
+
+                        if (index > lastIndex) {
+                            tokens.push({ type: 'text', value: source.slice(lastIndex, index) });
+                        }
+
+                        const { url, trailing } = trimTrailingPunctuation(matchedText);
+                        if (url) {
+                            tokens.push({ type: 'url', value: url });
+                        } else if (matchedText) {
+                            tokens.push({ type: 'text', value: matchedText });
+                        }
+                        if (trailing) {
+                            tokens.push({ type: 'text', value: trailing });
+                        }
+
+                        lastIndex = index + matchedText.length;
+                    }
+
+                    if (lastIndex < source.length) {
+                        tokens.push({ type: 'text', value: source.slice(lastIndex) });
+                    }
+
+                    return tokens;
+                };
+
+                const walker = document.createTreeWalker(
+                    rootNode,
+                    NodeFilter.SHOW_TEXT,
+                    {
+                        acceptNode: (node) => {
+                            const text = node && node.textContent ? node.textContent : '';
+                            if (!/https?:\/\//i.test(text)) {
+                                return NodeFilter.FILTER_SKIP;
+                            }
+                            const parent = node.parentElement;
+                            if (!parent) {
+                                return NodeFilter.FILTER_SKIP;
+                            }
+                            if (parent.closest && parent.closest('a, code, pre')) {
+                                return NodeFilter.FILTER_SKIP;
+                            }
+                            return NodeFilter.FILTER_ACCEPT;
+                        }
+                    }
+                );
+
+                const textNodes = [];
+                let currentNode = walker.nextNode();
+                while (currentNode) {
+                    textNodes.push(currentNode);
+                    currentNode = walker.nextNode();
+                }
+
+                textNodes.forEach((textNode) => {
+                    if (!textNode || !textNode.parentNode) return;
+                    const tokens = splitUrlAndTextTokens(textNode.textContent || '');
+                    if (!tokens.some((token) => token.type === 'url')) return;
+
+                    const fragment = document.createDocumentFragment();
+                    tokens.forEach((token) => {
+                        if (!token || !token.value) return;
+                        if (token.type === 'url') {
+                            const link = document.createElement('a');
+                            link.href = token.value;
+                            link.textContent = token.value;
+                            fragment.appendChild(link);
+                        } else {
+                            fragment.appendChild(document.createTextNode(token.value));
+                        }
+                    });
+
+                    textNode.parentNode.replaceChild(fragment, textNode);
+                });
+            };
+
+            autoLinkUrlTextNodesInContainer(container);
             const nodes = Array.from(container.childNodes || []);
             if (nodes.length === 0) {
                 return false;
@@ -14154,6 +14264,127 @@ import { SearchManager } from './modules/SearchManager.js';
             range.insertNode(fragment);
             setCaretAfterNode(selection, caretMarker);
             caretMarker.remove();
+            notifyChange();
+            return true;
+        };
+
+        const splitTextByDetectedUrls = (rawText) => {
+            const source = String(rawText || '').replace(/\r\n?/g, '\n');
+            const pattern = /https?:\/\/[^\s<>"'`]+/gi;
+            const tokens = [];
+            let lastIndex = 0;
+            let match;
+
+            const trimTrailingPunctuation = (value) => {
+                let url = value;
+                let trailing = '';
+
+                while (url.length > 0 && /[.,!?;:。．、，！？]$/.test(url)) {
+                    trailing = url.slice(-1) + trailing;
+                    url = url.slice(0, -1);
+                }
+
+                // If closing parentheses are unbalanced, keep them as trailing text.
+                while (url.endsWith(')')) {
+                    const opens = (url.match(/\(/g) || []).length;
+                    const closes = (url.match(/\)/g) || []).length;
+                    if (closes <= opens) break;
+                    trailing = ')' + trailing;
+                    url = url.slice(0, -1);
+                }
+
+                return { url, trailing };
+            };
+
+            while ((match = pattern.exec(source)) !== null) {
+                const index = match.index;
+                const matchedText = match[0] || '';
+
+                if (index > lastIndex) {
+                    tokens.push({ type: 'text', value: source.slice(lastIndex, index) });
+                }
+
+                const { url, trailing } = trimTrailingPunctuation(matchedText);
+                if (url) {
+                    tokens.push({ type: 'url', value: url });
+                } else if (matchedText) {
+                    tokens.push({ type: 'text', value: matchedText });
+                }
+                if (trailing) {
+                    tokens.push({ type: 'text', value: trailing });
+                }
+
+                lastIndex = index + matchedText.length;
+            }
+
+            if (lastIndex < source.length) {
+                tokens.push({ type: 'text', value: source.slice(lastIndex) });
+            }
+
+            return tokens;
+        };
+
+        const appendTextTokenWithLineBreaks = (parent, text) => {
+            const normalized = String(text || '').replace(/\r\n?/g, '\n');
+            const lines = normalized.split('\n');
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i];
+                if (line.length > 0) {
+                    parent.appendChild(document.createTextNode(line));
+                }
+                if (i < lines.length - 1) {
+                    parent.appendChild(document.createElement('br'));
+                }
+            }
+        };
+
+        const tryInsertAutoLinkedTextFromPastedText = (rawText) => {
+            if (typeof rawText !== 'string' || !/https?:\/\//i.test(rawText)) {
+                return false;
+            }
+
+            const ctx = getSelectionRangeForPaste();
+            if (!ctx) return false;
+            const { selection, range } = ctx;
+            if (isRangeInsideCodeBlock(range)) {
+                return false;
+            }
+
+            const tokens = splitTextByDetectedUrls(rawText);
+            if (!tokens.some((token) => token.type === 'url')) {
+                return false;
+            }
+
+            const fragment = document.createDocumentFragment();
+            tokens.forEach((token) => {
+                if (!token || !token.value) return;
+                if (token.type === 'url') {
+                    const link = document.createElement('a');
+                    link.href = token.value;
+                    link.textContent = token.value;
+                    fragment.appendChild(link);
+                    return;
+                }
+                appendTextTokenWithLineBreaks(fragment, token.value);
+            });
+
+            stateManager.saveState();
+            if (!range.collapsed) {
+                range.deleteContents();
+            }
+
+            const caretMarker = document.createTextNode('');
+            fragment.appendChild(caretMarker);
+            range.insertNode(fragment);
+            setCaretAfterNode(selection, caretMarker);
+            caretMarker.remove();
+
+            normalizeCheckboxListItems();
+            domUtils.ensureInlineCodeSpaces();
+            domUtils.cleanupGhostStyles();
+            tableManager.wrapTables();
+            applyImageRenderSizes();
+            updateListItemClasses();
             notifyChange();
             return true;
         };
@@ -15076,6 +15307,10 @@ import { SearchManager } from './modules/SearchManager.js';
             }
 
             if (rawText && tryInsertInlineMarkdownFromPastedText(rawText)) {
+                return true;
+            }
+
+            if (rawText && tryInsertAutoLinkedTextFromPastedText(rawText)) {
                 return true;
             }
 
