@@ -5697,9 +5697,7 @@ import { SearchManager } from './modules/SearchManager.js';
     function handlePlainEnterKeydown(e, context) {
         const { selection, range, container, listItem } = context;
         if (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && !listItem) {
-            const keyCode = typeof e.keyCode === 'number'
-                ? e.keyCode
-                : (typeof e.which === 'number' ? e.which : 0);
+            const keyCode = getKeyboardEventKeyCode(e);
             const isCompositionConfirmEnter = (
                 e.isComposing ||
                 isComposing ||
@@ -12782,7 +12780,24 @@ import { SearchManager } from './modules/SearchManager.js';
         return selection;
     }
 
+    function getKeyboardEventKeyCode(e) {
+        if (!e) return 0;
+        if (typeof e.keyCode === 'number') return e.keyCode;
+        if (typeof e.which === 'number') return e.which;
+        return 0;
+    }
+
+    function isImeInteractionKeydown(e) {
+        const keyCode = getKeyboardEventKeyCode(e);
+        return !!(e && (e.isComposing || isComposing || keyCode === 229));
+    }
+
     function handleKeydown(e) {
+        if (isImeInteractionKeydown(e)) {
+            hideSlashCommandMenu();
+            return;
+        }
+
         if (handleTableStructureSelectKeydown(e)) {
             return;
         }
