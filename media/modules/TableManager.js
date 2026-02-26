@@ -4503,6 +4503,14 @@ export class TableManager {
     }
 
     _insertNodeAsBlock(range, node) {
+        if (!range || !node) return;
+
+        // Paste/insert should replace the current selection first.
+        if (!range.collapsed) {
+            range.deleteContents();
+            range.collapse(true);
+        }
+
         const block = this._getClosestBlock(range.startContainer);
         if (!block || block === this.editor || block.tagName === 'LI' || block.tagName === 'TD' || block.tagName === 'TH') {
             range.deleteContents();

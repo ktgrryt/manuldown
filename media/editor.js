@@ -41,6 +41,8 @@ import { SearchManager } from './modules/SearchManager.js';
     const TOC_PANEL_MIN_WIDTH = 0;
     const TOC_PANEL_MAX_WIDTH = 480;
     const IME_ENTER_CONFIRM_GRACE_MS = 80;
+    const INTERNAL_EDITOR_PLAIN_TEXT_CLIPBOARD_TYPE = 'application/x-manuldown-editor-plain-text';
+    const INTERNAL_EDITOR_HTML_CLIPBOARD_TYPE = 'application/x-manuldown-editor-html';
 
     function normalizeTocScrollDuration(value) {
         if (typeof value !== 'number' || !Number.isFinite(value)) {
@@ -650,12 +652,28 @@ import { SearchManager } from './modules/SearchManager.js';
             'PRE', 'TABLE', 'TR', 'TD', 'TH',
             'H1', 'H2', 'H3', 'H4', 'H5', 'H6'
         ]);
+        const isBlockElement = (node) => {
+            return !!(node && node.nodeType === Node.ELEMENT_NODE && blockTags.has(node.tagName));
+        };
         let output = '';
 
         const walk = (node) => {
             if (!node) return;
             if (node.nodeType === Node.TEXT_NODE) {
-                output += node.textContent || '';
+                const text = node.textContent || '';
+                if (/^[\t\r\n ]+$/.test(text)) {
+                    const previousIsBlock = isBlockElement(node.previousSibling);
+                    const nextIsBlock = isBlockElement(node.nextSibling);
+                    if (previousIsBlock || nextIsBlock) {
+                        // Ignore formatting-only newline nodes between block elements,
+                        // but preserve intentional visual gaps encoded as 2+ line breaks.
+                        if (/(?:\r?\n[\t ]*){2,}/.test(text)) {
+                            output += '\n\n';
+                        }
+                        return;
+                    }
+                }
+                output += text;
                 return;
             }
             if (node.nodeType !== Node.ELEMENT_NODE) return;
@@ -707,6 +725,41 @@ import { SearchManager } from './modules/SearchManager.js';
     function createClipboardPayloadFromSelection(selection) {
         if (!selection || !selection.rangeCount) return null;
         return createClipboardPayloadFromRange(selection.getRangeAt(0));
+    }
+
+    function normalizeClipboardPlainText(text) {
+        return String(text || '')
+            .replace(/\r\n?/g, '\n')
+            .replace(/[\u200B\uFEFF]/g, '');
+    }
+
+    function writeClipboardPayload(clipboardData, payload, fallbackText = '', plainTextOverride = null) {
+        if (!clipboardData || !payload) return '';
+
+        if (payload.html) {
+            clipboardData.setData('text/html', payload.html);
+            try {
+                clipboardData.setData(INTERNAL_EDITOR_HTML_CLIPBOARD_TYPE, payload.html);
+            } catch (_error) {
+                // Some clipboard implementations reject custom MIME types.
+            }
+        }
+
+        const plainText = normalizeClipboardPlainText(
+            typeof plainTextOverride === 'string'
+                ? plainTextOverride
+                : (payload.text || fallbackText || '')
+        );
+        if (plainText) {
+            clipboardData.setData('text/plain', plainText);
+            try {
+                clipboardData.setData(INTERNAL_EDITOR_PLAIN_TEXT_CLIPBOARD_TYPE, plainText);
+            } catch (_error) {
+                // Some clipboard implementations reject custom MIME types.
+            }
+        }
+
+        return plainText;
     }
 
     function focusEditorWithoutScroll() {
@@ -13985,6 +14038,94 @@ import { SearchManager } from './modules/SearchManager.js';
             return true;
         };
 
+        const setCaretToEndOfInsertedNode = (selection, node) => {
+            if (!selection || !node) return;
+            if (node.nodeType === Node.TEXT_NODE) {
+                const range = document.createRange();
+                range.setStart(node, (node.textContent || '').length);
+                range.collapse(true);
+                selection.removeAllRanges();
+                selection.addRange(range);
+                return;
+            }
+
+            if (node.nodeType !== Node.ELEMENT_NODE) {
+                setCaretAfterNode(selection, node);
+                return;
+            }
+
+            const lastTextNode = domUtils.getLastTextNode(node);
+            if (lastTextNode) {
+                const range = document.createRange();
+                range.setStart(lastTextNode, (lastTextNode.textContent || '').length);
+                range.collapse(true);
+                selection.removeAllRanges();
+                selection.addRange(range);
+                return;
+            }
+
+            const range = document.createRange();
+            range.selectNodeContents(node);
+            range.collapse(false);
+            selection.removeAllRanges();
+            selection.addRange(range);
+        };
+
+        const tryInsertInternalHtmlFromClipboard = (rawHtml) => {
+            if (typeof rawHtml !== 'string' || rawHtml.trim() === '') {
+                return false;
+            }
+
+            const ctx = getSelectionRangeForPaste();
+            if (!ctx) return false;
+            const { selection, range } = ctx;
+            if (isRangeInsideCodeBlock(range)) {
+                return false;
+            }
+
+            const container = document.createElement('div');
+            container.innerHTML = rawHtml;
+            container.querySelectorAll('[data-exclude-from-markdown="true"]').forEach((node) => node.remove());
+            const nodes = Array.from(container.childNodes || []);
+            if (nodes.length === 0) {
+                return false;
+            }
+
+            const fragment = document.createDocumentFragment();
+            let lastInsertedNode = null;
+            nodes.forEach((node) => {
+                fragment.appendChild(node);
+                lastInsertedNode = node;
+            });
+
+            stateManager.saveState();
+            const hasTopLevelBlock = nodes.some((node) => node.nodeType === Node.ELEMENT_NODE && isBlockElement(node));
+            if (hasTopLevelBlock) {
+                tableManager._insertNodeAsBlock(range, fragment);
+                if (lastInsertedNode && lastInsertedNode.isConnected) {
+                    setCaretToEndOfInsertedNode(selection, lastInsertedNode);
+                }
+            } else {
+                if (!range.collapsed) {
+                    range.deleteContents();
+                }
+                const caretMarker = document.createTextNode('');
+                fragment.appendChild(caretMarker);
+                range.insertNode(fragment);
+                setCaretAfterNode(selection, caretMarker);
+                caretMarker.remove();
+            }
+
+            normalizeCheckboxListItems();
+            domUtils.ensureInlineCodeSpaces();
+            domUtils.cleanupGhostStyles();
+            tableManager.wrapTables();
+            applyImageRenderSizes();
+            updateListItemClasses();
+            notifyChange();
+            return true;
+        };
+
         const tryInsertInlineMarkdownFromPastedText = (rawText) => {
             if (typeof rawText !== 'string' || rawText.indexOf('\n') !== -1) {
                 return false;
@@ -14534,6 +14675,7 @@ import { SearchManager } from './modules/SearchManager.js';
             const normalized = rawText.replace(/\r\n?/g, '\n');
             const lines = normalized.split('\n');
             if (lines.length === 0) return false;
+            const hasExplicitBlankLine = lines.some((line) => (line || '').trim() === '');
 
             const isFenceStart = (line) => /^\s*```/.test(line || '');
             const parseListLine = (line) => {
@@ -14835,7 +14977,10 @@ import { SearchManager } from './modules/SearchManager.js';
                 i = j;
             }
 
-            if (!hasMarkdownSyntax || blocks.length === 0) {
+            // Preserve paragraph breaks for plain text with explicit blank lines
+            // (e.g. editor-internal copy/paste of "a\\n\\nb"), even when it contains
+            // no Markdown markers.
+            if ((!hasMarkdownSyntax && !hasExplicitBlankLine) || blocks.length === 0) {
                 return false;
             }
 
@@ -14960,18 +15105,31 @@ import { SearchManager } from './modules/SearchManager.js';
         // 画像のペースト・リンクのペースト
         editor.addEventListener('paste', (e) => {
             if (!isUpdating) {
+                if (!e.clipboardData) return;
                 if (tableManager.handleEdgePaste(e)) {
                     return;
                 }
                 if (tableManager.handlePaste(e)) {
                     return;
                 }
-                const items = e.clipboardData.items;
+                const clipboardData = e.clipboardData;
+                const items = clipboardData.items;
                 let hasImageFile = false;
 
                 // 選択範囲があり、URLがペーストされた場合はリンクを作成
                 const selection = window.getSelection();
-                const pastedText = e.clipboardData.getData('text/plain');
+                const internalPastedHtml = clipboardData.getData(INTERNAL_EDITOR_HTML_CLIPBOARD_TYPE);
+                const internalPastedText = clipboardData.getData(INTERNAL_EDITOR_PLAIN_TEXT_CLIPBOARD_TYPE);
+                const pastedText = internalPastedText || clipboardData.getData('text/plain');
+
+                if (
+                    selection &&
+                    internalPastedHtml &&
+                    tryInsertInternalHtmlFromClipboard(internalPastedHtml)
+                ) {
+                    e.preventDefault();
+                    return;
+                }
 
                 if (selection && !selection.isCollapsed && pastedText && isUrl(pastedText)) {
                     e.preventDefault();
@@ -15086,28 +15244,28 @@ import { SearchManager } from './modules/SearchManager.js';
             showImageResizeOverlay(image);
         });
 
-        // 画像を含む選択のコピーを補助（右クリックコピー・範囲選択コピー対応）
+        // 複数行選択のコピー時は改行を正規化したtext/plainを優先して設定
         editor.addEventListener('copy', (e) => {
             if (isUpdating || e.defaultPrevented) return;
             const selection = window.getSelection();
-            if (!selection || !selection.rangeCount) return;
-            if (!selectionContainsImage(selection)) return;
+            if (!selection || !selection.rangeCount || selection.isCollapsed || !e.clipboardData) return;
 
             const payload = createClipboardPayloadFromSelection(selection);
-            if (!payload || !e.clipboardData) return;
+            if (!payload) return;
+
+            const payloadPlainText = normalizeClipboardPlainText(payload.text || '');
+            const fallbackText = normalizeClipboardPlainText(selection.toString());
+            const hasImage = selectionContainsImage(selection);
+            const plainText = hasImage
+                ? (payloadPlainText || fallbackText)
+                : (payloadPlainText || fallbackText);
+            const isMultiLineSelection = plainText.includes('\n');
+            const hasBlockStructure = typeof payload.html === 'string' &&
+                /<\/(?:p|div|blockquote|pre|h[1-6]|li|ul|ol|table)>\s*</i.test(payload.html);
+            if (!hasImage && !isMultiLineSelection && !hasBlockStructure) return;
 
             e.preventDefault();
-            if (payload.html) {
-                e.clipboardData.setData('text/html', payload.html);
-            }
-            if (payload.text) {
-                e.clipboardData.setData('text/plain', payload.text);
-            } else {
-                const fallbackText = selection.toString();
-                if (fallbackText) {
-                    e.clipboardData.setData('text/plain', fallbackText);
-                }
-            }
+            writeClipboardPayload(e.clipboardData, payload, fallbackText, plainText);
         });
 
         // 画像を含む選択のカットを補助（右クリックカット・範囲選択カット対応）
