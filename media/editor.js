@@ -1682,6 +1682,118 @@ import { SearchManager } from './modules/SearchManager.js';
         return [];
     }
 
+    function pruneEmptyListItemsAfterRangeDelete(listItems) {
+        if (!Array.isArray(listItems) || listItems.length === 0) {
+            return false;
+        }
+
+        const candidates = new Set();
+        listItems.forEach((item) => {
+            let current = item;
+            while (current && current !== editor) {
+                if (current.nodeType === Node.ELEMENT_NODE && current.tagName === 'LI') {
+                    candidates.add(current);
+                }
+                current = current.parentElement;
+            }
+        });
+        if (candidates.size === 0) {
+            return false;
+        }
+
+        let changed = false;
+        let didRemove = false;
+        do {
+            changed = false;
+            for (const listItem of Array.from(candidates)) {
+                if (!listItem || !listItem.isConnected || listItem.tagName !== 'LI') {
+                    continue;
+                }
+                if (hasCheckboxAtStart(listItem)) continue;
+                if (hasNestedListChild(listItem)) continue;
+                if (hasDirectTextContent(listItem)) continue;
+
+                const parentList = listItem.parentElement;
+                const ancestorListItem = parentList ? domUtils.getParentElement(parentList, 'LI') : null;
+                listItem.remove();
+                didRemove = true;
+                changed = true;
+
+                if (ancestorListItem) {
+                    candidates.add(ancestorListItem);
+                }
+                if (parentList && !listHasDirectListItems(parentList)) {
+                    const parentOfList = parentList.parentElement;
+                    parentList.remove();
+                    if (parentOfList && parentOfList.tagName === 'LI') {
+                        candidates.add(parentOfList);
+                    }
+                }
+            }
+        } while (changed);
+
+        if (didRemove) {
+            cleanupEmptyListContainers(true);
+        }
+        return didRemove;
+    }
+
+    function captureRangeDeleteListAnchor(listItems) {
+        if (!Array.isArray(listItems) || listItems.length === 0) {
+            return null;
+        }
+        const firstListItem = listItems[0];
+        if (!firstListItem || !firstListItem.isConnected) {
+            return null;
+        }
+
+        const topLevelBlock = getTopLevelLineContainer(firstListItem);
+        if (!topLevelBlock || !topLevelBlock.parentElement || topLevelBlock.parentElement !== editor) {
+            return null;
+        }
+
+        return {
+            parent: topLevelBlock.parentElement,
+            nextSibling: topLevelBlock.nextSibling
+        };
+    }
+
+    function restoreEmptyLineAtRangeDeleteAnchor(anchor, selectedListItems) {
+        if (!anchor || !anchor.parent || !anchor.parent.isConnected) {
+            return false;
+        }
+        if (!Array.isArray(selectedListItems) || selectedListItems.length === 0) {
+            return false;
+        }
+
+        const removedAllSelectedListItems = selectedListItems.every(
+            (item) => !item || !item.isConnected || !editor.contains(item)
+        );
+        if (!removedAllSelectedListItems) {
+            return false;
+        }
+
+        const selection = window.getSelection();
+        if (!selection) {
+            return false;
+        }
+
+        const insertBeforeNode =
+            anchor.nextSibling && anchor.nextSibling.parentNode === anchor.parent
+                ? anchor.nextSibling
+                : null;
+        const p = document.createElement('p');
+        p.appendChild(document.createElement('br'));
+        anchor.parent.insertBefore(p, insertBeforeNode);
+
+        const range = document.createRange();
+        range.setStart(p, 0);
+        range.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        return true;
+    }
+
     function getCtrlKTargetListItem(range) {
         if (!range || !range.collapsed) return null;
 
@@ -6233,11 +6345,34 @@ import { SearchManager } from './modules/SearchManager.js';
                 if (shouldFlagStrikeCleanupForDelete(range)) {
                     pendingStrikeCleanup = true;
                 }
+                const selectedListItems = getSelectedListItemsFromRange(range);
+                const rangeDeleteListAnchor = captureRangeDeleteListAnchor(selectedListItems);
                 // 選択範囲がある場合は状態を保存
                 stateManager.saveState();
-                if (isMac && e.ctrlKey && key === 'h') {
-                    document.execCommand('delete', false, null);
+                e.preventDefault();
+                e.stopPropagation();
+                const deleted = document.execCommand('delete', false, null);
+                if (!deleted) {
+                    try {
+                        range.deleteContents();
+                        range.collapse(true);
+                        selection.removeAllRanges();
+                        selection.addRange(range);
+                    } catch (_e) {
+                        // noop
+                    }
                 }
+                requestAnimationFrame(() => {
+                    const didPrune = pruneEmptyListItemsAfterRangeDelete(selectedListItems);
+                    const restoredAnchorLine = restoreEmptyLineAtRangeDeleteAnchor(
+                        rangeDeleteListAnchor,
+                        selectedListItems
+                    );
+                    if (didPrune || restoredAnchorLine) {
+                        updateListItemClasses();
+                    }
+                    notifyChangeImmediate();
+                });
                 return true;
             }
 
