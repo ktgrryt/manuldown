@@ -45,6 +45,7 @@ import { SearchManager } from './modules/SearchManager.js';
     const INTERNAL_EDITOR_HTML_CLIPBOARD_TYPE = 'application/x-manuldown-editor-html';
     const INTERNAL_EDITOR_HTML_MARKER_START = '<!--manuldown-clipboard-start-->';
     const INTERNAL_EDITOR_HTML_MARKER_END = '<!--manuldown-clipboard-end-->';
+    const SOFT_LINE_BREAK_ATTRIBUTE = 'data-mdw-soft-break';
 
     function normalizeTocScrollDuration(value) {
         if (typeof value !== 'number' || !Number.isFinite(value)) {
@@ -3035,9 +3036,10 @@ import { SearchManager } from './modules/SearchManager.js';
     function insertCustomSlashTemplate(templateContent) {
         const normalizedContent = String(templateContent || '').replace(/\r\n?/g, '\n');
         if (normalizedContent === '') return;
+        const insertionOptions = { lineBreakMode: 'soft' };
 
         if (typeof applyTextInsertionWithPasteRules === 'function') {
-            const handled = applyTextInsertionWithPasteRules(normalizedContent);
+            const handled = applyTextInsertionWithPasteRules(normalizedContent, insertionOptions);
             if (handled) {
                 editor.focus();
                 return;
@@ -3045,7 +3047,7 @@ import { SearchManager } from './modules/SearchManager.js';
         }
 
         stateManager.saveState();
-        const inserted = insertPlainTextWithLineBreaksAtSelection(normalizedContent);
+        const inserted = insertPlainTextWithLineBreaksAtSelection(normalizedContent, insertionOptions);
         if (!inserted) return;
 
         editor.focus();
@@ -4199,10 +4201,23 @@ import { SearchManager } from './modules/SearchManager.js';
         return true;
     }
 
-    function insertPlainTextWithLineBreaksAtSelection(text) {
+    function normalizeLineBreakMode(value) {
+        return value === 'soft' ? 'soft' : 'hard';
+    }
+
+    function createLineBreakNode(lineBreakMode) {
+        const br = document.createElement('br');
+        if (normalizeLineBreakMode(lineBreakMode) === 'soft') {
+            br.setAttribute(SOFT_LINE_BREAK_ATTRIBUTE, 'true');
+        }
+        return br;
+    }
+
+    function insertPlainTextWithLineBreaksAtSelection(text, options = {}) {
         const selection = window.getSelection();
         if (!selection || !selection.rangeCount) return false;
         const range = selection.getRangeAt(0);
+        const lineBreakMode = normalizeLineBreakMode(options.lineBreakMode);
 
         cleanupEmptyStrikeAtSelection();
         cleanupEmptyStrikes();
@@ -4222,7 +4237,7 @@ import { SearchManager } from './modules/SearchManager.js';
                 fragment.appendChild(document.createTextNode(line));
             }
             if (i < lines.length - 1) {
-                fragment.appendChild(document.createElement('br'));
+                fragment.appendChild(createLineBreakNode(lineBreakMode));
             }
         }
 
@@ -14667,10 +14682,11 @@ import { SearchManager } from './modules/SearchManager.js';
             return true;
         };
 
-        const insertPlainTextPreservingLineBreaks = (text) => {
+        const insertPlainTextPreservingLineBreaks = (text, options = {}) => {
             const selection = window.getSelection();
             if (!selection || !selection.rangeCount) return false;
             const range = selection.getRangeAt(0);
+            const lineBreakMode = normalizeLineBreakMode(options.lineBreakMode);
 
             cleanupEmptyStrikeAtSelection();
             cleanupEmptyStrikes();
@@ -14690,7 +14706,7 @@ import { SearchManager } from './modules/SearchManager.js';
                     fragment.appendChild(document.createTextNode(line));
                 }
                 if (i < lines.length - 1) {
-                    fragment.appendChild(document.createElement('br'));
+                    fragment.appendChild(createLineBreakNode(lineBreakMode));
                 }
             }
 
@@ -15736,10 +15752,22 @@ import { SearchManager } from './modules/SearchManager.js';
             while (i < lines.length) {
                 const line = lines[i];
                 if (isPastedBlankLine(line)) {
-                    const blankLine = document.createElement('p');
-                    blankLine.appendChild(document.createElement('br'));
-                    blocks.push(blankLine);
-                    i++;
+                    const blankStart = i;
+                    while (i < lines.length && isPastedBlankLine(lines[i])) {
+                        i++;
+                    }
+                    const blankCount = i - blankStart;
+                    const hasContentBefore = blocks.length > 0;
+                    const hasContentAfter = i < lines.length;
+                    const blankParagraphCount = (hasContentBefore && hasContentAfter)
+                        ? Math.max(0, blankCount - 1)
+                        : blankCount;
+
+                    for (let blankIndex = 0; blankIndex < blankParagraphCount; blankIndex++) {
+                        const blankLine = document.createElement('p');
+                        blankLine.appendChild(document.createElement('br'));
+                        blocks.push(blankLine);
+                    }
                     continue;
                 }
 
@@ -16054,6 +16082,7 @@ import { SearchManager } from './modules/SearchManager.js';
 
         const insertTextWithPasteBehavior = (rawText, options = {}) => {
             const allowPlainTextFallback = options.allowPlainTextFallback !== false;
+            const lineBreakMode = normalizeLineBreakMode(options.lineBreakMode);
             const selection = window.getSelection();
             if (!selection) return false;
 
@@ -16098,7 +16127,7 @@ import { SearchManager } from './modules/SearchManager.js';
             }
 
             stateManager.saveState();
-            const inserted = insertPlainTextPreservingLineBreaks(rawText);
+            const inserted = insertPlainTextPreservingLineBreaks(rawText, { lineBreakMode });
             if (!inserted) {
                 return false;
             }
@@ -16112,8 +16141,8 @@ import { SearchManager } from './modules/SearchManager.js';
             return true;
         };
 
-        applyTextInsertionWithPasteRules = (rawText) => {
-            return insertTextWithPasteBehavior(rawText, { allowPlainTextFallback: true });
+        applyTextInsertionWithPasteRules = (rawText, options = {}) => {
+            return insertTextWithPasteBehavior(rawText, { allowPlainTextFallback: true, ...options });
         };
 
         // 画像のペースト・リンクのペースト

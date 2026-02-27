@@ -70,6 +70,17 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         // Keep default list handling - Turndown handles nested lists correctly by default
         // Just ensure proper indentation with 2 spaces
         this.turndownService.keep(['br']);
+        this.turndownService.addRule('lineBreak', {
+            filter: 'br',
+            replacement: function (_content: string, node: any) {
+                const isSoftBreak = !!(
+                    node &&
+                    typeof node.getAttribute === 'function' &&
+                    node.getAttribute('data-mdw-soft-break') === 'true'
+                );
+                return isSoftBreak ? '\n' : '  \n';
+            }
+        });
 
         const provider = this;
         this.turndownService.addRule('tableCell', {
