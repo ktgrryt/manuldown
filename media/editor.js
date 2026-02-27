@@ -6377,6 +6377,12 @@ import { SearchManager } from './modules/SearchManager.js';
             }
 
             if (isBackwardDelete) {
+                if (moveCaretToImageRightEdgeFromFollowingBlockStartForBackspace(range, selection)) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    return true;
+                }
+
                 const imageAtRightEdge = getBackspaceTargetImageAtRightEdge(range);
                 if (imageAtRightEdge) {
                     e.preventDefault();
@@ -8588,13 +8594,12 @@ import { SearchManager } from './modules/SearchManager.js';
             const boundaryOnly =
                 normalized === '' ||
                 (hasPlaceholderSignal && normalized.replace(/["']/g, '') === '');
-            if (boundaryOnly) {
+            if (boundaryOnly && hasPlaceholderSignal) {
                 if (raw !== preferredAnchorText) {
                     nextSibling.textContent = preferredAnchorText;
                 }
-                return nextSibling;
             }
-            return null;
+            return nextSibling;
         }
 
         if (!create) {
@@ -11340,6 +11345,51 @@ import { SearchManager } from './modules/SearchManager.js';
         }
 
         return isCollapsedRangeAtImageRightEdge(range, candidate) ? candidate : null;
+    }
+
+    function moveCaretToImageRightEdgeFromFollowingBlockStartForBackspace(targetRange = null, selectionOverride = null) {
+        const selection = selectionOverride || window.getSelection();
+        if (!selection || !selection.rangeCount || !selection.isCollapsed) {
+            return false;
+        }
+
+        const range = targetRange && targetRange.collapsed ? targetRange : selection.getRangeAt(0);
+        if (!range || !range.collapsed || !editor.contains(range.startContainer)) {
+            return false;
+        }
+
+        const currentBlock = getClosestBlockElement(range.startContainer);
+        if (!currentBlock || currentBlock === editor) {
+            return false;
+        }
+        if (currentBlock.tagName !== 'P' && currentBlock.tagName !== 'DIV') {
+            return false;
+        }
+        if (isImageOnlyBlockElement(currentBlock) || isEffectivelyEmptyBlock(currentBlock)) {
+            return false;
+        }
+        if (!isRangeAtBlockTextStart(range, currentBlock)) {
+            return false;
+        }
+
+        const prevBlock = currentBlock.previousElementSibling;
+        if (!prevBlock) {
+            return false;
+        }
+
+        const targetImage = prevBlock.tagName === 'IMG'
+            ? prevBlock
+            : getSingleImageFromImageOnlyBlock(prevBlock);
+        if (!targetImage || targetImage.tagName !== 'IMG' || !editor.contains(targetImage)) {
+            return false;
+        }
+
+        const edgeRange = createAfterImageCaretRange(targetImage, { ensureTextAnchor: true });
+        if (!edgeRange) {
+            return false;
+        }
+
+        return applySelectionRange(selection, edgeRange);
     }
 
     function moveCaretToParagraphAfterImageRightEdgeForTextInput() {
