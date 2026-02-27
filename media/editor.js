@@ -140,6 +140,126 @@ import { SearchManager } from './modules/SearchManager.js';
         return true;
     }
 
+    function clearEditorContentAndPlaceCaret(selectionOverride = null) {
+        if (!editor) return false;
+        while (editor.firstChild) {
+            editor.removeChild(editor.firstChild);
+        }
+        const selection = selectionOverride || window.getSelection();
+        if (!selection) return true;
+        const range = document.createRange();
+        range.setStart(editor, 0);
+        range.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        return true;
+    }
+
+    function hasMeaningfulContentForSelectionBoundary(node) {
+        if (!node) return false;
+        if (node.nodeType === Node.TEXT_NODE) {
+            return !isIgnorableEditorTextValue(node.textContent || '');
+        }
+        if (node.nodeType !== Node.ELEMENT_NODE) {
+            return false;
+        }
+
+        const element = node;
+        if (element.getAttribute?.('data-exclude-from-markdown') === 'true') {
+            return false;
+        }
+        if (element.classList?.contains('md-table-insert-line')) {
+            return false;
+        }
+        if (element.getAttribute?.('aria-hidden') === 'true') {
+            return false;
+        }
+        if (element.tagName === 'BR') {
+            return false;
+        }
+        if (
+            element.tagName === 'IMG' ||
+            element.tagName === 'HR' ||
+            element.tagName === 'TABLE' ||
+            element.tagName === 'PRE' ||
+            element.tagName === 'INPUT'
+        ) {
+            return true;
+        }
+        return Array.from(element.childNodes || []).some((child) =>
+            hasMeaningfulContentForSelectionBoundary(child)
+        );
+    }
+
+    function rangeContainsRenderableContent(range) {
+        if (!range) return false;
+        try {
+            const fragment = range.cloneContents();
+            return Array.from(fragment.childNodes || []).some((node) =>
+                hasMeaningfulContentForSelectionBoundary(node)
+            );
+        } catch (_e) {
+            const text = (range.toString() || '').replace(/[\u200B\uFEFF\u00A0]/g, '').trim();
+            return text !== '';
+        }
+    }
+
+    function isRangeCoveringEntireEditor(range) {
+        if (!range || range.collapsed || !editor) return false;
+        try {
+            if (range.commonAncestorContainer !== editor && !editor.contains(range.commonAncestorContainer)) {
+                return false;
+            }
+
+            const beforeRange = document.createRange();
+            beforeRange.setStart(editor, 0);
+            beforeRange.setEnd(range.startContainer, range.startOffset);
+            if (rangeContainsRenderableContent(beforeRange)) {
+                return false;
+            }
+
+            const afterRange = document.createRange();
+            afterRange.setStart(range.endContainer, range.endOffset);
+            afterRange.setEnd(editor, editor.childNodes.length);
+            if (rangeContainsRenderableContent(afterRange)) {
+                return false;
+            }
+
+            return true;
+        } catch (_e) {
+            return false;
+        }
+    }
+
+    function isEmptyBlockquoteShell(blockquote) {
+        if (!blockquote || blockquote.tagName !== 'BLOCKQUOTE') return false;
+        const normalizedText = (blockquote.textContent || '').replace(/[\u200B\u00A0\uFEFF]/g, '').trim();
+        if (normalizedText !== '') return false;
+        const hasStructuralContent = !!blockquote.querySelector('img, hr, table, pre, ul, ol, input');
+        if (hasStructuralContent) return false;
+        return true;
+    }
+
+    function clearEditorIfOnlyEmptyBlockquoteShell(selectionOverride = null) {
+        if (!editor) return false;
+        const topLevelNonWhitespaceNodes = Array.from(editor.childNodes || []).filter((node) => {
+            if (!node) return false;
+            if (node.nodeType === Node.TEXT_NODE) {
+                return !isIgnorableEditorTextValue(node.textContent || '');
+            }
+            return node.nodeType === Node.ELEMENT_NODE;
+        });
+        if (topLevelNonWhitespaceNodes.length !== 1) return false;
+        const onlyNode = topLevelNonWhitespaceNodes[0];
+        if (onlyNode.nodeType !== Node.ELEMENT_NODE || onlyNode.tagName !== 'BLOCKQUOTE') {
+            return false;
+        }
+        if (!isEmptyBlockquoteShell(onlyNode)) {
+            return false;
+        }
+        return clearEditorContentAndPlaceCaret(selectionOverride);
+    }
+
     function getEditorScrollbarMetrics() {
         if (!editor) return null;
         const clientHeight = editor.clientHeight;
@@ -6342,6 +6462,16 @@ import { SearchManager } from './modules/SearchManager.js';
             }
 
             if (!range.collapsed) {
+                if (isRangeCoveringEntireEditor(range)) {
+                    stateManager.saveState();
+                    e.preventDefault();
+                    e.stopPropagation();
+                    clearEditorContentAndPlaceCaret(selection);
+                    pendingDeleteListItem = null;
+                    pendingStrikeCleanup = false;
+                    notifyChangeImmediate();
+                    return true;
+                }
                 if (shouldFlagStrikeCleanupForDelete(range)) {
                     pendingStrikeCleanup = true;
                 }
@@ -6371,6 +6501,7 @@ import { SearchManager } from './modules/SearchManager.js';
                     if (didPrune || restoredAnchorLine) {
                         updateListItemClasses();
                     }
+                    clearEditorIfOnlyEmptyBlockquoteShell(selection);
                     notifyChangeImmediate();
                 });
                 return true;
@@ -13849,6 +13980,17 @@ import { SearchManager } from './modules/SearchManager.js';
             if (typeof e.inputType === 'string' && e.inputType.startsWith('delete')) {
                 const selection = window.getSelection();
                 const range = selection && selection.rangeCount ? selection.getRangeAt(0) : null;
+                if (range && !range.collapsed && isRangeCoveringEntireEditor(range)) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    stateManager.saveState();
+                    clearEditorContentAndPlaceCaret(selection);
+                    pendingDeleteListItem = null;
+                    pendingStrikeCleanup = false;
+                    pendingCtrlKDeleteSync = false;
+                    notifyChangeImmediate();
+                    return;
+                }
                 if (shouldFlagStrikeCleanupForDelete(range)) {
                     pendingStrikeCleanup = true;
                 }
