@@ -43,6 +43,8 @@ import { SearchManager } from './modules/SearchManager.js';
     const IME_ENTER_CONFIRM_GRACE_MS = 80;
     const INTERNAL_EDITOR_PLAIN_TEXT_CLIPBOARD_TYPE = 'application/x-manuldown-editor-plain-text';
     const INTERNAL_EDITOR_HTML_CLIPBOARD_TYPE = 'application/x-manuldown-editor-html';
+    const INTERNAL_EDITOR_HTML_MARKER_START = '<!--manuldown-clipboard-start-->';
+    const INTERNAL_EDITOR_HTML_MARKER_END = '<!--manuldown-clipboard-end-->';
 
     function normalizeTocScrollDuration(value) {
         if (typeof value !== 'number' || !Number.isFinite(value)) {
@@ -645,6 +647,23 @@ import { SearchManager } from './modules/SearchManager.js';
         return false;
     }
 
+    function selectionContainsListStructure(selection) {
+        if (!selection || !selection.rangeCount) return false;
+        for (let i = 0; i < selection.rangeCount; i++) {
+            const range = selection.getRangeAt(i);
+            const startListItem = domUtils.getParentElement(range.startContainer, 'LI');
+            const endListItem = domUtils.getParentElement(range.endContainer, 'LI');
+            if (startListItem || endListItem) {
+                return true;
+            }
+            const fragment = range.cloneContents();
+            if (fragment.querySelector && fragment.querySelector('li, ul, ol')) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     function fragmentToClipboardPlainText(fragment) {
         if (!fragment) return '';
         const blockTags = new Set([
@@ -656,6 +675,122 @@ import { SearchManager } from './modules/SearchManager.js';
             return !!(node && node.nodeType === Node.ELEMENT_NODE && blockTags.has(node.tagName));
         };
         let output = '';
+        const ensureTrailingLineBreaks = (count = 1) => {
+            const parsed = Number.isFinite(count) ? Math.trunc(count) : 0;
+            const needed = Math.max(0, parsed);
+            if (needed <= 0) return;
+            const trailingLineBreaks = (output.match(/\n*$/) || [''])[0].length;
+            if (trailingLineBreaks < needed) {
+                output += '\n'.repeat(needed - trailingLineBreaks);
+            }
+        };
+        const inlineNodeToText = (node) => {
+            if (!node) return '';
+            if (node.nodeType === Node.TEXT_NODE) {
+                return node.textContent || '';
+            }
+            if (node.nodeType !== Node.ELEMENT_NODE) {
+                return '';
+            }
+            const element = node;
+            if (element.getAttribute && element.getAttribute('data-exclude-from-markdown') === 'true') {
+                return '';
+            }
+            if (element.tagName === 'IMG') {
+                return createMarkdownImageSyntaxFromElement(element);
+            }
+            if (element.tagName === 'BR') {
+                return '\n';
+            }
+            if (element.tagName === 'UL' || element.tagName === 'OL') {
+                return '';
+            }
+            if (element.tagName === 'INPUT' && element.type === 'checkbox') {
+                return '';
+            }
+            let text = '';
+            for (const child of Array.from(element.childNodes || [])) {
+                text += inlineNodeToText(child);
+            }
+            return text;
+        };
+        const normalizeListText = (text) => {
+            return normalizeClipboardPlainText(text)
+                .replace(/\n+/g, ' ')
+                .replace(/[ \t]+/g, ' ')
+                .trim();
+        };
+        const getOrderedListItemNumber = (listElement, listItem) => {
+            const start = Math.max(1, parseInt(listElement?.getAttribute?.('start') || '1', 10) || 1);
+            if (!listElement || !listItem || listElement.tagName !== 'OL') {
+                return start;
+            }
+            let offset = 0;
+            for (const child of Array.from(listElement.children || [])) {
+                if (!child || child.tagName !== 'LI') continue;
+                if (child === listItem) {
+                    return start + offset;
+                }
+                offset++;
+            }
+            return start;
+        };
+        const serializeListItem = (listItem, listType, level, number) => {
+            if (!listItem || listItem.tagName !== 'LI') return;
+            const indent = '  '.repeat(Math.max(0, level));
+            const marker = listType === 'ol' ? `${Math.max(1, number || 1)}. ` : '- ';
+            const checkbox = getCheckboxInListItemDirectContent(listItem);
+            const isTaskItem = !!checkbox;
+            const isChecked = isTaskItem && !!(checkbox.checked || checkbox.hasAttribute('checked'));
+
+            let directTextRaw = '';
+            for (const child of Array.from(listItem.childNodes || [])) {
+                if (child.nodeType === Node.ELEMENT_NODE &&
+                    (child.tagName === 'UL' || child.tagName === 'OL')) {
+                    continue;
+                }
+                if (child.nodeType === Node.ELEMENT_NODE &&
+                    child.tagName === 'INPUT' &&
+                    child.type === 'checkbox') {
+                    continue;
+                }
+                directTextRaw += inlineNodeToText(child);
+            }
+
+            const directText = normalizeListText(directTextRaw);
+            let line = `${indent}${marker}`;
+            if (isTaskItem) {
+                line += isChecked ? '[x]' : '[ ]';
+                if (directText !== '') {
+                    line += ` ${directText}`;
+                }
+            } else if (directText !== '') {
+                line += directText;
+            }
+            output += line;
+            ensureTrailingLineBreaks(1);
+
+            const nestedLists = Array.from(listItem.children || []).filter(
+                (child) => child && (child.tagName === 'UL' || child.tagName === 'OL')
+            );
+            nestedLists.forEach((nestedList) => serializeList(nestedList, level + 1));
+        };
+        const serializeList = (listElement, level = 0) => {
+            if (!listElement || (listElement.tagName !== 'UL' && listElement.tagName !== 'OL')) {
+                return;
+            }
+            const listType = listElement.tagName === 'OL' ? 'ol' : 'ul';
+            let orderedNumber = Math.max(1, parseInt(listElement.getAttribute('start') || '1', 10) || 1);
+            const items = Array.from(listElement.children || []).filter(
+                (child) => child && child.tagName === 'LI'
+            );
+            items.forEach((item) => {
+                serializeListItem(item, listType, level, orderedNumber);
+                if (listType === 'ol') {
+                    orderedNumber++;
+                }
+            });
+        };
 
         const walk = (node) => {
             if (!node) return;
@@ -688,6 +823,18 @@ import { SearchManager } from './modules/SearchManager.js';
             }
             if (el.tagName === 'BR') {
                 output += '\n';
+                return;
+            }
+            if (el.tagName === 'UL' || el.tagName === 'OL') {
+                serializeList(el, 0);
+                return;
+            }
+            if (el.tagName === 'LI') {
+                const parent = el.parentElement;
+                const parentIsOrderedList = !!(parent && parent.tagName === 'OL');
+                const listType = parentIsOrderedList ? 'ol' : 'ul';
+                const number = parentIsOrderedList ? getOrderedListItemNumber(parent, el) : 1;
+                serializeListItem(el, listType, 0, number);
                 return;
             }
 
@@ -733,11 +880,22 @@ import { SearchManager } from './modules/SearchManager.js';
             .replace(/[\u200B\uFEFF]/g, '');
     }
 
+    function extractInternalHtmlFromMarkedClipboardHtml(rawHtml) {
+        if (typeof rawHtml !== 'string' || rawHtml === '') return '';
+        const startIndex = rawHtml.indexOf(INTERNAL_EDITOR_HTML_MARKER_START);
+        if (startIndex === -1) return '';
+        const contentStart = startIndex + INTERNAL_EDITOR_HTML_MARKER_START.length;
+        const endIndex = rawHtml.indexOf(INTERNAL_EDITOR_HTML_MARKER_END, contentStart);
+        if (endIndex === -1) return '';
+        return rawHtml.slice(contentStart, endIndex);
+    }
+
     function writeClipboardPayload(clipboardData, payload, fallbackText = '', plainTextOverride = null) {
         if (!clipboardData || !payload) return '';
 
         if (payload.html) {
-            clipboardData.setData('text/html', payload.html);
+            const markedHtml = `${INTERNAL_EDITOR_HTML_MARKER_START}${payload.html}${INTERNAL_EDITOR_HTML_MARKER_END}`;
+            clipboardData.setData('text/html', markedHtml);
             try {
                 clipboardData.setData(INTERNAL_EDITOR_HTML_CLIPBOARD_TYPE, payload.html);
             } catch (_error) {
@@ -14875,14 +15033,139 @@ import { SearchManager } from './modules/SearchManager.js';
             return true;
         };
 
+        const clipboardVariationSelectorPattern = /[\uFE00-\uFE0F]/;
+        const clipboardInvisiblePattern = /[\u200B\u200C\u200D\u200E\u200F\u202A-\u202E\u2060\u2066-\u2069\uFEFF]/g;
+        const unorderedPastedListMarkers = new Set([
+            '*', '+', '-',
+            '•', '◦', '▪', '‣', '∙', '·',
+            '●', '○', '◉', '◌', '◍',
+            '◾', '◽', '▫',
+            '▸', '▹', '►', '▻',
+            '➤', '➢',
+            '–', '—', '⁃', '−', '‒', '﹘', '﹣'
+        ]);
+        const normalizeClipboardLineForParsing = (line) => {
+            return String(line || '')
+                .replace(clipboardInvisiblePattern, '');
+        };
+        const isClipboardWhitespaceChar = (char) => {
+            return !!(char && char.trim() === '');
+        };
+        const isPastedBlankLine = (line) => {
+            return normalizeClipboardLineForParsing(line).trim() === '';
+        };
+        const getListIndentLength = (indentValue) => {
+            let length = 0;
+            const indent = String(indentValue || '').replace(clipboardInvisiblePattern, '');
+            for (const char of indent) {
+                if (char === '\t') {
+                    length += 4;
+                } else if (isClipboardWhitespaceChar(char)) {
+                    length += 1;
+                } else {
+                    break;
+                }
+            }
+            return length;
+        };
+        const parsePastedListLine = (line) => {
+            const normalizedLine = normalizeClipboardLineForParsing(line);
+            if (!normalizedLine) return null;
+
+            let cursor = 0;
+            while (cursor < normalizedLine.length && isClipboardWhitespaceChar(normalizedLine[cursor])) {
+                cursor++;
+            }
+
+            const indent = normalizedLine.slice(0, cursor);
+            const rest = normalizedLine.slice(cursor);
+            if (!rest) return null;
+
+            const orderedMatch = rest.match(/^(\d+)([.)])/);
+            if (orderedMatch) {
+                let markerEnd = orderedMatch[0].length;
+                if (markerEnd >= rest.length || !isClipboardWhitespaceChar(rest[markerEnd])) {
+                    return null;
+                }
+                while (markerEnd < rest.length && isClipboardWhitespaceChar(rest[markerEnd])) {
+                    markerEnd++;
+                }
+                return {
+                    indent,
+                    indentLength: getListIndentLength(indent),
+                    listType: 'ol',
+                    startNumber: Math.max(1, parseInt(orderedMatch[1], 10) || 1),
+                    content: normalizeClipboardLineForParsing(rest.slice(markerEnd)).trimEnd()
+                };
+            }
+
+            if (!unorderedPastedListMarkers.has(rest[0])) {
+                return null;
+            }
+
+            const markerChar = rest[0];
+            let markerEnd = 1;
+            while (markerEnd < rest.length && clipboardVariationSelectorPattern.test(rest[markerEnd])) {
+                markerEnd++;
+            }
+            let contentStart = markerEnd;
+            if (markerEnd < rest.length && isClipboardWhitespaceChar(rest[markerEnd])) {
+                while (contentStart < rest.length && isClipboardWhitespaceChar(rest[contentStart])) {
+                    contentStart++;
+                }
+            } else if (markerChar === '-' || markerChar === '*' || markerChar === '+') {
+                // Keep Markdown-like ASCII markers strict to avoid false positives
+                // with ordinary text that starts with punctuation.
+                return null;
+            }
+
+            return {
+                indent,
+                indentLength: getListIndentLength(indent),
+                listType: 'ul',
+                startNumber: 1,
+                content: normalizeClipboardLineForParsing(rest.slice(contentStart)).trimEnd()
+            };
+        };
+        const pastedTextLooksLikeList = (rawText) => {
+            if (typeof rawText !== 'string' || rawText === '') return false;
+            const normalized = rawText.replace(/\r\n?/g, '\n').replace(/[\u2028\u2029]/g, '\n');
+            const lines = normalized.split('\n');
+            let parsedLineCount = 0;
+            for (const line of lines) {
+                if (isPastedBlankLine(line)) continue;
+                if (!parsePastedListLine(line)) {
+                    return false;
+                }
+                parsedLineCount++;
+            }
+            return parsedLineCount > 0;
+        };
+        const internalHtmlIsListlessPlainText = (rawHtml) => {
+            if (typeof rawHtml !== 'string' || rawHtml.trim() === '') return false;
+            const container = document.createElement('div');
+            container.innerHTML = rawHtml;
+            container.querySelectorAll('[data-exclude-from-markdown="true"]').forEach((node) => node.remove());
+            const semanticSelector = [
+                'ul', 'ol', 'li',
+                'table', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td',
+                'pre', 'code',
+                'blockquote',
+                'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+                'img', 'hr',
+                'input', 'a'
+            ].join(', ');
+            return !container.querySelector(semanticSelector);
+        };
+
         const tryInsertMarkdownListFromPastedText = (rawText) => {
             if (typeof rawText !== 'string') return false;
 
-            const normalized = rawText.replace(/\r\n?/g, '\n');
+            const normalized = rawText.replace(/\r\n?/g, '\n').replace(/[\u2028\u2029]/g, '\n');
             const lines = normalized.split('\n');
             // Let the mixed parser handle documents that include blank lines
             // so visual line breaks between list blocks are preserved.
-            if (lines.some((line) => (line || '').trim() === '')) {
+            if (lines.some((line) => isPastedBlankLine(line))) {
                 return false;
             }
             const parsedItems = [];
@@ -14890,26 +15173,26 @@ import { SearchManager } from './modules/SearchManager.js';
             let rootStartNumber = 1;
 
             for (const line of lines) {
-                if (line.trim() === '') {
+                if (isPastedBlankLine(line)) {
                     continue;
                 }
-                const match = line.match(/^(\s*)(?:([-*+])|(\d+)\.)\s+(.*)$/);
-                if (!match) {
+                const parsed = parsePastedListLine(line);
+                if (!parsed) {
                     return false;
                 }
 
-                const listType = match[2] ? 'ul' : 'ol';
+                const listType = parsed.listType;
                 if (!rootListType) {
                     rootListType = listType;
                     if (listType === 'ol') {
-                        rootStartNumber = Math.max(1, parseInt(match[3], 10) || 1);
+                        rootStartNumber = parsed.startNumber;
                     }
                 } else if (rootListType !== listType) {
                     return false;
                 }
 
-                const indentLength = match[1].replace(/\t/g, '    ').length;
-                const rawContent = (match[4] || '').trimEnd();
+                const indentLength = parsed.indentLength;
+                const rawContent = parsed.content;
                 const taskMatch = listType === 'ul'
                     ? rawContent.match(/^\[( |x|X)\](?:\s+(.*))?$/)
                     : null;
@@ -15032,22 +15315,12 @@ import { SearchManager } from './modules/SearchManager.js';
                 return false;
             }
 
-            const normalized = rawText.replace(/\r\n?/g, '\n');
+            const normalized = rawText.replace(/\r\n?/g, '\n').replace(/[\u2028\u2029]/g, '\n');
             const lines = normalized.split('\n');
             if (lines.length === 0) return false;
-            const hasExplicitBlankLine = lines.some((line) => (line || '').trim() === '');
+            const hasExplicitBlankLine = lines.some((line) => isPastedBlankLine(line));
 
             const isFenceStart = (line) => /^\s*```/.test(line || '');
-            const parseListLine = (line) => {
-                const match = (line || '').match(/^(\s*)(?:([-*+])|(\d+)\.)\s+(.*)$/);
-                if (!match) return null;
-                return {
-                    indent: match[1] || '',
-                    listType: match[2] ? 'ul' : 'ol',
-                    startNumber: match[3] ? Math.max(1, parseInt(match[3], 10) || 1) : 1,
-                    content: (match[4] || '').trimEnd()
-                };
-            };
             const parseHeadingLine = (line) => {
                 const match = (line || '').match(/^\s*(#{1,6})\s+(.+?)\s*$/);
                 if (!match) return null;
@@ -15069,13 +15342,13 @@ import { SearchManager } from './modules/SearchManager.js';
             const startsKnownBlockAt = (index) => {
                 if (index < 0 || index >= lines.length) return false;
                 const line = lines[index];
-                if ((line || '').trim() === '') return false;
+                if (isPastedBlankLine(line)) return false;
                 if (isFenceStart(line)) return true;
                 if (isTableStartAt(index)) return true;
                 if (parseHeadingLine(line)) return true;
                 if (parseHrLine(line)) return true;
                 if (parseQuoteLine(line) !== null) return true;
-                if (parseListLine(line)) return true;
+                if (parsePastedListLine(line)) return true;
                 return false;
             };
 
@@ -15085,7 +15358,7 @@ import { SearchManager } from './modules/SearchManager.js';
 
             while (i < lines.length) {
                 const line = lines[i];
-                if ((line || '').trim() === '') {
+                if (isPastedBlankLine(line)) {
                     const blankLine = document.createElement('p');
                     blankLine.appendChild(document.createElement('br'));
                     blocks.push(blankLine);
@@ -15127,7 +15400,7 @@ import { SearchManager } from './modules/SearchManager.js';
                     let j = i + 2;
                     while (j < lines.length) {
                         const tableLine = lines[j];
-                        if ((tableLine || '').trim() === '') break;
+                        if (isPastedBlankLine(tableLine)) break;
                         const cells = splitMarkdownTableRow(tableLine);
                         if (!cells) break;
                         if (cells.length < colCount) {
@@ -15227,7 +15500,7 @@ import { SearchManager } from './modules/SearchManager.js';
                     continue;
                 }
 
-                const listLine = parseListLine(line);
+                const listLine = parsePastedListLine(line);
                 if (listLine) {
                     const rootListType = listLine.listType;
                     const rootStartNumber = listLine.startNumber;
@@ -15235,14 +15508,14 @@ import { SearchManager } from './modules/SearchManager.js';
                     let j = i;
                     while (j < lines.length) {
                         const current = lines[j];
-                        if ((current || '').trim() === '') break;
-                        const parsed = parseListLine(current);
+                        if (isPastedBlankLine(current)) break;
+                        const parsed = parsePastedListLine(current);
                         if (!parsed || parsed.listType !== rootListType) break;
                         const taskMatch = rootListType === 'ul'
                             ? parsed.content.match(/^\[( |x|X)\](?:\s+(.*))?$/)
                             : null;
                         listItems.push({
-                            indentLength: parsed.indent.replace(/\t/g, '    ').length,
+                            indentLength: parsed.indentLength,
                             isTaskItem: !!taskMatch,
                             checked: !!(taskMatch && (taskMatch[1] || '').toLowerCase() === 'x'),
                             text: taskMatch ? (taskMatch[2] || '').trim() : parsed.content.trim()
@@ -15319,7 +15592,7 @@ import { SearchManager } from './modules/SearchManager.js';
                 let j = i;
                 while (j < lines.length) {
                     const paragraphLine = lines[j];
-                    if ((paragraphLine || '').trim() === '') break;
+                    if (isPastedBlankLine(paragraphLine)) break;
                     if (j !== i && startsKnownBlockAt(j)) break;
                     if (paragraph.childNodes.length > 0) {
                         paragraph.appendChild(document.createElement('br'));
@@ -15351,7 +15624,7 @@ import { SearchManager } from './modules/SearchManager.js';
                 return false;
             }
             if (isRangeInTableCell(range)) {
-                const hasListSyntax = lines.some((line) => !!parseListLine(line));
+                const hasListSyntax = lines.some((line) => !!parsePastedListLine(line));
                 if (hasListSyntax) {
                     return false;
                 }
@@ -15482,13 +15755,29 @@ import { SearchManager } from './modules/SearchManager.js';
 
                 // 選択範囲があり、URLがペーストされた場合はリンクを作成
                 const selection = window.getSelection();
-                const internalPastedHtml = clipboardData.getData(INTERNAL_EDITOR_HTML_CLIPBOARD_TYPE);
+                const pastedHtml = clipboardData.getData('text/html');
+                const markedInternalHtml = extractInternalHtmlFromMarkedClipboardHtml(pastedHtml);
+                const internalPastedHtml = clipboardData.getData(INTERNAL_EDITOR_HTML_CLIPBOARD_TYPE) || markedInternalHtml;
                 const internalPastedText = clipboardData.getData(INTERNAL_EDITOR_PLAIN_TEXT_CLIPBOARD_TYPE);
                 const pastedText = internalPastedText || clipboardData.getData('text/plain');
+                const hasListLikeText = !!(pastedText && pastedTextLooksLikeList(pastedText));
+
+                if (
+                    hasListLikeText &&
+                    selection &&
+                    insertTextWithPasteBehavior(pastedText, { allowPlainTextFallback: false })
+                ) {
+                    e.preventDefault();
+                    return;
+                }
 
                 if (
                     selection &&
                     internalPastedHtml &&
+                    !(
+                        hasListLikeText &&
+                        internalHtmlIsListlessPlainText(internalPastedHtml)
+                    ) &&
                     tryInsertInternalHtmlFromClipboard(internalPastedHtml)
                 ) {
                     e.preventDefault();
@@ -15609,10 +15898,12 @@ import { SearchManager } from './modules/SearchManager.js';
         });
 
         // 複数行選択のコピー時は改行を正規化したtext/plainを優先して設定
-        editor.addEventListener('copy', (e) => {
+        const handleEditorCopy = (e) => {
             if (isUpdating || e.defaultPrevented) return;
             const selection = window.getSelection();
             if (!selection || !selection.rangeCount || selection.isCollapsed || !e.clipboardData) return;
+            const anchorRange = selection.getRangeAt(0);
+            if (!editor.contains(anchorRange.commonAncestorContainer)) return;
 
             const payload = createClipboardPayloadFromSelection(selection);
             if (!payload) return;
@@ -15620,17 +15911,20 @@ import { SearchManager } from './modules/SearchManager.js';
             const payloadPlainText = normalizeClipboardPlainText(payload.text || '');
             const fallbackText = normalizeClipboardPlainText(selection.toString());
             const hasImage = selectionContainsImage(selection);
+            const hasListStructure = selectionContainsListStructure(selection);
             const plainText = hasImage
                 ? (payloadPlainText || fallbackText)
                 : (payloadPlainText || fallbackText);
             const isMultiLineSelection = plainText.includes('\n');
             const hasBlockStructure = typeof payload.html === 'string' &&
                 /<\/(?:p|div|blockquote|pre|h[1-6]|li|ul|ol|table)>\s*</i.test(payload.html);
-            if (!hasImage && !isMultiLineSelection && !hasBlockStructure) return;
+            if (!hasImage && !hasListStructure && !isMultiLineSelection && !hasBlockStructure) return;
 
             e.preventDefault();
             writeClipboardPayload(e.clipboardData, payload, fallbackText, plainText);
-        });
+        };
+        editor.addEventListener('copy', handleEditorCopy);
+        document.addEventListener('copy', handleEditorCopy, true);
 
         // 画像を含む選択のカットを補助（右クリックカット・範囲選択カット対応）
         editor.addEventListener('cut', (e) => {
@@ -15643,17 +15937,7 @@ import { SearchManager } from './modules/SearchManager.js';
             if (!payload || !e.clipboardData) return;
 
             e.preventDefault();
-            if (payload.html) {
-                e.clipboardData.setData('text/html', payload.html);
-            }
-            if (payload.text) {
-                e.clipboardData.setData('text/plain', payload.text);
-            } else {
-                const fallbackText = selection.toString();
-                if (fallbackText) {
-                    e.clipboardData.setData('text/plain', fallbackText);
-                }
-            }
+            writeClipboardPayload(e.clipboardData, payload, selection.toString(), payload.text || selection.toString());
 
             const range = selection.getRangeAt(0);
             stateManager.saveState();
