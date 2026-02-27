@@ -95,7 +95,12 @@ Notes:
 | Find | `Cmd+F` | `Ctrl+F` |
 | Find next match | `Enter` | `Enter` |
 | Find previous match | `Shift+Enter` | `Shift+Enter` |
+| Select image from image edge caret | `ArrowLeft` / `ArrowRight` | `ArrowLeft` / `ArrowRight` |
+| Resize selected image smaller | `Shift+ArrowDown` | `Shift+ArrowDown` |
+| Resize selected image larger | `Shift+ArrowUp` | `Shift+ArrowUp` |
 | Toggle editor | `Cmd+Option+M` | `Ctrl+Alt+M` |
+
+Image resize flow: place the caret on the left or right edge of an image, press `ArrowLeft` / `ArrowRight` to select the image, then use `Shift+ArrowUp` or `Shift+ArrowDown`.
 
 #### Table Operations
 

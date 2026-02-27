@@ -17152,12 +17152,149 @@ import { SearchManager } from './modules/SearchManager.js';
             syncImageResizeOverlayPosition();
         }
 
+        function shouldKeepImageResizeOverlayForSelection(image) {
+            if (!image || image.tagName !== 'IMG' || !image.isConnected || !editor.contains(image)) {
+                return false;
+            }
+            const selection = window.getSelection();
+            if (!selection || !selection.rangeCount) {
+                return false;
+            }
+            const range = selection.getRangeAt(0);
+            if (!editor.contains(range.commonAncestorContainer)) {
+                return false;
+            }
+
+            if (!range.collapsed) {
+                const selectedImage = getSelectedImageNodeFromRange(range) ||
+                    ((cursorManager && typeof cursorManager._getSelectedImageNode === 'function')
+                        ? cursorManager._getSelectedImageNode(range)
+                        : null);
+                return selectedImage === image;
+            }
+            return false;
+        }
+
         window.addEventListener('resize', () => {
             syncImageResizeOverlayPosition();
             scheduleEditorOverflowStateUpdate();
         });
 
+        const IMAGE_KEYBOARD_RESIZE_STEP_PX = 16;
+        const IMAGE_KEYBOARD_RESIZE_MIN_WIDTH_PX = 40;
+
+        function getSelectedImageForKeyboardResize() {
+            const selection = window.getSelection();
+            if (!selection || !selection.rangeCount) {
+                return null;
+            }
+
+            const range = selection.getRangeAt(0);
+            if (
+                range.collapsed &&
+                range.startContainer &&
+                range.startContainer.nodeType === Node.ELEMENT_NODE &&
+                range.startContainer.tagName === 'IMG' &&
+                editor.contains(range.startContainer)
+            ) {
+                return range.startContainer;
+            }
+
+            const selectedImage = getSelectedImageNodeFromRange(range) ||
+                ((cursorManager && typeof cursorManager._getSelectedImageNode === 'function')
+                    ? cursorManager._getSelectedImageNode(range)
+                    : null);
+            if (!selectedImage || selectedImage.tagName !== 'IMG' || !editor.contains(selectedImage)) {
+                return null;
+            }
+            return selectedImage;
+        }
+
+        function resizeImageByKeyboardStep(image, direction, beforeApply = null) {
+            if (!image || image.tagName !== 'IMG' || !editor.contains(image)) {
+                return false;
+            }
+            if (!Number.isFinite(direction) || direction === 0) {
+                return false;
+            }
+
+            const rect = image.getBoundingClientRect ? image.getBoundingClientRect() : null;
+            let currentWidth = rect && Number.isFinite(rect.width) ? rect.width : 0;
+            if (!(currentWidth > 0)) {
+                const widthAttr = Number.parseFloat(image.getAttribute('width') || '');
+                if (Number.isFinite(widthAttr) && widthAttr > 0) {
+                    currentWidth = widthAttr;
+                }
+            }
+            if (!(currentWidth > 0) && image.naturalWidth > 0) {
+                currentWidth = Math.min(image.naturalWidth, getImageRenderMaxWidth());
+            }
+            if (!(currentWidth > 0)) {
+                return false;
+            }
+
+            let aspectRatio = 0;
+            if (image.naturalWidth > 0 && image.naturalHeight > 0) {
+                aspectRatio = image.naturalWidth / image.naturalHeight;
+            }
+            if (!(aspectRatio > 0) && rect && Number.isFinite(rect.height) && rect.height > 0) {
+                aspectRatio = currentWidth / rect.height;
+            }
+            if (!(aspectRatio > 0)) {
+                aspectRatio = 1;
+            }
+
+            const minWidth = IMAGE_KEYBOARD_RESIZE_MIN_WIDTH_PX;
+            const maxWidth = Math.max(minWidth, getImageRenderMaxWidth());
+            const rawWidth = currentWidth + (IMAGE_KEYBOARD_RESIZE_STEP_PX * direction);
+            const targetWidth = Math.max(minWidth, Math.min(rawWidth, maxWidth));
+            const roundedTargetWidth = Math.round(targetWidth);
+            const roundedCurrentWidth = Math.round(currentWidth);
+            if (roundedTargetWidth === roundedCurrentWidth) {
+                return false;
+            }
+
+            if (typeof beforeApply === 'function') {
+                beforeApply();
+            }
+
+            const targetHeight = roundedTargetWidth / aspectRatio;
+            setImageRenderSize(image, roundedTargetWidth, targetHeight);
+            syncImageResizeOverlayPosition();
+            if (syncImageAltSizeFromRenderedSize(image)) {
+                return true;
+            }
+
+            const previousAlt = image.getAttribute('alt') || '';
+            const fallbackAlt = buildImageAltWithSizeSpec(previousAlt, roundedTargetWidth, targetHeight);
+            if (fallbackAlt === previousAlt) {
+                return false;
+            }
+            image.setAttribute('alt', fallbackAlt);
+            return true;
+        }
+
         document.addEventListener('keydown', (e) => {
+            const isResizeDown =
+                e.key === 'ArrowDown' && e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey;
+            const isResizeUp =
+                e.key === 'ArrowUp' && e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey;
+            if (isResizeDown || isResizeUp) {
+                const selectedImage = getSelectedImageForKeyboardResize();
+                if (selectedImage) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    showImageResizeOverlay(selectedImage, { preserveSelection: true });
+                    const resized = resizeImageByKeyboardStep(selectedImage, isResizeUp ? 1 : -1, () => {
+                        stateManager.saveState();
+                    });
+                    if (resized) {
+                        notifyChange();
+                    }
+                    return;
+                }
+            }
+
             if (!activeResizeImage) return;
 
             const key = (e.key || '').toLowerCase();
@@ -17407,6 +17544,10 @@ import { SearchManager } from './modules/SearchManager.js';
         // 水平線の選択状態を視覚的に反映 & チェックボックス付近のカーソル補正
         let isCorrectingCheckboxCursor = false;
         document.addEventListener('selectionchange', () => {
+            if (activeResizeImage && !imageResizeState && !shouldKeepImageResizeOverlayForSelection(activeResizeImage)) {
+                hideImageResizeOverlay();
+            }
+
             // すべてのHRから選択状態を解除
             editor.querySelectorAll('hr.selected').forEach(hr => hr.classList.remove('selected'));
 
