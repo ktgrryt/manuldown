@@ -237,6 +237,7 @@ export class MarkdownConverter {
             this.domUtils.getParentElement(textNode, 'TD') ||
             this.domUtils.getParentElement(textNode, 'TH')
         );
+        const isInListItem = !!this.domUtils.getParentElement(textNode, 'LI');
         const isInHeading = !!(
             this.domUtils.getParentElement(textNode, 'H1') ||
             this.domUtils.getParentElement(textNode, 'H2') ||
@@ -248,7 +249,7 @@ export class MarkdownConverter {
 
         // 見出し構文をチェック（行頭）
         const headingMatch = normalizedText.match(/^\s*(#{1,6})\s+(.+)$/);
-        if (!isInTableCell && headingMatch) {
+        if (!isInTableCell && !isInListItem && headingMatch) {
             const level = headingMatch[1].length;
             const content = headingMatch[2];
             const headingTag = 'h' + level;

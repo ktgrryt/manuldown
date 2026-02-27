@@ -10,6 +10,62 @@ export class ListManager {
         this.domUtils = domUtils;
     }
 
+    _getLastDirectListItem(listElement) {
+        if (!listElement || (listElement.tagName !== 'UL' && listElement.tagName !== 'OL')) {
+            return null;
+        }
+        const children = Array.from(listElement.children || []);
+        for (let i = children.length - 1; i >= 0; i--) {
+            const child = children[i];
+            if (child && child.tagName === 'LI') {
+                return child;
+            }
+        }
+        return null;
+    }
+
+    _findTailListItem(node) {
+        if (!node || node.nodeType !== Node.ELEMENT_NODE) {
+            return null;
+        }
+
+        if (node.tagName === 'LI') {
+            return node;
+        }
+
+        const directListItem = this._getLastDirectListItem(node);
+        if (directListItem) {
+            return directListItem;
+        }
+
+        const children = Array.from(node.children || []);
+        for (let i = children.length - 1; i >= 0; i--) {
+            const candidate = this._findTailListItem(children[i]);
+            if (candidate) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    _findPreviousIndentTargetListItem(listItem, parentList) {
+        if (!parentList) return null;
+
+        let current = parentList;
+        while (current && current !== this.editor) {
+            let prev = current.previousElementSibling;
+            while (prev) {
+                const candidate = this._findTailListItem(prev);
+                if (candidate && candidate !== listItem && candidate.tagName === 'LI') {
+                    return candidate;
+                }
+                prev = prev.previousElementSibling;
+            }
+            current = current.parentElement;
+        }
+        return null;
+    }
+
     /**
      * リストアイテムをインデント（ネスト）
      * @param {HTMLElement} listItem - インデントするリストアイテム
@@ -17,20 +73,10 @@ export class ListManager {
      * @param {number} offset - オフセット（未使用だが互換性のため保持）
      */
     indentListItem(listItem, textNode, offset) {
-        for (let i = 0; i < listItem.childNodes.length; i++) {
-            const child = listItem.childNodes[i];
-        }
-        
         const parentList = listItem.parentElement;
         let previousSibling = listItem.previousElementSibling;
-        if (!previousSibling && parentList) {
-            const previousList = parentList.previousElementSibling;
-            if (previousList && (previousList.tagName === 'UL' || previousList.tagName === 'OL')) {
-                const lastLi = previousList.lastElementChild;
-                if (lastLi && lastLi.tagName === 'LI') {
-                    previousSibling = lastLi;
-                }
-            }
+        if (!previousSibling || previousSibling.tagName !== 'LI') {
+            previousSibling = this._findPreviousIndentTargetListItem(listItem, parentList);
         }
         if (!previousSibling) {
             // エディタのフォーカスを維持
