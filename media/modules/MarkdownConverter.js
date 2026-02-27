@@ -237,6 +237,14 @@ export class MarkdownConverter {
             this.domUtils.getParentElement(textNode, 'TD') ||
             this.domUtils.getParentElement(textNode, 'TH')
         );
+        const isInHeading = !!(
+            this.domUtils.getParentElement(textNode, 'H1') ||
+            this.domUtils.getParentElement(textNode, 'H2') ||
+            this.domUtils.getParentElement(textNode, 'H3') ||
+            this.domUtils.getParentElement(textNode, 'H4') ||
+            this.domUtils.getParentElement(textNode, 'H5') ||
+            this.domUtils.getParentElement(textNode, 'H6')
+        );
 
         // 見出し構文をチェック（行頭）
         const headingMatch = normalizedText.match(/^\s*(#{1,6})\s+(.+)$/);
@@ -457,7 +465,7 @@ export class MarkdownConverter {
 
         // 順序なしリスト構文をチェック - item / - [ ] task
         const ulMatch = normalizedText.match(/^\s*[-*]\s+(.*)$/);
-        if (!isInTableCell && ulMatch) {
+        if (!isInTableCell && !isInHeading && ulMatch) {
             const rawContent = ulMatch[1] ?? '';
             const content = rawContent.trim() === '' ? '' : rawContent;
             const taskMatch = rawContent.match(/^\[( |x|X)\](.*)$/);
@@ -563,7 +571,7 @@ export class MarkdownConverter {
 
         // 順序付きリスト構文をチェック 1. item
         const olMatch = normalizedText.match(/^\s*\d+\.\s+(.*)$/);
-        if (!isInTableCell && olMatch) {
+        if (!isInTableCell && !isInHeading && olMatch) {
             const rawContent = olMatch[1] ?? '';
             const content = rawContent.trim() === '' ? '' : rawContent;
 

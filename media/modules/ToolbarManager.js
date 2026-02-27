@@ -153,6 +153,9 @@ export class ToolbarManager {
                 this.formatBlock('h3');
                 break;
             case 'ul':
+                if (this.isSelectionInHeadingContext()) {
+                    this.formatBlock('p');
+                }
                 if (!this.convertCheckboxListItemToListType('ul')) {
                     const marker = this._placeCollapsedCaretMarker();
                     document.execCommand('insertUnorderedList', false, null);
@@ -160,6 +163,9 @@ export class ToolbarManager {
                 }
                 break;
             case 'ol':
+                if (this.isSelectionInHeadingContext()) {
+                    this.formatBlock('p');
+                }
                 if (!this.convertCheckboxListItemToListType('ol')) {
                     const marker = this._placeCollapsedCaretMarker();
                     document.execCommand('insertOrderedList', false, null);
@@ -199,7 +205,10 @@ export class ToolbarManager {
                 this.headingLevelCommands.has(command) &&
                 !!activeHeadingCommand &&
                 activeHeadingCommand === command;
-            const isDisabled = disabledByTable || disabledBoldInHeading || disabledSameHeadingLevel;
+            const isDisabled =
+                disabledByTable ||
+                disabledBoldInHeading ||
+                disabledSameHeadingLevel;
             button.disabled = isDisabled;
             button.classList.toggle('is-disabled', isDisabled);
             button.classList.toggle('is-current-heading', isCurrentHeadingLevel);
