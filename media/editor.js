@@ -15993,6 +15993,8 @@ import { SearchManager } from './modules/SearchManager.js';
                 const pastedHtml = clipboardData.getData('text/html');
                 const markedInternalHtml = extractInternalHtmlFromMarkedClipboardHtml(pastedHtml);
                 const internalPastedHtml = clipboardData.getData(INTERNAL_EDITOR_HTML_CLIPBOARD_TYPE) || markedInternalHtml;
+                const pastedHtmlContainsImage = typeof pastedHtml === 'string' && /<img\b/i.test(pastedHtml);
+                const richPastedHtml = internalPastedHtml || (pastedHtmlContainsImage ? pastedHtml : '');
                 const internalPastedText = clipboardData.getData(INTERNAL_EDITOR_PLAIN_TEXT_CLIPBOARD_TYPE);
                 const pastedText = internalPastedText || clipboardData.getData('text/plain');
                 const hasListLikeText = !!(pastedText && pastedTextLooksLikeList(pastedText));
@@ -16008,12 +16010,12 @@ import { SearchManager } from './modules/SearchManager.js';
 
                 if (
                     selection &&
-                    internalPastedHtml &&
+                    richPastedHtml &&
                     !(
                         hasListLikeText &&
-                        internalHtmlIsListlessPlainText(internalPastedHtml)
+                        internalHtmlIsListlessPlainText(richPastedHtml)
                     ) &&
-                    tryInsertInternalHtmlFromClipboard(internalPastedHtml)
+                    tryInsertInternalHtmlFromClipboard(richPastedHtml)
                 ) {
                     e.preventDefault();
                     return;
@@ -16143,12 +16145,13 @@ import { SearchManager } from './modules/SearchManager.js';
             const payload = createClipboardPayloadFromSelection(selection);
             if (!payload) return;
 
+            const selectedImageOnly = !!getSelectedImageNodeFromRange(anchorRange);
             const payloadPlainText = normalizeClipboardPlainText(payload.text || '');
             const fallbackText = normalizeClipboardPlainText(selection.toString());
             const hasImage = selectionContainsImage(selection);
             const hasListStructure = selectionContainsListStructure(selection);
-            const plainText = hasImage
-                ? (payloadPlainText || fallbackText)
+            const plainText = selectedImageOnly
+                ? ''
                 : (payloadPlainText || fallbackText);
             const isMultiLineSelection = plainText.includes('\n');
             const hasBlockStructure = typeof payload.html === 'string' &&
@@ -16170,11 +16173,15 @@ import { SearchManager } from './modules/SearchManager.js';
 
             const payload = createClipboardPayloadFromSelection(selection);
             if (!payload || !e.clipboardData) return;
+            const selectedRange = selection.getRangeAt(0);
+            const selectedImageOnly = !!getSelectedImageNodeFromRange(selectedRange);
+            const fallbackText = selectedImageOnly ? '' : selection.toString();
+            const plainText = selectedImageOnly ? '' : (payload.text || selection.toString());
 
             e.preventDefault();
-            writeClipboardPayload(e.clipboardData, payload, selection.toString(), payload.text || selection.toString());
+            writeClipboardPayload(e.clipboardData, payload, fallbackText, plainText);
 
-            const range = selection.getRangeAt(0);
+            const range = selectedRange;
             stateManager.saveState();
             range.deleteContents();
             range.collapse(true);
