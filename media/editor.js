@@ -1642,6 +1642,46 @@ import { SearchManager } from './modules/SearchManager.js';
         return listItem || null;
     }
 
+    function getSelectedListItemsFromRange(range) {
+        if (!range || range.collapsed) return [];
+        if (!editor.contains(range.startContainer) || !editor.contains(range.endContainer)) {
+            return [];
+        }
+
+        const allListItems = Array.from(editor.querySelectorAll('li'));
+        if (allListItems.length === 0) return [];
+
+        const intersectedItems = allListItems.filter((item) => rangeIntersectsNodeSafely(range, item));
+        if (intersectedItems.length > 0) {
+            return intersectedItems;
+        }
+
+        const resolveBoundaryListItem = (container, offset, direction) => {
+            const direct = domUtils.getParentElement(container, 'LI');
+            if (direct) return direct;
+            if (cursorManager && typeof cursorManager._getListItemFromContainer === 'function') {
+                const resolved = cursorManager._getListItemFromContainer(container, offset, direction);
+                if (resolved) return resolved;
+            }
+            return null;
+        };
+
+        const startListItem = resolveBoundaryListItem(range.startContainer, range.startOffset, 'down');
+        const endListItem = resolveBoundaryListItem(range.endContainer, range.endOffset, 'up');
+
+        if (startListItem && endListItem) {
+            const startIndex = allListItems.indexOf(startListItem);
+            const endIndex = allListItems.indexOf(endListItem);
+            if (startIndex !== -1 && endIndex !== -1) {
+                const from = Math.min(startIndex, endIndex);
+                const to = Math.max(startIndex, endIndex);
+                return allListItems.slice(from, to + 1);
+            }
+        }
+
+        return [];
+    }
+
     function getCtrlKTargetListItem(range) {
         if (!range || !range.collapsed) return null;
 
@@ -6025,7 +6065,12 @@ import { SearchManager } from './modules/SearchManager.js';
             return true;
         }
 
-        if (listItem) {
+        const selectedListItems = getSelectedListItemsFromRange(range);
+        const targetListItems = selectedListItems.length > 0
+            ? selectedListItems
+            : (listItem ? [listItem] : []);
+
+        if (targetListItems.length > 0) {
             e.preventDefault();
             e.stopPropagation();
 
@@ -6034,12 +6079,17 @@ import { SearchManager } from './modules/SearchManager.js';
 
             const textNode = container.nodeType === 3 ? container : container.firstChild;
             const offset = range.startOffset;
-
-            if (e.shiftKey) {
-                listManager.outdentListItem(listItem, textNode, offset);
-            } else {
-                listManager.indentListItem(listItem, textNode, offset);
-            }
+            const operationTargets = e.shiftKey
+                ? targetListItems.slice().reverse()
+                : targetListItems;
+            operationTargets.forEach((targetListItem) => {
+                if (!targetListItem || !targetListItem.isConnected) return;
+                if (e.shiftKey) {
+                    listManager.outdentListItem(targetListItem, textNode, offset);
+                } else {
+                    listManager.indentListItem(targetListItem, textNode, offset);
+                }
+            });
 
             // Ensure editor maintains focus after Tab operation
             setTimeout(() => {
