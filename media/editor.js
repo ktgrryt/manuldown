@@ -10738,6 +10738,11 @@ import { SearchManager } from './modules/SearchManager.js';
                 snapshotBefore.eo === snapshotAfter.eo;
             if (selectionUnchanged && selectionAfter && selectionAfter.rangeCount > 0) {
                 const rangeAfter = selectionAfter.getRangeAt(0);
+                if (moveCursorDownFromInlineCodeOutsideLeftBoundary(rangeAfter, selectionAfter)) {
+                    normalizeVerticalEntryAtLeadingInlineCodeToOutsideLeft(beforeRange);
+                    setTimeout(() => correctCheckboxCursorPosition(), 0);
+                    return true;
+                }
                 let preBlock = domUtils.getParentElement(rangeAfter.startContainer, 'PRE');
                 if (!preBlock) {
                     preBlock = domUtils.getParentElement(rangeAfter.endContainer, 'PRE');
@@ -11204,6 +11209,146 @@ import { SearchManager } from './modules/SearchManager.js';
             return false;
         }
         return !!cursorManager._placeCursorBeforeInlineCodeElement(codeElement, selection);
+    }
+
+    function getInlineCodeAtOutsideLeftBoundary(range) {
+        if (!range || !range.collapsed) {
+            return null;
+        }
+
+        const isInlineCodeElement = (node) => {
+            if (!node || node.nodeType !== Node.ELEMENT_NODE || node.tagName !== 'CODE') {
+                return false;
+            }
+            return !domUtils.getParentElement(node, 'PRE');
+        };
+        const isBoundaryOnlyTextNode = (node) => {
+            if (!node || node.nodeType !== Node.TEXT_NODE) {
+                return false;
+            }
+            const raw = node.textContent || '';
+            return raw === '' || raw.replace(/[\u200B\uFEFF]/g, '') === '';
+        };
+
+        const container = range.startContainer;
+        const offset = range.startOffset;
+
+        if (container.nodeType === Node.TEXT_NODE) {
+            if (!isBoundaryOnlyTextNode(container)) {
+                return null;
+            }
+            const nextSibling = container.nextSibling;
+            return isInlineCodeElement(nextSibling) ? nextSibling : null;
+        }
+
+        if (container.nodeType !== Node.ELEMENT_NODE) {
+            return null;
+        }
+
+        const candidate = container.childNodes[offset] || null;
+        if (isInlineCodeElement(candidate)) {
+            return candidate;
+        }
+        if (isBoundaryOnlyTextNode(candidate) && isInlineCodeElement(candidate.nextSibling)) {
+            return candidate.nextSibling;
+        }
+        return null;
+    }
+
+    function moveCursorDownFromInlineCodeOutsideLeftBoundary(range, selection) {
+        if (!selection || !range || !range.collapsed) {
+            return false;
+        }
+
+        const inlineCode = getInlineCodeAtOutsideLeftBoundary(range);
+        if (!inlineCode) {
+            return false;
+        }
+
+        const currentListItem = getListItemFromRange(range, 'down') || domUtils.getParentElement(inlineCode, 'LI');
+        if (currentListItem) {
+            const nextListItem = cursorManager && typeof cursorManager._getAdjacentListItem === 'function'
+                ? cursorManager._getAdjacentListItem(currentListItem, 'next')
+                : currentListItem.nextElementSibling;
+            if (nextListItem) {
+                let moved = false;
+                if (cursorManager &&
+                    typeof cursorManager._placeCursorInListItemAtX === 'function' &&
+                    typeof cursorManager._getCaretRect === 'function') {
+                    const caretRect = cursorManager._getCaretRect(range);
+                    if (caretRect) {
+                        const currentX = caretRect.left || caretRect.x || 0;
+                        moved = cursorManager._placeCursorInListItemAtX(nextListItem, currentX, 'down', selection);
+                    }
+                }
+                if (!moved) {
+                    moved = placeCursorAtListItemStart(nextListItem);
+                }
+                if (moved) {
+                    return true;
+                }
+            }
+        }
+
+        let block = inlineCode.parentElement;
+        while (block && block !== editor && !domUtils.isBlockElement(block)) {
+            block = block.parentElement;
+        }
+        if (!block || block === editor) {
+            return false;
+        }
+
+        let structureAnchor = block;
+        if (block.tagName === 'LI') {
+            let outerList = block.parentElement;
+            while (outerList && outerList.parentElement && outerList.parentElement.tagName === 'LI') {
+                const parentListItem = outerList.parentElement;
+                const parentList = parentListItem ? parentListItem.parentElement : null;
+                if (parentList && (parentList.tagName === 'UL' || parentList.tagName === 'OL')) {
+                    outerList = parentList;
+                } else {
+                    break;
+                }
+            }
+            if (outerList && (outerList.tagName === 'UL' || outerList.tagName === 'OL')) {
+                structureAnchor = outerList;
+            }
+        }
+
+        const nextElement = getNextElementSibling(structureAnchor);
+        if (!nextElement) {
+            return false;
+        }
+
+        if (nextElement.tagName === 'HR') {
+            const hrRange = document.createRange();
+            hrRange.selectNode(nextElement);
+            selection.removeAllRanges();
+            selection.addRange(hrRange);
+            return true;
+        }
+
+        if (nextElement.tagName === 'PRE' && nextElement.querySelector('code')) {
+            return selectCodeBlockLanguageLabel(nextElement);
+        }
+
+        if (cursorManager &&
+            typeof cursorManager._placeCursorBeforeLeadingInlineCode === 'function' &&
+            cursorManager._placeCursorBeforeLeadingInlineCode(nextElement, selection)) {
+            return true;
+        }
+
+        const newRange = document.createRange();
+        const firstNode = getPreferredFirstTextNodeForElement(nextElement);
+        if (firstNode) {
+            newRange.setStart(firstNode, 0);
+        } else {
+            newRange.setStart(nextElement, 0);
+        }
+        newRange.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(newRange);
+        return true;
     }
 
     const ctrlNavSuppressWindowMs = 200;
@@ -12818,8 +12963,35 @@ import { SearchManager } from './modules/SearchManager.js';
             const beforeRange = beforeSelection && beforeSelection.rangeCount > 0
                 ? beforeSelection.getRangeAt(0).cloneRange()
                 : null;
+            const snapshotBefore = beforeRange ? {
+                sc: beforeRange.startContainer,
+                so: beforeRange.startOffset,
+                ec: beforeRange.endContainer,
+                eo: beforeRange.endOffset
+            } : null;
             cursorManager.moveCursorDown(notifyChange);
             normalizeVerticalEntryAtLeadingInlineCodeToOutsideLeft(beforeRange);
+            const afterSelection = window.getSelection();
+            const snapshotAfter = afterSelection && afterSelection.rangeCount > 0 ? (() => {
+                const r = afterSelection.getRangeAt(0);
+                return {
+                    sc: r.startContainer,
+                    so: r.startOffset,
+                    ec: r.endContainer,
+                    eo: r.endOffset
+                };
+            })() : null;
+            const selectionUnchanged = snapshotBefore && snapshotAfter &&
+                snapshotBefore.sc === snapshotAfter.sc &&
+                snapshotBefore.so === snapshotAfter.so &&
+                snapshotBefore.ec === snapshotAfter.ec &&
+                snapshotBefore.eo === snapshotAfter.eo;
+            if (selectionUnchanged && afterSelection && afterSelection.rangeCount > 0) {
+                const rangeAfter = afterSelection.getRangeAt(0);
+                if (moveCursorDownFromInlineCodeOutsideLeftBoundary(rangeAfter, afterSelection)) {
+                    normalizeVerticalEntryAtLeadingInlineCodeToOutsideLeft(beforeRange);
+                }
+            }
             // チェックボックス行に入った場合、カーソル位置を補正
             setTimeout(() => correctCheckboxCursorPosition(), 0);
             recordCtrlNavHandled('down', fromCommand);
@@ -16615,7 +16787,7 @@ import { SearchManager } from './modules/SearchManager.js';
             let newRange = null;
             let shouldApplyImmediately = false;
 
-            // 行間クリック等で先頭へ強制ジャンプしないよう、左側のマーカー領域クリック時だけ補正する
+            // 行間クリック等で先頭へ強制ジャンプしないよう、左側マーカー/右側余白のみ補正する
             if (container.nodeType !== Node.TEXT_NODE || !textNodes.includes(container)) {
                 const firstTextNode = textNodes[0];
                 const firstTextRange = document.createRange();
@@ -16627,6 +16799,26 @@ import { SearchManager } from './modules/SearchManager.js';
                     newRange = document.createRange();
                     newRange.setStart(firstTextNode, 0);
                     newRange.collapse(true);
+                } else {
+                    const nearestTextMatch = getNearestTextRectForBlockClickByY(listItem, y, x);
+                    const nearestTextRect = nearestTextMatch && nearestTextMatch.rect ? nearestTextMatch.rect : null;
+                    const rightSideTolerancePx = 1.5;
+                    if (
+                        nearestTextRect &&
+                        Number.isFinite(nearestTextRect.right) &&
+                        x >= nearestTextRect.right - rightSideTolerancePx
+                    ) {
+                        const rightSideRange = createRightSideLineEndRangeFromTextMatch(listItem, nearestTextMatch);
+                        if (rightSideRange) {
+                            newRange = rightSideRange;
+                        } else {
+                            const lastTextNode = textNodes[textNodes.length - 1];
+                            newRange = document.createRange();
+                            newRange.setStart(lastTextNode, lastTextNode.textContent.length);
+                            newRange.collapse(true);
+                        }
+                        shouldApplyImmediately = !e.shiftKey;
+                    }
                 }
             } else {
                 // テキストノード内をクリックした場合、クリック位置がテキストの範囲内かチェック
