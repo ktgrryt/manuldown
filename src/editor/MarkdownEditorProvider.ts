@@ -11,6 +11,7 @@ type CustomSlashCommandTemplate = {
     description: string;
     content: string;
 };
+type UnorderedListMarker = '-' | '*' | '+';
 
 export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     private static readonly viewType = 'manulDown.editor';
@@ -35,7 +36,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         this.turndownService = new TurndownService({
             headingStyle: 'atx',
             hr: '---',
-            bulletListMarker: '-',
+            bulletListMarker: this.getDefaultUnorderedListMarker(),
             codeBlockStyle: 'fenced',
             emDelimiter: '*',
             strongDelimiter: '**',
@@ -754,9 +755,74 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         await vscode.workspace.applyEdit(edit);
     }
 
+    private getDefaultUnorderedListMarker(): UnorderedListMarker {
+        const useDashStyle = vscode.workspace
+            .getConfiguration('manulDown')
+            .get<boolean>('list.dashStyle', false);
+        return useDashStyle ? '-' : '*';
+    }
+
+    private detectUnorderedListMarker(markdown: string): UnorderedListMarker | null {
+        const lines = markdown.split(/\r?\n/);
+        let activeFenceChar: '`' | '~' | null = null;
+        let activeFenceLength = 0;
+
+        for (const line of lines) {
+            const fenceMatch = line.match(/^ {0,3}(`{3,}|~{3,})/);
+            if (fenceMatch) {
+                const fenceToken = fenceMatch[1];
+                const fenceChar = fenceToken[0] as '`' | '~';
+                const fenceLength = fenceToken.length;
+                if (activeFenceChar === null) {
+                    activeFenceChar = fenceChar;
+                    activeFenceLength = fenceLength;
+                } else if (activeFenceChar === fenceChar && fenceLength >= activeFenceLength) {
+                    activeFenceChar = null;
+                    activeFenceLength = 0;
+                }
+                continue;
+            }
+
+            if (activeFenceChar !== null) {
+                continue;
+            }
+
+            // Ignore thematic breaks like "***" or "- - -".
+            const trimmed = line.trim();
+            if (/^([*-])(?:\s*\1){2,}\s*$/.test(trimmed)) {
+                continue;
+            }
+
+            const listMatch = line.match(/^\s*(?:>\s*)*([*+-])\s+/);
+            if (!listMatch) {
+                continue;
+            }
+
+            const marker = listMatch[1];
+            if (marker === '*' || marker === '-' || marker === '+') {
+                return marker;
+            }
+        }
+
+        return null;
+    }
+
+    private getPreferredUnorderedListMarker(document: vscode.TextDocument): UnorderedListMarker {
+        const detected = this.detectUnorderedListMarker(document.getText());
+        return detected ?? this.getDefaultUnorderedListMarker();
+    }
+
+    private escapeRegExp(value: string): string {
+        return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+
     private htmlToMarkdown(html: string, document: vscode.TextDocument): string {
         // Use Turndown for reliable HTML to Markdown conversion
         try {
+            const unorderedListMarker = this.getPreferredUnorderedListMarker(document);
+            const escapedUnorderedListMarker = this.escapeRegExp(unorderedListMarker);
+            (this.turndownService as any).options.bulletListMarker = unorderedListMarker;
+
             // Pre-process HTML to convert webview URIs back to relative paths
             html = this.convertWebviewUrisToRelativePaths(html, document);
 
@@ -963,10 +1029,13 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 return '```' + language + '\n\n```';
             });
 
-            // 1. Fix list marker spacing: "-   " -> "- "
-            markdown = markdown.replace(/^(\s*)-\s{2,}/gm, '$1- ');
+            // 1. Fix list marker spacing: "<marker>   " -> "<marker> "
+            markdown = markdown.replace(
+                new RegExp(`^(\\s*)${escapedUnorderedListMarker}\\s{2,}`, 'gm'),
+                `$1${unorderedListMarker} `
+            );
 
-            // 1.5. Ensure bare task markers become list items ("[ ]" -> "- [ ]")
+            // 1.5. Ensure bare task markers become list items ("[ ]" -> "<marker> [ ]")
             const taskLines = markdown.split('\n');
             let inTaskCodeBlock = false;
             for (let i = 0; i < taskLines.length; i++) {
@@ -987,14 +1056,14 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 if (escapedBareMatch) {
                     const indent = escapedBareMatch[1];
                     const checked = escapedBareMatch[2] === 'x' || escapedBareMatch[2] === 'X' ? 'x' : ' ';
-                    taskLines[i] = `${indent}- [${checked}]`;
+                    taskLines[i] = `${indent}${unorderedListMarker} [${checked}]`;
                     continue;
                 }
                 const bareMatch = taskLines[i].match(/^(\s*)\[(\s|x|X)\]\s*$/);
                 if (bareMatch) {
                     const indent = bareMatch[1];
                     const checked = bareMatch[2] === 'x' || bareMatch[2] === 'X' ? 'x' : ' ';
-                    taskLines[i] = `${indent}- [${checked}]`;
+                    taskLines[i] = `${indent}${unorderedListMarker} [${checked}]`;
                 }
             }
             markdown = taskLines.join('\n');
@@ -1006,14 +1075,15 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             // Then, remove whitespace-only lines that appear after empty list items
             const linesForEmptyItemCleanup = markdown.split('\n');
             const cleanedLinesForEmptyItem: string[] = [];
+            const emptyUnorderedListItemPattern = new RegExp(`^\\s*${escapedUnorderedListMarker}\\s*(?:&nbsp;)?\\s*$`);
             for (let i = 0; i < linesForEmptyItemCleanup.length; i++) {
                 const line = linesForEmptyItemCleanup[i];
                 const prevLine = i > 0 ? linesForEmptyItemCleanup[i - 1] : '';
 
                 // Skip whitespace-only lines that come after an empty list item marker
-                // Empty list item pattern: any amount of whitespace, then "- ", then optional whitespace, then end of line
+                // Empty list item pattern: any amount of whitespace, then "<marker> ", then optional whitespace, then end of line
                 if (line.trim() === '' && line.length > 0) {
-                    const isAfterEmptyListItem = /^\s*-\s*(?:&nbsp;)?\s*$/.test(prevLine);
+                    const isAfterEmptyListItem = emptyUnorderedListItemPattern.test(prevLine);
                     if (isAfterEmptyListItem) {
                         continue;
                     }
@@ -1027,20 +1097,26 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
 
             // 4. Handle empty list items (those with just whitespace)
             // Normalize truly empty markers while preserving &nbsp; for empty items
-            markdown = markdown.replace(/^(\s*)-\s*$/gm, '$1- ');
+            markdown = markdown.replace(
+                new RegExp(`^(\\s*)${escapedUnorderedListMarker}\\s*$`, 'gm'),
+                `$1${unorderedListMarker} `
+            );
 
-            // 4. Fix pattern "- - " (empty list item followed by nested list on same line)
-            // Convert to "- \n  - " (empty list item on its own line, then nested list)
-            // This handles the case where Turndown outputs "  - - c" for <li> <ul><li>c</li></ul></li>
-            markdown = markdown.replace(/^(\s*)-\s+-\s+/gm, (match, indent) => {
-                // Calculate the indentation for the nested list (add 2 spaces)
-                const nestedIndent = indent + '  ';
-                return indent + '- \n' + nestedIndent + '- ';
-            });
+            // 4. Fix pattern "<marker> <marker> " (empty list item followed by nested list on same line)
+            // Convert to "<marker> \n  <marker> " (empty list item on its own line, then nested list)
+            markdown = markdown.replace(
+                new RegExp(`^(\\s*)${escapedUnorderedListMarker}\\s+${escapedUnorderedListMarker}\\s+`, 'gm'),
+                (_match, indent: string) => {
+                    // Calculate the indentation for the nested list (add 2 spaces)
+                    const nestedIndent = indent + '  ';
+                    return `${indent}${unorderedListMarker} \n${nestedIndent}${unorderedListMarker} `;
+                }
+            );
 
             // 4. Remove empty lines between list items only
             const lines = markdown.split('\n');
             const processedLines: string[] = [];
+            const unorderedListItemPattern = new RegExp(`^\\s*${escapedUnorderedListMarker}\\s+`);
 
             // Track if we're inside a code block
             let inCodeBlock = false;
@@ -1059,7 +1135,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     const prevLine = lines[i - 1];
                     const nextLine = lines[i + 1];
                     // Check if both surrounding lines are list items (with any indentation)
-                    if (prevLine.match(/^\s*-\s+/) && nextLine.match(/^\s*-\s+/)) {
+                    if (unorderedListItemPattern.test(prevLine) && unorderedListItemPattern.test(nextLine)) {
                         continue;
                     }
                 }
