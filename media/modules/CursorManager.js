@@ -313,6 +313,48 @@ export class CursorManager {
         return false;
     }
 
+    _isSameVisualLine(lastLine, rect) {
+        if (!lastLine || !rect) {
+            return false;
+        }
+        const lastTop = Number.isFinite(lastLine.top) ? lastLine.top : 0;
+        const lastBottom = Number.isFinite(lastLine.bottom) ? lastLine.bottom : lastTop;
+        const rectTop = Number.isFinite(rect.top) ? rect.top : 0;
+        const rectBottom = Number.isFinite(rect.bottom) ? rect.bottom : rectTop;
+        const lastHeight = Math.max(1, lastBottom - lastTop);
+        const rectHeight = Math.max(1, rectBottom - rectTop);
+        const minHeight = Math.min(lastHeight, rectHeight);
+        const topDelta = Math.abs(lastTop - rectTop);
+        const verticalOverlap = Math.min(lastBottom, rectBottom) - Math.max(lastTop, rectTop);
+
+        const overlapThreshold = Math.max(2, minHeight * 0.35);
+        if (verticalOverlap >= overlapThreshold) {
+            return true;
+        }
+        const topDeltaThreshold = Math.max(3, minHeight * 0.55);
+        return topDelta <= topDeltaThreshold;
+    }
+
+    _appendRectToVisualLines(lines, rect) {
+        if (!lines || !rect) {
+            return;
+        }
+        const lastLine = lines.length > 0 ? lines[lines.length - 1] : null;
+        if (!lastLine || !this._isSameVisualLine(lastLine, rect)) {
+            lines.push({
+                top: rect.top,
+                bottom: rect.bottom,
+                left: rect.left,
+                right: rect.right
+            });
+            return;
+        }
+        lastLine.top = Math.min(lastLine.top, rect.top);
+        lastLine.bottom = Math.max(lastLine.bottom, rect.bottom);
+        lastLine.left = Math.min(lastLine.left, rect.left);
+        lastLine.right = Math.max(lastLine.right, rect.right);
+    }
+
     _isIgnorableBoundaryNode(node) {
         if (!node) {
             return true;
@@ -3067,20 +3109,7 @@ export class CursorManager {
 
                 const lines = [];
                 for (const rect of rects) {
-                    const lastLine = lines.length > 0 ? lines[lines.length - 1] : null;
-                    if (!lastLine || Math.abs(lastLine.top - rect.top) > 3) {
-                        lines.push({
-                            top: rect.top,
-                            bottom: rect.bottom,
-                            left: rect.left,
-                            right: rect.right
-                        });
-                        continue;
-                    }
-                    lastLine.top = Math.min(lastLine.top, rect.top);
-                    lastLine.bottom = Math.max(lastLine.bottom, rect.bottom);
-                    lastLine.left = Math.min(lastLine.left, rect.left);
-                    lastLine.right = Math.max(lastLine.right, rect.right);
+                    this._appendRectToVisualLines(lines, rect);
                 }
                 return lines;
             } catch (e) {
@@ -3816,20 +3845,7 @@ export class CursorManager {
                 }
                 const lines = [];
                 for (const rect of rects) {
-                    const lastLine = lines.length > 0 ? lines[lines.length - 1] : null;
-                    if (!lastLine || Math.abs(lastLine.top - rect.top) > 3) {
-                        lines.push({
-                            top: rect.top,
-                            bottom: rect.bottom,
-                            left: rect.left,
-                            right: rect.right
-                        });
-                        continue;
-                    }
-                    lastLine.top = Math.min(lastLine.top, rect.top);
-                    lastLine.bottom = Math.max(lastLine.bottom, rect.bottom);
-                    lastLine.left = Math.min(lastLine.left, rect.left);
-                    lastLine.right = Math.max(lastLine.right, rect.right);
+                    this._appendRectToVisualLines(lines, rect);
                 }
                 return lines;
             } catch (e) {
@@ -5366,20 +5382,7 @@ export class CursorManager {
                 }
                 const lines = [];
                 for (const rect of rects) {
-                    const lastLine = lines.length > 0 ? lines[lines.length - 1] : null;
-                    if (!lastLine || Math.abs(lastLine.top - rect.top) > 3) {
-                        lines.push({
-                            top: rect.top,
-                            bottom: rect.bottom,
-                            left: rect.left,
-                            right: rect.right
-                        });
-                        continue;
-                    }
-                    lastLine.top = Math.min(lastLine.top, rect.top);
-                    lastLine.bottom = Math.max(lastLine.bottom, rect.bottom);
-                    lastLine.left = Math.min(lastLine.left, rect.left);
-                    lastLine.right = Math.max(lastLine.right, rect.right);
+                    this._appendRectToVisualLines(lines, rect);
                 }
                 return lines;
             } catch (e) {
@@ -5545,9 +5548,17 @@ export class CursorManager {
             if (!targetLine) {
                 return false;
             }
+            if (currentRect) {
+                const currentTop = currentRect.top || currentRect.y || 0;
+                if (targetLine.top <= currentTop + 1) {
+                    return false;
+                }
+            }
 
             const lineStartCaret = findLineStartCaretInListItem(activeListItem, textNodes, targetLine);
-            if (lineStartCaret) {
+            if (lineStartCaret &&
+                !(lineStartCaret.node === range.startContainer &&
+                    lineStartCaret.offset === range.startOffset)) {
                 const startRange = document.createRange();
                 startRange.setStart(lineStartCaret.node, lineStartCaret.offset);
                 startRange.collapse(true);
@@ -5640,10 +5651,15 @@ export class CursorManager {
             if (!targetLine) {
                 return false;
             }
+            if (targetLine.top <= currentLine.top + 1) {
+                return false;
+            }
             const atCurrentLineStart = (currentRect.left || currentRect.x || 0) <= (currentLine.left + 2);
             if (atCurrentLineStart) {
                 const lineStartCaret = findLineStartCaretInListItem(activeListItem, textNodes, targetLine);
-                if (lineStartCaret) {
+                if (lineStartCaret &&
+                    !(lineStartCaret.node === range.startContainer &&
+                        lineStartCaret.offset === range.startOffset)) {
                     const startRange = document.createRange();
                     startRange.setStart(lineStartCaret.node, lineStartCaret.offset);
                     startRange.collapse(true);
@@ -5876,20 +5892,7 @@ export class CursorManager {
 
                 const lines = [];
                 for (const rect of rects) {
-                    const lastLine = lines.length > 0 ? lines[lines.length - 1] : null;
-                    if (!lastLine || Math.abs(lastLine.top - rect.top) > 3) {
-                        lines.push({
-                            top: rect.top,
-                            bottom: rect.bottom,
-                            left: rect.left,
-                            right: rect.right
-                        });
-                        continue;
-                    }
-                    lastLine.top = Math.min(lastLine.top, rect.top);
-                    lastLine.bottom = Math.max(lastLine.bottom, rect.bottom);
-                    lastLine.left = Math.min(lastLine.left, rect.left);
-                    lastLine.right = Math.max(lastLine.right, rect.right);
+                    this._appendRectToVisualLines(lines, rect);
                 }
                 return lines;
             } catch (e) {
@@ -5965,6 +5968,9 @@ export class CursorManager {
             if (!targetLine) {
                 return false;
             }
+            if (targetLine.top <= currentLine.top + 1) {
+                return false;
+            }
 
             const currentX = currentRect.left || currentRect.x || 0;
             const atCurrentLineStart = !!currentLine && currentX <= (currentLine.left + 2);
@@ -6032,7 +6038,9 @@ export class CursorManager {
             };
             if (atCurrentLineStart) {
                 const lineStartCaret = findLineStartCaretInBlock(currentBlock, targetLine);
-                if (lineStartCaret) {
+                if (lineStartCaret &&
+                    !(lineStartCaret.node === range.startContainer &&
+                        lineStartCaret.offset === range.startOffset)) {
                     const startRange = document.createRange();
                     startRange.setStart(lineStartCaret.node, lineStartCaret.offset);
                     startRange.collapse(true);
