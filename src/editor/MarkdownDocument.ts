@@ -11,11 +11,17 @@ export class MarkdownDocument {
         private readonly document: vscode.TextDocument,
         private readonly webview?: vscode.Webview
     ) {
+        // Disable Setext headings ("text" + "---"/"===") so a trailing
+        // underline line does not convert the previous paragraph into H1/H2.
+        const tokenizer = new marked.Tokenizer();
+        tokenizer.lheading = () => undefined;
+
         // Configure marked options
         marked.setOptions({
             breaks: true,
             gfm: true,
             pedantic: false, // Allow nested lists with proper indentation
+            tokenizer,
         });
 
         // Custom renderer to preserve code block content exactly as-is

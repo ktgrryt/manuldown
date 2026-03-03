@@ -3639,13 +3639,14 @@ export class CursorManager {
                         selection.addRange(newRange);
                         return;
                     }
-                    // Empty line directly below an image should move to the image right edge.
-                    // This keeps vertical navigation symmetric:
-                    // below-line -> image right edge -> image selection -> image left edge.
+                    // Empty line directly below an image should move to the image left edge.
+                    // Keep vertical navigation symmetric:
+                    // above-line -> image left edge -> below-line
+                    // below-line -> image left edge -> above-line
                     const imageTarget = this._getImageFromNavigationCandidate(prevElement);
                     if (imageTarget) {
                         const imageRange = document.createRange();
-                        if (this._collapseRangeAfterNode(imageRange, imageTarget)) {
+                        if (this._collapseRangeBeforeNode(imageRange, imageTarget)) {
                             selection.removeAllRanges();
                             selection.addRange(imageRange);
                             return;
