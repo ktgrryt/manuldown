@@ -74,6 +74,172 @@ import { SearchManager } from './modules/SearchManager.js';
     let imageResolveRequestSeq = 0;
     let overflowStateRaf = null;
 
+    const NETWORK_BLOCKED_ERROR_MESSAGE = 'External network requests are blocked in ManulDown webview.';
+
+    function tryOverrideGlobalProperty(target, propertyName, replacementValue) {
+        if (!target || !propertyName) {
+            return false;
+        }
+        try {
+            Object.defineProperty(target, propertyName, {
+                configurable: true,
+                writable: true,
+                value: replacementValue
+            });
+            return true;
+        } catch (_error) {
+            try {
+                target[propertyName] = replacementValue;
+                return true;
+            } catch (_assignError) {
+                return false;
+            }
+        }
+    }
+
+    function getTargetUrlText(input) {
+        if (!input) return '';
+        if (typeof input === 'string') return input;
+        if (input instanceof URL) return input.toString();
+        if (typeof input.url === 'string') return input.url;
+        return '';
+    }
+
+    function isInternalWebviewCdnUrl(parsedUrl) {
+        if (!parsedUrl) return false;
+        const protocol = String(parsedUrl.protocol || '').toLowerCase();
+        const host = String(parsedUrl.host || '').toLowerCase();
+        return protocol === 'https:' && host.endsWith('.vscode-cdn.net');
+    }
+
+    function isExternalNetworkTarget(urlLike) {
+        const raw = String(urlLike || '').trim();
+        if (!raw) return false;
+
+        let parsed;
+        try {
+            parsed = new URL(raw, window.location.href);
+        } catch (_error) {
+            return false;
+        }
+
+        const protocol = String(parsed.protocol || '').toLowerCase();
+        if (
+            protocol === 'data:' ||
+            protocol === 'blob:' ||
+            protocol === 'file:' ||
+            protocol === 'about:' ||
+            protocol === 'vscode-resource:' ||
+            protocol === 'vscode-webview-resource:'
+        ) {
+            return false;
+        }
+
+        if (isInternalWebviewCdnUrl(parsed)) {
+            return false;
+        }
+
+        return (
+            protocol === 'http:' ||
+            protocol === 'https:' ||
+            protocol === 'ws:' ||
+            protocol === 'wss:' ||
+            protocol === 'ftp:' ||
+            protocol === 'ftps:'
+        );
+    }
+
+    function reportBlockedExternalRequest(apiName, urlLike) {
+        const target = String(urlLike || '').trim() || '(unknown)';
+        console.warn(`[security] Blocked external request via ${apiName}: ${target}`);
+    }
+
+    function installExternalCommunicationGuards() {
+        if (typeof window.fetch === 'function') {
+            const originalFetch = window.fetch.bind(window);
+            const guardedFetch = (input, init) => {
+                const target = getTargetUrlText(input);
+                if (isExternalNetworkTarget(target)) {
+                    reportBlockedExternalRequest('fetch', target);
+                    return Promise.reject(new Error(NETWORK_BLOCKED_ERROR_MESSAGE));
+                }
+                return originalFetch(input, init);
+            };
+            tryOverrideGlobalProperty(window, 'fetch', guardedFetch);
+        }
+
+        if (
+            typeof window.XMLHttpRequest === 'function' &&
+            window.XMLHttpRequest.prototype &&
+            typeof window.XMLHttpRequest.prototype.open === 'function'
+        ) {
+            const originalXhrOpen = window.XMLHttpRequest.prototype.open;
+            window.XMLHttpRequest.prototype.open = function (method, url, ...rest) {
+                if (isExternalNetworkTarget(url)) {
+                    reportBlockedExternalRequest('XMLHttpRequest', url);
+                    throw new Error(NETWORK_BLOCKED_ERROR_MESSAGE);
+                }
+                return originalXhrOpen.call(this, method, url, ...rest);
+            };
+        }
+
+        if (typeof window.WebSocket === 'function') {
+            const OriginalWebSocket = window.WebSocket;
+            class GuardedWebSocket extends OriginalWebSocket {
+                constructor(url, protocols) {
+                    const target = getTargetUrlText(url);
+                    if (isExternalNetworkTarget(target)) {
+                        reportBlockedExternalRequest('WebSocket', target);
+                        throw new Error(NETWORK_BLOCKED_ERROR_MESSAGE);
+                    }
+                    super(url, protocols);
+                }
+            }
+            tryOverrideGlobalProperty(window, 'WebSocket', GuardedWebSocket);
+        }
+
+        if (typeof window.EventSource === 'function') {
+            const OriginalEventSource = window.EventSource;
+            class GuardedEventSource extends OriginalEventSource {
+                constructor(url, eventSourceInitDict) {
+                    const target = getTargetUrlText(url);
+                    if (isExternalNetworkTarget(target)) {
+                        reportBlockedExternalRequest('EventSource', target);
+                        throw new Error(NETWORK_BLOCKED_ERROR_MESSAGE);
+                    }
+                    super(url, eventSourceInitDict);
+                }
+            }
+            tryOverrideGlobalProperty(window, 'EventSource', GuardedEventSource);
+        }
+
+        if (typeof navigator.sendBeacon === 'function') {
+            const originalSendBeacon = navigator.sendBeacon.bind(navigator);
+            const guardedSendBeacon = (url, data) => {
+                if (isExternalNetworkTarget(url)) {
+                    reportBlockedExternalRequest('sendBeacon', url);
+                    return false;
+                }
+                return originalSendBeacon(url, data);
+            };
+            tryOverrideGlobalProperty(navigator, 'sendBeacon', guardedSendBeacon);
+        }
+
+        if (typeof window.open === 'function') {
+            const originalWindowOpen = window.open.bind(window);
+            const guardedWindowOpen = (url, target, features) => {
+                if (isExternalNetworkTarget(url)) {
+                    reportBlockedExternalRequest('window.open', url);
+                    return null;
+                }
+                return originalWindowOpen(url, target, features);
+            };
+            tryOverrideGlobalProperty(window, 'open', guardedWindowOpen);
+        }
+    }
+
+    installExternalCommunicationGuards();
+
     function hideImageResizeOverlaySafely() {
         if (typeof hideImageResizeOverlay === 'function') {
             try {
