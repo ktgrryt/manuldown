@@ -763,7 +763,10 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     }
 
     private getDefaultListIndentSize(): number {
-        return 2;
+        const configuredIndentSize = vscode.workspace
+            .getConfiguration('manulDown')
+            .get<number>('list.indentSize', 2);
+        return configuredIndentSize === 4 ? 4 : 2;
     }
 
     private getVisualIndentWidth(value: string): number {

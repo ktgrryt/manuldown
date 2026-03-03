@@ -220,6 +220,19 @@
           "type": "boolean",
           "default": false,
           "description": "Use a dash (-) as the bullet marker style."
+        },
+        "manulDown.list.indentSize": {
+          "type": "number",
+          "default": 2,
+          "enum": [
+            2,
+            4
+          ],
+          "enumDescriptions": [
+            "Indent nested list items with 2 spaces.",
+            "Indent nested list items with 4 spaces."
+          ],
+          "description": "Default indentation width for nested list items when no existing list indentation style can be detected."
         }
       }
     }
