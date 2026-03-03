@@ -17599,29 +17599,6 @@ import { SearchManager } from './modules/SearchManager.js';
                 e.stopPropagation();
                 hideLinkPopover();
 
-                const clickedElement = e.target && e.target.nodeType === Node.ELEMENT_NODE
-                    ? e.target
-                    : e.target?.parentElement;
-                const clickX = typeof e.clientX === 'number' ? e.clientX : null;
-                const clickY = typeof e.clientY === 'number' ? e.clientY : null;
-
-                if (!e.shiftKey && Number.isFinite(clickX) && Number.isFinite(clickY)) {
-                    const edgeRange = getImageCaretRangeFromHorizontalClick(
-                        clickX,
-                        clickY,
-                        clickedElement || image
-                    );
-                    if (edgeRange) {
-                        const selection = window.getSelection();
-                        if (selection) {
-                            selection.removeAllRanges();
-                            selection.addRange(edgeRange);
-                        }
-                        showImageResizeOverlay(image, { preserveSelection: true });
-                        return;
-                    }
-                }
-
                 showImageResizeOverlay(image);
                 return;
             }
