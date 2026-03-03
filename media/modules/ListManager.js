@@ -406,13 +406,28 @@ export class ListManager {
                         }
                     }
                 } else {
-                    // すべての子ノードを削除（<br>を含む）
-                    while (listItem.firstChild) {
-                        listItem.removeChild(listItem.firstChild);
+                    // ネストしたサブリストは保持し、それ以外の子ノードのみ削除する。
+                    // 空アイテムのアウトデント時に後続兄弟をサブリストへ移すため、
+                    // ここでサブリストを消すと項目が失われる。
+                    const children = Array.from(listItem.childNodes);
+                    children.forEach(child => {
+                        if (child.nodeType === Node.ELEMENT_NODE &&
+                            (child.tagName === 'UL' || child.tagName === 'OL')) {
+                            return;
+                        }
+                        child.remove();
+                    });
+
+                    // カーソル配置用のテキストノードを先頭に確保
+                    const firstSublist = Array.from(listItem.children).find(
+                        child => child.tagName === 'UL' || child.tagName === 'OL'
+                    );
+                    const anchorNode = document.createTextNode('');
+                    if (firstSublist) {
+                        listItem.insertBefore(anchorNode, firstSublist);
+                    } else {
+                        listItem.appendChild(anchorNode);
                     }
-                    // カーソル配置用の単一のテキストノードを追加
-                    const newTextNode = document.createTextNode('');
-                    listItem.appendChild(newTextNode);
                 }
             } else {
                 // 空でない場合でも、先頭のBRタグを削除

@@ -5736,6 +5736,9 @@ import { SearchManager } from './modules/SearchManager.js';
                 const offset = range.startOffset;
                 listManager.outdentListItem(activeListItem, textNode, offset);
             } else {
+                if (hasNestedListChild(activeListItem)) {
+                    return replaceEmptyListItemWithParagraphAndPromotedNestedItems(activeListItem, false);
+                }
                 // Top-level list - convert to paragraph
                 const p = document.createElement('p');
                 const br = document.createElement('br');
