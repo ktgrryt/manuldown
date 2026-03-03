@@ -282,15 +282,12 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         webviewPanel: vscode.WebviewPanel,
         _token: vscode.CancellationToken
     ): Promise<void> {
-        // Check if the user wants to open in WYSIWYG by default
         const wasExplicit = this.explicitlyRequested;
         this.explicitlyRequested = false;
         if (!wasExplicit) {
             const openByDefault = vscode.workspace.getConfiguration('manulDown').get<boolean>('openByDefault', true);
             if (!openByDefault) {
-                setTimeout(() => {
-                    vscode.commands.executeCommand('vscode.openWith', document.uri, 'default');
-                }, 0);
+                void this.reopenWithDefaultEditorAndCloseResidualCustomTabs(document.uri);
                 return;
             }
         }
@@ -544,6 +541,33 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         setTimeout(() => {
             void vscode.commands.executeCommand('workbench.action.keepEditor');
         }, 0);
+    }
+
+    private async reopenWithDefaultEditorAndCloseResidualCustomTabs(documentUri: vscode.Uri): Promise<void> {
+        try {
+            await vscode.commands.executeCommand('vscode.openWith', documentUri, 'default');
+        } finally {
+            await this.closeResidualCustomTabs(documentUri);
+        }
+    }
+
+    private async closeResidualCustomTabs(documentUri: vscode.Uri): Promise<void> {
+        const customTabs = vscode.window.tabGroups.all.flatMap((group) =>
+            group.tabs.filter((tab) => {
+                const input = tab.input;
+                return (
+                    input instanceof vscode.TabInputCustom &&
+                    input.viewType === MarkdownEditorProvider.viewType &&
+                    input.uri.toString() === documentUri.toString()
+                );
+            })
+        );
+
+        if (customTabs.length === 0) {
+            return;
+        }
+
+        await vscode.window.tabGroups.close(customTabs, true);
     }
 
     private getCustomSlashTemplateRootUri(): vscode.Uri {
