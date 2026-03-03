@@ -25,6 +25,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     private static readonly minTocPanelWidthPx = 0;
     private static readonly maxTocPanelWidthPx = 480;
     private turndownService: TurndownService;
+    private currentListIndent = '  ';
     private webviewPanels = new Map<string, vscode.WebviewPanel>();
     private lastActivePanel: vscode.WebviewPanel | null = null;
     private customSlashCommandCache: { loadedAt: number; items: CustomSlashCommandTemplate[] } | null = null;
@@ -40,7 +41,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             codeBlockStyle: 'fenced',
             emDelimiter: '*',
             strongDelimiter: '**',
-            // Use 2 spaces for list indentation
+            // Default nested-list indentation (updated per document on save).
             blankReplacement: (content: string, node: any) => {
                 return node.isBlock ? '\n\n' : '';
             }
@@ -64,12 +65,11 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             return escaped.replace(/\\`/g, '`').replace(/\\-/g, '-');
         };
 
-        // Override list item indentation to use 2 spaces instead of 4
-        const originalIndent = (this.turndownService as any).options.indent || '    ';
-        (this.turndownService as any).options.indent = '  '; // 2 spaces
+        // Override nested-list indentation width (updated dynamically on save).
+        (this.turndownService as any).options.indent = this.currentListIndent;
 
         // Keep default list handling - Turndown handles nested lists correctly by default
-        // Just ensure proper indentation with 2 spaces
+        // Just ensure proper indentation
         this.turndownService.keep(['br']);
         this.turndownService.addRule('lineBreak', {
             filter: 'br',
@@ -94,7 +94,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             }
         });
 
-        // Add custom rule for list items to use 2-space indentation
+        // Add custom rule for list items to keep nested-list indentation stable.
         this.turndownService.addRule('listItem', {
             filter: 'li',
             replacement: function (content: string, node: any, options: any) {
@@ -133,7 +133,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     content = content
                         .replace(/^\n+/, '') // remove leading newlines
                         .replace(/\n+$/, '\n') // replace trailing newlines with just a single one
-                        .replace(/\n/gm, '\n  '); // indent nested content
+                        .replace(/\n/gm, `\n${provider.currentListIndent}`); // indent nested content
 
                     let prefix = options.bulletListMarker + ' ';
                     const parent = node.parentNode;
@@ -152,7 +152,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     content = content
                         .replace(/^\n+/, '') // remove leading newlines
                         .replace(/\n+$/, '\n') // replace trailing newlines with just a single one
-                        .replace(/\n/gm, '\n  '); // indent
+                        .replace(/\n/gm, `\n${provider.currentListIndent}`); // indent
 
                     // Return the indented content without prefix
                     return content + (node.nextSibling && !/\n$/.test(content) ? '\n' : '');
@@ -164,7 +164,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     content = content
                         .replace(/^\n+/, '') // remove leading newlines
                         .replace(/\n+$/, '\n') // replace trailing newlines with just a single one
-                        .replace(/\n/gm, '\n  '); // indent
+                        .replace(/\n/gm, `\n${provider.currentListIndent}`); // indent
                 }
 
                 let prefix = options.bulletListMarker + ' ';
@@ -762,6 +762,104 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         return useDashStyle ? '-' : '*';
     }
 
+    private getDefaultListIndentSize(): number {
+        return 2;
+    }
+
+    private getVisualIndentWidth(value: string): number {
+        let width = 0;
+        for (const char of value) {
+            if (char === '\t') {
+                width += 4;
+            } else if (char === ' ') {
+                width += 1;
+            }
+        }
+        return width;
+    }
+
+    private stripLeadingBlockquotePrefix(line: string): string {
+        return line.replace(/^\s*(?:>[ \t]?)+/, '');
+    }
+
+    private getBlockquoteDepth(line: string): number {
+        const prefixMatch = line.match(/^\s*(?:>[ \t]?)+/);
+        if (!prefixMatch) {
+            return 0;
+        }
+        const markers = prefixMatch[0].match(/>/g);
+        return markers ? markers.length : 0;
+    }
+
+    private detectListIndentSize(markdown: string): number | null {
+        const lines = markdown.split(/\r?\n/);
+        let activeFenceChar: '`' | '~' | null = null;
+        let activeFenceLength = 0;
+        const indentDeltaCandidates: number[] = [];
+        const positiveIndentSamples: number[] = [];
+        const previousIndentByBlockquoteDepth = new Map<number, number>();
+
+        for (const line of lines) {
+            const fenceMatch = line.match(/^ {0,3}(`{3,}|~{3,})/);
+            if (fenceMatch) {
+                const fenceToken = fenceMatch[1];
+                const fenceChar = fenceToken[0] as '`' | '~';
+                const fenceLength = fenceToken.length;
+                if (activeFenceChar === null) {
+                    activeFenceChar = fenceChar;
+                    activeFenceLength = fenceLength;
+                } else if (activeFenceChar === fenceChar && fenceLength >= activeFenceLength) {
+                    activeFenceChar = null;
+                    activeFenceLength = 0;
+                }
+                continue;
+            }
+
+            if (activeFenceChar !== null) {
+                continue;
+            }
+
+            const lineWithoutBlockquotePrefix = this.stripLeadingBlockquotePrefix(line);
+            const listMatch = lineWithoutBlockquotePrefix.match(/^([ \t]*)(?:[*+-]|\d+[.)])\s+/);
+            if (!listMatch) {
+                continue;
+            }
+
+            const indentWidth = this.getVisualIndentWidth(listMatch[1]);
+            const blockquoteDepth = this.getBlockquoteDepth(line);
+            const previousIndent = previousIndentByBlockquoteDepth.get(blockquoteDepth);
+            if (typeof previousIndent === 'number' && indentWidth > previousIndent) {
+                indentDeltaCandidates.push(indentWidth - previousIndent);
+            }
+            previousIndentByBlockquoteDepth.set(blockquoteDepth, indentWidth);
+
+            if (indentWidth > 0) {
+                positiveIndentSamples.push(indentWidth);
+            }
+        }
+
+        const delta2Count = indentDeltaCandidates.filter((value) => value === 2).length;
+        const delta4Count = indentDeltaCandidates.filter((value) => value === 4).length;
+        if (delta2Count > 0 || delta4Count > 0) {
+            return delta4Count >= delta2Count ? 4 : 2;
+        }
+
+        const indent2Count = positiveIndentSamples.filter((value) => value === 2).length;
+        const indent4Count = positiveIndentSamples.filter((value) => value === 4).length;
+        if (indent2Count > 0 || indent4Count > 0) {
+            return indent4Count >= indent2Count ? 4 : 2;
+        }
+
+        if (positiveIndentSamples.length > 0) {
+            const minimumIndent = Math.min(...positiveIndentSamples);
+            if (minimumIndent >= 4) {
+                return 4;
+            }
+        }
+
+        return null;
+    }
+
     private detectUnorderedListMarker(markdown: string): UnorderedListMarker | null {
         const lines = markdown.split(/\r?\n/);
         let activeFenceChar: '`' | '~' | null = null;
@@ -812,6 +910,12 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         return detected ?? this.getDefaultUnorderedListMarker();
     }
 
+    private getPreferredListIndent(document: vscode.TextDocument): string {
+        const detected = this.detectListIndentSize(document.getText());
+        const indentSize = detected ?? this.getDefaultListIndentSize();
+        return ' '.repeat(indentSize);
+    }
+
     private escapeRegExp(value: string): string {
         return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     }
@@ -821,7 +925,10 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         try {
             const unorderedListMarker = this.getPreferredUnorderedListMarker(document);
             const escapedUnorderedListMarker = this.escapeRegExp(unorderedListMarker);
+            const listIndent = this.getPreferredListIndent(document);
+            this.currentListIndent = listIndent;
             (this.turndownService as any).options.bulletListMarker = unorderedListMarker;
+            (this.turndownService as any).options.indent = listIndent;
 
             // Pre-process HTML to convert webview URIs back to relative paths
             html = this.convertWebviewUrisToRelativePaths(html, document);
@@ -1092,7 +1199,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             }
             markdown = cleanedLinesForEmptyItem.join('\n');
 
-            // 3. Turndown already handles list indentation correctly with 2 spaces
+            // 3. Turndown already handles list indentation according to current options
             // Don't modify indentation as it may break nested list structure
 
             // 4. Handle empty list items (those with just whitespace)
@@ -1103,12 +1210,12 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             );
 
             // 4. Fix pattern "<marker> <marker> " (empty list item followed by nested list on same line)
-            // Convert to "<marker> \n  <marker> " (empty list item on its own line, then nested list)
+            // Convert to "<marker> \n<indent><marker> " (empty parent item + nested child item)
             markdown = markdown.replace(
                 new RegExp(`^(\\s*)${escapedUnorderedListMarker}\\s+${escapedUnorderedListMarker}\\s+`, 'gm'),
                 (_match, indent: string) => {
-                    // Calculate the indentation for the nested list (add 2 spaces)
-                    const nestedIndent = indent + '  ';
+                    // Calculate the indentation for the nested list.
+                    const nestedIndent = indent + listIndent;
                     return `${indent}${unorderedListMarker} \n${nestedIndent}${unorderedListMarker} `;
                 }
             );
