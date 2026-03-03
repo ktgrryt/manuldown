@@ -1058,7 +1058,92 @@ import { SearchManager } from './modules/SearchManager.js';
         range.selectNode(image);
         selection.removeAllRanges();
         selection.addRange(range);
+        updateImageCaretEdgeIndicators(selection);
         return true;
+    }
+
+    const IMAGE_CARET_LEFT_EDGE_CLASS = 'image-caret-left-edge';
+    const IMAGE_CARET_RIGHT_EDGE_CLASS = 'image-caret-right-edge';
+
+    function clearImageCaretEdgeIndicators() {
+        editor.querySelectorAll(`img.${IMAGE_CARET_LEFT_EDGE_CLASS}, img.${IMAGE_CARET_RIGHT_EDGE_CLASS}`).forEach((img) => {
+            img.classList.remove(IMAGE_CARET_LEFT_EDGE_CLASS, IMAGE_CARET_RIGHT_EDGE_CLASS);
+        });
+    }
+
+    function applyImageCaretEdgeIndicator(image, edge) {
+        if (!image || image.tagName !== 'IMG' || !editor.contains(image)) {
+            return false;
+        }
+        clearImageCaretEdgeIndicators();
+        if (edge === 'left') {
+            image.classList.add(IMAGE_CARET_LEFT_EDGE_CLASS);
+            return true;
+        }
+        if (edge === 'right') {
+            image.classList.add(IMAGE_CARET_RIGHT_EDGE_CLASS);
+            return true;
+        }
+        return false;
+    }
+
+    function updateImageCaretEdgeIndicators(selectionOverride = null) {
+        const previousLeftEdgeImage = editor.querySelector(`img.${IMAGE_CARET_LEFT_EDGE_CLASS}`);
+        const previousRightEdgeImage = editor.querySelector(`img.${IMAGE_CARET_RIGHT_EDGE_CLASS}`);
+        clearImageCaretEdgeIndicators();
+
+        const selection = selectionOverride || window.getSelection();
+        if (!selection || !selection.rangeCount || !selection.isCollapsed) {
+            return;
+        }
+        const range = selection.getRangeAt(0);
+        if (!range || !editor.contains(range.startContainer)) {
+            return;
+        }
+
+        const directImage =
+            range.startContainer &&
+                range.startContainer.nodeType === Node.ELEMENT_NODE &&
+                range.startContainer.tagName === 'IMG' &&
+                editor.contains(range.startContainer)
+                ? range.startContainer
+                : null;
+        if (directImage) {
+            if (previousRightEdgeImage === directImage) {
+                applyImageCaretEdgeIndicator(directImage, 'right');
+                return;
+            }
+            if (previousLeftEdgeImage === directImage) {
+                applyImageCaretEdgeIndicator(directImage, 'left');
+                return;
+            }
+        }
+
+        const imageAtLeftEdge = getCtrlKTargetImageAtLeftEdge(range);
+        if (imageAtLeftEdge) {
+            applyImageCaretEdgeIndicator(imageAtLeftEdge, 'left');
+            return;
+        }
+
+        const imageAtRightEdge = getBackspaceTargetImageAtRightEdge(range);
+        if (imageAtRightEdge) {
+            applyImageCaretEdgeIndicator(imageAtRightEdge, 'right');
+            return;
+        }
+
+        const imageBehind = (cursorManager && typeof cursorManager._getImageBehindFromCollapsedRange === 'function')
+            ? cursorManager._getImageBehindFromCollapsedRange(range)
+            : null;
+        const imageAhead = (cursorManager && typeof cursorManager._getImageAheadFromCollapsedRange === 'function')
+            ? cursorManager._getImageAheadFromCollapsedRange(range)
+            : null;
+        if (imageBehind && !imageAhead) {
+            applyImageCaretEdgeIndicator(imageBehind, 'right');
+            return;
+        }
+        if (imageAhead && !imageBehind) {
+            applyImageCaretEdgeIndicator(imageAhead, 'left');
+        }
     }
 
     function clearImageSelectionForLayoutResize() {
@@ -9442,6 +9527,18 @@ import { SearchManager } from './modules/SearchManager.js';
             return true;
         }
 
+        const nextImage = nextElement.tagName === 'IMG'
+            ? nextElement
+            : getSingleImageFromImageOnlyBlock(nextElement);
+        if (nextImage && editor.contains(nextImage)) {
+            const imageLeftRange = createBeforeImageCaretRange(nextImage);
+            if (imageLeftRange) {
+                selection.removeAllRanges();
+                selection.addRange(imageLeftRange);
+                return true;
+            }
+        }
+
         const newRange = document.createRange();
         const firstNode = getPreferredFirstTextNodeForElement(nextElement);
         if (firstNode) {
@@ -14947,6 +15044,8 @@ import { SearchManager } from './modules/SearchManager.js';
             }
             selection.removeAllRanges();
             selection.addRange(range);
+            applyImageCaretEdgeIndicator(image, 'right');
+            requestAnimationFrame(() => updateImageCaretEdgeIndicators(selection));
             return true;
         };
 
@@ -17832,10 +17931,12 @@ import { SearchManager } from './modules/SearchManager.js';
                 cursorCheckbox.classList.add('cursor-on');
             }
 
+            const sel = window.getSelection();
+            updateImageCaretEdgeIndicators(sel);
+
             // チェックボックス付近のカーソル補正
             // チェックボックスが先頭にある場合のみ適用
             if (isUpdating || isCorrectingCheckboxCursor) return;
-            const sel = window.getSelection();
             if (!sel || !sel.rangeCount || !sel.isCollapsed) return;
             const range = sel.getRangeAt(0);
             const container = range.startContainer;

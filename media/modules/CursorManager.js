@@ -3389,10 +3389,18 @@ export class CursorManager {
             }
         }
 
-        // 画像右エッジ（画像直後）で↑ → 画像全体選択
+        // 画像右エッジ（画像直後）で↑ → 画像の1行上へ移動
         if (range.collapsed) {
             const imageBehind = this._getImageBehindFromCollapsedRange(range);
             if (imageBehind && this._isCollapsedRangeAtNodeBoundary(range, imageBehind, 'after')) {
+                const imageLeftRange = document.createRange();
+                if (this._collapseRangeBeforeNode(imageLeftRange, imageBehind)) {
+                    selection.removeAllRanges();
+                    selection.addRange(imageLeftRange);
+                    // 右エッジ→左エッジの中間遷移で止めず、そのまま上方向移動を完了させる。
+                    this.moveCursorUp(notifyCallback);
+                    return;
+                }
                 const imageRange = document.createRange();
                 imageRange.selectNode(imageBehind);
                 selection.removeAllRanges();

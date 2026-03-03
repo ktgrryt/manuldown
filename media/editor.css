@@ -983,7 +983,7 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
 }
 
 #editor img {
-    --image-caret-edge-gap: 2px;
+    --image-caret-edge-gap: 4px;
     max-width: min(820px, calc(100% - (var(--image-caret-edge-gap) * 2)));
     height: auto;
     display: block;
@@ -991,12 +991,24 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
     border-radius: 3px;
     border: 1px solid var(--vscode-editorGroup-border);
     cursor: pointer;
-    transition: opacity 0.2s, border-color 0.2s;
+    transition: opacity 0.2s, border-color 0.2s, box-shadow 0.12s;
 }
 
 #editor img:hover {
     opacity: 1;
     border-color: var(--vscode-editorGroup-border);
+}
+
+#editor img.image-caret-left-edge {
+    box-shadow: -2px 0 0 0 var(--vscode-focusBorder, var(--vscode-textLink-foreground));
+    border-left-width: 1px;
+    border-left-color: var(--vscode-editorGroup-border);
+}
+
+#editor img.image-caret-right-edge {
+    box-shadow: 2px 0 0 0 var(--vscode-focusBorder, var(--vscode-textLink-foreground));
+    border-right-width: 1px;
+    border-right-color: var(--vscode-editorGroup-border);
 }
 
 /* Scrollbar styling */
