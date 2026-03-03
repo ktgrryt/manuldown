@@ -1934,8 +1934,9 @@ export class CursorManager {
                 return true;
             }
             // Safari/WebView can report one-char-short offset when a leading ZWSP exists.
-            // Keep the tolerance only for that legacy layout.
-            const threshold = this._isInlineBoundaryChar(text[0])
+            // Do not apply this tolerance to FEFF-based inline-code markers, otherwise
+            // the caret can skip the inside-right edge of inline code.
+            const threshold = text[0] === '\u200B'
                 ? Math.max(0, text.length - 1)
                 : text.length;
             return offset >= threshold;

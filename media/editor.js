@@ -13597,8 +13597,9 @@ import { SearchManager } from './modules/SearchManager.js';
                     atInlineCodeEnd = true;
                 } else {
                     // Safari/WebView can report one-char-short offset when a leading
-                    // boundary marker exists. Allow the same tolerance for FEFF too.
-                    const threshold = (text[0] === '\u200B' || text[0] === '\uFEFF')
+                    // ZWSP marker exists. Do not apply this tolerance to FEFF markers,
+                    // otherwise right-arrow may skip inline-code inside-right.
+                    const threshold = text[0] === '\u200B'
                         ? Math.max(0, text.length - 1)
                         : text.length;
                     if (offset >= threshold) {
