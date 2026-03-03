@@ -14671,6 +14671,52 @@ import { SearchManager } from './modules/SearchManager.js';
             });
         };
 
+        const findMarkdownClosingBracket = (source, startIndex) => {
+            let nestedDepth = 0;
+            for (let i = startIndex; i < source.length; i++) {
+                const current = source[i];
+                if (current === '\\') {
+                    i++;
+                    continue;
+                }
+                if (current === '[') {
+                    nestedDepth++;
+                    continue;
+                }
+                if (current !== ']') {
+                    continue;
+                }
+                if (nestedDepth === 0) {
+                    return i;
+                }
+                nestedDepth--;
+            }
+            return -1;
+        };
+
+        const findMarkdownClosingParen = (source, startIndex) => {
+            let nestedDepth = 0;
+            for (let i = startIndex; i < source.length; i++) {
+                const current = source[i];
+                if (current === '\\') {
+                    i++;
+                    continue;
+                }
+                if (current === '(') {
+                    nestedDepth++;
+                    continue;
+                }
+                if (current !== ')') {
+                    continue;
+                }
+                if (nestedDepth === 0) {
+                    return i;
+                }
+                nestedDepth--;
+            }
+            return -1;
+        };
+
         const createImageElementFromMarkdown = (rawAlt, rawTarget) => {
             const alt = (rawAlt || '')
                 .replace(/\\\]/g, ']')
@@ -14698,6 +14744,33 @@ import { SearchManager } from './modules/SearchManager.js';
             return image;
         };
 
+        const createLinkElementFromMarkdown = (rawText, rawTarget) => {
+            const text = (rawText || '')
+                .replace(/\\\]/g, ']')
+                .replace(/\\\[/g, '[');
+            if (!text) return null;
+
+            const target = (rawTarget || '').trim();
+            if (!target) return null;
+
+            const targetMatch = target.match(/^(<[^>]+>|[^\s]+)(?:\s+["'][^"']*["'])?$/);
+            if (!targetMatch) return null;
+
+            let href = targetMatch[1];
+            if (href.startsWith('<') && href.endsWith('>')) {
+                href = href.slice(1, -1);
+            }
+            href = href
+                .replace(/\\\)/g, ')')
+                .replace(/\\\(/g, '(');
+            if (!href) return null;
+
+            const link = document.createElement('a');
+            link.href = href;
+            link.textContent = text;
+            return link;
+        };
+
         const appendInlineMarkdownText = (parentNode, text) => {
             const source = typeof text === 'string' ? text : '';
             if (source === '') {
@@ -14719,9 +14792,9 @@ import { SearchManager } from './modules/SearchManager.js';
                 let matched = false;
 
                 if (source[cursor] === '!' && source[cursor + 1] === '[') {
-                    const altEnd = source.indexOf(']', cursor + 2);
+                    const altEnd = findMarkdownClosingBracket(source, cursor + 2);
                     if (hasClosing(altEnd) && source[altEnd + 1] === '(') {
-                        const closeParen = source.indexOf(')', altEnd + 2);
+                        const closeParen = findMarkdownClosingParen(source, altEnd + 2);
                         if (hasClosing(closeParen)) {
                             const rawAlt = source.slice(cursor + 2, altEnd);
                             const rawTarget = source.slice(altEnd + 2, closeParen);
@@ -14729,6 +14802,26 @@ import { SearchManager } from './modules/SearchManager.js';
                             if (image) {
                                 flushText(cursor);
                                 parentNode.appendChild(image);
+                                converted = true;
+                                cursor = closeParen + 1;
+                                textStart = cursor;
+                                matched = true;
+                            }
+                        }
+                    }
+                }
+
+                if (!matched && source[cursor] === '[') {
+                    const textEnd = findMarkdownClosingBracket(source, cursor + 1);
+                    if (hasClosing(textEnd) && source[textEnd + 1] === '(') {
+                        const closeParen = findMarkdownClosingParen(source, textEnd + 2);
+                        if (hasClosing(closeParen)) {
+                            const rawText = source.slice(cursor + 1, textEnd);
+                            const rawTarget = source.slice(textEnd + 2, closeParen);
+                            const link = createLinkElementFromMarkdown(rawText, rawTarget);
+                            if (link) {
+                                flushText(cursor);
+                                parentNode.appendChild(link);
                                 converted = true;
                                 cursor = closeParen + 1;
                                 textStart = cursor;
