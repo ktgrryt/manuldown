@@ -6166,24 +6166,6 @@ export class CursorManager {
                 return true;
             }
 
-            const prevElement = findAdjacentNavigableElement(startContainer, 'prev');
-            if (prevElement) {
-                const fallbackRange = document.createRange();
-                const lastTextNode = this._getLastNavigableTextNode(prevElement);
-                if (lastTextNode) {
-                    fallbackRange.setStart(lastTextNode, (lastTextNode.textContent || '').length);
-                } else {
-                    fallbackRange.setStart(
-                        prevElement,
-                        prevElement.childNodes ? prevElement.childNodes.length : 0
-                    );
-                }
-                fallbackRange.collapse(true);
-                activeSelection.removeAllRanges();
-                activeSelection.addRange(fallbackRange);
-                return true;
-            }
-
             return false;
         };
 
