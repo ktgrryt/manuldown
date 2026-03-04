@@ -3621,10 +3621,18 @@ export class CursorManager {
                     prevElement = this._getPrevNavigableElementInDocument(currentBlock);
                 }
                 if (prevElement) {
+                    const currentRectForEmptyUp = getVisualCaretRectForRange(range);
+                    const baseXForEmptyUp = currentRectForEmptyUp
+                        ? (currentRectForEmptyUp.left || currentRectForEmptyUp.x || 0)
+                        : 0;
+
                     if (prevElement.tagName === 'UL' || prevElement.tagName === 'OL') {
                         const listItems = prevElement.querySelectorAll('li');
                         const targetLi = listItems.length > 0 ? listItems[listItems.length - 1] : null;
                         if (targetLi) {
+                            if (this._placeCursorInListItemAtX(targetLi, baseXForEmptyUp, 'up', selection)) {
+                                return;
+                            }
                             let targetNode = this._getFirstDirectTextNode(targetLi) || this._getLastDirectTextNode(targetLi);
                             if (!targetNode) {
                                 this._placeCursorInEmptyListItem(targetLi, selection, 'up');
@@ -3661,11 +3669,6 @@ export class CursorManager {
                             return;
                         }
                     }
-                    const currentRectForEmptyUp = getVisualCaretRectForRange(range);
-                    const baseXForEmptyUp = currentRectForEmptyUp
-                        ? (currentRectForEmptyUp.left || currentRectForEmptyUp.x || 0)
-                        : 0;
-
                     if (prevElement.tagName === 'LI' &&
                         this._placeCursorInListItemAtX(prevElement, baseXForEmptyUp, 'up', selection)) {
                         return;
@@ -6180,9 +6183,11 @@ export class CursorManager {
         };
 
         // 直下が空行ブロックの場合は、次のテキスト行へ飛ばさず空行に入る
+        // LI 末尾などで親要素をまたぐケースもあるため、同一親の sibling ではなく
+        // 文書順で次のナビゲーション要素を解決する。
         const originBlock = getBlockFromContainer(container, range.startOffset);
         if (originBlock) {
-            const nextBlock = this._getNextNavigableElementSibling(originBlock);
+            const nextBlock = this._getNextNavigableElementInDocument(originBlock);
             const caretRect = getVisualCaretRectForRange(range);
             const blockRect = originBlock.getBoundingClientRect ? originBlock.getBoundingClientRect() : null;
             const lineHeightForBottom = caretRect ? getEstimatedLineHeight(range.startContainer, caretRect) : 18;
