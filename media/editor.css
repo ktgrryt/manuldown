@@ -172,6 +172,10 @@ body.toc-resizing {
     position: relative;
 }
 
+#editor.image-caret-edge-active {
+    caret-color: transparent;
+}
+
 #editor.has-overflow {
     overflow-y: scroll;
 }

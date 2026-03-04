@@ -1230,40 +1230,55 @@ import { SearchManager } from './modules/SearchManager.js';
 
     const IMAGE_CARET_LEFT_EDGE_CLASS = 'image-caret-left-edge';
     const IMAGE_CARET_RIGHT_EDGE_CLASS = 'image-caret-right-edge';
+    const IMAGE_CARET_EDGE_ACTIVE_CLASS = 'image-caret-edge-active';
 
-    function clearImageCaretEdgeIndicators() {
+    function setImageCaretEdgeActive(isActive) {
+        editor.classList.toggle(IMAGE_CARET_EDGE_ACTIVE_CLASS, !!isActive);
+    }
+
+    function clearImageCaretEdgeIndicators(options = {}) {
+        const keepCaretActive = options && options.keepCaretActive === true;
         editor.querySelectorAll(`img.${IMAGE_CARET_LEFT_EDGE_CLASS}, img.${IMAGE_CARET_RIGHT_EDGE_CLASS}`).forEach((img) => {
             img.classList.remove(IMAGE_CARET_LEFT_EDGE_CLASS, IMAGE_CARET_RIGHT_EDGE_CLASS);
         });
+        if (!keepCaretActive) {
+            setImageCaretEdgeActive(false);
+        }
     }
 
     function applyImageCaretEdgeIndicator(image, edge) {
         if (!image || image.tagName !== 'IMG' || !editor.contains(image)) {
             return false;
         }
-        clearImageCaretEdgeIndicators();
+        clearImageCaretEdgeIndicators({ keepCaretActive: true });
         if (edge === 'left') {
             image.classList.add(IMAGE_CARET_LEFT_EDGE_CLASS);
+            setImageCaretEdgeActive(true);
             return true;
         }
         if (edge === 'right') {
             image.classList.add(IMAGE_CARET_RIGHT_EDGE_CLASS);
+            setImageCaretEdgeActive(true);
             return true;
         }
+        setImageCaretEdgeActive(false);
         return false;
     }
 
     function updateImageCaretEdgeIndicators(selectionOverride = null) {
         const previousLeftEdgeImage = editor.querySelector(`img.${IMAGE_CARET_LEFT_EDGE_CLASS}`);
         const previousRightEdgeImage = editor.querySelector(`img.${IMAGE_CARET_RIGHT_EDGE_CLASS}`);
-        clearImageCaretEdgeIndicators();
+        // Keep caret hidden while edge detection is in progress to avoid visual flicker.
+        clearImageCaretEdgeIndicators({ keepCaretActive: true });
 
         const selection = selectionOverride || window.getSelection();
         if (!selection || !selection.rangeCount || !selection.isCollapsed) {
+            setImageCaretEdgeActive(false);
             return;
         }
         const range = selection.getRangeAt(0);
         if (!range || !editor.contains(range.startContainer)) {
+            setImageCaretEdgeActive(false);
             return;
         }
 
@@ -1309,7 +1324,17 @@ import { SearchManager } from './modules/SearchManager.js';
         }
         if (imageAhead && !imageBehind) {
             applyImageCaretEdgeIndicator(imageAhead, 'left');
+            return;
         }
+        setImageCaretEdgeActive(false);
+    }
+
+    function syncImageCaretEdgeIndicatorsNow(selectionOverride = null) {
+        const selection = selectionOverride || window.getSelection();
+        updateImageCaretEdgeIndicators(selection);
+        requestAnimationFrame(() => {
+            updateImageCaretEdgeIndicators(selectionOverride || window.getSelection());
+        });
     }
 
     function clearImageSelectionForLayoutResize() {
@@ -9701,6 +9726,7 @@ import { SearchManager } from './modules/SearchManager.js';
             if (imageLeftRange) {
                 selection.removeAllRanges();
                 selection.addRange(imageLeftRange);
+                syncImageCaretEdgeIndicatorsNow(selection);
                 return true;
             }
         }
@@ -10647,6 +10673,7 @@ import { SearchManager } from './modules/SearchManager.js';
                     }
                     if (moveCursorDownFromEmptyBlock(range, selection)) {
                         e.preventDefault();
+                        syncImageCaretEdgeIndicatorsNow(selection);
                         return true;
                     }
                     if (range.collapsed) {
@@ -10987,6 +11014,7 @@ import { SearchManager } from './modules/SearchManager.js';
             e.preventDefault();
             cursorManager.moveCursorDown(notifyChange);
             normalizeVerticalEntryAtLeadingInlineCodeToOutsideLeft(beforeRange);
+            syncImageCaretEdgeIndicatorsNow();
             const selectionAfter = window.getSelection();
             const snapshotAfter = selectionAfter && selectionAfter.rangeCount > 0 ? (() => {
                 const r = selectionAfter.getRangeAt(0);
@@ -11006,6 +11034,7 @@ import { SearchManager } from './modules/SearchManager.js';
                 const rangeAfter = selectionAfter.getRangeAt(0);
                 if (moveCursorDownFromInlineCodeOutsideLeftBoundary(rangeAfter, selectionAfter)) {
                     normalizeVerticalEntryAtLeadingInlineCodeToOutsideLeft(beforeRange);
+                    syncImageCaretEdgeIndicatorsNow(selectionAfter);
                     setTimeout(() => correctCheckboxCursorPosition(), 0);
                     return true;
                 }
@@ -11042,6 +11071,7 @@ import { SearchManager } from './modules/SearchManager.js';
                             if (exitEmptyCodeBlockDownFromPre(preBlock, selectionAfter, true, true)) {
                                 // チェックボックス行に入った場合、カーソル位置を補正
                                 setTimeout(() => correctCheckboxCursorPosition(), 0);
+                                syncImageCaretEdgeIndicatorsNow(selectionAfter);
                                 return true;
                             }
                         }
@@ -11061,6 +11091,7 @@ import { SearchManager } from './modules/SearchManager.js';
                             if (codeBlock) {
                                 if (exitEmptyCodeBlockDownFromPre(afterPreBlock, selectionAfter, true, true)) {
                                     setTimeout(() => correctCheckboxCursorPosition(), 0);
+                                    syncImageCaretEdgeIndicatorsNow(selectionAfter);
                                     return true;
                                 }
                             }
@@ -11070,6 +11101,7 @@ import { SearchManager } from './modules/SearchManager.js';
             }
             // チェックボックス行に入った場合、カーソル位置を補正
             setTimeout(() => correctCheckboxCursorPosition(), 0);
+            syncImageCaretEdgeIndicatorsNow(selectionAfter);
             return true;
         }
         if (e.key === 'ArrowLeft' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
@@ -11215,6 +11247,7 @@ import { SearchManager } from './modules/SearchManager.js';
                             e.preventDefault();
                             selection.removeAllRanges();
                             selection.addRange(leftEdgeRange);
+                            syncImageCaretEdgeIndicatorsNow(selection);
                             return true;
                         }
                     }
@@ -11236,6 +11269,7 @@ import { SearchManager } from './modules/SearchManager.js';
             }
             if (cursorManager.moveCursorBackward(notifyChange)) {
                 e.preventDefault();
+                syncImageCaretEdgeIndicatorsNow();
                 return true;
             }
             return false;
@@ -11347,10 +11381,14 @@ import { SearchManager } from './modules/SearchManager.js';
                 e.preventDefault();
                 // チェックボックス行に入った場合、カーソル位置を補正
                 correctCheckboxCursorPosition();
+                syncImageCaretEdgeIndicatorsNow();
                 return true;
             }
             // ブラウザのデフォルト動作後にチェックボックスのカーソル位置を補正
-            setTimeout(() => correctCheckboxCursorPosition(), 0);
+            setTimeout(() => {
+                correctCheckboxCursorPosition();
+                syncImageCaretEdgeIndicatorsNow();
+            }, 0);
             return false;
         }
         return false;
@@ -11360,6 +11398,7 @@ import { SearchManager } from './modules/SearchManager.js';
         const selection = window.getSelection();
         if (!selection || !selection.rangeCount) {
             cursorManager.moveCursorUp(notifyChange);
+            syncImageCaretEdgeIndicatorsNow();
             return;
         }
 
@@ -11378,6 +11417,7 @@ import { SearchManager } from './modules/SearchManager.js';
 
         const afterSelection = window.getSelection();
         if (!afterSelection || !afterSelection.rangeCount) {
+            syncImageCaretEdgeIndicatorsNow();
             return;
         }
 
@@ -11394,24 +11434,29 @@ import { SearchManager } from './modules/SearchManager.js';
             afterTop > beforeTop + 2;
 
         if (!currentListItem) {
+            syncImageCaretEdgeIndicatorsNow(afterSelection);
             return;
         }
 
         if (!cursorManager ||
             typeof cursorManager._getAdjacentListItem !== 'function' ||
             typeof cursorManager._placeCursorInListItemAtX !== 'function') {
+            syncImageCaretEdgeIndicatorsNow(afterSelection);
             return;
         }
 
         const prevListItem = cursorManager._getAdjacentListItem(currentListItem, 'prev');
         if (!prevListItem || prevListItem === currentListItem) {
+            syncImageCaretEdgeIndicatorsNow(afterSelection);
             return;
         }
 
         if (!moved || movedDownByMistake) {
             cursorManager._placeCursorInListItemAtX(prevListItem, beforeX, 'up', afterSelection);
+            syncImageCaretEdgeIndicatorsNow(afterSelection);
             return;
         }
+        syncImageCaretEdgeIndicatorsNow(afterSelection);
     }
 
     function normalizeVerticalEntryAtLeadingInlineCodeToOutsideLeft(beforeRange = null) {
@@ -13237,6 +13282,7 @@ import { SearchManager } from './modules/SearchManager.js';
             } : null;
             cursorManager.moveCursorDown(notifyChange);
             normalizeVerticalEntryAtLeadingInlineCodeToOutsideLeft(beforeRange);
+            syncImageCaretEdgeIndicatorsNow();
             const afterSelection = window.getSelection();
             const snapshotAfter = afterSelection && afterSelection.rangeCount > 0 ? (() => {
                 const r = afterSelection.getRangeAt(0);
@@ -13256,10 +13302,12 @@ import { SearchManager } from './modules/SearchManager.js';
                 const rangeAfter = afterSelection.getRangeAt(0);
                 if (moveCursorDownFromInlineCodeOutsideLeftBoundary(rangeAfter, afterSelection)) {
                     normalizeVerticalEntryAtLeadingInlineCodeToOutsideLeft(beforeRange);
+                    syncImageCaretEdgeIndicatorsNow(afterSelection);
                 }
             }
             // チェックボックス行に入った場合、カーソル位置を補正
             setTimeout(() => correctCheckboxCursorPosition(), 0);
+            syncImageCaretEdgeIndicatorsNow(afterSelection);
             recordCtrlNavHandled('down', fromCommand);
             return true;
         }
@@ -13384,6 +13432,7 @@ import { SearchManager } from './modules/SearchManager.js';
             // Normal backward movement
             if (cursorManager.moveCursorBackward(notifyChange)) {
                 e.preventDefault();
+                syncImageCaretEdgeIndicatorsNow();
                 return true;
             }
             return false;
@@ -13543,6 +13592,7 @@ import { SearchManager } from './modules/SearchManager.js';
 
             e.preventDefault();
             cursorManager.moveCursorForward(notifyChange);
+            syncImageCaretEdgeIndicatorsNow();
             // チェックボックス行に入った場合、カーソル位置を補正
             // setTimeout to ensure cursor is positioned after moveCursorForward completes
             setTimeout(() => correctCheckboxCursorPosition(), 0);
@@ -15212,7 +15262,7 @@ import { SearchManager } from './modules/SearchManager.js';
             selection.removeAllRanges();
             selection.addRange(range);
             applyImageCaretEdgeIndicator(image, 'right');
-            requestAnimationFrame(() => updateImageCaretEdgeIndicators(selection));
+            syncImageCaretEdgeIndicatorsNow(selection);
             return true;
         };
 
@@ -16956,6 +17006,7 @@ import { SearchManager } from './modules/SearchManager.js';
                     if (!selection) return;
                     selection.removeAllRanges();
                     selection.addRange(imageHorizontalRange);
+                    syncImageCaretEdgeIndicatorsNow(selection);
                     return;
                 }
             }
