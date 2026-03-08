@@ -1174,8 +1174,9 @@ export class TableManager {
     handleBackspaceKeydown(e) {
         if (e.metaKey || e.altKey) return false;
         const key = e.key.toLowerCase();
-        const isBackspace = e.key === 'Backspace' || e.key === 'Delete' || (this._isMac && e.ctrlKey && key === 'h');
-        if (!isBackspace) return false;
+        const isBackwardDelete = e.key === 'Backspace' || (this._isMac && e.ctrlKey && key === 'h');
+        const isDeleteKey = isBackwardDelete || e.key === 'Delete';
+        if (!isDeleteKey) return false;
 
         const structureSelection = this._normalizeStructureSelection();
         if (structureSelection) {
@@ -1226,6 +1227,24 @@ export class TableManager {
         const selection = window.getSelection();
         if (selection && selection.rangeCount) {
             const range = selection.getRangeAt(0);
+            const cell = this._getCellFromTarget(range.startContainer);
+            const table = cell ? cell.closest('table') : null;
+            if (
+                isBackwardDelete &&
+                range.collapsed &&
+                cell &&
+                table &&
+                this._isTableEmpty(table)
+            ) {
+                const edge = this._getTableEdge(table, 'right') || this._getTableEdge(table, 'left');
+                if (edge) {
+                    e.preventDefault();
+                    this.stateManager.saveState();
+                    this._deleteTableFromEdge(edge);
+                    if (this.notifyChange) this.notifyChange();
+                    return true;
+                }
+            }
             if (!range.collapsed) {
                 const startCell = this._getCellFromTarget(range.startContainer);
                 const endCell = this._getCellFromTarget(range.endContainer);
@@ -4103,6 +4122,15 @@ export class TableManager {
 
     _isCellEmpty(cell) {
         return !this._hasRenderableCellContent(cell);
+    }
+
+    _isTableEmpty(table) {
+        if (!table || !table.rows.length) return false;
+        const rows = Array.from(table.rows);
+        return rows.every((row) => {
+            const cells = Array.from(row.cells || []);
+            return cells.every((cell) => this._isCellEmpty(cell));
+        });
     }
 
     _getCellFromTarget(target) {
