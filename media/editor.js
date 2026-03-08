@@ -14767,10 +14767,93 @@ import { SearchManager } from './modules/SearchManager.js';
             scheduleEditorOverflowStateUpdate();
         });
 
-        // URLかどうかを判定するヘルパー関数
-        const isUrl = (text) => {
-            const urlPattern = /^https?:\/\/[^\s]+$/i;
-            return urlPattern.test(text.trim());
+        const absoluteUrlPattern = /^https?:\/\/[^\s]+$/i;
+        const emailAddressPattern = /^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i;
+        const linkLikeTextPattern = /https?:\/\/|[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
+
+        const resolveDirectLinkTarget = (text) => {
+            const normalized = String(text || '').trim();
+            if (!normalized) return null;
+            if (absoluteUrlPattern.test(normalized)) {
+                return {
+                    type: 'url',
+                    text: normalized,
+                    href: normalized
+                };
+            }
+            if (emailAddressPattern.test(normalized)) {
+                return {
+                    type: 'email',
+                    text: normalized,
+                    href: `mailto:${normalized}`
+                };
+            }
+            return null;
+        };
+
+        const hasLinkLikeText = (text) => {
+            return linkLikeTextPattern.test(String(text || ''));
+        };
+
+        const trimTrailingLinkPunctuation = (value) => {
+            let candidate = value;
+            let trailing = '';
+
+            while (candidate.length > 0 && /[.,!?;:。．、，！？]$/.test(candidate)) {
+                trailing = candidate.slice(-1) + trailing;
+                candidate = candidate.slice(0, -1);
+            }
+
+            // If closing parentheses are unbalanced, keep them as trailing text.
+            while (candidate.endsWith(')')) {
+                const opens = (candidate.match(/\(/g) || []).length;
+                const closes = (candidate.match(/\)/g) || []).length;
+                if (closes <= opens) break;
+                trailing = ')' + trailing;
+                candidate = candidate.slice(0, -1);
+            }
+
+            return { candidate, trailing };
+        };
+
+        const splitTextByDetectedLinks = (rawText) => {
+            const source = String(rawText || '').replace(/\r\n?/g, '\n');
+            const pattern = /https?:\/\/[^\s<>"'`]+|[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+            const tokens = [];
+            let lastIndex = 0;
+            let match;
+
+            while ((match = pattern.exec(source)) !== null) {
+                const index = match.index;
+                const matchedText = match[0] || '';
+
+                if (index > lastIndex) {
+                    tokens.push({ type: 'text', value: source.slice(lastIndex, index) });
+                }
+
+                const { candidate, trailing } = trimTrailingLinkPunctuation(matchedText);
+                const resolvedLink = resolveDirectLinkTarget(candidate);
+                if (resolvedLink) {
+                    tokens.push({
+                        type: resolvedLink.type,
+                        value: resolvedLink.text,
+                        href: resolvedLink.href
+                    });
+                } else if (matchedText) {
+                    tokens.push({ type: 'text', value: matchedText });
+                }
+                if (trailing) {
+                    tokens.push({ type: 'text', value: trailing });
+                }
+
+                lastIndex = index + matchedText.length;
+            }
+
+            if (lastIndex < source.length) {
+                tokens.push({ type: 'text', value: source.slice(lastIndex) });
+            }
+
+            return tokens;
         };
 
         const isImageFile = (file) => {
@@ -15354,68 +15437,13 @@ import { SearchManager } from './modules/SearchManager.js';
             const autoLinkUrlTextNodesInContainer = (rootNode) => {
                 if (!rootNode) return;
 
-                const splitUrlAndTextTokens = (sourceText) => {
-                    const source = String(sourceText || '').replace(/\r\n?/g, '\n');
-                    const pattern = /https?:\/\/[^\s<>"'`]+/gi;
-                    const tokens = [];
-                    let lastIndex = 0;
-                    let match;
-
-                    const trimTrailingPunctuation = (value) => {
-                        let url = value;
-                        let trailing = '';
-
-                        while (url.length > 0 && /[.,!?;:。．、，！？]$/.test(url)) {
-                            trailing = url.slice(-1) + trailing;
-                            url = url.slice(0, -1);
-                        }
-
-                        while (url.endsWith(')')) {
-                            const opens = (url.match(/\(/g) || []).length;
-                            const closes = (url.match(/\)/g) || []).length;
-                            if (closes <= opens) break;
-                            trailing = ')' + trailing;
-                            url = url.slice(0, -1);
-                        }
-
-                        return { url, trailing };
-                    };
-
-                    while ((match = pattern.exec(source)) !== null) {
-                        const index = match.index;
-                        const matchedText = match[0] || '';
-
-                        if (index > lastIndex) {
-                            tokens.push({ type: 'text', value: source.slice(lastIndex, index) });
-                        }
-
-                        const { url, trailing } = trimTrailingPunctuation(matchedText);
-                        if (url) {
-                            tokens.push({ type: 'url', value: url });
-                        } else if (matchedText) {
-                            tokens.push({ type: 'text', value: matchedText });
-                        }
-                        if (trailing) {
-                            tokens.push({ type: 'text', value: trailing });
-                        }
-
-                        lastIndex = index + matchedText.length;
-                    }
-
-                    if (lastIndex < source.length) {
-                        tokens.push({ type: 'text', value: source.slice(lastIndex) });
-                    }
-
-                    return tokens;
-                };
-
                 const walker = document.createTreeWalker(
                     rootNode,
                     NodeFilter.SHOW_TEXT,
                     {
                         acceptNode: (node) => {
                             const text = node && node.textContent ? node.textContent : '';
-                            if (!/https?:\/\//i.test(text)) {
+                            if (!hasLinkLikeText(text)) {
                                 return NodeFilter.FILTER_SKIP;
                             }
                             const parent = node.parentElement;
@@ -15439,15 +15467,15 @@ import { SearchManager } from './modules/SearchManager.js';
 
                 textNodes.forEach((textNode) => {
                     if (!textNode || !textNode.parentNode) return;
-                    const tokens = splitUrlAndTextTokens(textNode.textContent || '');
-                    if (!tokens.some((token) => token.type === 'url')) return;
+                    const tokens = splitTextByDetectedLinks(textNode.textContent || '');
+                    if (!tokens.some((token) => token.type === 'url' || token.type === 'email')) return;
 
                     const fragment = document.createDocumentFragment();
                     tokens.forEach((token) => {
                         if (!token || !token.value) return;
-                        if (token.type === 'url') {
+                        if (token.type === 'url' || token.type === 'email') {
                             const link = document.createElement('a');
-                            link.href = token.value;
+                            link.href = token.href || token.value;
                             link.textContent = token.value;
                             fragment.appendChild(link);
                         } else {
@@ -15532,62 +15560,6 @@ import { SearchManager } from './modules/SearchManager.js';
             return true;
         };
 
-        const splitTextByDetectedUrls = (rawText) => {
-            const source = String(rawText || '').replace(/\r\n?/g, '\n');
-            const pattern = /https?:\/\/[^\s<>"'`]+/gi;
-            const tokens = [];
-            let lastIndex = 0;
-            let match;
-
-            const trimTrailingPunctuation = (value) => {
-                let url = value;
-                let trailing = '';
-
-                while (url.length > 0 && /[.,!?;:。．、，！？]$/.test(url)) {
-                    trailing = url.slice(-1) + trailing;
-                    url = url.slice(0, -1);
-                }
-
-                // If closing parentheses are unbalanced, keep them as trailing text.
-                while (url.endsWith(')')) {
-                    const opens = (url.match(/\(/g) || []).length;
-                    const closes = (url.match(/\)/g) || []).length;
-                    if (closes <= opens) break;
-                    trailing = ')' + trailing;
-                    url = url.slice(0, -1);
-                }
-
-                return { url, trailing };
-            };
-
-            while ((match = pattern.exec(source)) !== null) {
-                const index = match.index;
-                const matchedText = match[0] || '';
-
-                if (index > lastIndex) {
-                    tokens.push({ type: 'text', value: source.slice(lastIndex, index) });
-                }
-
-                const { url, trailing } = trimTrailingPunctuation(matchedText);
-                if (url) {
-                    tokens.push({ type: 'url', value: url });
-                } else if (matchedText) {
-                    tokens.push({ type: 'text', value: matchedText });
-                }
-                if (trailing) {
-                    tokens.push({ type: 'text', value: trailing });
-                }
-
-                lastIndex = index + matchedText.length;
-            }
-
-            if (lastIndex < source.length) {
-                tokens.push({ type: 'text', value: source.slice(lastIndex) });
-            }
-
-            return tokens;
-        };
-
         const appendTextTokenWithLineBreaks = (parent, text) => {
             const normalized = String(text || '').replace(/\r\n?/g, '\n');
             const lines = normalized.split('\n');
@@ -15603,7 +15575,7 @@ import { SearchManager } from './modules/SearchManager.js';
         };
 
         const tryInsertAutoLinkedTextFromPastedText = (rawText) => {
-            if (typeof rawText !== 'string' || !/https?:\/\//i.test(rawText)) {
+            if (typeof rawText !== 'string' || !hasLinkLikeText(rawText)) {
                 return false;
             }
 
@@ -15614,17 +15586,17 @@ import { SearchManager } from './modules/SearchManager.js';
                 return false;
             }
 
-            const tokens = splitTextByDetectedUrls(rawText);
-            if (!tokens.some((token) => token.type === 'url')) {
+            const tokens = splitTextByDetectedLinks(rawText);
+            if (!tokens.some((token) => token.type === 'url' || token.type === 'email')) {
                 return false;
             }
 
             const fragment = document.createDocumentFragment();
             tokens.forEach((token) => {
                 if (!token || !token.value) return;
-                if (token.type === 'url') {
+                if (token.type === 'url' || token.type === 'email') {
                     const link = document.createElement('a');
-                    link.href = token.value;
+                    link.href = token.href || token.value;
                     link.textContent = token.value;
                     fragment.appendChild(link);
                     return;
@@ -16743,7 +16715,7 @@ import { SearchManager } from './modules/SearchManager.js';
                 const items = clipboardData.items;
                 let hasImageFile = false;
 
-                // 選択範囲があり、URLがペーストされた場合はリンクを作成
+                // 選択範囲があり、URL/メールアドレスがペーストされた場合はリンクを作成
                 const selection = window.getSelection();
                 const pastedHtml = clipboardData.getData('text/html');
                 const markedInternalHtml = extractInternalHtmlFromMarkedClipboardHtml(pastedHtml);
@@ -16752,6 +16724,7 @@ import { SearchManager } from './modules/SearchManager.js';
                 const richPastedHtml = internalPastedHtml || (pastedHtmlContainsImage ? pastedHtml : '');
                 const internalPastedText = clipboardData.getData(INTERNAL_EDITOR_PLAIN_TEXT_CLIPBOARD_TYPE);
                 const pastedText = internalPastedText || clipboardData.getData('text/plain');
+                const directLinkTarget = resolveDirectLinkTarget(pastedText);
                 const hasListLikeText = !!(pastedText && pastedTextLooksLikeList(pastedText));
 
                 if (
@@ -16776,7 +16749,7 @@ import { SearchManager } from './modules/SearchManager.js';
                     return;
                 }
 
-                if (selection && !selection.isCollapsed && pastedText && isUrl(pastedText)) {
+                if (selection && !selection.isCollapsed && directLinkTarget) {
                     e.preventDefault();
 
                     const selectedText = selection.toString();
@@ -16784,7 +16757,7 @@ import { SearchManager } from './modules/SearchManager.js';
 
                     // リンク要素を作成
                     const link = document.createElement('a');
-                    link.href = pastedText.trim();
+                    link.href = directLinkTarget.href;
                     link.textContent = selectedText;
 
                     // 選択範囲をリンクで置換
@@ -16803,18 +16776,17 @@ import { SearchManager } from './modules/SearchManager.js';
                     return;
                 }
 
-                // URLがペーストされた場合（選択なし）、自動的にリンクを作成
-                if (selection && selection.isCollapsed && pastedText && isUrl(pastedText)) {
+                // URL/メールアドレスがペーストされた場合（選択なし）、自動的にリンクを作成
+                if (selection && selection.isCollapsed && directLinkTarget) {
                     const range = selection.getRangeAt(0);
                     const container = range.commonAncestorContainer;
                     const codeElement = domUtils.getParentElement(container, 'CODE');
                     if (!codeElement) {
                         e.preventDefault();
 
-                        const url = pastedText.trim();
                         const link = document.createElement('a');
-                        link.href = url;
-                        link.textContent = url;
+                        link.href = directLinkTarget.href;
+                        link.textContent = directLinkTarget.text;
 
                         range.deleteContents();
                         range.insertNode(link);
