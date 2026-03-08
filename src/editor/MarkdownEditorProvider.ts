@@ -1380,6 +1380,10 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     markdown: `![image](${relativePath})`,
                     src: webview.asWebviewUri(imageUri).toString()
                 });
+                // Request an explicit sync right after insertion as a safety net.
+                webview.postMessage({
+                    type: 'requestSync'
+                });
             } else if (options.showNotification) {
                 vscode.window.showInformationMessage(`Image saved: ${relativePath}`);
             }

@@ -35,6 +35,8 @@ import { SearchManager } from './modules/SearchManager.js';
     let tocResizeState = null;
     let emacsKillBuffer = '';
     let suppressNextNativeCtrlKDelete = false;
+    let suppressImageRemovalSync = false;
+    let imageRemovalSyncScheduled = false;
 
     const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
     const TOC_PANEL_DEFAULT_WIDTH = 150;
@@ -4098,6 +4100,68 @@ import { SearchManager } from './modules/SearchManager.js';
         scheduleUpdate(0);
     }
 
+    function temporarilySuppressImageRemovalSync() {
+        suppressImageRemovalSync = true;
+        setTimeout(() => {
+            suppressImageRemovalSync = false;
+        }, 0);
+    }
+
+    function scheduleImmediateSyncForImageRemoval() {
+        if (imageRemovalSyncScheduled) {
+            return;
+        }
+        imageRemovalSyncScheduled = true;
+        requestAnimationFrame(() => {
+            imageRemovalSyncScheduled = false;
+            if (isUpdating || suppressImageRemovalSync) {
+                return;
+            }
+            notifyChangeImmediate();
+        });
+    }
+
+    function nodeContainsImage(node) {
+        if (!node) return false;
+        if (node.nodeType === Node.ELEMENT_NODE) {
+            if (node.tagName === 'IMG') {
+                return true;
+            }
+            if (typeof node.querySelector === 'function' && node.querySelector('img')) {
+                return true;
+            }
+            return false;
+        }
+        if (node.nodeType === Node.DOCUMENT_FRAGMENT_NODE && typeof node.querySelector === 'function') {
+            return !!node.querySelector('img');
+        }
+        return false;
+    }
+
+    function setupImageRemovalSyncObserver() {
+        const observer = new MutationObserver((mutations) => {
+            if (isUpdating || suppressImageRemovalSync) {
+                return;
+            }
+            for (const mutation of mutations) {
+                if (!mutation || mutation.type !== 'childList') {
+                    continue;
+                }
+                for (const removedNode of mutation.removedNodes || []) {
+                    if (nodeContainsImage(removedNode)) {
+                        scheduleImmediateSyncForImageRemoval();
+                        return;
+                    }
+                }
+            }
+        });
+
+        observer.observe(editor, {
+            childList: true,
+            subtree: true
+        });
+    }
+
     // Undo/Redo用の遅延通知（VSCodeの更新処理が完了するまで待つ）
     function notifyChangeDelayed() {
         scheduleEditorOverflowStateUpdate();
@@ -6787,16 +6851,21 @@ import { SearchManager } from './modules/SearchManager.js';
                     }
                 }
                 requestAnimationFrame(() => {
-                    const didPrune = pruneEmptyListItemsAfterRangeDelete(selectedListItems);
-                    const restoredAnchorLine = restoreEmptyLineAtRangeDeleteAnchor(
-                        rangeDeleteListAnchor,
-                        selectedListItems
-                    );
-                    if (didPrune || restoredAnchorLine) {
-                        updateListItemClasses();
+                    try {
+                        const didPrune = pruneEmptyListItemsAfterRangeDelete(selectedListItems);
+                        const restoredAnchorLine = restoreEmptyLineAtRangeDeleteAnchor(
+                            rangeDeleteListAnchor,
+                            selectedListItems
+                        );
+                        if (didPrune || restoredAnchorLine) {
+                            updateListItemClasses();
+                        }
+                        clearEditorIfOnlyEmptyBlockquoteShell(selection);
+                    } catch (error) {
+                        console.error('[delete] Post-delete normalization failed:', error);
+                    } finally {
+                        notifyChangeImmediate();
                     }
-                    clearEditorIfOnlyEmptyBlockquoteShell(selection);
-                    notifyChangeImmediate();
                 });
                 return true;
             }
@@ -14216,6 +14285,8 @@ import { SearchManager } from './modules/SearchManager.js';
 
     // エディタのセットアップ
     function setupEditor() {
+        setupImageRemovalSyncObserver();
+
         // フォーカス監視
         let lastFocusTime = Date.now();
         let focusCheckInterval = null;
@@ -16943,7 +17014,7 @@ import { SearchManager } from './modules/SearchManager.js';
             selection.addRange(range);
 
             hideImageResizeOverlay();
-            notifyChange();
+            notifyChangeImmediate();
         });
 
         // キーボードイベント
@@ -17955,7 +18026,7 @@ import { SearchManager } from './modules/SearchManager.js';
             e.stopPropagation();
             stateManager.saveState();
             if (deleteActiveResizeImage()) {
-                notifyChange();
+                notifyChangeImmediate();
             }
         }, true);
 
@@ -18338,6 +18409,7 @@ import { SearchManager } from './modules/SearchManager.js';
 
         switch (message.type) {
             case 'init':
+                temporarilySuppressImageRemovalSync();
                 isUpdating = true;
                 editor.innerHTML = message.content;
                 isUpdating = false;
@@ -18363,6 +18435,7 @@ import { SearchManager } from './modules/SearchManager.js';
                 break;
             case 'update':
                 if (!editor.contains(document.activeElement)) {
+                    temporarilySuppressImageRemovalSync();
                     isUpdating = true;
                     const scrollTop = editor.scrollTop;
                     editor.innerHTML = message.content;
@@ -18381,6 +18454,7 @@ import { SearchManager } from './modules/SearchManager.js';
                 }
                 break;
             case 'refresh':
+                temporarilySuppressImageRemovalSync();
                 isUpdating = true;
                 const scrollTopRefresh = editor.scrollTop;
                 editor.innerHTML = message.content;
@@ -18546,6 +18620,9 @@ import { SearchManager } from './modules/SearchManager.js';
 
                     notifyChangeImmediate();
                 }
+                break;
+            case 'requestSync':
+                notifyChangeImmediate();
                 break;
             case 'tableCommand':
                 tableManager.executeTableCommand(message.command);
