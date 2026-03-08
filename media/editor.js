@@ -14767,9 +14767,10 @@ import { SearchManager } from './modules/SearchManager.js';
             scheduleEditorOverflowStateUpdate();
         });
 
-        const absoluteUrlPattern = /^https?:\/\/[^\s]+$/i;
+        const absoluteUrlPattern = /^https?:\/\/[^\s<>"'`]+$/i;
+        const detectedLinkPattern = /https?:\/\/[^\s<>"'`]+|[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
         const emailAddressPattern = /^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i;
-        const linkLikeTextPattern = /https?:\/\/|[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
+        const linkLikeTextPattern = /https?:\/\/[^\s<>"'`]+|[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
 
         const resolveDirectLinkTarget = (text) => {
             const normalized = String(text || '').trim();
@@ -14818,12 +14819,12 @@ import { SearchManager } from './modules/SearchManager.js';
 
         const splitTextByDetectedLinks = (rawText) => {
             const source = String(rawText || '').replace(/\r\n?/g, '\n');
-            const pattern = /https?:\/\/[^\s<>"'`]+|[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
             const tokens = [];
             let lastIndex = 0;
             let match;
+            detectedLinkPattern.lastIndex = 0;
 
-            while ((match = pattern.exec(source)) !== null) {
+            while ((match = detectedLinkPattern.exec(source)) !== null) {
                 const index = match.index;
                 const matchedText = match[0] || '';
 
@@ -14854,6 +14855,22 @@ import { SearchManager } from './modules/SearchManager.js';
             }
 
             return tokens;
+        };
+
+        const findUrlLikeRanges = (text) => {
+            const source = String(text || '').replace(/\r\n?/g, '\n');
+            const ranges = [];
+            detectedLinkPattern.lastIndex = 0;
+            let match;
+            while ((match = detectedLinkPattern.exec(source)) !== null) {
+                const value = match[0] || '';
+                if (!value) continue;
+                ranges.push({
+                    start: match.index,
+                    end: match.index + value.length
+                });
+            }
+            return ranges;
         };
 
         const isImageFile = (file) => {
@@ -15181,6 +15198,16 @@ import { SearchManager } from './modules/SearchManager.js';
             let cursor = 0;
             let textStart = 0;
             let converted = false;
+            const urlLikeRanges = findUrlLikeRanges(source);
+            const isInsideUrlLikeText = (index) => {
+                for (let i = 0; i < urlLikeRanges.length; i++) {
+                    const range = urlLikeRanges[i];
+                    if (index >= range.start && index < range.end) {
+                        return true;
+                    }
+                }
+                return false;
+            };
             const flushText = (endIndex) => {
                 if (endIndex > textStart) {
                     parentNode.appendChild(document.createTextNode(source.slice(textStart, endIndex)));
@@ -15245,7 +15272,7 @@ import { SearchManager } from './modules/SearchManager.js';
                     }
                 }
 
-                if (!matched && source.startsWith('**', cursor)) {
+                if (!matched && source.startsWith('**', cursor) && !isInsideUrlLikeText(cursor)) {
                     const end = source.indexOf('**', cursor + 2);
                     if (hasClosing(end) && end > cursor + 2) {
                         const content = source.slice(cursor + 2, end);
@@ -15262,7 +15289,7 @@ import { SearchManager } from './modules/SearchManager.js';
                     }
                 }
 
-                if (!matched && source.startsWith('~~', cursor)) {
+                if (!matched && source.startsWith('~~', cursor) && !isInsideUrlLikeText(cursor)) {
                     const end = source.indexOf('~~', cursor + 2);
                     if (hasClosing(end) && end > cursor + 2) {
                         const content = source.slice(cursor + 2, end);
@@ -15279,7 +15306,7 @@ import { SearchManager } from './modules/SearchManager.js';
                     }
                 }
 
-                if (!matched && source[cursor] === '*' && source[cursor + 1] !== '*') {
+                if (!matched && source[cursor] === '*' && source[cursor + 1] !== '*' && !isInsideUrlLikeText(cursor)) {
                     const end = source.indexOf('*', cursor + 1);
                     if (hasClosing(end) && end > cursor + 1) {
                         const content = source.slice(cursor + 1, end);
@@ -15296,7 +15323,7 @@ import { SearchManager } from './modules/SearchManager.js';
                     }
                 }
 
-                if (!matched && source[cursor] === '_' && source[cursor + 1] !== '_') {
+                if (!matched && source[cursor] === '_' && source[cursor + 1] !== '_' && !isInsideUrlLikeText(cursor)) {
                     const end = source.indexOf('_', cursor + 1);
                     if (hasClosing(end) && end > cursor + 1) {
                         const content = source.slice(cursor + 1, end);
