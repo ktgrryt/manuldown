@@ -1319,6 +1319,13 @@ body.image-resizing * {
     background-color: var(--vscode-button-secondaryHoverBackground);
 }
 
+.link-popover-btn:disabled,
+.link-popover-btn[aria-disabled="true"] {
+    opacity: 0.55;
+    cursor: not-allowed;
+    pointer-events: none;
+}
+
 .link-popover-btn.primary {
     background-color: var(--vscode-button-background);
     color: var(--vscode-button-foreground);
@@ -1326,6 +1333,12 @@ body.image-resizing * {
 
 .link-popover-btn.primary:hover {
     background-color: var(--vscode-button-hoverBackground);
+}
+
+.link-popover-btn.primary:disabled,
+.link-popover-btn.primary[aria-disabled="true"] {
+    background-color: var(--vscode-button-secondaryBackground);
+    color: var(--vscode-disabledForeground, var(--vscode-descriptionForeground));
 }
 
 .link-popover-btn.danger {

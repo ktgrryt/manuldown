@@ -17422,9 +17422,20 @@ import { SearchManager } from './modules/SearchManager.js';
                     linkInputSavedValue = input.value;
                     linkInputDebounceTimer = null;
                 }, 500);
+                syncLinkPopoverOpenButtonState(input.value);
             });
             document.body.appendChild(popover);
             return popover;
+        }
+
+        function syncLinkPopoverOpenButtonState(urlValue) {
+            if (!linkPopover) return;
+            const openButton = linkPopover.querySelector('[data-action="open"]');
+            if (!openButton) return;
+            const normalized = String(urlValue || '').trim();
+            const canOpen = isHttpUrl(normalized);
+            openButton.disabled = !canOpen;
+            openButton.setAttribute('aria-disabled', canOpen ? 'false' : 'true');
         }
 
         function showLinkPopover(link) {
@@ -17435,6 +17446,7 @@ import { SearchManager } from './modules/SearchManager.js';
             currentLink = link;
             const input = linkPopover.querySelector('.link-popover-input');
             input.value = link.getAttribute('href') || '';
+            syncLinkPopoverOpenButtonState(input.value);
             linkInputUndoStack = [];
             linkInputRedoStack = [];
             linkInputSavedValue = input.value;
@@ -17470,6 +17482,7 @@ import { SearchManager } from './modules/SearchManager.js';
                     if (!isHttpUrl(newUrl)) {
                         // http/https以外はリンクとして設定不可 - 元のURLに戻す
                         input.value = oldUrl;
+                        syncLinkPopoverOpenButtonState(input.value);
                         return;
                     }
                     currentLink.setAttribute('href', newUrl);
@@ -17491,10 +17504,28 @@ import { SearchManager } from './modules/SearchManager.js';
 
         function unlinkLink() {
             if (currentLink) {
-                const text = currentLink.textContent;
+                const text = currentLink.textContent || '';
                 const textNode = document.createTextNode(text);
-                currentLink.parentNode.replaceChild(textNode, currentLink);
-                stateManager.saveStateDebounced();
+                const parent = currentLink.parentNode;
+                if (!parent) {
+                    hideLinkPopover(true);
+                    return;
+                }
+                parent.replaceChild(textNode, currentLink);
+
+                // Keep keyboard shortcuts on the editor after clicking the popover button.
+                focusEditorWithoutScroll();
+                const selection = window.getSelection();
+                if (selection) {
+                    const range = document.createRange();
+                    range.setStart(textNode, text.length);
+                    range.collapse(true);
+                    selection.removeAllRanges();
+                    selection.addRange(range);
+                }
+
+                // Save immediately so unlink is always undoable/redoable.
+                stateManager.saveState();
                 notifyChange();
             }
             hideLinkPopover(true); // 保存をスキップ（リンク削除済み）
@@ -17505,11 +17536,14 @@ import { SearchManager } from './modules/SearchManager.js';
             saveLinkUrlIfChanged();
             if (currentLink) {
                 const url = currentLink.getAttribute('href');
-                if (url) {
+                if (url && isHttpUrl(url)) {
                     vscode.postMessage({
                         type: 'openLink',
                         url: url
                     });
+                } else {
+                    syncLinkPopoverOpenButtonState(url || '');
+                    return;
                 }
             }
             hideLinkPopover(true); // 既に保存済み
@@ -18013,6 +18047,9 @@ import { SearchManager } from './modules/SearchManager.js';
             if (linkPopover) {
                 const linkBtn = e.target.closest('.link-popover-btn');
                 if (linkBtn && linkPopover.contains(linkBtn)) {
+                    if (linkBtn.disabled) {
+                        return;
+                    }
                     const action = linkBtn.dataset.action;
                     if (action === 'unlink') {
                         unlinkLink();
@@ -18072,6 +18109,7 @@ import { SearchManager } from './modules/SearchManager.js';
                             linkInputRedoStack.push(linkInputSavedValue);
                             linkInputSavedValue = linkInputUndoStack.pop();
                             input.value = linkInputSavedValue;
+                            syncLinkPopoverOpenButtonState(input.value);
                         }
                     }
                 } else if ((e.metaKey || e.ctrlKey) && (e.key === 'Z' || (e.key === 'z' && e.shiftKey)) && !e.altKey) {
@@ -18089,6 +18127,7 @@ import { SearchManager } from './modules/SearchManager.js';
                             linkInputUndoStack.push(linkInputSavedValue);
                             linkInputSavedValue = linkInputRedoStack.pop();
                             input.value = linkInputSavedValue;
+                            syncLinkPopoverOpenButtonState(input.value);
                         }
                     }
                 }
