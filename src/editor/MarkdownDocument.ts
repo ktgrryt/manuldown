@@ -6,6 +6,29 @@ export class MarkdownDocument {
     private static readonly blanklineMarkerHtml = '<p data-mdw-blankline="true"><br></p>';
     private static readonly imageHardBreakMarkerAttr = 'data-mdw-image-hardbreak="true"';
     private static readonly blockquoteEmptyLineMarker = 'MDW-BLOCKQUOTE-EMPTYLINE-MARKER';
+    private static readonly commonHtmlTagNames = new Set([
+        'a', 'abbr', 'address', 'area', 'article', 'aside', 'audio',
+        'b', 'bdi', 'bdo', 'blockquote', 'body', 'br', 'button',
+        'canvas', 'caption', 'cite', 'code', 'col', 'colgroup',
+        'data', 'datalist', 'dd', 'del', 'details', 'dfn', 'dialog', 'div', 'dl', 'dt',
+        'em',
+        'fieldset', 'figcaption', 'figure', 'footer', 'form',
+        'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'head', 'header', 'hgroup', 'hr', 'html',
+        'i', 'iframe', 'img', 'input', 'ins',
+        'kbd',
+        'label', 'legend', 'li', 'link',
+        'main', 'map', 'mark', 'menu', 'meta', 'meter',
+        'nav', 'noscript',
+        'object', 'ol', 'optgroup', 'option', 'output',
+        'p', 'picture', 'pre', 'progress',
+        'q',
+        'rp', 'rt', 'ruby',
+        's', 'samp', 'script', 'section', 'select', 'slot', 'small', 'source', 'span', 'strong', 'style', 'sub', 'summary', 'sup',
+        'table', 'tbody', 'td', 'template', 'textarea', 'tfoot', 'th', 'thead', 'time', 'title', 'tr', 'track',
+        'u', 'ul',
+        'var', 'video',
+        'wbr'
+    ]);
 
     constructor(
         private readonly document: vscode.TextDocument,
@@ -40,8 +63,8 @@ export class MarkdownDocument {
     public toHtml(): string {
         const markdown = this.document.getText();
         try {
-
-            const explicitBlockquoteMarkdown = this.breakLazyBlockquoteContinuations(markdown);
+            const escapedPlaceholderMarkdown = this.escapePlaceholderAngleBrackets(markdown);
+            const explicitBlockquoteMarkdown = this.breakLazyBlockquoteContinuations(escapedPlaceholderMarkdown);
             const blockquoteBlankPreservedMarkdown = this.preserveEmptyBlockquoteLines(explicitBlockquoteMarkdown);
             const preprocessedMarkdown = this.preserveExtraBlankLines(blockquoteBlankPreservedMarkdown);
             let html = marked.parse(preprocessedMarkdown) as string;
@@ -423,6 +446,93 @@ export class MarkdownDocument {
         }
 
         return output.join('');
+    }
+
+    private escapePlaceholderAngleBrackets(markdown: string): string {
+        const segments = markdown.match(/[^\n]*\n|[^\n]+$/g);
+        if (!segments || segments.length === 0) {
+            return markdown;
+        }
+
+        const output: string[] = [];
+        let inFence = false;
+        let fenceMarker: '`' | '~' | null = null;
+        let fenceLength = 0;
+
+        for (const segment of segments) {
+            const lineEnding = segment.endsWith('\r\n')
+                ? '\r\n'
+                : (segment.endsWith('\n') ? '\n' : '');
+            const lineWithoutEnding = lineEnding
+                ? segment.slice(0, -lineEnding.length)
+                : segment;
+            const line = this.stripTrailingCarriageReturn(lineWithoutEnding);
+
+            if (inFence) {
+                output.push(segment);
+                if (fenceMarker && this.isFenceClosingLine(line, fenceMarker, fenceLength)) {
+                    inFence = false;
+                    fenceMarker = null;
+                    fenceLength = 0;
+                }
+                continue;
+            }
+
+            const openingFence = this.parseFenceOpeningLine(line);
+            if (openingFence) {
+                output.push(segment);
+                inFence = true;
+                fenceMarker = openingFence.marker;
+                fenceLength = openingFence.length;
+                continue;
+            }
+
+            // Keep inline-code and indented-code lines untouched.
+            if (line.includes('`') || /^(?: {4,}|\t)/.test(line)) {
+                output.push(segment);
+                continue;
+            }
+
+            output.push(`${this.escapeUnknownPlaceholderTagsInLine(line)}${lineEnding}`);
+        }
+
+        return output.join('');
+    }
+
+    private escapeUnknownPlaceholderTagsInLine(line: string): string {
+        const angleTokens = line.match(/<[^<>\n]+>/g);
+        if (!angleTokens || angleTokens.length < 2) {
+            return line;
+        }
+
+        const hasNonHtmlToken = angleTokens.some((token) => {
+            if (this.isAutolinkAngleToken(token)) {
+                return false;
+            }
+            return !this.isHtmlTagLikeAngleToken(token);
+        });
+        if (!hasNonHtmlToken) {
+            return line;
+        }
+
+        return line.replace(/<([A-Za-z][A-Za-z0-9-]*)>/g, (match, tagName: string) => {
+            if (MarkdownDocument.commonHtmlTagNames.has(tagName.toLowerCase())) {
+                return match;
+            }
+            return `&lt;${tagName}&gt;`;
+        });
+    }
+
+    private isAutolinkAngleToken(token: string): boolean {
+        if (/^<(?:https?:\/\/|ftp:\/\/|mailto:)[^>\s]+>$/i.test(token)) {
+            return true;
+        }
+
+        return /^<[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}>$/.test(token);
+    }
+
+    private isHtmlTagLikeAngleToken(token: string): boolean {
+        return /^<\/?[A-Za-z][\w:-]*(?:\s[^<>]*)?\/?>$/.test(token);
     }
 
     private parseFenceOpeningLine(line: string): { marker: '`' | '~'; length: number } | null {
