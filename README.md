@@ -138,6 +138,7 @@ You can change the following options from VSCode settings (`Ctrl+,` / `Cmd+,`):
 | `manulDown.toc.scrollDuration` | `120` | TOC click scroll duration in ms (`0` for instant jump) |
 | `manulDown.openByDefault` | `true` | Open Markdown files with ManulDown by default (updates `workbench.editorAssociations` immediately) |
 | `manulDown.keepTabOpenOnExplorerClick` | `true` | Keep ManulDown tabs open when opening Markdown from Explorer (prevents preview-tab replacement) |
+| `manulDown.editor.theme` | `"vscode"` | Editor theme mode: `"vscode"` (follow VSCode), `"light"`, or `"dark"` |
 | `manulDown.list.dashStyle` | `false` | Use `-` as the bullet marker style |
 | `manulDown.list.indentSize` | `2` | Default nested list indentation width (`2` or `4` spaces) when the document style cannot be detected |
 

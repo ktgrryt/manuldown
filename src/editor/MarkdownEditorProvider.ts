@@ -12,6 +12,7 @@ type CustomSlashCommandTemplate = {
     content: string;
 };
 type UnorderedListMarker = '-' | '*' | '+';
+type EditorThemeMode = 'vscode' | 'light' | 'dark';
 
 export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     private static readonly viewType = 'manulDown.editor';
@@ -1657,12 +1658,19 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         tocPanelWidth: number;
         useVsCodeCtrlP: boolean;
         listDashStyle: boolean;
+        editorThemeMode: EditorThemeMode;
     } {
         const config = vscode.workspace.getConfiguration('manulDown');
         const configuredTocScrollDuration = config.get<number>('toc.scrollDuration', 120);
         const tocScrollDuration = Number.isFinite(configuredTocScrollDuration)
             ? Math.max(0, Math.min(2000, Math.round(configuredTocScrollDuration)))
             : 120;
+        const configuredThemeMode = String(config.get<string>('editor.theme', 'vscode')).toLowerCase();
+        const editorThemeMode: EditorThemeMode = configuredThemeMode === 'light'
+            ? 'light'
+            : configuredThemeMode === 'dark'
+                ? 'dark'
+                : 'vscode';
         return {
             toolbarVisible: config.get<boolean>('toolbar.visible', true),
             tocEnabled: config.get<boolean>('toc.enabled', true),
@@ -1670,6 +1678,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             tocPanelWidth: this.tocPanelWidthPx,
             useVsCodeCtrlP: true,
             listDashStyle: config.get<boolean>('list.dashStyle', false),
+            editorThemeMode,
         };
     }
 
@@ -1679,6 +1688,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         const settingsJson = JSON.stringify(settings);
         const toolbarVisibleAttr = settings.toolbarVisible ? 'true' : 'false';
         const tocEnabledAttr = settings.tocEnabled ? 'true' : 'false';
+        const themeModeAttr = settings.editorThemeMode;
 
         // Add timestamp to force cache refresh
         const timestamp = Date.now();
@@ -1724,7 +1734,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     <link href="${prismCssUri}" rel="stylesheet">
     <title>ManulDown</title>
 </head>
-<body data-toolbar-visible="${toolbarVisibleAttr}" data-toc-enabled="${tocEnabledAttr}">
+<body data-toolbar-visible="${toolbarVisibleAttr}" data-toc-enabled="${tocEnabledAttr}" data-theme-mode="${themeModeAttr}">
     <div class="toolbar">
         <button class="toolbar-btn" data-command="bold" title="Bold (Ctrl+B)">
             <strong>B</strong>

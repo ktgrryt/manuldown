@@ -5,7 +5,7 @@
  */
 
 export class CodeBlockManager {
-    constructor(editor, cursorManager = null, vscodeApi = null) {
+    constructor(editor, cursorManager = null, vscodeApi = null, themeMode = 'vscode') {
         this.editor = editor;
         this.cursorManager = cursorManager;
         this.vscode = vscodeApi;
@@ -37,7 +37,121 @@ export class CodeBlockManager {
         this.mermaidRenderTokens = new WeakMap();
         this.mermaidCache = new WeakMap();
         this.mermaidIdCounter = 0;
+        this.mermaidThemeKey = null;
+        this.editorThemeMode = this._normalizeThemeMode(themeMode);
         this._initMermaid();
+    }
+
+    setThemeMode(themeMode) {
+        const normalized = this._normalizeThemeMode(themeMode);
+        if (normalized === this.editorThemeMode && this.mermaidInitialized) {
+            return;
+        }
+        this.editorThemeMode = normalized;
+        this._initMermaid();
+        this._rerenderMermaidBlocks();
+    }
+
+    _normalizeThemeMode(themeMode) {
+        const normalized = String(themeMode || 'vscode').toLowerCase();
+        if (normalized === 'light' || normalized === 'dark') {
+            return normalized;
+        }
+        return 'vscode';
+    }
+
+    _isDarkTheme() {
+        if (this.editorThemeMode === 'dark') {
+            return true;
+        }
+        if (this.editorThemeMode === 'light') {
+            return false;
+        }
+        if (typeof document === 'undefined' || !document.body) {
+            return true;
+        }
+        return (
+            document.body.classList.contains('vscode-dark') ||
+            document.body.classList.contains('vscode-high-contrast')
+        );
+    }
+
+    _getMermaidThemeKey() {
+        return this._isDarkTheme() ? 'dark' : 'light';
+    }
+
+    _getMermaidThemeVariables() {
+        const common = {
+            fontFamily: 'var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif)',
+            fontSize: '13px'
+        };
+
+        if (this._isDarkTheme()) {
+            return {
+                ...common,
+                background: '#1e1e1e',
+                primaryColor: '#252526',
+                primaryBorderColor: '#d4d4d4',
+                primaryTextColor: '#d4d4d4',
+                lineColor: '#d4d4d4',
+                secondaryColor: '#252526',
+                tertiaryColor: '#252526',
+                noteBkgColor: '#2d2d2d',
+                noteTextColor: '#d4d4d4',
+                mainBkg: '#252526',
+                textColor: '#d4d4d4',
+                actorBkg: '#252526',
+                actorBorder: '#d4d4d4',
+                actorTextColor: '#d4d4d4',
+                clusterBkg: '#252526',
+                clusterBorder: '#7f7f7f',
+                labelBoxBkgColor: '#252526',
+                labelTextColor: '#d4d4d4',
+                activationBkgColor: '#3a3d41',
+                activationBorderColor: '#d4d4d4',
+                edgeLabelBackground: '#252526'
+            };
+        }
+
+        return {
+            ...common,
+            background: '#ffffff',
+            primaryColor: '#ffffff',
+            primaryBorderColor: '#57606a',
+            primaryTextColor: '#24292f',
+            lineColor: '#24292f',
+            secondaryColor: '#f6f8fa',
+            tertiaryColor: '#ffffff',
+            noteBkgColor: '#fff7d1',
+            noteTextColor: '#24292f',
+            mainBkg: '#ffffff',
+            textColor: '#24292f',
+            actorBkg: '#ffffff',
+            actorBorder: '#57606a',
+            actorTextColor: '#24292f',
+            clusterBkg: '#f6f8fa',
+            clusterBorder: '#9aa4b2',
+            labelBoxBkgColor: '#f6f8fa',
+            labelTextColor: '#24292f',
+            activationBkgColor: '#f6f8fa',
+            activationBorderColor: '#57606a',
+            edgeLabelBackground: '#ffffff'
+        };
+    }
+
+    _rerenderMermaidBlocks() {
+        if (!this.editor) {
+            return;
+        }
+        const mermaidCodeBlocks = this.editor.querySelectorAll('pre code[class*="language-mermaid"]');
+        mermaidCodeBlocks.forEach((codeBlock) => {
+            const pre = codeBlock.parentElement;
+            if (!pre) {
+                return;
+            }
+            this.mermaidCache.delete(pre);
+            this._scheduleMermaidRender(pre, codeBlock, true);
+        });
     }
 
     _getTrailingNewlineCount(text) {
@@ -67,10 +181,11 @@ export class CodeBlockManager {
     }
 
     _initMermaid() {
-        if (this.mermaidInitialized) {
+        if (typeof window === 'undefined' || !window.mermaid) {
             return;
         }
-        if (typeof window === 'undefined' || !window.mermaid) {
+        const themeKey = this._getMermaidThemeKey();
+        if (this.mermaidInitialized && this.mermaidThemeKey === themeKey) {
             return;
         }
         try {
@@ -78,19 +193,10 @@ export class CodeBlockManager {
                 startOnLoad: false,
                 securityLevel: 'strict',
                 theme: 'base',
-                themeVariables: {
-                    fontFamily: 'var(--vscode-font-family, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif)',
-                    fontSize: '13px',
-                    background: '#ffffff',
-                    primaryColor: '#ffffff',
-                    primaryBorderColor: '#444444',
-                    primaryTextColor: '#111111',
-                    lineColor: '#444444',
-                    secondaryColor: '#ffffff',
-                    tertiaryColor: '#ffffff'
-                }
+                themeVariables: this._getMermaidThemeVariables()
             });
             this.mermaidInitialized = true;
+            this.mermaidThemeKey = themeKey;
         } catch (error) {
             console.error('Failed to initialize Mermaid:', error);
         }

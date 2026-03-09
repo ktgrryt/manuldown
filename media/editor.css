@@ -17,6 +17,147 @@ body {
     --toc-resizer-hit-width: 8px;
     --toc-content-offset: 0px;
     --search-bar-edge-gap: 20px;
+    --md-syntax-comment: #6a9955;
+    --md-syntax-punctuation: #d4d4d4;
+    --md-syntax-property: #b5cea8;
+    --md-syntax-string: #ce9178;
+    --md-syntax-operator: #d4d4d4;
+    --md-syntax-keyword: #c586c0;
+    --md-syntax-function: #dcdcaa;
+    --md-syntax-variable: #d16969;
+    --md-mermaid-preview-background: #ffffff;
+    --md-mermaid-preview-foreground: #111111;
+}
+
+body[data-theme-mode="vscode"].vscode-light,
+body[data-theme-mode="light"] {
+    --md-syntax-comment: #008000;
+    --md-syntax-punctuation: #24292f;
+    --md-syntax-property: #0550ae;
+    --md-syntax-string: #a31515;
+    --md-syntax-operator: #24292f;
+    --md-syntax-keyword: #0000ff;
+    --md-syntax-function: #795e26;
+    --md-syntax-variable: #811f3f;
+    --md-mermaid-preview-background: #ffffff;
+    --md-mermaid-preview-foreground: #24292f;
+}
+
+body[data-theme-mode="vscode"].vscode-dark,
+body[data-theme-mode="vscode"].vscode-high-contrast,
+body[data-theme-mode="dark"] {
+    --md-syntax-comment: #6a9955;
+    --md-syntax-punctuation: #d4d4d4;
+    --md-syntax-property: #b5cea8;
+    --md-syntax-string: #ce9178;
+    --md-syntax-operator: #d4d4d4;
+    --md-syntax-keyword: #c586c0;
+    --md-syntax-function: #dcdcaa;
+    --md-syntax-variable: #d16969;
+    --md-mermaid-preview-background: #1f1f1f;
+    --md-mermaid-preview-foreground: #d4d4d4;
+}
+
+body[data-theme-mode="light"] {
+    --vscode-font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    --vscode-editor-background: #ffffff;
+    --vscode-editor-foreground: #24292f;
+    --vscode-editorGroupHeader-tabsBackground: #f3f3f3;
+    --vscode-editorGroup-border: #d0d7de;
+    --vscode-scrollbarSlider-background: rgba(87, 96, 106, 0.28);
+    --vscode-scrollbarSlider-hoverBackground: rgba(87, 96, 106, 0.45);
+    --vscode-list-hoverBackground: #eaeef2;
+    --vscode-button-secondaryHoverBackground: #dce3ea;
+    --vscode-focusBorder: #0969da;
+    --vscode-descriptionForeground: #57606a;
+    --vscode-editor-selectionBackground: rgba(9, 105, 218, 0.24);
+    --vscode-editor-inactiveSelectionBackground: rgba(9, 105, 218, 0.14);
+    --vscode-editorCursor-foreground: #24292f;
+    --vscode-button-background: #0969da;
+    --vscode-button-hoverBackground: #0b5dc4;
+    --vscode-button-foreground: #ffffff;
+    --vscode-button-secondaryBackground: #eaeef2;
+    --vscode-button-secondaryForeground: #24292f;
+    --vscode-input-background: #ffffff;
+    --vscode-input-foreground: #24292f;
+    --vscode-input-border: #d0d7de;
+    --vscode-input-placeholderForeground: #6e7781;
+    --vscode-symbolIcon-stringForeground: #a31515;
+    --vscode-terminal-ansiYellow: #b26f00;
+    --vscode-terminal-ansiGreen: #1a7f37;
+    --vscode-textCodeBlock-background: rgba(175, 184, 193, 0.2);
+    --vscode-list-focusBackground: #0969da;
+    --vscode-list-focusForeground: #ffffff;
+    --vscode-dropdown-background: #ffffff;
+    --vscode-dropdown-border: #d0d7de;
+    --vscode-list-activeSelectionBackground: #d8e8ff;
+    --vscode-list-activeSelectionForeground: #24292f;
+    --vscode-sideBar-background: #f6f8fa;
+    --vscode-foreground: #24292f;
+    --vscode-textLink-foreground: #0969da;
+    --vscode-editor-findMatchHighlightBackground: rgba(234, 92, 0, 0.24);
+    --vscode-editor-findMatchBackground: rgba(255, 213, 0, 0.45);
+    --vscode-editor-findMatchBorder: #9a6700;
+    --vscode-editorWidget-background: #f6f8fa;
+    --vscode-editorWidget-border: #d0d7de;
+    --vscode-inputOption-activeBackground: rgba(9, 105, 218, 0.16);
+    --vscode-inputOption-activeForeground: #24292f;
+    --vscode-inputOption-activeBorder: #0969da;
+    --vscode-inputValidation-errorBackground: #fff1f0;
+    --vscode-inputValidation-errorForeground: #cf222e;
+    --vscode-disabledForeground: #8c959f;
+    --vscode-errorForeground: #cf222e;
+}
+
+body[data-theme-mode="dark"] {
+    --vscode-font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    --vscode-editor-background: #1e1e1e;
+    --vscode-editor-foreground: #d4d4d4;
+    --vscode-editorGroupHeader-tabsBackground: #252526;
+    --vscode-editorGroup-border: #3c3c3c;
+    --vscode-scrollbarSlider-background: rgba(121, 121, 121, 0.4);
+    --vscode-scrollbarSlider-hoverBackground: rgba(121, 121, 121, 0.65);
+    --vscode-list-hoverBackground: #2a2d2e;
+    --vscode-button-secondaryHoverBackground: #4d4d4d;
+    --vscode-focusBorder: #007fd4;
+    --vscode-descriptionForeground: #9da4ad;
+    --vscode-editor-selectionBackground: rgba(38, 79, 120, 0.85);
+    --vscode-editor-inactiveSelectionBackground: rgba(58, 61, 65, 0.7);
+    --vscode-editorCursor-foreground: #d4d4d4;
+    --vscode-button-background: #0e639c;
+    --vscode-button-hoverBackground: #1177bb;
+    --vscode-button-foreground: #ffffff;
+    --vscode-button-secondaryBackground: #3a3d41;
+    --vscode-button-secondaryForeground: #d4d4d4;
+    --vscode-input-background: #3c3c3c;
+    --vscode-input-foreground: #d4d4d4;
+    --vscode-input-border: #3c3c3c;
+    --vscode-input-placeholderForeground: #8b949e;
+    --vscode-symbolIcon-stringForeground: #ce9178;
+    --vscode-terminal-ansiYellow: #d7ba7d;
+    --vscode-terminal-ansiGreen: #3fb950;
+    --vscode-textCodeBlock-background: rgba(110, 118, 129, 0.28);
+    --vscode-list-focusBackground: #094771;
+    --vscode-list-focusForeground: #ffffff;
+    --vscode-dropdown-background: #3c3c3c;
+    --vscode-dropdown-border: #3c3c3c;
+    --vscode-list-activeSelectionBackground: #094771;
+    --vscode-list-activeSelectionForeground: #ffffff;
+    --vscode-sideBar-background: #252526;
+    --vscode-foreground: #d4d4d4;
+    --vscode-textLink-foreground: #4daafc;
+    --vscode-editor-findMatchHighlightBackground: rgba(234, 92, 0, 0.33);
+    --vscode-editor-findMatchBackground: rgba(255, 213, 0, 0.35);
+    --vscode-editor-findMatchBorder: #9f7b00;
+    --vscode-editorWidget-background: #252526;
+    --vscode-editorWidget-border: #454545;
+    --vscode-inputOption-activeBackground: rgba(9, 71, 113, 0.65);
+    --vscode-inputOption-activeForeground: #ffffff;
+    --vscode-inputOption-activeBorder: #007fd4;
+    --vscode-inputValidation-errorBackground: #5a1d1d;
+    --vscode-inputValidation-errorForeground: #f48771;
+    --vscode-disabledForeground: #6e7681;
+    --vscode-errorForeground: #f48771;
 }
 
 body.toc-resizing {
@@ -829,9 +970,9 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
     padding: 8px;
     border: 1px solid var(--vscode-editorGroup-border);
     border-radius: 3px;
-    background-color: #ffffff;
+    background-color: var(--md-mermaid-preview-background);
     overflow-x: auto;
-    color: #111111;
+    color: var(--md-mermaid-preview-foreground);
 }
 
 #editor pre .mermaid-preview svg {
@@ -883,11 +1024,11 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
 #editor .token.prolog,
 #editor .token.doctype,
 #editor .token.cdata {
-    color: #6a9955 !important;
+    color: var(--md-syntax-comment) !important;
 }
 
 #editor .token.punctuation {
-    color: #d4d4d4 !important;
+    color: var(--md-syntax-punctuation) !important;
 }
 
 #editor .token.property,
@@ -897,7 +1038,7 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
 #editor .token.constant,
 #editor .token.symbol,
 #editor .token.deleted {
-    color: #b5cea8 !important;
+    color: var(--md-syntax-property) !important;
 }
 
 #editor .token.selector,
@@ -906,7 +1047,7 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
 #editor .token.char,
 #editor .token.builtin,
 #editor .token.inserted {
-    color: #ce9178 !important;
+    color: var(--md-syntax-string) !important;
 }
 
 #editor .token.operator,
@@ -914,24 +1055,24 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
 #editor .token.url,
 #editor .language-css .token.string,
 #editor .style .token.string {
-    color: #d4d4d4 !important;
+    color: var(--md-syntax-operator) !important;
 }
 
 #editor .token.atrule,
 #editor .token.attr-value,
 #editor .token.keyword {
-    color: #c586c0 !important;
+    color: var(--md-syntax-keyword) !important;
 }
 
 #editor .token.function,
 #editor .token.class-name {
-    color: #dcdcaa !important;
+    color: var(--md-syntax-function) !important;
 }
 
 #editor .token.regex,
 #editor .token.important,
 #editor .token.variable {
-    color: #d16969 !important;
+    color: var(--md-syntax-variable) !important;
 }
 
 /* Additional token types for better coverage */

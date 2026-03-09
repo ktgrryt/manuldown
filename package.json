@@ -221,6 +221,21 @@
           "default": false,
           "description": "Use a dash (-) as the bullet marker style."
         },
+        "manulDown.editor.theme": {
+          "type": "string",
+          "default": "vscode",
+          "enum": [
+            "vscode",
+            "light",
+            "dark"
+          ],
+          "enumDescriptions": [
+            "Match the active VSCode theme.",
+            "Use a built-in light theme independent from VSCode.",
+            "Use a built-in dark theme independent from VSCode."
+          ],
+          "description": "Theme mode for the ManulDown editor."
+        },
         "manulDown.list.indentSize": {
           "type": "number",
           "default": 2,

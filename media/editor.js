@@ -63,6 +63,17 @@ import { SearchManager } from './modules/SearchManager.js';
         return Math.max(TOC_PANEL_MIN_WIDTH, Math.min(TOC_PANEL_MAX_WIDTH, Math.round(value)));
     }
 
+    function normalizeEditorThemeMode(value) {
+        if (typeof value !== 'string') {
+            return 'vscode';
+        }
+        const normalized = value.toLowerCase();
+        if (normalized === 'light' || normalized === 'dark') {
+            return normalized;
+        }
+        return 'vscode';
+    }
+
     const initialSettings = window.__manulDownSettings || {};
     const settingsState = {
         toolbarVisible: initialSettings.toolbarVisible !== false,
@@ -70,7 +81,8 @@ import { SearchManager } from './modules/SearchManager.js';
         tocScrollDuration: normalizeTocScrollDuration(initialSettings.tocScrollDuration),
         tocPanelWidth: normalizeTocPanelWidth(initialSettings.tocPanelWidth),
         useVsCodeCtrlP: initialSettings.useVsCodeCtrlP !== false,
-        listDashStyle: initialSettings.listDashStyle === true
+        listDashStyle: initialSettings.listDashStyle === true,
+        editorThemeMode: normalizeEditorThemeMode(initialSettings.editorThemeMode)
     };
     const imageRenderMaxWidthPx = 820;
     let imageResolveRequestSeq = 0;
@@ -484,6 +496,7 @@ import { SearchManager } from './modules/SearchManager.js';
         document.body.dataset.toolbarVisible = settingsState.toolbarVisible ? 'true' : 'false';
         document.body.dataset.tocEnabled = settingsState.tocEnabled ? 'true' : 'false';
         document.body.dataset.listDashStyle = settingsState.listDashStyle ? 'true' : 'false';
+        document.body.dataset.themeMode = settingsState.editorThemeMode;
         document.body.dataset.platform = isMac ? 'mac' : 'other';
     };
     syncBodySettings();
@@ -517,7 +530,12 @@ import { SearchManager } from './modules/SearchManager.js';
     const cursorManager = new CursorManager(editor, domUtils);
     const listManager = new ListManager(editor, domUtils);
     const markdownConverter = new MarkdownConverter(editor, domUtils);
-    const codeBlockManager = new CodeBlockManager(editor, cursorManager, vscode);
+    const codeBlockManager = new CodeBlockManager(
+        editor,
+        cursorManager,
+        vscode,
+        settingsState.editorThemeMode
+    );
     const tocManager = new TableOfContentsManager(editor, tocContainer, tocContent, tocEmpty, {
         enabled: settingsState.tocEnabled,
         scrollDuration: settingsState.tocScrollDuration
@@ -551,7 +569,11 @@ import { SearchManager } from './modules/SearchManager.js';
         if (typeof nextSettings.listDashStyle === 'boolean') {
             settingsState.listDashStyle = nextSettings.listDashStyle;
         }
+        if (typeof nextSettings.editorThemeMode === 'string') {
+            settingsState.editorThemeMode = normalizeEditorThemeMode(nextSettings.editorThemeMode);
+        }
         syncBodySettings();
+        codeBlockManager.setThemeMode(settingsState.editorThemeMode);
         applyTocPanelWidth();
         syncToolbarBulletLabel();
         tocManager.setEnabled(settingsState.tocEnabled);
