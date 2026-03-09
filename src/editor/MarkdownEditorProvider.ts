@@ -1654,17 +1654,12 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     private getWebviewSettings(): {
         toolbarVisible: boolean;
         tocEnabled: boolean;
-        tocScrollDuration: number;
         tocPanelWidth: number;
         useVsCodeCtrlP: boolean;
         listDashStyle: boolean;
         editorThemeMode: EditorThemeMode;
     } {
         const config = vscode.workspace.getConfiguration('manulDown');
-        const configuredTocScrollDuration = config.get<number>('toc.scrollDuration', 120);
-        const tocScrollDuration = Number.isFinite(configuredTocScrollDuration)
-            ? Math.max(0, Math.min(2000, Math.round(configuredTocScrollDuration)))
-            : 120;
         const configuredThemeMode = String(config.get<string>('editor.theme', 'vscode')).toLowerCase();
         const editorThemeMode: EditorThemeMode = configuredThemeMode === 'light'
             ? 'light'
@@ -1674,7 +1669,6 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         return {
             toolbarVisible: config.get<boolean>('toolbar.visible', true),
             tocEnabled: config.get<boolean>('toc.enabled', true),
-            tocScrollDuration,
             tocPanelWidth: this.tocPanelWidthPx,
             useVsCodeCtrlP: true,
             listDashStyle: config.get<boolean>('list.dashStyle', false),

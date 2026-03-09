@@ -42,19 +42,13 @@ import { SearchManager } from './modules/SearchManager.js';
     const TOC_PANEL_DEFAULT_WIDTH = 150;
     const TOC_PANEL_MIN_WIDTH = 0;
     const TOC_PANEL_MAX_WIDTH = 480;
+    const TOC_SCROLL_DURATION_MS = 120;
     const IME_ENTER_CONFIRM_GRACE_MS = 80;
     const INTERNAL_EDITOR_PLAIN_TEXT_CLIPBOARD_TYPE = 'application/x-manuldown-editor-plain-text';
     const INTERNAL_EDITOR_HTML_CLIPBOARD_TYPE = 'application/x-manuldown-editor-html';
     const INTERNAL_EDITOR_HTML_MARKER_START = '<!--manuldown-clipboard-start-->';
     const INTERNAL_EDITOR_HTML_MARKER_END = '<!--manuldown-clipboard-end-->';
     const SOFT_LINE_BREAK_ATTRIBUTE = 'data-mdw-soft-break';
-
-    function normalizeTocScrollDuration(value) {
-        if (typeof value !== 'number' || !Number.isFinite(value)) {
-            return 120;
-        }
-        return Math.max(0, Math.min(2000, Math.round(value)));
-    }
 
     function normalizeTocPanelWidth(value) {
         if (typeof value !== 'number' || !Number.isFinite(value)) {
@@ -78,7 +72,6 @@ import { SearchManager } from './modules/SearchManager.js';
     const settingsState = {
         toolbarVisible: initialSettings.toolbarVisible !== false,
         tocEnabled: initialSettings.tocEnabled !== false,
-        tocScrollDuration: normalizeTocScrollDuration(initialSettings.tocScrollDuration),
         tocPanelWidth: normalizeTocPanelWidth(initialSettings.tocPanelWidth),
         useVsCodeCtrlP: initialSettings.useVsCodeCtrlP !== false,
         listDashStyle: initialSettings.listDashStyle === true,
@@ -538,7 +531,7 @@ import { SearchManager } from './modules/SearchManager.js';
     );
     const tocManager = new TableOfContentsManager(editor, tocContainer, tocContent, tocEmpty, {
         enabled: settingsState.tocEnabled,
-        scrollDuration: settingsState.tocScrollDuration
+        scrollDuration: TOC_SCROLL_DURATION_MS
     });
     const tableManager = new TableManager(editor, domUtils, stateManager);
     const searchManager = new SearchManager(editor);
@@ -557,9 +550,6 @@ import { SearchManager } from './modules/SearchManager.js';
         if (typeof nextSettings.tocEnabled === 'boolean') {
             settingsState.tocEnabled = nextSettings.tocEnabled;
         }
-        if (typeof nextSettings.tocScrollDuration === 'number') {
-            settingsState.tocScrollDuration = normalizeTocScrollDuration(nextSettings.tocScrollDuration);
-        }
         if (typeof nextSettings.tocPanelWidth === 'number') {
             settingsState.tocPanelWidth = normalizeTocPanelWidth(nextSettings.tocPanelWidth);
         }
@@ -577,7 +567,6 @@ import { SearchManager } from './modules/SearchManager.js';
         applyTocPanelWidth();
         syncToolbarBulletLabel();
         tocManager.setEnabled(settingsState.tocEnabled);
-        tocManager.setScrollDuration(settingsState.tocScrollDuration);
         scheduleEditorOverflowStateUpdate();
     }
 
