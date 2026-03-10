@@ -27,6 +27,12 @@ body {
     --md-syntax-variable: #d16969;
     --md-mermaid-preview-background: #ffffff;
     --md-mermaid-preview-foreground: #111111;
+    --md-divider-color: var(--vscode-editorGroup-border, var(--vscode-editor-foreground));
+    --md-divider-color: color-mix(
+        in srgb,
+        var(--vscode-editorGroup-border, var(--vscode-editor-foreground)) 74%,
+        var(--vscode-editor-foreground) 26%
+    );
 }
 
 body[data-theme-mode="vscode"].vscode-light,
@@ -56,6 +62,11 @@ body[data-theme-mode="dark"] {
     --md-syntax-variable: #d16969;
     --md-mermaid-preview-background: #1f1f1f;
     --md-mermaid-preview-foreground: #d4d4d4;
+}
+
+body[data-theme-mode="vscode"].vscode-high-contrast,
+body[data-theme-mode="vscode"].vscode-high-contrast-light {
+    --md-divider-color: var(--vscode-contrastBorder, var(--vscode-editor-foreground));
 }
 
 body[data-theme-mode="light"] {
@@ -400,7 +411,7 @@ body[data-toc-visible="true"] {
     font-size: 2em;
     font-weight: 600;
     margin: 0.67em 0;
-    border-bottom: 1px solid var(--vscode-editorGroup-border);
+    border-bottom: 1px solid var(--md-divider-color);
     padding-bottom: 0.3em;
 }
 
@@ -408,7 +419,7 @@ body[data-toc-visible="true"] {
     font-size: 1.5em;
     font-weight: 600;
     margin: 0.75em 0 0.5em 0;
-    border-bottom: 1px solid var(--vscode-editorGroup-border);
+    border-bottom: 1px solid var(--md-divider-color);
     padding-bottom: 0.3em;
 }
 
@@ -524,7 +535,7 @@ body[data-list-dash-style="true"] #editor ul ul ul {
 
 #editor table.md-table td,
 #editor table.md-table th {
-    border: 1px solid var(--vscode-editorGroup-border);
+    border: 1px solid var(--md-divider-color);
     padding: 6px 8px;
     width: auto;
     min-width: 0;
@@ -1116,7 +1127,7 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
 
 #editor hr {
     border: none;
-    border-top: 1px solid var(--vscode-editorGroup-border);
+    border-top: 1px solid var(--md-divider-color);
     margin: 1em 0;
     padding: 0.5em 0;
     cursor: pointer;
