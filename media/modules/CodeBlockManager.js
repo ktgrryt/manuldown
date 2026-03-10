@@ -881,7 +881,7 @@ export class CodeBlockManager {
                     e.preventDefault();
                     e.stopPropagation();
                     moveSelection(-1);
-                } else if (e.key === 'Tab') {
+                } else if (e.key === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey) {
                     e.preventDefault();
                     e.stopPropagation();
                     const delta = e.shiftKey ? -1 : 1;

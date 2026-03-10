@@ -246,7 +246,7 @@ export class TableManager {
         // ダイアログ内でTabキーのフォーカスをループさせる
         const focusableElements = [rowInput, colInput, cancelBtn, insertBtn];
         dialog.addEventListener('keydown', (e) => {
-            if (e.key === 'Tab') {
+            if (e.key === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey) {
                 const currentIndex = focusableElements.indexOf(e.target);
                 if (currentIndex === -1) return;
                 e.preventDefault();
@@ -536,7 +536,7 @@ export class TableManager {
 
         const isModifier = e.metaKey || e.ctrlKey || e.altKey;
         const isNavigation = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key);
-        const isTab = e.key === 'Tab';
+        const isTab = e.key === 'Tab' && !isModifier;
         const isCopyPaste = (e.metaKey || e.ctrlKey) && ['c', 'v', 'x'].includes(e.key.toLowerCase());
         const key = e.key.toLowerCase();
         const isDeleteKey = e.key === 'Backspace' || e.key === 'Delete' || (this._isMac && e.ctrlKey && key === 'h');
@@ -1123,7 +1123,7 @@ export class TableManager {
     }
 
     handleTabKeydown(e) {
-        if (e.key !== 'Tab' || e.isComposing) return false;
+        if (e.key !== 'Tab' || e.isComposing || e.metaKey || e.ctrlKey || e.altKey) return false;
 
         const direction = e.shiftKey ? 'prev' : 'next';
         const handled = this._handleTableNavigation(direction);

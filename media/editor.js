@@ -3741,7 +3741,7 @@ import { SearchManager } from './modules/SearchManager.js';
             return true;
         }
 
-        if (e.key === 'Tab') {
+        if (e.key === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey) {
             e.preventDefault();
             const delta = e.shiftKey ? -1 : 1;
             moveSlashCommandSelection(delta);
@@ -6658,7 +6658,7 @@ import { SearchManager } from './modules/SearchManager.js';
         const { listItem, container, range } = context;
         // Tab/Shift+Tab でリストのインデント/アウトデント
         // Ignore Tab key during IME composition (e.g., Japanese input conversion)
-        if (e.key !== 'Tab' || e.isComposing) {
+        if (e.key !== 'Tab' || e.isComposing || e.ctrlKey || e.metaKey || e.altKey) {
             return false;
         }
 
@@ -13971,7 +13971,14 @@ import { SearchManager } from './modules/SearchManager.js';
         }
 
         let selection = window.getSelection();
-        if ((!selection || !selection.rangeCount) && e.key === 'Tab' && !e.isComposing) {
+        if (
+            (!selection || !selection.rangeCount) &&
+            e.key === 'Tab' &&
+            !e.isComposing &&
+            !e.ctrlKey &&
+            !e.metaKey &&
+            !e.altKey
+        ) {
             const restoredSelection = restoreSelectionFromCheckboxTarget(e.target);
             if (restoredSelection && restoredSelection.rangeCount) {
                 selection = restoredSelection;
