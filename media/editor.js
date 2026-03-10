@@ -6513,6 +6513,38 @@ import { SearchManager } from './modules/SearchManager.js';
                 return true;
             }
 
+            // 画像右エッジ（または画像選択）でEnterした場合は、画像行末の<BR>生成を避けて
+            // 次段落を明示的に作成し、見かけ上の余分な空行を防ぐ。
+            if (range) {
+                const imageAtRightEdgeForEnter = range.collapsed
+                    ? getBackspaceTargetImageAtRightEdge(range)
+                    : null;
+                const selectedImageForEnter = getSelectedImageNodeFromRange(range);
+                const imageTargetForEnter = imageAtRightEdgeForEnter ||
+                    (selectedImageForEnter && selectedImageForEnter.tagName === 'IMG' && editor.contains(selectedImageForEnter)
+                        ? selectedImageForEnter
+                        : null);
+
+                if (imageTargetForEnter) {
+                    stateManager.saveState();
+                    if (selection) {
+                        const imageRightEdgeRange = createAfterImageCaretRange(imageTargetForEnter, { ensureTextAnchor: true });
+                        if (imageRightEdgeRange) {
+                            applySelectionRange(selection, imageRightEdgeRange);
+                        }
+                    }
+                    if (moveCaretToParagraphAfterImageRightEdgeForTextInput({
+                        forceNewParagraph: true,
+                        imageOverride: imageTargetForEnter
+                    })) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        notifyChange();
+                        return true;
+                    }
+                }
+            }
+
             // 見出し行頭でEnterされた場合は、空の見出しを作らず空段落を見出しの前に挿入
             if (range && range.collapsed) {
                 let heading = container.nodeType === Node.ELEMENT_NODE
@@ -12074,14 +12106,20 @@ import { SearchManager } from './modules/SearchManager.js';
         return applySelectionRange(selection, edgeRange);
     }
 
-    function moveCaretToParagraphAfterImageRightEdgeForTextInput() {
+    function moveCaretToParagraphAfterImageRightEdgeForTextInput(options = {}) {
+        const { forceNewParagraph = false, imageOverride = null } = options;
         const selection = window.getSelection();
         if (!selection || !selection.rangeCount || !selection.isCollapsed) {
             return false;
         }
 
         const range = selection.getRangeAt(0);
-        const imageAtRightEdge = getBackspaceTargetImageAtRightEdge(range);
+        const imageAtRightEdge =
+            imageOverride &&
+                imageOverride.tagName === 'IMG' &&
+                editor.contains(imageOverride)
+                ? imageOverride
+                : getBackspaceTargetImageAtRightEdge(range);
         if (!imageAtRightEdge) {
             return false;
         }
@@ -12092,17 +12130,21 @@ import { SearchManager } from './modules/SearchManager.js';
         }
 
         let targetParagraph = imageBlock.nextElementSibling;
-        if (targetParagraph && targetParagraph.tagName === 'P' && !isImageOnlyBlockElement(targetParagraph)) {
+        const canReuseExistingEmptyParagraph =
+            targetParagraph &&
+            targetParagraph.tagName === 'P' &&
+            isEffectivelyEmptyBlock(targetParagraph);
+
+        if (!forceNewParagraph &&
+            targetParagraph &&
+            targetParagraph.tagName === 'P' &&
+            !isImageOnlyBlockElement(targetParagraph) &&
+            !canReuseExistingEmptyParagraph) {
             const existingParagraphRange = createCollapsedRangeAtElementBoundary(targetParagraph, 'start');
             if (existingParagraphRange) {
                 return applySelectionRange(selection, existingParagraphRange);
             }
         }
-
-        const canReuseExistingEmptyParagraph =
-            targetParagraph &&
-            targetParagraph.tagName === 'P' &&
-            isEffectivelyEmptyBlock(targetParagraph);
 
         if (!canReuseExistingEmptyParagraph) {
             targetParagraph = document.createElement('p');
@@ -14561,6 +14603,41 @@ import { SearchManager } from './modules/SearchManager.js';
 
             if (tableManager.handleEdgeBeforeInput(e)) {
                 return;
+            }
+
+            const isParagraphInsertInput =
+                e.inputType === 'insertParagraph' ||
+                e.inputType === 'insertLineBreak';
+            if (isParagraphInsertInput) {
+                const selection = window.getSelection();
+                const range = selection && selection.rangeCount ? selection.getRangeAt(0) : null;
+                const imageAtRightEdgeForEnter = range && range.collapsed
+                    ? getBackspaceTargetImageAtRightEdge(range)
+                    : null;
+                const selectedImageForEnter = range ? getSelectedImageNodeFromRange(range) : null;
+                const imageTargetForEnter = imageAtRightEdgeForEnter ||
+                    (selectedImageForEnter && selectedImageForEnter.tagName === 'IMG' && editor.contains(selectedImageForEnter)
+                        ? selectedImageForEnter
+                        : null);
+
+                if (imageTargetForEnter) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    stateManager.saveState();
+                    if (selection) {
+                        const imageRightEdgeRange = createAfterImageCaretRange(imageTargetForEnter, { ensureTextAnchor: true });
+                        if (imageRightEdgeRange) {
+                            applySelectionRange(selection, imageRightEdgeRange);
+                        }
+                    }
+                    if (moveCaretToParagraphAfterImageRightEdgeForTextInput({
+                        forceNewParagraph: true,
+                        imageOverride: imageTargetForEnter
+                    })) {
+                        notifyChange();
+                    }
+                    return;
+                }
             }
 
             if (typeof e.inputType === 'string' && e.inputType.startsWith('delete')) {

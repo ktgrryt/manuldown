@@ -1,14 +1,26 @@
 import * as vscode from 'vscode';
 import { MarkdownEditorProvider } from './editor/MarkdownEditorProvider';
 
-const MARKDOWN_ASSOCIATION_PROMPT_KEY = 'manulDown.markdownAssociationPromptShown';
 const MANULDOWN_EDITOR_VIEW_TYPE = 'manulDown.editor';
 const MANULDOWN_CONFIGURATION_SECTION = 'manulDown';
 const OPEN_BY_DEFAULT_SETTING_KEY = 'openByDefault';
 const MARKDOWN_FILE_ASSOCIATION_KEY = '*.md';
+const AUTO_OPEN_GUARD_TTL_MS = 2500;
+const AUTO_OPEN_SUPPRESS_TTL_MS = 4000;
+const SOURCE_CONTROL_SCHEMES = new Set(['git', 'svn', 'hg']);
+const SOURCE_CONTROL_LABEL_KEYWORDS = [
+    'working tree',
+    'index',
+    'staged',
+    'untracked',
+    '作業ツリー',
+    'インデックス',
+    'ステージ',
+    '未追跡',
+];
 
 export function activate(context: vscode.ExtensionContext) {
-    void initializeDefaultMarkdownAssociation(context);
+    void removeLegacyMarkdownEditorAssociation();
 
     // Register the custom editor provider
     const provider = new MarkdownEditorProvider(context);
@@ -24,6 +36,9 @@ export function activate(context: vscode.ExtensionContext) {
     );
 
     context.subscriptions.push(registration);
+
+    const autoOpenSuppressedUntil = new Map<string, number>();
+    registerOpenByDefaultBehavior(context, autoOpenSuppressedUntil);
 
     // Register command to open with WYSIWYG editor
     const openEditorCommand = vscode.commands.registerCommand(
@@ -49,6 +64,7 @@ export function activate(context: vscode.ExtensionContext) {
             const activeTab = vscode.window.tabGroups.activeTabGroup.activeTab;
             const input = activeTab?.input;
             if (input instanceof vscode.TabInputCustom) {
+                suppressAutoOpenForUri(autoOpenSuppressedUntil, input.uri);
                 await vscode.commands.executeCommand('vscode.openWith', input.uri, 'default');
             }
         }
@@ -64,6 +80,7 @@ export function activate(context: vscode.ExtensionContext) {
             const input = activeTab?.input;
             if (input instanceof vscode.TabInputCustom) {
                 // Currently in WYSIWYG editor -> switch to text editor
+                suppressAutoOpenForUri(autoOpenSuppressedUntil, input.uri);
                 await vscode.commands.executeCommand('vscode.openWith', input.uri, 'default');
             } else if (input instanceof vscode.TabInputText) {
                 // Currently in text editor -> switch to WYSIWYG editor
@@ -129,7 +146,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     const configurationListener = vscode.workspace.onDidChangeConfiguration((event) => {
         if (event.affectsConfiguration(`${MANULDOWN_CONFIGURATION_SECTION}.${OPEN_BY_DEFAULT_SETTING_KEY}`)) {
-            void syncDefaultMarkdownAssociationWithSetting();
+            void removeLegacyMarkdownEditorAssociation();
         }
     });
     context.subscriptions.push(configurationListener);
@@ -138,99 +155,198 @@ export function activate(context: vscode.ExtensionContext) {
 export function deactivate() {
 }
 
-async function initializeDefaultMarkdownAssociation(context: vscode.ExtensionContext): Promise<void> {
-    await promptForDefaultMarkdownAssociation(context);
-    await syncDefaultMarkdownAssociationWithSetting();
+function registerOpenByDefaultBehavior(
+    context: vscode.ExtensionContext,
+    autoOpenSuppressedUntil: Map<string, number>
+): void {
+    const recentlyAutoOpened = new Map<string, number>();
+    const tabListener = vscode.window.tabGroups.onDidChangeTabs((event) => {
+        if (!getOpenByDefaultSetting()) {
+            return;
+        }
+
+        pruneExpiredEntries(recentlyAutoOpened, AUTO_OPEN_GUARD_TTL_MS);
+        pruneExpiredEntries(autoOpenSuppressedUntil, AUTO_OPEN_SUPPRESS_TTL_MS);
+
+        for (const tab of event.opened) {
+            const input = tab.input;
+            if (!(input instanceof vscode.TabInputText)) {
+                continue;
+            }
+
+            const targetUri = input.uri;
+            if (!isPlainMarkdownFile(targetUri)) {
+                continue;
+            }
+
+            if (isAutoOpenSuppressed(autoOpenSuppressedUntil, targetUri)) {
+                continue;
+            }
+
+            if (isSourceControlOpenContext(tab, targetUri)) {
+                continue;
+            }
+
+            const uriKey = targetUri.toString();
+            if (recentlyAutoOpened.has(uriKey)) {
+                continue;
+            }
+            recentlyAutoOpened.set(uriKey, Date.now());
+
+            void openWithManulDownReplacingTextTabs(targetUri);
+        }
+    });
+    context.subscriptions.push(tabListener);
 }
 
-async function promptForDefaultMarkdownAssociation(context: vscode.ExtensionContext): Promise<void> {
-    const hasPrompted = context.globalState.get<boolean>(MARKDOWN_ASSOCIATION_PROMPT_KEY, false);
-    if (hasPrompted) {
+function isPlainMarkdownFile(uri: vscode.Uri): boolean {
+    if (uri.scheme !== 'file') {
+        return false;
+    }
+    return uri.path.toLowerCase().endsWith('.md');
+}
+
+function isSourceControlOpenContext(tab: vscode.Tab, targetUri: vscode.Uri): boolean {
+    if (hasSourceControlLabel(tab.label)) {
+        return true;
+    }
+
+    return vscode.window.tabGroups.all.some((group) => group.tabs.some((candidateTab) => {
+        const input = candidateTab.input;
+        if (input instanceof vscode.TabInputTextDiff) {
+            return (
+                isSameUri(input.modified, targetUri) &&
+                SOURCE_CONTROL_SCHEMES.has(input.original.scheme)
+            );
+        }
+
+        return (
+            input instanceof vscode.TabInputText &&
+            SOURCE_CONTROL_SCHEMES.has(input.uri.scheme) &&
+            isSamePath(input.uri.path, targetUri.path)
+        );
+    }));
+}
+
+function hasSourceControlLabel(label: string): boolean {
+    const normalized = label.trim().toLowerCase();
+    if (normalized === '') {
+        return false;
+    }
+
+    return SOURCE_CONTROL_LABEL_KEYWORDS.some((keyword) => normalized.includes(keyword));
+}
+
+function isSameUri(left: vscode.Uri, right: vscode.Uri): boolean {
+    return left.scheme === right.scheme && isSamePath(left.path, right.path);
+}
+
+function isSamePath(leftPath: string, rightPath: string): boolean {
+    return toComparablePath(leftPath) === toComparablePath(rightPath);
+}
+
+function toComparablePath(pathValue: string): string {
+    return process.platform === 'win32' ? pathValue.toLowerCase() : pathValue;
+}
+
+function suppressAutoOpenForUri(autoOpenSuppressedUntil: Map<string, number>, uri: vscode.Uri): void {
+    if (uri.scheme !== 'file') {
+        return;
+    }
+    autoOpenSuppressedUntil.set(uri.toString(), Date.now());
+}
+
+function isAutoOpenSuppressed(autoOpenSuppressedUntil: Map<string, number>, uri: vscode.Uri): boolean {
+    const timestamp = autoOpenSuppressedUntil.get(uri.toString());
+    if (!timestamp) {
+        return false;
+    }
+    if (Date.now() - timestamp > AUTO_OPEN_SUPPRESS_TTL_MS) {
+        autoOpenSuppressedUntil.delete(uri.toString());
+        return false;
+    }
+    return true;
+}
+
+function pruneExpiredEntries(entries: Map<string, number>, ttlMs: number): void {
+    const now = Date.now();
+    entries.forEach((timestamp, key) => {
+        if (now - timestamp > ttlMs) {
+            entries.delete(key);
+        }
+    });
+}
+
+async function openWithManulDownReplacingTextTabs(targetUri: vscode.Uri): Promise<void> {
+    try {
+        await vscode.commands.executeCommand(
+            'vscode.openWith',
+            targetUri,
+            MANULDOWN_EDITOR_VIEW_TYPE
+        );
+    } catch {
         return;
     }
 
-    if (!getOpenByDefaultSetting()) {
-        await context.globalState.update(MARKDOWN_ASSOCIATION_PROMPT_KEY, true);
+    if (!hasManulDownTabForUri(targetUri)) {
         return;
     }
 
-    const editorAssociations = getEditorAssociations();
-
-    if (editorAssociations[MARKDOWN_FILE_ASSOCIATION_KEY] === MANULDOWN_EDITOR_VIEW_TYPE) {
-        await context.globalState.update(MARKDOWN_ASSOCIATION_PROMPT_KEY, true);
-        return;
-    }
-
-    const setDefaultAction = 'Set as Default';
-    const skipAction = 'No';
-    const selection = await vscode.window.showInformationMessage(
-        'Set ManulDown as the default editor for Markdown files (*.md)?',
-        { modal: true },
-        setDefaultAction,
-        skipAction
+    const residualTextTabs = vscode.window.tabGroups.all.flatMap((group) =>
+        group.tabs.filter((tab) => {
+            const input = tab.input;
+            return input instanceof vscode.TabInputText && isSameUri(input.uri, targetUri);
+        })
     );
 
-    if (selection === setDefaultAction) {
-        try {
-            await setOpenByDefaultSetting(true);
-            vscode.window.showInformationMessage('ManulDown is now the default editor for Markdown files.');
-            await context.globalState.update(MARKDOWN_ASSOCIATION_PROMPT_KEY, true);
-            return;
-        } catch {
-            vscode.window.showErrorMessage('Failed to save the default Markdown editor setting.');
-            return;
-        }
+    if (residualTextTabs.length > 0) {
+        await vscode.window.tabGroups.close(residualTextTabs, true);
     }
-
-    try {
-        await setOpenByDefaultSetting(false);
-    } catch {
-        vscode.window.showErrorMessage('Failed to save the default Markdown editor setting.');
-        return;
-    }
-
-    await context.globalState.update(MARKDOWN_ASSOCIATION_PROMPT_KEY, true);
 }
 
-async function syncDefaultMarkdownAssociationWithSetting(): Promise<void> {
-    const openByDefault = getOpenByDefaultSetting();
-    const workbenchConfig = vscode.workspace.getConfiguration('workbench');
-    const editorAssociations = getEditorAssociations();
-    const currentAssociation = editorAssociations[MARKDOWN_FILE_ASSOCIATION_KEY];
+function hasManulDownTabForUri(targetUri: vscode.Uri): boolean {
+    return vscode.window.tabGroups.all.some((group) =>
+        group.tabs.some((tab) => {
+            const input = tab.input;
+            return (
+                input instanceof vscode.TabInputCustom &&
+                input.viewType === MANULDOWN_EDITOR_VIEW_TYPE &&
+                isSameUri(input.uri, targetUri)
+            );
+        })
+    );
+}
 
-    if (openByDefault) {
-        if (currentAssociation === MANULDOWN_EDITOR_VIEW_TYPE) {
+async function removeLegacyMarkdownEditorAssociation(): Promise<void> {
+    const workbenchConfig = vscode.workspace.getConfiguration('workbench');
+    const inspected = workbenchConfig.inspect<Record<string, string>>('editorAssociations');
+    if (!inspected) {
+        return;
+    }
+
+    const updates: Array<{ target: vscode.ConfigurationTarget; value: Record<string, string> }> = [];
+    const queueUpdate = (
+        value: Record<string, string> | undefined,
+        target: vscode.ConfigurationTarget
+    ): void => {
+        if (!value || value[MARKDOWN_FILE_ASSOCIATION_KEY] !== MANULDOWN_EDITOR_VIEW_TYPE) {
             return;
         }
+        const { [MARKDOWN_FILE_ASSOCIATION_KEY]: _, ...updatedValue } = value;
+        updates.push({ target, value: updatedValue });
+    };
 
-        const updatedEditorAssociations: Record<string, string> = {
-            ...editorAssociations,
-            [MARKDOWN_FILE_ASSOCIATION_KEY]: MANULDOWN_EDITOR_VIEW_TYPE,
-        };
+    queueUpdate(inspected.globalValue, vscode.ConfigurationTarget.Global);
+    queueUpdate(inspected.workspaceValue, vscode.ConfigurationTarget.Workspace);
 
-        try {
-            await workbenchConfig.update(
-                'editorAssociations',
-                updatedEditorAssociations,
-                vscode.ConfigurationTarget.Global
-            );
-        } catch {
-            vscode.window.showErrorMessage('Failed to update default Markdown editor setting.');
-        }
+    if (updates.length === 0) {
         return;
     }
 
-    if (currentAssociation !== MANULDOWN_EDITOR_VIEW_TYPE) {
-        return;
-    }
-
-    const { [MARKDOWN_FILE_ASSOCIATION_KEY]: _, ...updatedEditorAssociations } = editorAssociations;
     try {
-        await workbenchConfig.update(
-            'editorAssociations',
-            updatedEditorAssociations,
-            vscode.ConfigurationTarget.Global
-        );
+        for (const update of updates) {
+            await workbenchConfig.update('editorAssociations', update.value, update.target);
+        }
     } catch {
         vscode.window.showErrorMessage('Failed to update default Markdown editor setting.');
     }
@@ -240,16 +356,6 @@ function getOpenByDefaultSetting(): boolean {
     return vscode.workspace
         .getConfiguration(MANULDOWN_CONFIGURATION_SECTION)
         .get<boolean>(OPEN_BY_DEFAULT_SETTING_KEY, true);
-}
-
-async function setOpenByDefaultSetting(value: boolean): Promise<void> {
-    await vscode.workspace
-        .getConfiguration(MANULDOWN_CONFIGURATION_SECTION)
-        .update(OPEN_BY_DEFAULT_SETTING_KEY, value, vscode.ConfigurationTarget.Global);
-}
-
-function getEditorAssociations(): Record<string, string> {
-    return vscode.workspace.getConfiguration('workbench').get<Record<string, string>>('editorAssociations') ?? {};
 }
 
 // Made with Bob

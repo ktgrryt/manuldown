@@ -135,7 +135,7 @@ You can change the following options from VSCode settings (`Ctrl+,` / `Cmd+,`):
 | --- | --- | --- |
 | `manulDown.toolbar.visible` | `true` | Show the toolbar |
 | `manulDown.toc.enabled` | `true` | Automatically show the table of contents when headings exist |
-| `manulDown.openByDefault` | `true` | Open Markdown files with ManulDown by default (updates `workbench.editorAssociations` immediately) |
+| `manulDown.openByDefault` | `true` | Open Markdown files with ManulDown by default (SCM/diff opens stay on VSCode's standard text/diff editors) |
 | `manulDown.keepTabOpenOnExplorerClick` | `true` | Keep ManulDown tabs open when opening Markdown from Explorer (prevents preview-tab replacement) |
 | `manulDown.editor.theme` | `"vscode"` | Editor theme mode: `"vscode"` (follow VSCode), `"light"`, or `"dark"` |
 | `manulDown.list.dashStyle` | `false` | Use `-` as the bullet marker style |

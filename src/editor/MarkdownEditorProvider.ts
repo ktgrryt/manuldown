@@ -16,6 +16,18 @@ type EditorThemeMode = 'vscode' | 'light' | 'dark';
 
 export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     private static readonly viewType = 'manulDown.editor';
+    private static readonly sourceControlSchemes = new Set(['git', 'svn', 'hg']);
+    private static readonly sourceControlTitleKeywords = [
+        'working tree',
+        'index',
+        'staged',
+        'untracked',
+        '作業ツリー',
+        'インデックス',
+        'ステージ',
+        '未追跡',
+    ];
+    private static readonly sourceControlContextTtlMs = 4000;
     private static readonly builtInSlashCommandIds = new Set(['table', 'quote', 'code', 'checkbox']);
     private static readonly customSlashTemplateDirectoryName = '.manuldown';
     private static readonly customSlashTemplateExtension = '.md';
@@ -31,9 +43,12 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     private lastActivePanel: vscode.WebviewPanel | null = null;
     private customSlashCommandCache: { loadedAt: number; items: CustomSlashCommandTemplate[] } | null = null;
     private tocPanelWidthPx = MarkdownEditorProvider.defaultTocPanelWidthPx;
+    private sourceControlFallbackRequestedAt = new Map<string, number>();
     public explicitlyRequested = false;
 
     constructor(private readonly context: vscode.ExtensionContext) {
+        this.registerSourceControlOpenTracking();
+
         // Initialize Turndown service with proper settings for nested lists
         this.turndownService = new TurndownService({
             headingStyle: 'atx',
@@ -286,12 +301,19 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     ): Promise<void> {
         const wasExplicit = this.explicitlyRequested;
         this.explicitlyRequested = false;
-        if (!wasExplicit) {
-            const openByDefault = vscode.workspace.getConfiguration('manulDown').get<boolean>('openByDefault', true);
-            if (!openByDefault) {
-                void this.reopenWithDefaultEditorAndCloseResidualCustomTabs(document.uri);
-                return;
-            }
+        if (!wasExplicit && this.wasRecentSourceControlFallback(document.uri)) {
+            void this.reopenWithDefaultEditorAndCloseResidualCustomTabs(document.uri);
+            return;
+        }
+
+        if (!this.shouldOpenWithCustomEditor(document, wasExplicit)) {
+            void this.reopenWithDefaultEditorAndCloseResidualCustomTabs(document.uri);
+            return;
+        }
+
+        if (!wasExplicit && this.isLikelySourceControlWorkingTreeOpen(document, webviewPanel)) {
+            void this.reopenSourceControlChangeAndCloseResidualTabs(document.uri);
+            return;
         }
 
         // Setup webview options
@@ -314,6 +336,21 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 this.lastActivePanel = webviewPanel;
             }
         });
+
+        if (!wasExplicit && document.uri.scheme === 'file') {
+            // SCM labels/context can appear just after tab creation, so perform one deferred check.
+            setTimeout(() => {
+                if (this.wasRecentSourceControlFallback(document.uri)) {
+                    return;
+                }
+
+                const fileName = path.basename(document.uri.fsPath || document.uri.path);
+                const hasSourceControlTitle = this.hasSourceControlTitleSuffix(fileName, webviewPanel.title.trim());
+                if (hasSourceControlTitle || this.hasSourceControlTabContextForFileUri(document.uri)) {
+                    void this.reopenSourceControlChangeAndCloseResidualTabs(document.uri);
+                }
+            }, 0);
+        }
 
         // Create document manager
         const markdownDocument = new MarkdownDocument(document, webviewPanel.webview);
@@ -543,6 +580,363 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         setTimeout(() => {
             void vscode.commands.executeCommand('workbench.action.keepEditor');
         }, 0);
+    }
+
+    private shouldOpenWithCustomEditor(document: vscode.TextDocument, wasExplicit: boolean): boolean {
+        if (wasExplicit) {
+            return true;
+        }
+
+        const openByDefault = vscode.workspace.getConfiguration('manulDown').get<boolean>('openByDefault', true);
+        if (!openByDefault) {
+            return false;
+        }
+
+        return this.isEditableDocument(document);
+    }
+
+    private registerSourceControlOpenTracking(): void {
+        const textDocumentListener = vscode.workspace.onDidOpenTextDocument((openedDocument) => {
+            if (!MarkdownEditorProvider.sourceControlSchemes.has(openedDocument.uri.scheme)) {
+                return;
+            }
+
+            this.recordSourceControlPath(openedDocument.uri.path);
+            void this.reopenMatchingCustomMarkdownTabsForSourceControlPath(openedDocument.uri.path);
+        });
+
+        const tabListener = vscode.window.tabGroups.onDidChangeTabs((event) => {
+            const changedTabs = [...event.opened, ...event.changed];
+            for (const tab of changedTabs) {
+                const input = tab.input;
+
+                if (
+                    input instanceof vscode.TabInputTextDiff &&
+                    MarkdownEditorProvider.sourceControlSchemes.has(input.original.scheme) &&
+                    input.modified.scheme === 'file'
+                ) {
+                    this.recordSourceControlPath(input.modified.path);
+                    void this.reopenMatchingCustomMarkdownTabsForSourceControlUri(input.modified);
+                    continue;
+                }
+
+                if (input instanceof vscode.TabInputText && MarkdownEditorProvider.sourceControlSchemes.has(input.uri.scheme)) {
+                    this.recordSourceControlPath(input.uri.path);
+                    void this.reopenMatchingCustomMarkdownTabsForSourceControlPath(input.uri.path);
+                    continue;
+                }
+
+                if (
+                    input instanceof vscode.TabInputCustom &&
+                    input.viewType === MarkdownEditorProvider.viewType &&
+                    input.uri.scheme === 'file'
+                ) {
+                    if (this.wasRecentSourceControlFallback(input.uri)) {
+                        continue;
+                    }
+
+                    const fileName = path.basename(input.uri.fsPath || input.uri.path);
+                    const hasSourceControlTitle = this.hasSourceControlTitleSuffix(fileName, tab.label.trim());
+                    if (hasSourceControlTitle || this.hasSourceControlTabContextForFileUri(input.uri)) {
+                        void this.reopenSourceControlChangeAndCloseResidualTabs(input.uri, tab);
+                    }
+                }
+            }
+        });
+
+        this.context.subscriptions.push(textDocumentListener, tabListener);
+    }
+
+    private recordSourceControlPath(pathValue: string): void {
+        if (!pathValue) {
+            return;
+        }
+
+        this.pruneSourceControlContextCache();
+        this.sourceControlFallbackRequestedAt.forEach((value, key) => {
+            if (Date.now() - value > MarkdownEditorProvider.sourceControlContextTtlMs) {
+                this.sourceControlFallbackRequestedAt.delete(key);
+            }
+        });
+
+        this.sourceControlFallbackRequestedAt.set(`scm:${this.toComparablePath(pathValue)}`, Date.now());
+    }
+
+    private hasRecentSourceControlPath(pathValue: string): boolean {
+        const cacheKey = `scm:${this.toComparablePath(pathValue)}`;
+        const timestamp = this.sourceControlFallbackRequestedAt.get(cacheKey);
+        if (!timestamp) {
+            return false;
+        }
+
+        if (Date.now() - timestamp > MarkdownEditorProvider.sourceControlContextTtlMs) {
+            this.sourceControlFallbackRequestedAt.delete(cacheKey);
+            return false;
+        }
+
+        return true;
+    }
+
+    private pruneSourceControlContextCache(): void {
+        const now = Date.now();
+        this.sourceControlFallbackRequestedAt.forEach((value, key) => {
+            if (!key.startsWith('scm:')) {
+                return;
+            }
+            if (now - value > MarkdownEditorProvider.sourceControlContextTtlMs) {
+                this.sourceControlFallbackRequestedAt.delete(key);
+            }
+        });
+    }
+
+    private async reopenMatchingCustomMarkdownTabsForSourceControlUri(uri: vscode.Uri): Promise<void> {
+        if (uri.scheme !== 'file') {
+            return;
+        }
+        await this.reopenMatchingCustomMarkdownTabsForSourceControlPath(uri.path);
+    }
+
+    private async reopenMatchingCustomMarkdownTabsForSourceControlPath(pathValue: string): Promise<void> {
+        const customTabs = vscode.window.tabGroups.all.flatMap((group) =>
+            group.tabs.filter((tab) => {
+                const input = tab.input;
+                if (!(input instanceof vscode.TabInputCustom)) {
+                    return false;
+                }
+                if (input.viewType !== MarkdownEditorProvider.viewType || input.uri.scheme !== 'file') {
+                    return false;
+                }
+                return this.isSamePath(input.uri.path, pathValue);
+            })
+        );
+
+        if (customTabs.length === 0) {
+            return;
+        }
+
+        const seen = new Set<string>();
+        for (const tab of customTabs) {
+            const input = tab.input;
+            if (!(input instanceof vscode.TabInputCustom)) {
+                continue;
+            }
+            const uriKey = input.uri.toString();
+            if (seen.has(uriKey) || this.wasRecentSourceControlFallback(input.uri)) {
+                continue;
+            }
+            seen.add(uriKey);
+            await this.reopenSourceControlChangeAndCloseResidualTabs(input.uri);
+        }
+    }
+
+    private isEditableDocument(document: vscode.TextDocument): boolean {
+        if (document.isUntitled) {
+            return true;
+        }
+
+        // SCM and history resources (for example, `git:`) are read-only and should
+        // stay in the built-in text/diff editors.
+        const isWritableFileSystem = vscode.workspace.fs.isWritableFileSystem(document.uri.scheme);
+        if (typeof isWritableFileSystem === 'boolean') {
+            return isWritableFileSystem;
+        }
+
+        return document.uri.scheme === 'file';
+    }
+
+    private wasRecentSourceControlFallback(documentUri: vscode.Uri): boolean {
+        const key = documentUri.toString();
+        const requestedAt = this.sourceControlFallbackRequestedAt.get(key);
+        if (!requestedAt) {
+            return false;
+        }
+
+        const elapsedMs = Date.now() - requestedAt;
+        if (elapsedMs > 3000) {
+            this.sourceControlFallbackRequestedAt.delete(key);
+            return false;
+        }
+
+        return true;
+    }
+
+    private isLikelySourceControlWorkingTreeOpen(
+        document: vscode.TextDocument,
+        webviewPanel: vscode.WebviewPanel
+    ): boolean {
+        if (document.uri.scheme !== 'file') {
+            return false;
+        }
+
+        if (this.hasSourceControlTabContextForFileUri(document.uri)) {
+            return true;
+        }
+
+        const fileName = path.basename(document.uri.fsPath || document.uri.path);
+        const title = webviewPanel.title.trim();
+        if (this.hasSourceControlTitleSuffix(fileName, title)) {
+            return true;
+        }
+
+        return vscode.window.tabGroups.all.some((group) => group.tabs.some((tab) => {
+            const input = tab.input;
+            if (input instanceof vscode.TabInputTextDiff) {
+                return (
+                    this.isSameUri(input.modified, document.uri) &&
+                    MarkdownEditorProvider.sourceControlSchemes.has(input.original.scheme)
+                );
+            }
+
+            return (
+                input instanceof vscode.TabInputText &&
+                MarkdownEditorProvider.sourceControlSchemes.has(input.uri.scheme) &&
+                this.isSamePath(input.uri.path, document.uri.path)
+            );
+        }));
+    }
+
+    private hasSourceControlTabContextForFileUri(fileUri: vscode.Uri): boolean {
+        if (fileUri.scheme !== 'file') {
+            return false;
+        }
+
+        const fileName = path.basename(fileUri.fsPath || fileUri.path);
+        const hasSameFileSourceControlTab = vscode.window.tabGroups.all.some((group) => group.tabs.some((tab) => {
+            const input = tab.input;
+            if (input instanceof vscode.TabInputTextDiff) {
+                return (
+                    this.isSameUri(input.modified, fileUri) &&
+                    MarkdownEditorProvider.sourceControlSchemes.has(input.original.scheme)
+                );
+            }
+
+            if (input instanceof vscode.TabInputText) {
+                if (
+                    MarkdownEditorProvider.sourceControlSchemes.has(input.uri.scheme) &&
+                    this.isSamePath(input.uri.path, fileUri.path)
+                ) {
+                    return true;
+                }
+
+                if (input.uri.scheme === 'file' && this.isSamePath(input.uri.path, fileUri.path)) {
+                    return this.hasSourceControlTitleSuffix(fileName, tab.label.trim());
+                }
+            }
+
+            return false;
+        }));
+
+        if (hasSameFileSourceControlTab) {
+            return true;
+        }
+
+        if (!this.hasRecentSourceControlPath(fileUri.path)) {
+            return false;
+        }
+
+        return vscode.window.tabGroups.all.some((group) => group.tabs.some((tab) => {
+            const input = tab.input;
+            if (input instanceof vscode.TabInputTextDiff) {
+                return (
+                    this.isSameUri(input.modified, fileUri) &&
+                    MarkdownEditorProvider.sourceControlSchemes.has(input.original.scheme)
+                );
+            }
+
+            return (
+                input instanceof vscode.TabInputText &&
+                MarkdownEditorProvider.sourceControlSchemes.has(input.uri.scheme) &&
+                this.isSamePath(input.uri.path, fileUri.path)
+            );
+        }));
+    }
+
+    private hasSourceControlTitleSuffix(fileName: string, title: string): boolean {
+        if (!fileName || !title || title === fileName || !title.startsWith(fileName)) {
+            return false;
+        }
+
+        const suffix = title.slice(fileName.length).trim();
+        if (suffix === '') {
+            return false;
+        }
+
+        const normalizedSuffix = suffix.toLowerCase();
+        if (MarkdownEditorProvider.sourceControlTitleKeywords.some((keyword) => normalizedSuffix.includes(keyword))) {
+            return true;
+        }
+
+        return /^[\(\（].+[\)\）]$/.test(suffix);
+    }
+
+    private isSameUri(left: vscode.Uri, right: vscode.Uri): boolean {
+        return left.scheme === right.scheme && this.isSamePath(left.path, right.path);
+    }
+
+    private isSamePath(leftPath: string, rightPath: string): boolean {
+        if (process.platform === 'win32') {
+            return this.toComparablePath(leftPath) === this.toComparablePath(rightPath);
+        }
+        return leftPath === rightPath;
+    }
+
+    private toComparablePath(pathValue: string): string {
+        return process.platform === 'win32' ? pathValue.toLowerCase() : pathValue;
+    }
+
+    private async reopenSourceControlChangeAndCloseResidualTabs(
+        documentUri: vscode.Uri,
+        tabToClose?: vscode.Tab
+    ): Promise<void> {
+        const key = documentUri.toString();
+        this.sourceControlFallbackRequestedAt.set(key, Date.now());
+        let openedBySourceControl = false;
+        try {
+            if (tabToClose) {
+                await vscode.window.tabGroups.close(tabToClose, true);
+            }
+            await vscode.commands.executeCommand('git.openChange', documentUri);
+            openedBySourceControl = true;
+        } catch {
+            await vscode.commands.executeCommand('vscode.openWith', documentUri, 'default');
+        } finally {
+            await this.closeResidualCustomTabs(documentUri);
+            if (openedBySourceControl) {
+                await this.closeResidualSourceControlTextTabs(documentUri);
+            }
+            setTimeout(() => {
+                void this.closeResidualCustomTabs(documentUri);
+                if (openedBySourceControl) {
+                    void this.closeResidualSourceControlTextTabs(documentUri);
+                }
+            }, 150);
+            setTimeout(() => {
+                this.sourceControlFallbackRequestedAt.delete(key);
+            }, 3000);
+        }
+    }
+
+    private async closeResidualSourceControlTextTabs(documentUri: vscode.Uri): Promise<void> {
+        const textTabs = vscode.window.tabGroups.all.flatMap((group) =>
+            group.tabs.filter((tab) => {
+                if (tab.isActive) {
+                    return false;
+                }
+
+                const input = tab.input;
+                return (
+                    input instanceof vscode.TabInputText &&
+                    MarkdownEditorProvider.sourceControlSchemes.has(input.uri.scheme) &&
+                    this.isSamePath(input.uri.path, documentUri.path)
+                );
+            })
+        );
+
+        if (textTabs.length === 0) {
+            return;
+        }
+
+        await vscode.window.tabGroups.close(textTabs, true);
     }
 
     private async reopenWithDefaultEditorAndCloseResidualCustomTabs(documentUri: vscode.Uri): Promise<void> {
