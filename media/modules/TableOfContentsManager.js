@@ -23,6 +23,8 @@ export class TableOfContentsManager {
         this.scrollAnimationRaf = null;
         this.revealRaf = null;
         this.scrollDuration = this.normalizeScrollDuration(options.scrollDuration);
+        this.lastMeasuredClientWidth = -1;
+        this.lastMeasuredScrollHeight = -1;
     }
 
     /**
@@ -121,6 +123,8 @@ export class TableOfContentsManager {
             this.headings = [];
             this.tocItems = [];
             this.headingTops = [];
+            this.lastMeasuredClientWidth = -1;
+            this.lastMeasuredScrollHeight = -1;
             this.clearActive();
             return;
         }
@@ -218,6 +222,8 @@ export class TableOfContentsManager {
     refreshHeadingPositions() {
         if (this.headings.length === 0) {
             this.headingTops = [];
+            this.lastMeasuredClientWidth = this.editor.clientWidth;
+            this.lastMeasuredScrollHeight = this.editor.scrollHeight;
             return;
         }
         const editorRect = this.editor.getBoundingClientRect();
@@ -226,6 +232,18 @@ export class TableOfContentsManager {
             const rect = heading.getBoundingClientRect();
             return rect.top - editorRect.top + editorScrollTop;
         });
+        this.lastMeasuredClientWidth = this.editor.clientWidth;
+        this.lastMeasuredScrollHeight = this.editor.scrollHeight;
+    }
+
+    needsHeadingPositionRefresh() {
+        if (this.headingTops.length !== this.headings.length) {
+            return true;
+        }
+        return (
+            this.editor.clientWidth !== this.lastMeasuredClientWidth ||
+            this.editor.scrollHeight !== this.lastMeasuredScrollHeight
+        );
     }
 
     updateActiveFromScroll(force = false, { scrollIntoView = true } = {}) {
@@ -233,7 +251,7 @@ export class TableOfContentsManager {
             this.clearActive();
             return;
         }
-        if (this.headingTops.length !== this.headings.length) {
+        if (this.needsHeadingPositionRefresh()) {
             this.refreshHeadingPositions();
         }
         if (this.headingTops.length === 0) {
@@ -242,7 +260,7 @@ export class TableOfContentsManager {
         }
 
         const scrollTop = this.editor.scrollTop + this.activeOffset;
-        let nextIndex = 0;
+        let nextIndex = -1;
 
         for (let i = 0; i < this.headingTops.length; i++) {
             if (this.headingTops[i] <= scrollTop) {
