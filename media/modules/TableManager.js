@@ -21,6 +21,7 @@ export class TableManager {
         this.isDragging = false;
         this.anchorCell = null;
         this.focusCell = null;
+        this.pendingCellSelectionToggle = null;
 
         this.clipboardMatrix = null;
 
@@ -281,6 +282,7 @@ export class TableManager {
 
     handleMouseDown(e) {
         if (e.button !== 0) return false;
+        this.pendingCellSelectionToggle = null;
 
         const structureHandleInfo = this._getStructureHandleInfoFromTarget(e.target);
         if (structureHandleInfo) {
@@ -418,6 +420,18 @@ export class TableManager {
         }
 
         this._clearInsertHover();
+        const wasSelectedCellClick = !e.shiftKey && cell.classList.contains('md-table-cell-selected');
+        if (wasSelectedCellClick) {
+            // Immediately clear existing selection to avoid a temporary single-cell highlight
+            // before mouseup toggles selection off.
+            this.clearCellSelection();
+            this.isMouseDown = true;
+            this.isDragging = false;
+            this.anchorCell = cell;
+            this.focusCell = cell;
+            this.pendingCellSelectionToggle = cell;
+            return true;
+        }
         this.isMouseDown = true;
         this.isDragging = false;
         this.anchorCell = cell;
@@ -1518,9 +1532,18 @@ export class TableManager {
         }
 
         const wasDragging = this.isDragging;
+        const shouldToggleCellSelectionOff = !!(this.pendingCellSelectionToggle && !wasDragging);
+        this.pendingCellSelectionToggle = null;
         if (this.isMouseDown) {
             this.isMouseDown = false;
             this.isDragging = false;
+        }
+        if (shouldToggleCellSelectionOff) {
+            this.clearCellSelection();
+            this.anchorCell = null;
+            this.focusCell = null;
+            setTimeout(() => this.editor.focus(), 0);
+            return;
         }
         if (this.hasCellSelection()) {
             const selectedCells = this.selectedCells && this.selectedCells.length
