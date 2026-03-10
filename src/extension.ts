@@ -4,6 +4,7 @@ import { MarkdownEditorProvider } from './editor/MarkdownEditorProvider';
 const MANULDOWN_EDITOR_VIEW_TYPE = 'manulDown.editor';
 const MANULDOWN_CONFIGURATION_SECTION = 'manulDown';
 const OPEN_BY_DEFAULT_SETTING_KEY = 'openByDefault';
+const KEEP_TAB_OPEN_ON_EXPLORER_CLICK_SETTING_KEY = 'keepTabOpenOnExplorerClick';
 const MARKDOWN_FILE_ASSOCIATION_KEY = '*.md';
 const AUTO_OPEN_SUPPRESS_TTL_MS = 4000;
 const SOURCE_CONTROL_SCHEMES = new Set(['git', 'svn', 'hg']);
@@ -159,6 +160,36 @@ function registerOpenByDefaultBehavior(
     autoOpenSuppressedUntil: Map<string, number>
 ): void {
     const autoOpenInProgress = new Set<string>();
+    const restoreInProgress = new Set<string>();
+    let lastActivePreviewTextUri = getRestorableActivePreviewTextUri();
+
+    const tryRestoreLastActivePreview = (markdownUri: vscode.Uri | null): void => {
+        if (!markdownUri || !lastActivePreviewTextUri) {
+            return;
+        }
+        if (!getOpenByDefaultSetting() || !getKeepTabOpenOnExplorerClickSetting()) {
+            return;
+        }
+        if (hasSourceControlTabContextForUri(markdownUri)) {
+            return;
+        }
+        if (hasTextTabForUri(lastActivePreviewTextUri)) {
+            return;
+        }
+
+        const uriToRestore = lastActivePreviewTextUri;
+        const restoreKey = uriToRestore.toString();
+        if (restoreInProgress.has(restoreKey)) {
+            return;
+        }
+
+        restoreInProgress.add(restoreKey);
+        setTimeout(() => {
+            void reopenClosedTextTabWithoutFocus(uriToRestore).finally(() => {
+                restoreInProgress.delete(restoreKey);
+            });
+        }, 0);
+    };
 
     const tryAutoOpen = (targetUri: vscode.Uri, sourceTab?: vscode.Tab): void => {
         if (!getOpenByDefaultSetting()) {
@@ -195,6 +226,12 @@ function registerOpenByDefaultBehavior(
     };
 
     const tabListener = vscode.window.tabGroups.onDidChangeTabs((event) => {
+        const markdownTabUri =
+            [...event.opened, ...event.changed]
+                .map((tab) => getMarkdownUriFromTab(tab))
+                .find((uri): uri is vscode.Uri => uri !== null) ?? null;
+        tryRestoreLastActivePreview(markdownTabUri);
+
         for (const tab of event.opened) {
             const input = tab.input;
             if (!(input instanceof vscode.TabInputText)) {
@@ -205,11 +242,16 @@ function registerOpenByDefaultBehavior(
     });
 
     const activeTextEditorListener = vscode.window.onDidChangeActiveTextEditor((editor) => {
+        const activeMarkdownUri = getActiveMarkdownUri(editor);
+        tryRestoreLastActivePreview(activeMarkdownUri);
+
         if (!editor) {
+            lastActivePreviewTextUri = getRestorableActivePreviewTextUri();
             return;
         }
         const activeTab = getActiveTextTabForUri(editor.document.uri);
         tryAutoOpen(editor.document.uri, activeTab);
+        lastActivePreviewTextUri = getRestorableActivePreviewTextUri();
     });
 
     context.subscriptions.push(tabListener, activeTextEditorListener);
@@ -219,10 +261,12 @@ function registerOpenByDefaultBehavior(
     setTimeout(() => {
         const activeEditor = vscode.window.activeTextEditor;
         if (!activeEditor) {
+            lastActivePreviewTextUri = getRestorableActivePreviewTextUri();
             return;
         }
         const activeTab = getActiveTextTabForUri(activeEditor.document.uri);
         tryAutoOpen(activeEditor.document.uri, activeTab);
+        lastActivePreviewTextUri = getRestorableActivePreviewTextUri();
     }, 0);
 }
 
@@ -233,12 +277,48 @@ function isPlainMarkdownFile(uri: vscode.Uri): boolean {
     return uri.path.toLowerCase().endsWith('.md');
 }
 
-function isSourceControlOpenContext(tab: vscode.Tab, targetUri: vscode.Uri): boolean {
-    if (hasSourceControlLabel(tab.label)) {
-        return true;
+function getMarkdownUriFromTab(tab: vscode.Tab | undefined): vscode.Uri | null {
+    if (!tab) {
+        return null;
     }
 
-    return hasSourceControlTabContextForUri(targetUri);
+    const input = tab.input;
+    if (input instanceof vscode.TabInputText && isPlainMarkdownFile(input.uri)) {
+        return input.uri;
+    }
+    if (
+        input instanceof vscode.TabInputCustom &&
+        input.viewType === MANULDOWN_EDITOR_VIEW_TYPE &&
+        isPlainMarkdownFile(input.uri)
+    ) {
+        return input.uri;
+    }
+
+    return null;
+}
+
+function getActiveMarkdownUri(editor: vscode.TextEditor | undefined): vscode.Uri | null {
+    if (editor && isPlainMarkdownFile(editor.document.uri)) {
+        return editor.document.uri;
+    }
+
+    const activeTab = vscode.window.tabGroups.activeTabGroup.activeTab;
+    return getMarkdownUriFromTab(activeTab);
+}
+
+async function reopenClosedTextTabWithoutFocus(uri: vscode.Uri): Promise<void> {
+    if (hasTextTabForUri(uri)) {
+        return;
+    }
+
+    try {
+        await vscode.commands.executeCommand('vscode.open', uri, {
+            preserveFocus: true,
+            preview: false,
+        });
+    } catch {
+        // Ignore tabs that cannot be reopened as text.
+    }
 }
 
 function hasSourceControlTabContextForUri(targetUri: vscode.Uri): boolean {
@@ -275,6 +355,38 @@ function getActiveTextTabForUri(targetUri: vscode.Uri): vscode.Tab | undefined {
     }
 
     return activeTab;
+}
+
+function getRestorableActivePreviewTextUri(): vscode.Uri | null {
+    const activeTab = vscode.window.tabGroups.activeTabGroup.activeTab;
+    if (!activeTab) {
+        return null;
+    }
+    if (!activeTab.isPreview || activeTab.isDirty) {
+        return null;
+    }
+
+    const input = activeTab.input;
+    if (!(input instanceof vscode.TabInputText)) {
+        return null;
+    }
+    if (input.uri.scheme !== 'file') {
+        return null;
+    }
+    if (isPlainMarkdownFile(input.uri)) {
+        return null;
+    }
+
+    return input.uri;
+}
+
+function hasTextTabForUri(targetUri: vscode.Uri): boolean {
+    return vscode.window.tabGroups.all.some((group) =>
+        group.tabs.some((tab) => {
+            const input = tab.input;
+            return input instanceof vscode.TabInputText && isSameUri(input.uri, targetUri);
+        })
+    );
 }
 
 function hasSourceControlLabel(label: string): boolean {
@@ -405,6 +517,12 @@ function getOpenByDefaultSetting(): boolean {
     return vscode.workspace
         .getConfiguration(MANULDOWN_CONFIGURATION_SECTION)
         .get<boolean>(OPEN_BY_DEFAULT_SETTING_KEY, true);
+}
+
+function getKeepTabOpenOnExplorerClickSetting(): boolean {
+    return vscode.workspace
+        .getConfiguration(MANULDOWN_CONFIGURATION_SECTION)
+        .get<boolean>(KEEP_TAB_OPEN_ON_EXPLORER_CLICK_SETTING_KEY, true);
 }
 
 // Made with Bob
