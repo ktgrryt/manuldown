@@ -2095,6 +2095,92 @@ import { SearchManager } from './modules/SearchManager.js';
         return [];
     }
 
+    function rangeIntersectsListItemDirectContent(range, listItem) {
+        if (!range || !listItem || listItem.tagName !== 'LI') return false;
+
+        let hasDirectContent = false;
+        for (const child of Array.from(listItem.childNodes || [])) {
+            if (child.nodeType === Node.ELEMENT_NODE &&
+                (child.tagName === 'UL' || child.tagName === 'OL')) {
+                continue;
+            }
+            hasDirectContent = true;
+            if (rangeIntersectsNodeSafely(range, child)) {
+                return true;
+            }
+        }
+
+        // Items without direct content (nested list only) still need a fallback.
+        return !hasDirectContent && rangeIntersectsNodeSafely(range, listItem);
+    }
+
+    function filterRootSelectedListItems(listItems) {
+        if (!Array.isArray(listItems) || listItems.length <= 1) {
+            return Array.isArray(listItems) ? listItems : [];
+        }
+
+        const selectedSet = new Set(listItems);
+        return listItems.filter((item) => {
+            let current = item.parentElement;
+            while (current && current !== editor) {
+                if (current.tagName === 'LI' && selectedSet.has(current)) {
+                    return false;
+                }
+                current = current.parentElement;
+            }
+            return true;
+        });
+    }
+
+    function getTabOperationTargetListItems(range, fallbackListItem) {
+        const selectedListItems = getSelectedListItemsFromRange(range);
+        if (selectedListItems.length === 0) {
+            return fallbackListItem ? [fallbackListItem] : [];
+        }
+
+        const directSelectedListItems = selectedListItems.filter((item) =>
+            rangeIntersectsListItemDirectContent(range, item)
+        );
+        const baseItems = directSelectedListItems.length > 0
+            ? directSelectedListItems
+            : selectedListItems;
+        return filterRootSelectedListItems(baseItems);
+    }
+
+    function restoreRangeSelectionAroundListItems(listItems) {
+        if (!Array.isArray(listItems) || listItems.length === 0) return false;
+
+        const connectedItems = listItems.filter((item) =>
+            item &&
+            item.isConnected &&
+            item.tagName === 'LI' &&
+            editor.contains(item) &&
+            item.parentNode
+        );
+        if (connectedItems.length === 0) return false;
+
+        const sortedItems = connectedItems.slice().sort((a, b) => {
+            if (a === b) return 0;
+            const pos = a.compareDocumentPosition(b);
+            if (pos & Node.DOCUMENT_POSITION_PRECEDING) return 1;
+            if (pos & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
+            return 0;
+        });
+
+        const first = sortedItems[0];
+        const last = sortedItems[sortedItems.length - 1];
+        if (!first || !last || !first.parentNode || !last.parentNode) return false;
+
+        try {
+            const newRange = document.createRange();
+            newRange.setStartBefore(first);
+            newRange.setEndAfter(last);
+            return applySelectionRange(window.getSelection(), newRange);
+        } catch (_e) {
+            return false;
+        }
+    }
+
     function pruneEmptyListItemsAfterRangeDelete(listItems) {
         if (!Array.isArray(listItems) || listItems.length === 0) {
             return false;
@@ -6669,10 +6755,7 @@ import { SearchManager } from './modules/SearchManager.js';
             return true;
         }
 
-        const selectedListItems = getSelectedListItemsFromRange(range);
-        const targetListItems = selectedListItems.length > 0
-            ? selectedListItems
-            : (listItem ? [listItem] : []);
+        const targetListItems = getTabOperationTargetListItems(range, listItem);
 
         if (targetListItems.length > 0) {
             e.preventDefault();
@@ -6681,6 +6764,10 @@ import { SearchManager } from './modules/SearchManager.js';
             // Save state before indent/outdent operation
             stateManager.saveState();
 
+            const shouldPreserveRangeSelection = !!(range && !range.collapsed);
+            const selectionRestoreTargets = shouldPreserveRangeSelection
+                ? targetListItems.slice()
+                : null;
             const textNode = container.nodeType === 3 ? container : container.firstChild;
             const offset = range.startOffset;
             const operationTargets = e.shiftKey
@@ -6695,10 +6782,18 @@ import { SearchManager } from './modules/SearchManager.js';
                 }
             });
 
-            // Ensure editor maintains focus after Tab operation
-            setTimeout(() => {
-                editor.focus();
-            }, 0);
+            // Ensure editor maintains focus after Tab operation.
+            // When a range was selected, restore the list-block selection.
+            if (selectionRestoreTargets && selectionRestoreTargets.length > 0) {
+                requestAnimationFrame(() => {
+                    editor.focus();
+                    restoreRangeSelectionAroundListItems(selectionRestoreTargets);
+                });
+            } else {
+                setTimeout(() => {
+                    editor.focus();
+                }, 0);
+            }
 
             notifyChange();
             return true;
