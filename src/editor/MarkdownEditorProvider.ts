@@ -428,6 +428,13 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     case 'tocPanelWidthChanged':
                         this.updateSharedTocPanelWidth(message.width);
                         break;
+                    case 'switchEditorTab':
+                        if (message.direction === 'next') {
+                            await vscode.commands.executeCommand('workbench.action.nextEditor');
+                        } else if (message.direction === 'previous') {
+                            await vscode.commands.executeCommand('workbench.action.previousEditor');
+                        }
+                        break;
                 }
             }
         );

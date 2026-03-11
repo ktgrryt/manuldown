@@ -44,6 +44,7 @@ import { SearchManager } from './modules/SearchManager.js';
     const TOC_PANEL_MAX_WIDTH = 480;
     const TOC_SCROLL_DURATION_MS = 120;
     const IME_ENTER_CONFIRM_GRACE_MS = 80;
+    const TAB_SWITCH_SHORTCUT_DEBOUNCE_MS = 120;
     const INTERNAL_EDITOR_PLAIN_TEXT_CLIPBOARD_TYPE = 'application/x-manuldown-editor-plain-text';
     const INTERNAL_EDITOR_HTML_CLIPBOARD_TYPE = 'application/x-manuldown-editor-html';
     const INTERNAL_EDITOR_HTML_MARKER_START = '<!--manuldown-clipboard-start-->';
@@ -80,6 +81,8 @@ import { SearchManager } from './modules/SearchManager.js';
     const imageRenderMaxWidthPx = 820;
     let imageResolveRequestSeq = 0;
     let overflowStateRaf = null;
+    let lastEditorTabSwitchTs = 0;
+    let lastEditorTabSwitchDirection = null;
 
     const NETWORK_BLOCKED_ERROR_MESSAGE = 'External network requests are blocked in ManulDown webview.';
 
@@ -14308,6 +14311,19 @@ import { SearchManager } from './modules/SearchManager.js';
         // フォーカス監視
         let lastFocusTime = Date.now();
         let focusCheckInterval = null;
+        const canRecoverEditorFocus = () => {
+            if (document.visibilityState && document.visibilityState !== 'visible') {
+                return false;
+            }
+            if (!editor.isConnected) {
+                return false;
+            }
+            // Hidden webviews should not steal focus during editor/tab switching.
+            if (editor.getClientRects().length === 0) {
+                return false;
+            }
+            return true;
+        };
 
         editor.addEventListener('focus', () => {
             lastFocusTime = Date.now();
@@ -14317,10 +14333,15 @@ import { SearchManager } from './modules/SearchManager.js';
             focusCheckInterval = setInterval(() => {
                 if (!editor.contains(document.activeElement) &&
                     Date.now() - lastFocusTime < 2000 &&
-                    !isUpdating) {
+                    !isUpdating &&
+                    canRecoverEditorFocus()) {
                     const activeElement = document.activeElement;
                     if (!activeElement || activeElement === document.body) {
-                        editor.focus();
+                        try {
+                            editor.focus({ preventScroll: true });
+                        } catch (error) {
+                            editor.focus();
+                        }
                     }
                 }
             }, 100);
@@ -14333,6 +14354,55 @@ import { SearchManager } from './modules/SearchManager.js';
             }
             hideSlashCommandMenu();
         });
+
+        const handleMacEditorTabSwitchShortcut = (e) => {
+            if (!isMac || !e || e.defaultPrevented) {
+                return;
+            }
+            if (e.isComposing || isComposing) {
+                return;
+            }
+            if (!e.metaKey || !e.altKey || e.ctrlKey || e.shiftKey) {
+                return;
+            }
+            if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') {
+                return;
+            }
+
+            const direction = e.key === 'ArrowRight' ? 'next' : 'previous';
+            const now = Date.now();
+            const isDuplicate =
+                e.repeat ||
+                (lastEditorTabSwitchDirection === direction &&
+                    now - lastEditorTabSwitchTs < TAB_SWITCH_SHORTCUT_DEBOUNCE_MS);
+
+            e.preventDefault();
+            e.stopPropagation();
+
+            if (isDuplicate) {
+                return;
+            }
+
+            lastEditorTabSwitchTs = now;
+            lastEditorTabSwitchDirection = direction;
+            vscode.postMessage({
+                type: 'switchEditorTab',
+                direction
+            });
+        };
+        document.addEventListener('keydown', handleMacEditorTabSwitchShortcut, true);
+
+        // Some mice send BrowserBack/BrowserForward side-button clicks (button 3/4).
+        // Prevent webview-native history navigation so assigned tab-switch shortcuts
+        // are not applied twice.
+        const suppressHistoryMouseButtons = (e) => {
+            if (e.button === 3 || e.button === 4) {
+                e.preventDefault();
+            }
+        };
+        document.addEventListener('mousedown', suppressHistoryMouseButtons, true);
+        document.addEventListener('mouseup', suppressHistoryMouseButtons, true);
+        document.addEventListener('auxclick', suppressHistoryMouseButtons, true);
 
         if (editorScrollbarIndicator && editorScrollbarThumb) {
             const stopScrollbarDrag = () => {
