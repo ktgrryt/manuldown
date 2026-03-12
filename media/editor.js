@@ -10513,6 +10513,26 @@ import { SearchManager } from './modules/SearchManager.js';
         }
     }
 
+    function isAtEscapedMarkdownLineHead(range, topLevelNode) {
+        if (!range || !range.collapsed || !topLevelNode) {
+            return false;
+        }
+        try {
+            const beforeRange = document.createRange();
+            beforeRange.selectNodeContents(topLevelNode);
+            beforeRange.setEnd(range.startContainer, range.startOffset);
+            const beforeText = (beforeRange.toString() || '').replace(/[\u200B\uFEFF]/g, '');
+            if (beforeText !== '') {
+                return false;
+            }
+
+            const headText = (topLevelNode.textContent || '').replace(/[\u200B\uFEFF]/g, '');
+            return /^\\[`*_{}\[\]()#+.!|>~-]/.test(headText);
+        } catch (e) {
+            return false;
+        }
+    }
+
     function isCaretAdjacentToInlineCode(range) {
         if (!range || !range.collapsed) {
             return false;
@@ -10640,6 +10660,12 @@ import { SearchManager } from './modules/SearchManager.js';
 
         const topLevelBlock = getTopLevelBlock(anchorNode || range.startContainer);
         if (!topLevelBlock) {
+            return false;
+        }
+
+        if (e.key === 'ArrowRight' && isAtEscapedMarkdownLineHead(range, topLevelBlock)) {
+            // WebView native ArrowRight can get stuck at escaped markers (e.g. "\*foo").
+            // Force custom cursor navigation for this boundary case.
             return false;
         }
 
