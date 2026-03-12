@@ -4579,21 +4579,22 @@ export class TableManager {
         const beforeFrag = beforeRange.extractContents();
         const afterFrag = afterRange.extractContents();
 
-        const beforeBlock = block.cloneNode(false);
-        beforeBlock.appendChild(beforeFrag);
-        if ((beforeBlock.textContent || '').trim() === '') {
-            beforeBlock.appendChild(document.createElement('br'));
-        }
+        const hasBeforeContent = Array.from(beforeFrag.childNodes || [])
+            .some((child) => !this._isPlaceholderOnlyCellNode(child));
+        const hasAfterContent = Array.from(afterFrag.childNodes || [])
+            .some((child) => !this._isPlaceholderOnlyCellNode(child));
 
-        const afterBlock = block.cloneNode(false);
-        afterBlock.appendChild(afterFrag);
-        if ((afterBlock.textContent || '').trim() === '') {
-            afterBlock.appendChild(document.createElement('br'));
+        if (hasBeforeContent) {
+            const beforeBlock = block.cloneNode(false);
+            beforeBlock.appendChild(beforeFrag);
+            block.parentNode.insertBefore(beforeBlock, block);
         }
-
-        block.parentNode.insertBefore(beforeBlock, block);
         block.parentNode.insertBefore(node, block);
-        block.parentNode.insertBefore(afterBlock, block);
+        if (hasAfterContent) {
+            const afterBlock = block.cloneNode(false);
+            afterBlock.appendChild(afterFrag);
+            block.parentNode.insertBefore(afterBlock, block);
+        }
         block.remove();
     }
 
