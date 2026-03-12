@@ -8272,6 +8272,43 @@ import { SearchManager } from './modules/SearchManager.js';
             : createCollapsedRangeAtElementBoundary(nextBlock, 'start');
     }
 
+    function getCodeBlockForBelowGapClick(y) {
+        if (!Number.isFinite(y)) {
+            return null;
+        }
+
+        const blocks = Array.from(editor.children || []).filter((child) => {
+            if (!child || child.nodeType !== Node.ELEMENT_NODE) return false;
+            if (child.getAttribute && child.getAttribute('data-exclude-from-markdown') === 'true') return false;
+            return true;
+        });
+        if (blocks.length === 0) {
+            return null;
+        }
+
+        let previousBlock = null;
+        for (const block of blocks) {
+            const rect = block.getBoundingClientRect();
+            if (y < rect.top) {
+                break;
+            }
+            previousBlock = block;
+            if (y <= rect.bottom) {
+                if (block.tagName !== 'PRE' || !block.querySelector('code')) {
+                    return null;
+                }
+                const bottomTolerancePx = Math.max(2, Math.min(14, (rect.height || 0) * 0.18));
+                return y >= rect.bottom - bottomTolerancePx ? block : null;
+            }
+        }
+
+        if (previousBlock && previousBlock.tagName === 'PRE' && previousBlock.querySelector('code')) {
+            return previousBlock;
+        }
+
+        return null;
+    }
+
     function hasMeaningfulTextContent(value) {
         if (typeof value !== 'string') return false;
         const raw = String(value);
@@ -17308,6 +17345,21 @@ import { SearchManager } from './modules/SearchManager.js';
                     selection.addRange(looseRightSideRange);
                     beginManualPointerSelection(e, looseRightSideRange);
                     return;
+                }
+
+                const codeBlockBelowClick = getCodeBlockForBelowGapClick(y);
+                if (codeBlockBelowClick) {
+                    e.preventDefault();
+                    focusEditorWithoutScroll();
+                    const selection = window.getSelection();
+                    if (!selection) return;
+                    if (exitEmptyCodeBlockDownFromPre(codeBlockBelowClick, selection, true, true)) {
+                        if (selection.rangeCount > 0) {
+                            beginManualPointerSelection(e, selection.getRangeAt(0).cloneRange());
+                        }
+                        syncImageCaretEdgeIndicatorsNow(selection);
+                        return;
+                    }
                 }
             }
 
