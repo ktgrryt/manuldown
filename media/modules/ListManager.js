@@ -291,23 +291,25 @@ export class ListManager {
                 // アイテムを親の後に移動
                 grandParentList.insertBefore(listItem, grandParentList.children[index + 1]);
                 
-                // 後続の兄弟要素がある場合、それらを新しいサブリストに移動
-                if (followingSiblings.length > 0) {
-                    // 新しいサブリストを作成
-                    const newSublist = document.createElement(parentList.tagName);
-                    
-                    // 後続の兄弟要素を新しいサブリストに移動
-                    followingSiblings.forEach(sibling => {
-                        newSublist.appendChild(sibling);
-                    });
-                    
-                    // 新しいサブリストを移動したリストアイテムに追加
-                    listItem.appendChild(newSublist);
-                }
-                
-                // 既存のサブリストがあった場合、それも追加
+                // 既存のサブリストは先に戻し、元の子要素順を維持する。
                 if (existingSublist) {
                     listItem.appendChild(existingSublist);
+                }
+
+                // 後続の兄弟要素は、同じ種類の既存サブリストがあれば末尾にマージし、
+                // なければ新しいサブリストとして追加する。
+                if (followingSiblings.length > 0) {
+                    const targetSublist = existingSublist && existingSublist.tagName === parentList.tagName
+                        ? existingSublist
+                        : document.createElement(parentList.tagName);
+
+                    followingSiblings.forEach(sibling => {
+                        targetSublist.appendChild(sibling);
+                    });
+
+                    if (targetSublist !== existingSublist) {
+                        listItem.appendChild(targetSublist);
+                    }
                 }
             }
             
