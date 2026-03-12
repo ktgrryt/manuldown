@@ -101,7 +101,9 @@ export class MarkdownDocument {
                         return match;
                     }
                     if (!normalizedTrailing) {
-                        return `<p>${normalizedImage}</p>`;
+                        // Keep hard-break intent for round-trip so
+                        // "![...](...)  " is not lost on save.
+                        return `<p ${MarkdownDocument.imageHardBreakMarkerAttr}>${normalizedImage}</p>`;
                     }
                     return `<p ${MarkdownDocument.imageHardBreakMarkerAttr}>${normalizedImage}</p><p>${normalizedTrailing}</p>`;
                 }

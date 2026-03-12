@@ -5199,6 +5199,12 @@ export class CursorManager {
                     ? this._getTrailingImageInBlock(imageBlock)
                     : (imageBehind.parentElement === this.editor ? imageBehind : null);
                 if (trailingImage === imageBehind) {
+                    // Handle Markdown hard-break form like "<img><br>" first.
+                    // Without this, ArrowDown at image right edge can get stuck
+                    // when no next block exists.
+                    if (moveToNextLineWithinImageBlock(imageBehind, imageBlock)) {
+                        return;
+                    }
                     const boundaryNode = imageBlock || imageBehind;
                     const nextAfterImage = this._getNextNavigableElementInDocument(boundaryNode);
                     if (nextAfterImage && moveToBlockStart(nextAfterImage)) {

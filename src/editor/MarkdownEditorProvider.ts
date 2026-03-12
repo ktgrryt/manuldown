@@ -937,6 +937,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             const unorderedListMarker = this.getPreferredUnorderedListMarker(document);
             const escapedUnorderedListMarker = this.escapeRegExp(unorderedListMarker);
             const listIndent = this.getPreferredListIndent(document);
+            const imageHardBreakTailMarker = 'MDWIMAGEHARDBREAKENDMARKER';
             this.currentListIndent = listIndent;
             (this.turndownService as any).options.bulletListMarker = unorderedListMarker;
             (this.turndownService as any).options.indent = listIndent;
@@ -961,6 +962,18 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                         return `<p>${normalizedImage}</p>`;
                     }
                     return `<p>${normalizedImage}<br>${normalizedTrailing}</p>`;
+                }
+            );
+            // Preserve standalone image hard-break lines (e.g. "![...](...)  ")
+            // through Turndown by attaching a temporary marker after <br>.
+            html = html.replace(
+                /<p\b([^>]*)data-mdw-image-hardbreak\s*=\s*(["'])true\2([^>]*)>\s*([\s\S]*?)\s*<\/p>/gi,
+                (match, _before, _quote, _after, imageSegment) => {
+                    const normalizedImage = (imageSegment || '').trim();
+                    if (!normalizedImage || !/<img\b/i.test(normalizedImage)) {
+                        return match;
+                    }
+                    return `<p>${normalizedImage}<br>${imageHardBreakTailMarker}</p>`;
                 }
             );
 
@@ -1135,6 +1148,15 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 }
             }
             markdown = linesWithEmptyLineMarkers.join('\n');
+
+            // Remove temporary marker line while keeping preceding hard-break spaces.
+            // Example:
+            //   ![img](path)  \nMDWIMAGEHARDBREAKENDMARKER
+            // -> ![img](path)
+            markdown = markdown.replace(
+                new RegExp(`(^|\\n)(?:\\s*>\\s*)?${imageHardBreakTailMarker}\\s*(?=\\n|$)`, 'g'),
+                '$1'
+            );
 
             // 0.5. Replace EMPTYCODE placeholder with actual empty code blocks
             markdown = markdown.replace(/```([^\n]*)\nEMPTYCODE_([A-Za-z0-9_-]+)_EMPTYCODE\n```/g, (match, lang1, lang2) => {
