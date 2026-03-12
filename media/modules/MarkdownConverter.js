@@ -153,6 +153,71 @@ export class MarkdownConverter {
     }
 
     /**
+     * 指定位置のMarkdown記号がバックスラッシュでエスケープされているか判定
+     * @param {string} text - 判定対象テキスト
+     * @param {number} markerIndex - 記号の開始インデックス
+     * @returns {boolean} エスケープされている場合true
+     */
+    isEscapedAt(text, markerIndex) {
+        if (typeof text !== 'string' || markerIndex <= 0 || markerIndex > text.length) {
+            return false;
+        }
+
+        let backslashCount = 0;
+        for (let i = markerIndex - 1; i >= 0 && text[i] === '\\'; i--) {
+            backslashCount++;
+        }
+
+        return backslashCount % 2 === 1;
+    }
+
+    /**
+     * 入力直後の "\*" のような単一エスケープを表示上の記号へ反映する
+     * (例: "\*" -> "*")
+     * @param {Text} textNode
+     * @param {number} cursorOffset
+     * @param {Selection} selection
+     * @param {Function} notifyCallback
+     * @returns {boolean} 変換が行われた場合true
+     */
+    applySingleCharacterEscapeAtCursor(textNode, cursorOffset, selection, notifyCallback) {
+        if (!textNode || textNode.nodeType !== Node.TEXT_NODE) return false;
+        if (typeof cursorOffset !== 'number' || cursorOffset <= 1) return false;
+
+        // コード内ではMarkdownエスケープを自動反映しない
+        const inCode = !!this.domUtils.getParentElement(textNode, 'CODE');
+        if (inCode) return false;
+
+        const rawText = textNode.textContent || '';
+        if (cursorOffset > rawText.length) return false;
+
+        const markerIndex = cursorOffset - 1;
+        const marker = rawText[markerIndex];
+
+        // Markdownでエスケープ対象になりやすい記号のみ対象にする
+        if (!/[`*_{}\[\]()#+.!|>~-]/.test(marker)) {
+            return false;
+        }
+
+        // 直前がバックスラッシュ1個のときだけ "\*" -> "*" を適用
+        if (rawText[markerIndex - 1] !== '\\') return false;
+        if (markerIndex - 2 >= 0 && rawText[markerIndex - 2] === '\\') return false;
+
+        const nextText = rawText.slice(0, markerIndex - 1) + rawText.slice(markerIndex);
+        textNode.textContent = nextText;
+
+        const nextOffset = Math.max(0, cursorOffset - 1);
+        const range = document.createRange();
+        range.setStart(textNode, Math.min(nextOffset, nextText.length));
+        range.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(range);
+
+        if (notifyCallback) notifyCallback();
+        return true;
+    }
+
+    /**
      * Markdown構文をHTMLに変換
      * @param {Function} notifyCallback - 変更を通知するコールバック
      * @returns {boolean} 変換が実行された場合true、それ以外はfalse
@@ -231,6 +296,9 @@ export class MarkdownConverter {
         if (!textNode || textNode.nodeType !== 3 || cursorOffset === null) return false;
 
         const rawText = textNode.textContent || '';
+        if (this.applySingleCharacterEscapeAtCursor(textNode, cursorOffset, selection, notifyCallback)) {
+            return true;
+        }
         const normalizedText = rawText.replace(/[\u200B\u00A0]/g, '');
         const normalizedCursorOffset = rawText.slice(0, cursorOffset).replace(/[\u200B\u00A0]/g, '').length;
         const isInTableCell = !!(
@@ -282,69 +350,87 @@ export class MarkdownConverter {
         // 太字構文をチェック **text**
         const boldMatch = normalizedText.match(/\*\*([^*]+)\*\*$/);
         if (boldMatch && normalizedCursorOffset === normalizedText.length) {
-            const beforeText = normalizedText.substring(0, normalizedText.length - boldMatch[0].length);
-            const boldText = boldMatch[1];
+            const boldStart = normalizedText.length - boldMatch[0].length;
+            const boldClosingStart = normalizedText.length - 2;
+            const boldIsEscaped =
+                this.isEscapedAt(normalizedText, boldStart) ||
+                this.isEscapedAt(normalizedText, boldClosingStart);
+            if (boldIsEscaped) {
+                // 明示的にエスケープされた "**" は装飾へ変換しない
+            } else {
+                const beforeText = normalizedText.substring(0, normalizedText.length - boldMatch[0].length);
+                const boldText = boldMatch[1];
 
-            const parent = textNode.parentElement;
-            const fragment = document.createDocumentFragment();
+                const parent = textNode.parentElement;
+                const fragment = document.createDocumentFragment();
 
-            if (beforeText) {
-                fragment.appendChild(document.createTextNode(beforeText));
+                if (beforeText) {
+                    fragment.appendChild(document.createTextNode(beforeText));
+                }
+
+                const strong = document.createElement('strong');
+                strong.textContent = boldText;
+                fragment.appendChild(strong);
+
+                // 後ろにスペースを追加
+                fragment.appendChild(document.createTextNode(' '));
+
+                textNode.parentNode.replaceChild(fragment, textNode);
+
+                // 太字テキストの後にカーソルを設定
+                const newRange = document.createRange();
+                const lastNode = fragment.lastChild;
+                newRange.setStart(lastNode, 1);
+                newRange.collapse(true);
+                selection.removeAllRanges();
+                selection.addRange(newRange);
+
+                if (notifyCallback) notifyCallback();
+                return true;
             }
-
-            const strong = document.createElement('strong');
-            strong.textContent = boldText;
-            fragment.appendChild(strong);
-
-            // 後ろにスペースを追加
-            fragment.appendChild(document.createTextNode(' '));
-
-            textNode.parentNode.replaceChild(fragment, textNode);
-
-            // 太字テキストの後にカーソルを設定
-            const newRange = document.createRange();
-            const lastNode = fragment.lastChild;
-            newRange.setStart(lastNode, 1);
-            newRange.collapse(true);
-            selection.removeAllRanges();
-            selection.addRange(newRange);
-
-            if (notifyCallback) notifyCallback();
-            return true;
         }
 
         // イタリック構文をチェック *text*
         const italicMatch = normalizedText.match(/(?<!\*)\*([^*]+)\*(?!\*)$/);
         if (italicMatch && normalizedCursorOffset === normalizedText.length) {
-            const beforeText = normalizedText.substring(0, normalizedText.length - italicMatch[0].length);
-            const italicText = italicMatch[1];
+            const italicStart = normalizedText.length - italicMatch[0].length;
+            const italicClosingStart = normalizedText.length - 1;
+            const italicIsEscaped =
+                this.isEscapedAt(normalizedText, italicStart) ||
+                this.isEscapedAt(normalizedText, italicClosingStart);
+            if (italicIsEscaped) {
+                // 明示的にエスケープされた "*" は装飾へ変換しない
+            } else {
+                const beforeText = normalizedText.substring(0, normalizedText.length - italicMatch[0].length);
+                const italicText = italicMatch[1];
 
-            const parent = textNode.parentElement;
-            const fragment = document.createDocumentFragment();
+                const parent = textNode.parentElement;
+                const fragment = document.createDocumentFragment();
 
-            if (beforeText) {
-                fragment.appendChild(document.createTextNode(beforeText));
+                if (beforeText) {
+                    fragment.appendChild(document.createTextNode(beforeText));
+                }
+
+                const em = document.createElement('em');
+                em.textContent = italicText;
+                fragment.appendChild(em);
+
+                // 後ろにスペースを追加
+                fragment.appendChild(document.createTextNode(' '));
+
+                textNode.parentNode.replaceChild(fragment, textNode);
+
+                // イタリックテキストの後にカーソルを設定
+                const newRange = document.createRange();
+                const lastNode = fragment.lastChild;
+                newRange.setStart(lastNode, 1);
+                newRange.collapse(true);
+                selection.removeAllRanges();
+                selection.addRange(newRange);
+
+                if (notifyCallback) notifyCallback();
+                return true;
             }
-
-            const em = document.createElement('em');
-            em.textContent = italicText;
-            fragment.appendChild(em);
-
-            // 後ろにスペースを追加
-            fragment.appendChild(document.createTextNode(' '));
-
-            textNode.parentNode.replaceChild(fragment, textNode);
-
-            // イタリックテキストの後にカーソルを設定
-            const newRange = document.createRange();
-            const lastNode = fragment.lastChild;
-            newRange.setStart(lastNode, 1);
-            newRange.collapse(true);
-            selection.removeAllRanges();
-            selection.addRange(newRange);
-
-            if (notifyCallback) notifyCallback();
-            return true;
         }
 
         // 取り消し線構文をチェック ~~text~~（カーソル直前の範囲で判定）
@@ -352,40 +438,49 @@ export class MarkdownConverter {
         const strikeMatch = beforeCursorText.match(/~~([^~]+)~~(\s*)$/);
         if (strikeMatch) {
             const matchedText = strikeMatch[0];
-            const strikeText = strikeMatch[1];
             const trailingSpace = strikeMatch[2] || '';
-            const beforeText = beforeCursorText.substring(0, beforeCursorText.length - matchedText.length);
-            const afterText = normalizedText.slice(normalizedCursorOffset);
+            const strikeStart = beforeCursorText.length - matchedText.length;
+            const strikeClosingStart = beforeCursorText.length - trailingSpace.length - 2;
+            const strikeIsEscaped =
+                this.isEscapedAt(beforeCursorText, strikeStart) ||
+                this.isEscapedAt(beforeCursorText, strikeClosingStart);
+            if (strikeIsEscaped) {
+                // 明示的にエスケープされた "~~" は装飾へ変換しない
+            } else {
+                const strikeText = strikeMatch[1];
+                const beforeText = beforeCursorText.substring(0, beforeCursorText.length - matchedText.length);
+                const afterText = normalizedText.slice(normalizedCursorOffset);
 
-            const fragment = document.createDocumentFragment();
+                const fragment = document.createDocumentFragment();
 
-            if (beforeText) {
-                fragment.appendChild(document.createTextNode(beforeText));
+                if (beforeText) {
+                    fragment.appendChild(document.createTextNode(beforeText));
+                }
+
+                const del = document.createElement('del');
+                del.textContent = strikeText;
+                fragment.appendChild(del);
+
+                const spacerText = trailingSpace !== '' ? trailingSpace : ' ';
+                const spacerNode = document.createTextNode(spacerText);
+                fragment.appendChild(spacerNode);
+
+                if (afterText) {
+                    fragment.appendChild(document.createTextNode(afterText));
+                }
+
+                textNode.parentNode.replaceChild(fragment, textNode);
+
+                // 取り消し線テキストの後にカーソルを設定
+                const newRange = document.createRange();
+                newRange.setStart(spacerNode, spacerNode.textContent.length);
+                newRange.collapse(true);
+                selection.removeAllRanges();
+                selection.addRange(newRange);
+
+                if (notifyCallback) notifyCallback();
+                return true;
             }
-
-            const del = document.createElement('del');
-            del.textContent = strikeText;
-            fragment.appendChild(del);
-
-            const spacerText = trailingSpace !== '' ? trailingSpace : ' ';
-            const spacerNode = document.createTextNode(spacerText);
-            fragment.appendChild(spacerNode);
-
-            if (afterText) {
-                fragment.appendChild(document.createTextNode(afterText));
-            }
-
-            textNode.parentNode.replaceChild(fragment, textNode);
-
-            // 取り消し線テキストの後にカーソルを設定
-            const newRange = document.createRange();
-            newRange.setStart(spacerNode, spacerNode.textContent.length);
-            newRange.collapse(true);
-            selection.removeAllRanges();
-            selection.addRange(newRange);
-
-            if (notifyCallback) notifyCallback();
-            return true;
         }
 
         // インラインコード構文をチェック `code`
@@ -706,59 +801,62 @@ export class MarkdownConverter {
         const markdownImageMatch = textBeforeCursor.match(/!\[([^\]\n]*)\]\(([^)\n]+)\)$/);
         if (markdownImageMatch) {
             const matchIndex = markdownImageMatch.index ?? -1;
-            const alt = (markdownImageMatch[1] || '')
-                .replace(/\\\]/g, ']')
-                .replace(/\\\[/g, '[');
-            const rawTarget = (markdownImageMatch[2] || '').trim();
-            const targetMatch = rawTarget.match(/^(<[^>]+>|[^\s]+)(?:\s+["'][^"']*["'])?$/);
-            let src = targetMatch ? targetMatch[1] : '';
-            if (src && src.startsWith('<') && src.endsWith('>')) {
-                src = src.slice(1, -1);
-            }
-            src = (src || '')
-                .replace(/\\\)/g, ')')
-                .replace(/\\\(/g, '(')
-                .trim();
+            const isEscapedImageSyntax = this.isEscapedAt(textBeforeCursor, matchIndex);
+            if (!isEscapedImageSyntax) {
+                const alt = (markdownImageMatch[1] || '')
+                    .replace(/\\\]/g, ']')
+                    .replace(/\\\[/g, '[');
+                const rawTarget = (markdownImageMatch[2] || '').trim();
+                const targetMatch = rawTarget.match(/^(<[^>]+>|[^\s]+)(?:\s+["'][^"']*["'])?$/);
+                let src = targetMatch ? targetMatch[1] : '';
+                if (src && src.startsWith('<') && src.endsWith('>')) {
+                    src = src.slice(1, -1);
+                }
+                src = (src || '')
+                    .replace(/\\\)/g, ')')
+                    .replace(/\\\(/g, '(')
+                    .trim();
 
-            if (src !== '') {
-                const beforeImage = normalizedText.slice(0, matchIndex);
-                const afterCursorText = normalizedText.slice(normalizedCursorOffset);
+                if (src !== '') {
+                    const beforeImage = normalizedText.slice(0, matchIndex);
+                    const afterCursorText = normalizedText.slice(normalizedCursorOffset);
 
-                // コード内にいる場合はスキップ
-                const parentIsCode = textNode.parentNode && textNode.parentNode.tagName === 'CODE';
-                if (!parentIsCode) {
-                    const fragment = document.createDocumentFragment();
+                    // コード内にいる場合はスキップ
+                    const parentIsCode = textNode.parentNode && textNode.parentNode.tagName === 'CODE';
+                    if (!parentIsCode) {
+                        const fragment = document.createDocumentFragment();
 
-                    if (beforeImage) {
-                        fragment.appendChild(document.createTextNode(beforeImage));
+                        if (beforeImage) {
+                            fragment.appendChild(document.createTextNode(beforeImage));
+                        }
+
+                        const image = document.createElement('img');
+                        image.setAttribute('src', src);
+                        image.setAttribute('alt', alt);
+                        fragment.appendChild(image);
+
+                        let trailingTextNode = null;
+                        if (afterCursorText) {
+                            trailingTextNode = document.createTextNode(afterCursorText);
+                            fragment.appendChild(trailingTextNode);
+                        }
+
+                        textNode.parentNode.replaceChild(fragment, textNode);
+
+                        // カーソルを画像の直後（後続テキストがあればその先頭）へ設定
+                        const newRange = document.createRange();
+                        if (trailingTextNode) {
+                            newRange.setStart(trailingTextNode, 0);
+                        } else {
+                            newRange.setStartAfter(image);
+                        }
+                        newRange.collapse(true);
+                        selection.removeAllRanges();
+                        selection.addRange(newRange);
+
+                        if (notifyCallback) notifyCallback();
+                        return true;
                     }
-
-                    const image = document.createElement('img');
-                    image.setAttribute('src', src);
-                    image.setAttribute('alt', alt);
-                    fragment.appendChild(image);
-
-                    let trailingTextNode = null;
-                    if (afterCursorText) {
-                        trailingTextNode = document.createTextNode(afterCursorText);
-                        fragment.appendChild(trailingTextNode);
-                    }
-
-                    textNode.parentNode.replaceChild(fragment, textNode);
-
-                    // カーソルを画像の直後（後続テキストがあればその先頭）へ設定
-                    const newRange = document.createRange();
-                    if (trailingTextNode) {
-                        newRange.setStart(trailingTextNode, 0);
-                    } else {
-                        newRange.setStartAfter(image);
-                    }
-                    newRange.collapse(true);
-                    selection.removeAllRanges();
-                    selection.addRange(newRange);
-
-                    if (notifyCallback) notifyCallback();
-                    return true;
                 }
             }
         }
@@ -768,7 +866,8 @@ export class MarkdownConverter {
         if (markdownLinkMatch) {
             const matchIndex = markdownLinkMatch.index ?? -1;
             const isImageSyntax = matchIndex > 0 && textBeforeCursor[matchIndex - 1] === '!';
-            if (!isImageSyntax) {
+            const isEscapedLinkSyntax = this.isEscapedAt(textBeforeCursor, matchIndex);
+            if (!isImageSyntax && !isEscapedLinkSyntax) {
                 const label = (markdownLinkMatch[1] || '')
                     .replace(/\\\]/g, ']')
                     .replace(/\\\[/g, '[');

@@ -57,13 +57,19 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             }
         });
 
-        // Override escape function to not escape backticks and hyphens
+        // Override escape behavior:
+        // - keep legacy behavior for backticks/hyphens
+        // - collapse redundant escaping for already-escaped Markdown markers
+        //   (e.g. "\*" should not become "\\\*")
         const originalEscape = (this.turndownService as any).escape;
+        const redundantEscapedMarkerPattern = /\\\\\\([\\`*_{}\[\]()#+.!|>~])/g;
         (this.turndownService as any).escape = function (text: string) {
-            // Call original escape but preserve backticks and hyphens
+            // Call original escape first, then normalize selected sequences.
             const escaped = originalEscape.call(this, text);
-            // Unescape backticks and hyphens that were escaped
-            return escaped.replace(/\\`/g, '`').replace(/\\-/g, '-');
+            return escaped
+                .replace(redundantEscapedMarkerPattern, '\\$1')
+                .replace(/\\`/g, '`')
+                .replace(/\\-/g, '-');
         };
 
         // Override nested-list indentation width (updated dynamically on save).
