@@ -49,20 +49,6 @@ export class SearchManager {
      * @returns {boolean} true if the event was handled
      */
     handleKeydown(e) {
-        // Enter / Shift+Enter while search is open (editor focused)
-        if (this.isOpen &&
-            !e.metaKey && !e.ctrlKey && !e.altKey &&
-            e.key === 'Enter' && !e.isComposing) {
-            e.preventDefault();
-            e.stopPropagation();
-            if (e.shiftKey) {
-                this.goToPrevious();
-            } else {
-                this.goToNext();
-            }
-            return true;
-        }
-
         if (this._isMac) {
             if (e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey &&
                 e.key.toLowerCase() === 'f') {
