@@ -5887,8 +5887,16 @@ import { SearchManager } from './modules/SearchManager.js';
 
     function handleUndoRedoKeydown(e) {
         const syncTableUIAfterHistoryRestore = () => {
+            normalizeCheckboxListItems();
+            domUtils.ensureInlineCodeSpaces();
+            domUtils.cleanupGhostStyles();
             tableManager.ensureInsertLines();
             tableManager.wrapTables();
+            applyImageRenderSizes();
+            updateListItemClasses();
+            tocManager.update();
+            codeBlockManager.highlightCodeBlocks();
+            scheduleEditorOverflowStateUpdate();
             notifyChangeDelayed();
         };
 
@@ -16017,6 +16025,9 @@ import { SearchManager } from './modules/SearchManager.js';
             const codeContent = match[2] === '' ? '\n' : match[2];
             const pre = document.createElement('pre');
             const code = document.createElement('code');
+            if (language) {
+                code.className = `language-${language.toLowerCase()}`;
+            }
             code.textContent = codeContent;
             pre.appendChild(code);
             codeBlockManager.addCodeBlockControls(pre, language);
@@ -16686,6 +16697,9 @@ import { SearchManager } from './modules/SearchManager.js';
                             const codeContent = lines.slice(i + 1, closeIndex).join('\n');
                             const pre = document.createElement('pre');
                             const code = document.createElement('code');
+                            if (language) {
+                                code.className = `language-${language.toLowerCase()}`;
+                            }
                             code.textContent = codeContent === '' ? '\n' : codeContent;
                             pre.appendChild(code);
                             codeBlockManager.addCodeBlockControls(pre, language);

@@ -850,8 +850,9 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
     border: none;
     border-radius: 2px;
     cursor: pointer;
-    transition: background-color 0.1s;
+    transition: background-color 0.14s ease, color 0.14s ease, border-color 0.14s ease;
     font-weight: 500;
+    border: 1px solid transparent;
 }
 
 .code-block-copy-btn:hover {
@@ -859,8 +860,29 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
 }
 
 .code-block-copy-btn:active {
-    background-color: var(--vscode-button-background);
-    color: var(--vscode-button-foreground);
+    background-color: var(--vscode-button-secondaryHoverBackground);
+    color: var(--vscode-button-secondaryForeground);
+}
+
+.code-block-copy-btn[data-copy-state="busy"] {
+    background-color: var(--vscode-button-secondaryHoverBackground);
+    color: var(--vscode-button-secondaryForeground);
+}
+
+.code-block-copy-btn[data-copy-state="success"] {
+    background-color: var(--vscode-inputOption-activeBackground, var(--vscode-button-secondaryHoverBackground));
+    color: var(--vscode-inputOption-activeForeground, var(--vscode-button-secondaryForeground));
+    border-color: var(--vscode-inputOption-activeBorder, transparent);
+}
+
+.code-block-copy-btn[data-copy-state="error"] {
+    background-color: var(--vscode-inputValidation-errorBackground, var(--vscode-button-secondaryHoverBackground));
+    color: var(--vscode-inputValidation-errorForeground, var(--vscode-button-secondaryForeground));
+    border-color: color-mix(
+        in srgb,
+        var(--vscode-inputValidation-errorForeground, currentColor) 35%,
+        transparent
+    );
 }
 
 .code-block-export-btn {

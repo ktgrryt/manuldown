@@ -39,6 +39,23 @@ export class CodeBlockManager {
         this.mermaidIdCounter = 0;
         this.mermaidThemeKey = null;
         this.editorThemeMode = this._normalizeThemeMode(themeMode);
+        this.clipboardWriteRequestSeq = 0;
+        this.copyButtonStateReconcilerHandle = null;
+        this.codeBlockControlReconcileScheduled = false;
+        this.isReconcilingCodeBlockControls = false;
+        this.codeBlockControlObserver = null;
+        this.pendingClipboardWriteRequests = new Map();
+        this._handleWindowMessage = this._handleWindowMessage.bind(this);
+        this._reconcilePendingCopyButtons = this._reconcilePendingCopyButtons.bind(this);
+        this._scheduleCodeBlockControlReconcile = this._scheduleCodeBlockControlReconcile.bind(this);
+        if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+            window.addEventListener('message', this._handleWindowMessage);
+            window.addEventListener('focus', this._reconcilePendingCopyButtons);
+        }
+        if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+            document.addEventListener('visibilitychange', this._reconcilePendingCopyButtons);
+        }
+        this._observeCodeBlockControlMutations();
         this._initMermaid();
     }
 
@@ -420,6 +437,371 @@ export class CodeBlockManager {
         link.remove();
     }
 
+    _resetCopyButtonState(button) {
+        if (!button) {
+            return;
+        }
+        button.textContent = 'Copy';
+        button.dataset.copyState = 'idle';
+        delete button.dataset.copyResetAt;
+    }
+
+    _stopCopyButtonStateReconciler() {
+        if (this.copyButtonStateReconcilerHandle === null) {
+            return;
+        }
+        clearInterval(this.copyButtonStateReconcilerHandle);
+        this.copyButtonStateReconcilerHandle = null;
+    }
+
+    _ensureCopyButtonStateReconciler() {
+        if (this.copyButtonStateReconcilerHandle !== null ||
+            typeof window === 'undefined' ||
+            typeof window.setInterval !== 'function') {
+            return;
+        }
+
+        this.copyButtonStateReconcilerHandle = window.setInterval(() => {
+            this._reconcilePendingCopyButtons();
+        }, 250);
+    }
+
+    _reconcilePendingCopyButtons() {
+        if (!this.editor || typeof Date.now !== 'function') {
+            return;
+        }
+
+        const now = Date.now();
+        let hasPending = false;
+        this.editor.querySelectorAll('.code-block-copy-btn[data-copy-reset-at]').forEach((button) => {
+            const resetAt = Number(button.dataset.copyResetAt || 0);
+            if (!Number.isFinite(resetAt) || resetAt <= now) {
+                this._resetCopyButtonState(button);
+                return;
+            }
+            hasPending = true;
+        });
+
+        if (!hasPending) {
+            this._stopCopyButtonStateReconciler();
+        }
+    }
+
+    _getCodeBlockLanguage(codeBlock) {
+        if (!codeBlock) {
+            return '';
+        }
+        const className = typeof codeBlock.className === 'string'
+            ? codeBlock.className
+            : Array.from(codeBlock.classList || []).join(' ');
+        const match = className.match(/language-([A-Za-z0-9_-]+)/);
+        return match ? match[1].toLowerCase() : '';
+    }
+
+    _hasExpectedCodeBlockControls(pre, language) {
+        if (!pre) {
+            return false;
+        }
+
+        const toolbar = Array.from(pre.children || []).find((child) =>
+            child &&
+            child.nodeType === Node.ELEMENT_NODE &&
+            child.classList &&
+            child.classList.contains('code-block-toolbar')
+        );
+        if (!toolbar) {
+            return false;
+        }
+        if (toolbar.getAttribute('data-exclude-from-markdown') !== 'true') {
+            return false;
+        }
+        if (!toolbar.querySelector('.code-block-language')) {
+            return false;
+        }
+        if (!toolbar.querySelector('.code-block-copy-btn')) {
+            return false;
+        }
+        if (this._isMermaidLanguage(language) && toolbar.querySelectorAll('.code-block-export-btn').length < 2) {
+            return false;
+        }
+        return true;
+    }
+
+    _ensureCodeBlockControlsForPre(pre) {
+        if (!pre || pre.tagName !== 'PRE') {
+            return false;
+        }
+
+        const codeBlock = pre.querySelector('code');
+        if (!codeBlock) {
+            return false;
+        }
+
+        const language = this._getCodeBlockLanguage(codeBlock);
+        if (this._hasExpectedCodeBlockControls(pre, language)) {
+            return false;
+        }
+
+        this.addCodeBlockControls(pre, language);
+        return true;
+    }
+
+    _mutationMayAffectCodeBlockControls(mutation) {
+        if (!mutation || mutation.type !== 'childList') {
+            return false;
+        }
+
+        const isRelevantNode = (node) => {
+            if (!node || node.nodeType !== Node.ELEMENT_NODE) {
+                return false;
+            }
+            if (node.tagName === 'PRE' || node.tagName === 'CODE') {
+                return true;
+            }
+            if (!node.classList) {
+                return false;
+            }
+            return (
+                node.classList.contains('code-block-toolbar') ||
+                node.classList.contains('code-block-language') ||
+                node.classList.contains('code-block-actions') ||
+                node.classList.contains('code-block-copy-btn') ||
+                node.classList.contains('code-block-export-btn')
+            );
+        };
+
+        const target = mutation.target && mutation.target.nodeType === Node.ELEMENT_NODE
+            ? mutation.target
+            : null;
+        if (
+            target &&
+            (
+                target.tagName === 'PRE' ||
+                target.tagName === 'CODE' ||
+                (target.classList && (
+                    target.classList.contains('code-block-toolbar') ||
+                    target.classList.contains('code-block-actions')
+                ))
+            )
+        ) {
+            return true;
+        }
+
+        return Array.from(mutation.addedNodes || []).some(isRelevantNode) ||
+            Array.from(mutation.removedNodes || []).some(isRelevantNode);
+    }
+
+    _observeCodeBlockControlMutations() {
+        if (!this.editor || typeof MutationObserver === 'undefined') {
+            return;
+        }
+
+        this.codeBlockControlObserver = new MutationObserver((mutations) => {
+            if (this.isReconcilingCodeBlockControls) {
+                return;
+            }
+            if (mutations.some((mutation) => this._mutationMayAffectCodeBlockControls(mutation))) {
+                this._scheduleCodeBlockControlReconcile();
+            }
+        });
+
+        this.codeBlockControlObserver.observe(this.editor, {
+            childList: true,
+            subtree: true
+        });
+    }
+
+    _scheduleCodeBlockControlReconcile() {
+        if (this.codeBlockControlReconcileScheduled || this.isReconcilingCodeBlockControls) {
+            return;
+        }
+
+        this.codeBlockControlReconcileScheduled = true;
+        const run = () => {
+            this.codeBlockControlReconcileScheduled = false;
+            this._reconcileCodeBlockControls();
+        };
+
+        if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+            window.requestAnimationFrame(run);
+            return;
+        }
+
+        setTimeout(run, 0);
+    }
+
+    _reconcileCodeBlockControls() {
+        if (!this.editor || this.isReconcilingCodeBlockControls) {
+            return;
+        }
+
+        this.isReconcilingCodeBlockControls = true;
+        try {
+            this.editor.querySelectorAll('pre').forEach((pre) => {
+                this._ensureCodeBlockControlsForPre(pre);
+            });
+        } finally {
+            this.isReconcilingCodeBlockControls = false;
+        }
+    }
+
+    _handleWindowMessage(event) {
+        const message = event && event.data ? event.data : null;
+        if (!message || message.type !== 'clipboardWriteResult') {
+            return;
+        }
+
+        const requestId = message.requestId ? String(message.requestId) : '';
+        if (!requestId) {
+            return;
+        }
+
+        const pending = this.pendingClipboardWriteRequests.get(requestId);
+        if (!pending) {
+            return;
+        }
+
+        this.pendingClipboardWriteRequests.delete(requestId);
+        if (pending.timeoutId) {
+            clearTimeout(pending.timeoutId);
+        }
+
+        if (message.success) {
+            pending.resolve();
+            return;
+        }
+
+        const errorMessage = typeof message.error === 'string' && message.error.trim()
+            ? message.error.trim()
+            : 'Failed to write clipboard via VS Code.';
+        pending.reject(new Error(errorMessage));
+    }
+
+    _writeTextToClipboardViaVsCode(text) {
+        if (!this.vscode || typeof this.vscode.postMessage !== 'function') {
+            return Promise.reject(new Error('VS Code clipboard bridge is unavailable.'));
+        }
+
+        const requestId = `clipboard-write-${Date.now()}-${++this.clipboardWriteRequestSeq}`;
+
+        return new Promise((resolve, reject) => {
+            const timeoutId = setTimeout(() => {
+                this.pendingClipboardWriteRequests.delete(requestId);
+                reject(new Error('VS Code clipboard bridge timed out.'));
+            }, 2000);
+
+            this.pendingClipboardWriteRequests.set(requestId, {
+                resolve,
+                reject,
+                timeoutId
+            });
+
+            try {
+                this.vscode.postMessage({
+                    type: 'writeClipboard',
+                    requestId,
+                    text
+                });
+            } catch (error) {
+                clearTimeout(timeoutId);
+                this.pendingClipboardWriteRequests.delete(requestId);
+                reject(error);
+            }
+        });
+    }
+
+    _writeTextToClipboardWithExecCommand(text) {
+        if (typeof document === 'undefined' || typeof document.execCommand !== 'function') {
+            throw new Error('document.execCommand("copy") is unavailable.');
+        }
+
+        const selection = typeof window !== 'undefined' && typeof window.getSelection === 'function'
+            ? window.getSelection()
+            : null;
+        const savedRanges = [];
+        if (selection) {
+            for (let i = 0; i < selection.rangeCount; i += 1) {
+                savedRanges.push(selection.getRangeAt(i).cloneRange());
+            }
+        }
+
+        const activeElement = document.activeElement;
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.setAttribute('readonly', 'true');
+        textarea.setAttribute('aria-hidden', 'true');
+        textarea.style.position = 'fixed';
+        textarea.style.top = '0';
+        textarea.style.left = '-9999px';
+        textarea.style.opacity = '0';
+        textarea.style.pointerEvents = 'none';
+
+        document.body.appendChild(textarea);
+
+        let didCopy = false;
+        try {
+            textarea.focus();
+            textarea.select();
+            textarea.setSelectionRange(0, textarea.value.length);
+            didCopy = document.execCommand('copy');
+        } finally {
+            textarea.remove();
+
+            if (selection) {
+                selection.removeAllRanges();
+                savedRanges.forEach((range) => selection.addRange(range));
+            }
+
+            if (activeElement && typeof activeElement.focus === 'function' && document.contains(activeElement)) {
+                try {
+                    activeElement.focus({ preventScroll: true });
+                } catch (_focusError) {
+                    activeElement.focus();
+                }
+            }
+        }
+
+        if (!didCopy) {
+            throw new Error('document.execCommand("copy") returned false.');
+        }
+    }
+
+    async _writeTextToClipboard(text) {
+        const normalizedText = typeof text === 'string' ? text : String(text ?? '');
+        const errors = [];
+
+        if (typeof navigator !== 'undefined' &&
+            navigator.clipboard &&
+            typeof navigator.clipboard.writeText === 'function') {
+            try {
+                await navigator.clipboard.writeText(normalizedText);
+                return;
+            } catch (error) {
+                errors.push(error);
+            }
+        }
+
+        try {
+            await this._writeTextToClipboardViaVsCode(normalizedText);
+            return;
+        } catch (error) {
+            errors.push(error);
+        }
+
+        try {
+            this._writeTextToClipboardWithExecCommand(normalizedText);
+            return;
+        } catch (error) {
+            errors.push(error);
+        }
+
+        const errorMessage = errors
+            .map((error) => (error && error.message ? error.message : String(error || '')))
+            .filter(Boolean)
+            .join(' | ');
+        throw new Error(errorMessage || 'Failed to copy code to clipboard.');
+    }
+
     _saveMermaidImage(dataUrl, mimeType, filename) {
         if (this.vscode && typeof this.vscode.postMessage === 'function') {
             this.vscode.postMessage({
@@ -614,6 +996,10 @@ export class CodeBlockManager {
         // コードブロックの内容を更新
         codeBlock.innerHTML = html;
         this._ensureTrailingNewlines(codeBlock, trailingNewlines);
+        const preBlock = codeBlock.parentElement;
+        if (preBlock) {
+            this._ensureCodeBlockControlsForPre(preBlock);
+        }
         
         // コードブロックにフォーカスがあった場合、カーソル位置を復元
         if (hasFocus) {
@@ -790,13 +1176,13 @@ export class CodeBlockManager {
         
         // 言語ラベルをクリックで編集可能にする
         const beginEditing = (e) => {
+            if (langLabel.classList.contains('editing')) {
+                return;
+            }
+
             if (e) {
                 e.preventDefault();
                 e.stopPropagation();
-            }
-
-            if (langLabel.classList.contains('editing')) {
-                return;
             }
 
             const currentLang = langLabel.textContent;
@@ -960,25 +1346,52 @@ export class CodeBlockManager {
         copyBtn.className = 'code-block-copy-btn';
         copyBtn.textContent = 'Copy';
         copyBtn.title = 'Copy code to clipboard';
-        copyBtn.addEventListener('click', (e) => {
+        let copyButtonResetTimer = null;
+        const resetCopyButtonState = () => {
+            this._resetCopyButtonState(copyBtn);
+        };
+        const setCopyButtonLabel = (label, resetDelayMs = 0) => {
+            copyBtn.textContent = label;
+            copyBtn.dataset.copyState = resetDelayMs > 0
+                ? (label === 'Copied!' ? 'success' : label === 'Failed' ? 'error' : 'idle')
+                : (label === 'Copying...' ? 'busy' : 'idle');
+            if (copyButtonResetTimer) {
+                clearTimeout(copyButtonResetTimer);
+                copyButtonResetTimer = null;
+            }
+            delete copyBtn.dataset.copyResetAt;
+            if (resetDelayMs > 0) {
+                const resetAt = Date.now() + resetDelayMs;
+                copyBtn.dataset.copyResetAt = String(resetAt);
+                this._ensureCopyButtonStateReconciler();
+                copyButtonResetTimer = setTimeout(() => {
+                    const currentResetAt = Number(copyBtn.dataset.copyResetAt || 0);
+                    if (currentResetAt === resetAt) {
+                        resetCopyButtonState();
+                    }
+                }, resetDelayMs);
+            }
+        };
+        copyBtn.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+        });
+        copyBtn.addEventListener('click', async (e) => {
             e.preventDefault();
             e.stopPropagation();
             
             const code = pre.querySelector('code');
-            if (code) {
-                const text = code.textContent;
-                navigator.clipboard.writeText(text).then(() => {
-                    copyBtn.textContent = 'Copied!';
-                    setTimeout(() => {
-                        copyBtn.textContent = 'Copy';
-                    }, 2000);
-                }).catch(err => {
-                    console.error('Failed to copy:', err);
-                    copyBtn.textContent = 'Failed';
-                    setTimeout(() => {
-                        copyBtn.textContent = 'Copy';
-                    }, 2000);
-                });
+            if (!code) {
+                return;
+            }
+
+            try {
+                setCopyButtonLabel('Copying...');
+                await this._writeTextToClipboard(code.textContent || '');
+                setCopyButtonLabel('Copied!', 2000);
+            } catch (error) {
+                console.error('Failed to copy:', error);
+                setCopyButtonLabel('Failed', 2000);
             }
         });
         actionGroup.appendChild(copyBtn);

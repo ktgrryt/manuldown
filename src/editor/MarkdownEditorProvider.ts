@@ -431,6 +431,33 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                             vscode.env.openExternal(vscode.Uri.parse(message.url));
                         }
                         break;
+                    case 'writeClipboard':
+                        {
+                            const requestId = typeof message.requestId === 'string' ? message.requestId : '';
+                            try {
+                                await vscode.env.clipboard.writeText(
+                                    typeof message.text === 'string' ? message.text : ''
+                                );
+                                if (requestId) {
+                                    webviewPanel.webview.postMessage({
+                                        type: 'clipboardWriteResult',
+                                        requestId,
+                                        success: true
+                                    });
+                                }
+                            } catch (error) {
+                                console.error('[clipboard] Failed to write clipboard:', error);
+                                if (requestId) {
+                                    webviewPanel.webview.postMessage({
+                                        type: 'clipboardWriteResult',
+                                        requestId,
+                                        success: false,
+                                        error: error instanceof Error ? error.message : String(error)
+                                    });
+                                }
+                            }
+                        }
+                        break;
                     case 'tocPanelWidthChanged':
                         this.updateSharedTocPanelWidth(message.width);
                         break;
