@@ -45,6 +45,7 @@ import { SearchManager } from './modules/SearchManager.js';
     const TOC_SCROLL_DURATION_MS = 120;
     const IME_ENTER_CONFIRM_GRACE_MS = 80;
     const TAB_SWITCH_SHORTCUT_DEBOUNCE_MS = 120;
+    const TAB_CLOSE_SHORTCUT_DEBOUNCE_MS = 120;
     const INTERNAL_EDITOR_PLAIN_TEXT_CLIPBOARD_TYPE = 'application/x-manuldown-editor-plain-text';
     const INTERNAL_EDITOR_HTML_CLIPBOARD_TYPE = 'application/x-manuldown-editor-html';
     const INTERNAL_EDITOR_HTML_MARKER_START = '<!--manuldown-clipboard-start-->';
@@ -83,6 +84,7 @@ import { SearchManager } from './modules/SearchManager.js';
     let overflowStateRaf = null;
     let lastEditorTabSwitchTs = 0;
     let lastEditorTabSwitchDirection = null;
+    let lastEditorCloseShortcutTs = 0;
 
     const NETWORK_BLOCKED_ERROR_MESSAGE = 'External network requests are blocked in ManulDown webview.';
 
@@ -14557,6 +14559,39 @@ import { SearchManager } from './modules/SearchManager.js';
             });
         };
         document.addEventListener('keydown', handleMacEditorTabSwitchShortcut, true);
+
+        const handleEditorCloseShortcut = (e) => {
+            if (!e || e.defaultPrevented || e.isComposing || isComposing) {
+                return;
+            }
+
+            const key = typeof e.key === 'string' ? e.key.toLowerCase() : '';
+            const isCloseShortcut = isMac
+                ? e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && key === 'w'
+                : e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && key === 'w';
+
+            if (!isCloseShortcut) {
+                return;
+            }
+
+            const now = Date.now();
+            const isDuplicate =
+                e.repeat ||
+                now - lastEditorCloseShortcutTs < TAB_CLOSE_SHORTCUT_DEBOUNCE_MS;
+
+            e.preventDefault();
+            e.stopPropagation();
+
+            if (isDuplicate) {
+                return;
+            }
+
+            lastEditorCloseShortcutTs = now;
+            vscode.postMessage({
+                type: 'closeEditorTab'
+            });
+        };
+        document.addEventListener('keydown', handleEditorCloseShortcut, true);
 
         // Some mice send BrowserBack/BrowserForward side-button clicks (button 3/4).
         // Prevent webview-native history navigation so assigned tab-switch shortcuts

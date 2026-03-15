@@ -468,6 +468,9 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                             await vscode.commands.executeCommand('workbench.action.previousEditor');
                         }
                         break;
+                    case 'closeEditorTab':
+                        await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+                        break;
                 }
             }
         );
