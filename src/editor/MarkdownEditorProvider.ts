@@ -307,7 +307,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
 
         // Set webview HTML content
         webviewPanel.webview.html = this.getHtmlForWebview(webviewPanel.webview, document);
-        this.keepEditorTabOpenIfConfigured(wasExplicit);
+        this.keepEditorTabOpenOnExplorerClick(wasExplicit);
 
         const documentKey = document.uri.toString();
         this.webviewPanels.set(documentKey, webviewPanel);
@@ -481,9 +481,13 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         });
     }
 
-    public postMessageToActiveEditor(message: any): boolean {
+    public postMessageToActiveEditor(message: any, options?: { reveal?: boolean }): boolean {
         const panel = this.getActiveWebviewPanel();
         if (!panel) return false;
+        if (options?.reveal) {
+            panel.reveal(panel.viewColumn, false);
+            this.lastActivePanel = panel;
+        }
         panel.webview.postMessage(message);
         return true;
     }
@@ -530,6 +534,17 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             }
         }
 
+        if (this.lastActivePanel && this.lastActivePanel.visible) {
+            return this.lastActivePanel;
+        }
+
+        const visiblePanels = Array.from(this.webviewPanels.values()).filter((panel) => panel.visible);
+        if (visiblePanels.length === 1) {
+            const [visiblePanel] = visiblePanels;
+            this.lastActivePanel = visiblePanel;
+            return visiblePanel;
+        }
+
         if (this.webviewPanels.size === 1) {
             const onlyPanel = Array.from(this.webviewPanels.values())[0];
             this.lastActivePanel = onlyPanel;
@@ -539,16 +554,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         return null;
     }
 
-    private keepEditorTabOpenIfConfigured(wasExplicit: boolean): void {
+    private keepEditorTabOpenOnExplorerClick(wasExplicit: boolean): void {
         if (wasExplicit) {
-            return;
-        }
-
-        const keepOpenOnClick = vscode.workspace
-            .getConfiguration('manulDown')
-            .get<boolean>('keepTabOpenOnExplorerClick', true);
-
-        if (!keepOpenOnClick) {
             return;
         }
 

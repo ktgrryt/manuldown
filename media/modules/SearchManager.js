@@ -21,6 +21,7 @@ export class SearchManager {
         this.searchBar = null;
         this.searchInput = null;
         this.matchCountLabel = null;
+        this.actionsContainer = null;
         this.prevButton = null;
         this.nextButton = null;
         this.caseSensitiveButton = null;
@@ -31,6 +32,8 @@ export class SearchManager {
         this._refreshDebounceTimer = null;
         this._searchRefreshDebounceMs = 120;
         this._mutationObserver = null;
+        this._resizeObserver = null;
+        this._reservedSpaceAnimationFrame = null;
 
         this._isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
 
@@ -90,6 +93,7 @@ export class SearchManager {
 
         this.isOpen = true;
         this.searchBar.style.display = 'flex';
+        this._scheduleReservedSpaceUpdate();
 
         // If there's a text selection, use it as the initial query
         if (selection && !selection.isCollapsed) {
@@ -111,6 +115,7 @@ export class SearchManager {
     close() {
         this.isOpen = false;
         this.searchBar.style.display = 'none';
+        this._setReservedSpace(0);
 
         if (this._refreshDebounceTimer) {
             clearTimeout(this._refreshDebounceTimer);
@@ -197,6 +202,9 @@ export class SearchManager {
         this.matchCountLabel.className = 'search-bar-match-count';
         this.matchCountLabel.textContent = '';
 
+        this.actionsContainer = document.createElement('div');
+        this.actionsContainer.className = 'search-bar-actions';
+
         // Navigation buttons
         this.prevButton = document.createElement('button');
         this.prevButton.className = 'search-bar-btn';
@@ -215,10 +223,11 @@ export class SearchManager {
         this.closeButton.title = 'Close (Escape)';
 
         this.searchBar.appendChild(inputContainer);
-        this.searchBar.appendChild(this.matchCountLabel);
-        this.searchBar.appendChild(this.prevButton);
-        this.searchBar.appendChild(this.nextButton);
-        this.searchBar.appendChild(this.closeButton);
+        this.actionsContainer.appendChild(this.matchCountLabel);
+        this.actionsContainer.appendChild(this.prevButton);
+        this.actionsContainer.appendChild(this.nextButton);
+        this.actionsContainer.appendChild(this.closeButton);
+        this.searchBar.appendChild(this.actionsContainer);
 
         // Append inside .editor-container so it's positioned below the toolbar
         const editorContainer = document.querySelector('.editor-container');
@@ -229,6 +238,7 @@ export class SearchManager {
         }
 
         this._bindEvents();
+        this._observeSearchBarLayout();
     }
 
     _bindEvents() {
@@ -302,6 +312,41 @@ export class SearchManager {
             childList: true,
             characterData: true
         });
+    }
+
+    _observeSearchBarLayout() {
+        if (typeof ResizeObserver === 'undefined' || !this.searchBar) return;
+
+        this._resizeObserver = new ResizeObserver(() => {
+            this._scheduleReservedSpaceUpdate();
+        });
+
+        this._resizeObserver.observe(this.searchBar);
+    }
+
+    _scheduleReservedSpaceUpdate() {
+        if (this._reservedSpaceAnimationFrame !== null) {
+            cancelAnimationFrame(this._reservedSpaceAnimationFrame);
+        }
+
+        this._reservedSpaceAnimationFrame = requestAnimationFrame(() => {
+            this._reservedSpaceAnimationFrame = null;
+            this._updateReservedSpace();
+        });
+    }
+
+    _updateReservedSpace() {
+        if (!this.searchBar || !this.isOpen) {
+            this._setReservedSpace(0);
+            return;
+        }
+
+        const height = Math.ceil(this.searchBar.getBoundingClientRect().height || 0);
+        this._setReservedSpace(height);
+    }
+
+    _setReservedSpace(value) {
+        document.body.style.setProperty('--search-bar-reserved-height', `${Math.max(0, value)}px`);
     }
 
     // ── Search Algorithm ────────────────────────────────────

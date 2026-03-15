@@ -3,7 +3,7 @@
   "displayName": "ManulDown",
   "description": "WYSIWYG editor for Markdown files in VSCode",
   "icon": "images/icon.png",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "publisher": "ktgrryt",
   "license": "MIT",
   "repository": {
@@ -69,6 +69,11 @@
         "category": "ManulDown"
       },
       {
+        "command": "manulDown.findInEditor",
+        "title": "Find in ManulDown Editor",
+        "category": "ManulDown"
+      },
+      {
         "command": "manulDown.cursorRight",
         "title": "Cursor Right (ManulDown)",
         "category": "ManulDown"
@@ -129,6 +134,12 @@
         "command": "manulDown.cursorUp",
         "key": "ctrl+p",
         "mac": "ctrl+p",
+        "when": "activeCustomEditorId == 'manulDown.editor'"
+      },
+      {
+        "command": "manulDown.findInEditor",
+        "key": "ctrl+f",
+        "mac": "cmd+f",
         "when": "activeCustomEditorId == 'manulDown.editor'"
       },
       {
@@ -203,11 +214,6 @@
           "type": "boolean",
           "default": true,
           "description": "Open Markdown files with ManulDown by default."
-        },
-        "manulDown.keepTabOpenOnExplorerClick": {
-          "type": "boolean",
-          "default": true,
-          "description": "Keep ManulDown tabs open (not preview-reused) when opening Markdown files from Explorer."
         },
         "manulDown.list.dashStyle": {
           "type": "boolean",

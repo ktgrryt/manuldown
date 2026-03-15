@@ -90,6 +90,25 @@ export function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(cursorUpCommand);
 
+    const findInEditorCommand = vscode.commands.registerCommand(
+        'manulDown.findInEditor',
+        async () => {
+            const posted = provider.postMessageToActiveEditor(
+                {
+                    type: 'openSearch',
+                },
+                {
+                    reveal: true,
+                }
+            );
+            if (!posted) {
+                await vscode.commands.executeCommand('actions.find');
+            }
+        }
+    );
+
+    context.subscriptions.push(findInEditorCommand);
+
     const cursorRightCommand = vscode.commands.registerCommand(
         'manulDown.cursorRight',
         () => {

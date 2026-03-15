@@ -18740,6 +18740,9 @@ import { SearchManager } from './modules/SearchManager.js';
                     updateSlashCommandMenu();
                 }
                 break;
+            case 'openSearch':
+                searchManager.open();
+                break;
             case 'resolvedImageSrc':
                 {
                     const requestId = message && message.requestId ? String(message.requestId) : '';

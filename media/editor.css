@@ -16,7 +16,9 @@ body {
     --toc-panel-width: 150px;
     --toc-resizer-hit-width: 8px;
     --toc-content-offset: 0px;
-    --search-bar-edge-gap: 20px;
+    --search-bar-edge-gap: clamp(12px, 2.8vw, 20px);
+    --search-bar-reserved-height: 0px;
+    --editor-top-base-padding: 40px;
     --md-syntax-comment: #6a9955;
     --md-syntax-punctuation: #d4d4d4;
     --md-syntax-property: #b5cea8;
@@ -309,7 +311,7 @@ body.toc-resizing {
 
 #editor {
     flex: 1;
-    --editor-pad-top: 40px;
+    --editor-pad-top: max(var(--editor-top-base-padding), calc(var(--search-bar-reserved-height) + 8px));
     --editor-pad-right: calc(20px + var(--toc-content-offset));
     --editor-pad-bottom: clamp(120px, 45vh, 420px);
     --editor-pad-left: 20px;
@@ -387,7 +389,7 @@ body[data-toolbar-visible="false"] .toolbar {
 }
 
 body[data-toolbar-visible="false"] #editor {
-    --editor-pad-top: 20px;
+    --editor-top-base-padding: 20px;
 }
 
 body[data-toc-enabled="false"] #toc-container {
@@ -1623,14 +1625,19 @@ body.image-resizing * {
     right: calc(var(--search-bar-edge-gap) + var(--toc-content-offset));
     z-index: 1001;
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
-    gap: 4px;
-    padding: 4px 8px;
+    justify-content: flex-end;
+    column-gap: clamp(3px, 0.5vw, 4px);
+    row-gap: clamp(3px, 0.4vw, 4px);
+    width: min(360px, calc(100% - (var(--search-bar-edge-gap) * 2) - var(--toc-content-offset)));
+    max-width: calc(100% - (var(--search-bar-edge-gap) * 2) - var(--toc-content-offset));
+    padding: clamp(4px, 0.75vw, 6px);
     background-color: var(--vscode-editorWidget-background, var(--vscode-editor-background));
     border: 1px solid var(--vscode-editorWidget-border, var(--vscode-editorGroup-border));
     border-top: none;
-    border-radius: 0 0 4px 4px;
-    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+    border-radius: 0 0 6px 6px;
+    box-shadow: 0 5px 14px rgba(0, 0, 0, 0.16);
     font-size: 12px;
     transition: none;
 }
@@ -1638,9 +1645,11 @@ body.image-resizing * {
 .search-bar-input-container {
     display: flex;
     align-items: center;
+    flex: 1 1 auto;
+    min-width: min(120px, 100%);
     background: var(--vscode-input-background);
     border: 1px solid var(--vscode-input-border, var(--vscode-editorGroup-border));
-    border-radius: 2px;
+    border-radius: 3px;
     overflow: hidden;
 }
 
@@ -1649,8 +1658,9 @@ body.image-resizing * {
 }
 
 .search-bar-input {
-    width: 200px;
-    padding: 3px 6px;
+    width: 100%;
+    min-width: 0;
+    padding: 4px clamp(5px, 0.8vw, 6px);
     font-size: 12px;
     background: transparent;
     color: var(--vscode-input-foreground);
@@ -1663,18 +1673,29 @@ body.image-resizing * {
     color: var(--vscode-input-placeholderForeground, var(--vscode-descriptionForeground));
 }
 
+.search-bar-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: inherit;
+    flex: 0 0 auto;
+    flex-wrap: nowrap;
+    min-width: max-content;
+    margin-left: auto;
+}
+
 .search-bar-btn {
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 22px;
-    height: 22px;
+    width: clamp(20px, 2.8vw, 22px);
+    height: clamp(20px, 2.8vw, 22px);
     padding: 0;
-    font-size: 12px;
+    font-size: 11px;
     background: transparent;
     color: var(--vscode-editor-foreground);
     border: 1px solid transparent;
-    border-radius: 2px;
+    border-radius: 3px;
     cursor: pointer;
     flex-shrink: 0;
 }
@@ -1695,18 +1716,30 @@ body.image-resizing * {
 }
 
 .search-bar-close {
-    margin-left: 2px;
+    margin-left: 1px;
 }
 
 .search-bar-match-count {
     font-size: 11px;
     color: var(--vscode-descriptionForeground);
     white-space: nowrap;
-    min-width: 60px;
-    text-align: center;
-    padding: 0 4px;
+    min-width: clamp(40px, 7vw, 46px);
+    text-align: right;
+    padding: 0 2px;
+    line-height: 1;
 }
 
 .search-bar-match-count.no-results {
     color: var(--vscode-inputValidation-errorForeground, #f48771);
+}
+
+@media (max-width: 480px) {
+    .search-bar-input {
+        padding: 4px 5px;
+    }
+
+    .search-bar-match-count {
+        font-size: 10px;
+        min-width: 40px;
+    }
 }
