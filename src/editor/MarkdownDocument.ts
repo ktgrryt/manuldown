@@ -5,6 +5,7 @@ import * as path from 'path';
 export class MarkdownDocument {
     private static readonly blanklineMarkerHtml = '<p data-mdw-blankline="true"><br></p>';
     private static readonly imageHardBreakMarkerAttr = 'data-mdw-image-hardbreak="true"';
+    private static readonly imageHardBreakPlaceholderHtml = '<p data-mdw-image-hardbreak-placeholder="true"><br></p>';
     private static readonly blockquoteEmptyLineMarker = 'MDW-BLOCKQUOTE-EMPTYLINE-MARKER';
     private static readonly commonHtmlTagNames = new Set([
         'a', 'abbr', 'address', 'area', 'article', 'aside', 'audio',
@@ -102,10 +103,25 @@ export class MarkdownDocument {
                     }
                     if (!normalizedTrailing) {
                         // Keep hard-break intent for round-trip so
-                        // "![...](...)  " is not lost on save.
-                        return `<p ${MarkdownDocument.imageHardBreakMarkerAttr}>${normalizedImage}</p>`;
+                        // "![...](...)  " is not lost on save, while the webview
+                        // still exposes a blank editable line below the image.
+                        return `<p ${MarkdownDocument.imageHardBreakMarkerAttr}>${normalizedImage}</p>${MarkdownDocument.imageHardBreakPlaceholderHtml}`;
                     }
                     return `<p ${MarkdownDocument.imageHardBreakMarkerAttr}>${normalizedImage}</p><p>${normalizedTrailing}</p>`;
+                }
+            );
+
+            // Mark image-only paragraphs that carry trailing hard-break spaces
+            // (marked keeps them as literal spaces, not <br>) so the webview can
+            // ignore the spacing artifact but still allow caret movement below.
+            html = html.replace(
+                /<p>\s*((?:<a\b[^>]*>\s*)?<img\b[^>]*>(?:\s*<\/a>)?)([ \t]{2,})<\/p>/gi,
+                (_match, imageSegment) => {
+                    const normalizedImage = (imageSegment || '').trim();
+                    if (!normalizedImage) {
+                        return _match;
+                    }
+                    return `<p ${MarkdownDocument.imageHardBreakMarkerAttr}>${normalizedImage}</p>${MarkdownDocument.imageHardBreakPlaceholderHtml}`;
                 }
             );
 

@@ -984,6 +984,15 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             const escapedUnorderedListMarker = this.escapeRegExp(unorderedListMarker);
             const listIndent = this.getPreferredListIndent(document);
             const imageHardBreakTailMarker = 'MDWIMAGEHARDBREAKENDMARKER';
+            const isEffectivelyEmptyHtmlSegment = (value: string): boolean => {
+                const stripped = String(value || '')
+                    .replace(/<br\s*\/?>/gi, '')
+                    .replace(/&nbsp;|&#160;/gi, '')
+                    .replace(/<[^>]*>/g, '')
+                    .replace(/[\u00A0\u200B\uFEFF\s]/g, '')
+                    .trim();
+                return stripped === '';
+            };
             this.currentListIndent = listIndent;
             (this.turndownService as any).options.bulletListMarker = unorderedListMarker;
             (this.turndownService as any).options.indent = listIndent;
@@ -1004,8 +1013,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     if (!normalizedImage || !/<img\b/i.test(normalizedImage)) {
                         return match;
                     }
-                    if (!normalizedTrailing) {
-                        return `<p>${normalizedImage}</p>`;
+                    if (isEffectivelyEmptyHtmlSegment(normalizedTrailing)) {
+                        return `<p>${normalizedImage}<br>${imageHardBreakTailMarker}</p>`;
                     }
                     return `<p>${normalizedImage}<br>${normalizedTrailing}</p>`;
                 }
