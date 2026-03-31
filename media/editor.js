@@ -15981,6 +15981,54 @@ import { SearchManager } from './modules/SearchManager.js';
             return true;
         };
 
+        const extractSingleImageFromClipboardHtml = (rawHtml) => {
+            if (typeof rawHtml !== 'string' || rawHtml.trim() === '') {
+                return null;
+            }
+
+            const container = document.createElement('div');
+            container.innerHTML = rawHtml;
+            container.querySelectorAll('[data-exclude-from-markdown="true"]').forEach((node) => node.remove());
+
+            const disallowed = container.querySelector([
+                'table', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td',
+                'pre', 'code',
+                'blockquote',
+                'ul', 'ol', 'li',
+                'hr',
+                'input[type="checkbox"]'
+            ].join(', '));
+            if (disallowed) {
+                return null;
+            }
+
+            const meaningfulText = (container.textContent || '')
+                .replace(/[\u200B\u00A0]/g, '')
+                .trim();
+            if (meaningfulText !== '') {
+                return null;
+            }
+
+            const images = Array.from(container.querySelectorAll('img')).filter((image) => {
+                const src = (image.getAttribute('src') || image.currentSrc || '').trim();
+                return src !== '' && !src.startsWith('blob:');
+            });
+            if (images.length !== 1) {
+                return null;
+            }
+
+            const image = images[0];
+            const src = (image.getAttribute('src') || image.currentSrc || '').trim();
+            if (!src) {
+                return null;
+            }
+
+            return {
+                src,
+                altText: image.getAttribute('alt') || 'image'
+            };
+        };
+
         const tryInsertInlineMarkdownFromPastedText = (rawText) => {
             if (typeof rawText !== 'string' || rawText.indexOf('\n') !== -1) {
                 return false;
@@ -17193,6 +17241,26 @@ import { SearchManager } from './modules/SearchManager.js';
                 ) {
                     e.preventDefault();
                     return;
+                }
+
+                if (
+                    selection &&
+                    richPastedHtml &&
+                    !(
+                        hasListLikeText &&
+                        internalHtmlIsListlessPlainText(richPastedHtml)
+                    )
+                ) {
+                    const copiedImage = extractSingleImageFromClipboardHtml(richPastedHtml);
+                    if (copiedImage) {
+                        e.preventDefault();
+                        vscode.postMessage({
+                            type: 'saveImageFromUri',
+                            uri: copiedImage.src,
+                            altText: copiedImage.altText
+                        });
+                        return;
+                    }
                 }
 
                 if (
@@ -18910,7 +18978,9 @@ import { SearchManager } from './modules/SearchManager.js';
                     if (imageSrc) {
                         img.src = imageSrc;
                     }
-                    img.alt = 'image';
+                    img.alt = typeof message.alt === 'string' && message.alt !== ''
+                        ? message.alt
+                        : 'image';
                     if (markdownPath) {
                         img.setAttribute('data-md-path', markdownPath);
                     }

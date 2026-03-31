@@ -408,7 +408,10 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                         await this.saveImageFromUri(
                             message.uri,
                             document,
-                            webviewPanel.webview
+                            webviewPanel.webview,
+                            {
+                                altText: typeof message.altText === 'string' ? message.altText : undefined
+                            }
                         );
                         break;
                     case 'resolveImageSrc':
@@ -1348,7 +1351,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         mimeType: string,
         document: vscode.TextDocument,
         webview: vscode.Webview,
-        options: { insert?: boolean; showNotification?: boolean } = {}
+        options: { insert?: boolean; showNotification?: boolean; altText?: string } = {}
     ): Promise<void> {
         try {
             // Extract data from data URL (supports both base64 and URL-encoded data).
@@ -1441,13 +1444,17 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
 
             // Create relative path for markdown
             const relativePath = `images/${documentFileName}/${filename}`;
+            const altText = typeof options.altText === 'string' && options.altText !== ''
+                ? options.altText
+                : 'image';
 
             if (options.insert !== false) {
                 // Send message back to webview to insert the markdown syntax
                 webview.postMessage({
                     type: 'insertImage',
-                    markdown: `![image](${relativePath})`,
-                    src: webview.asWebviewUri(imageUri).toString()
+                    markdown: `![${this.escapeMarkdownImageAltText(altText)}](${relativePath})`,
+                    src: webview.asWebviewUri(imageUri).toString(),
+                    alt: altText
                 });
                 // Request an explicit sync right after insertion as a safety net.
                 webview.postMessage({
@@ -1480,6 +1487,12 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         return 'image/png';
     }
 
+    private escapeMarkdownImageAltText(altText: string): string {
+        return String(altText || '')
+            .replace(/\\/g, '\\\\')
+            .replace(/\]/g, '\\]');
+    }
+
     private getDocumentFileName(document: vscode.TextDocument): string {
         const parsed = path.posix.parse(document.uri.path);
         return parsed.name || 'document';
@@ -1501,6 +1514,69 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         }
 
         return vscode.Uri.joinPath(this.getDocumentDirectoryUri(document), normalized);
+    }
+
+    private resolveWebviewBackedImageUri(sourceText: string): vscode.Uri | null {
+        const normalized = sourceText.trim();
+        if (!normalized) {
+            return null;
+        }
+
+        const toFileUri = (rawPath: string): vscode.Uri | null => {
+            if (!rawPath) {
+                return null;
+            }
+
+            let fsPath = rawPath;
+            try {
+                fsPath = decodeURIComponent(rawPath);
+            } catch {
+                // Keep the raw path when decoding fails.
+            }
+
+            // URL pathname on Windows can be "/C:/..."; Uri.file expects "C:/...".
+            if (/^\/[A-Za-z]:\//.test(fsPath)) {
+                fsPath = fsPath.slice(1);
+            }
+
+            return vscode.Uri.file(fsPath);
+        };
+
+        try {
+            const parsedUrl = new URL(normalized);
+            if (
+                String(parsedUrl.protocol || '').toLowerCase() === 'https:' &&
+                String(parsedUrl.host || '').toLowerCase().endsWith('.vscode-cdn.net')
+            ) {
+                return toFileUri(parsedUrl.pathname);
+            }
+        } catch {
+            // Fall through to vscode.Uri parsing below.
+        }
+
+        try {
+            const uri = vscode.Uri.parse(normalized);
+            if (uri.scheme === 'vscode-resource' || uri.scheme === 'vscode-webview-resource') {
+                return toFileUri(uri.fsPath || uri.path);
+            }
+            if (
+                (uri.scheme === 'https' || uri.scheme === 'http') &&
+                String(uri.authority || '').toLowerCase().endsWith('.vscode-cdn.net')
+            ) {
+                return toFileUri(uri.path);
+            }
+        } catch {
+            // Fall back to manual extraction below.
+        }
+
+        const pathMatch = normalized.match(/vscode-cdn\.net([^?#]+)/i);
+        return pathMatch && pathMatch[1]
+            ? toFileUri(pathMatch[1])
+            : null;
+    }
+
+    private resolveReadableImageSourceUri(sourceText: string, document: vscode.TextDocument): vscode.Uri {
+        return this.resolveWebviewBackedImageUri(sourceText) || this.resolveImageSourceUri(sourceText, document);
     }
 
     private async fetchRemoteImage(
@@ -1552,7 +1628,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     private async saveImageFromUri(
         imageUriText: string,
         document: vscode.TextDocument,
-        webview: vscode.Webview
+        webview: vscode.Webview,
+        options: { altText?: string } = {}
     ): Promise<void> {
         try {
             if (!imageUriText || typeof imageUriText !== 'string') {
@@ -1570,12 +1647,16 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     '',
                     document,
                     webview,
-                    { insert: true, showNotification: false }
+                    {
+                        insert: true,
+                        showNotification: false,
+                        altText: options.altText
+                    }
                 );
                 return;
             }
 
-            const sourceUri = this.resolveImageSourceUri(raw, document);
+            const sourceUri = this.resolveReadableImageSourceUri(raw, document);
             let bytes: Uint8Array;
             let mimeType = this.getImageMimeTypeFromPath(sourceUri.path || sourceUri.fsPath || raw);
 
@@ -1596,7 +1677,11 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 mimeType,
                 document,
                 webview,
-                { insert: true, showNotification: false }
+                {
+                    insert: true,
+                    showNotification: false,
+                    altText: options.altText
+                }
             );
         } catch (error) {
             console.error('[saveImageFromUri] Error saving image from URI:', error);
