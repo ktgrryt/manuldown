@@ -1389,14 +1389,10 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 }
             }
 
-            // Get document filename without extension
-            const documentFileName = document.uri.fsPath.substring(
-                document.uri.fsPath.lastIndexOf('/') + 1,
-                document.uri.fsPath.lastIndexOf('.')
-            );
+            const documentFileName = this.getDocumentFileName(document);
 
             // Create images directory structure: images/{documentFileName}/
-            const documentDir = vscode.Uri.file(document.uri.fsPath.substring(0, document.uri.fsPath.lastIndexOf('/')));
+            const documentDir = this.getDocumentDirectoryUri(document);
             const imagesDir = vscode.Uri.joinPath(documentDir, 'images');
             const documentImagesDir = vscode.Uri.joinPath(imagesDir, documentFileName);
 
@@ -1484,6 +1480,75 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         return 'image/png';
     }
 
+    private getDocumentFileName(document: vscode.TextDocument): string {
+        const parsed = path.posix.parse(document.uri.path);
+        return parsed.name || 'document';
+    }
+
+    private getDocumentDirectoryUri(document: vscode.TextDocument): vscode.Uri {
+        return document.uri.with({ path: path.posix.dirname(document.uri.path) });
+    }
+
+    private resolveImageSourceUri(sourceText: string, document: vscode.TextDocument): vscode.Uri {
+        const normalized = sourceText.trim();
+
+        if (path.win32.isAbsolute(normalized) || path.posix.isAbsolute(normalized)) {
+            return vscode.Uri.file(normalized);
+        }
+
+        if (/^[a-z][a-z0-9+.-]*:/i.test(normalized)) {
+            return vscode.Uri.parse(normalized);
+        }
+
+        return vscode.Uri.joinPath(this.getDocumentDirectoryUri(document), normalized);
+    }
+
+    private async fetchRemoteImage(
+        sourceUri: vscode.Uri
+    ): Promise<{ bytes: Uint8Array; mimeType: string | null }> {
+        type SimpleFetchResponse = {
+            ok: boolean;
+            status: number;
+            statusText: string;
+            headers: { get(name: string): string | null };
+            arrayBuffer(): Promise<ArrayBuffer>;
+        };
+        type SimpleFetch = (
+            input: string,
+            init?: { headers?: Record<string, string> }
+        ) => Promise<SimpleFetchResponse>;
+
+        const fetchFn = (globalThis as unknown as { fetch?: SimpleFetch }).fetch;
+        if (!fetchFn) {
+            throw new Error('Fetch API is unavailable.');
+        }
+
+        const response = await fetchFn(sourceUri.toString(), {
+            headers: {
+                accept: 'image/*,*/*;q=0.8'
+            }
+        });
+
+        if (!response.ok) {
+            throw new Error(`Request failed: ${response.status} ${response.statusText}`);
+        }
+
+        const contentTypeHeader = response.headers.get('content-type');
+        const mimeType = contentTypeHeader
+            ? contentTypeHeader.split(';')[0].trim().toLowerCase()
+            : '';
+
+        if (mimeType && !mimeType.startsWith('image/')) {
+            throw new Error(`Dropped URL is not an image: ${mimeType}`);
+        }
+
+        const arrayBuffer = await response.arrayBuffer();
+        return {
+            bytes: new Uint8Array(arrayBuffer),
+            mimeType: mimeType || null
+        };
+    }
+
     private async saveImageFromUri(
         imageUriText: string,
         document: vscode.TextDocument,
@@ -1499,22 +1564,31 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 throw new Error('Empty image URI');
             }
 
-            let sourceUri: vscode.Uri;
-            if (/^[a-z][a-z0-9+.-]*:/i.test(raw)) {
-                sourceUri = vscode.Uri.parse(raw);
-            } else if (raw.startsWith('/')) {
-                sourceUri = vscode.Uri.file(raw);
+            if (/^data:image\//i.test(raw)) {
+                await this.saveImageFromDataUrl(
+                    raw,
+                    '',
+                    document,
+                    webview,
+                    { insert: true, showNotification: false }
+                );
+                return;
+            }
+
+            const sourceUri = this.resolveImageSourceUri(raw, document);
+            let bytes: Uint8Array;
+            let mimeType = this.getImageMimeTypeFromPath(sourceUri.path || sourceUri.fsPath || raw);
+
+            if (sourceUri.scheme === 'http' || sourceUri.scheme === 'https') {
+                const remoteImage = await this.fetchRemoteImage(sourceUri);
+                bytes = remoteImage.bytes;
+                if (remoteImage.mimeType) {
+                    mimeType = remoteImage.mimeType;
+                }
             } else {
-                const documentDir = vscode.Uri.file(document.uri.fsPath.substring(0, document.uri.fsPath.lastIndexOf('/')));
-                sourceUri = vscode.Uri.joinPath(documentDir, raw);
+                bytes = await vscode.workspace.fs.readFile(sourceUri);
             }
 
-            if (sourceUri.scheme !== 'file') {
-                throw new Error(`Unsupported URI scheme: ${sourceUri.scheme}`);
-            }
-
-            const bytes = await vscode.workspace.fs.readFile(sourceUri);
-            const mimeType = this.getImageMimeTypeFromPath(sourceUri.path || sourceUri.fsPath);
             const dataUrl = `data:${mimeType};base64,${Buffer.from(bytes).toString('base64')}`;
 
             await this.saveImageFromDataUrl(
@@ -1556,8 +1630,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 return;
             } else {
                 // Relative path - resolve relative to the document
-                const documentDir = vscode.Uri.file(document.uri.fsPath.substring(0, document.uri.fsPath.lastIndexOf('/')));
-                imageUri = vscode.Uri.joinPath(documentDir, imageSrc);
+                imageUri = this.resolveImageSourceUri(imageSrc, document);
             }
 
             // Check if file exists
@@ -1612,19 +1685,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 return decodedSrc;
             }
 
-            let sourceUri: vscode.Uri;
-            if (/^[a-z][a-z0-9+.-]*:/i.test(decodedSrc)) {
-                sourceUri = vscode.Uri.parse(decodedSrc);
-            } else if (decodedSrc.startsWith('/')) {
-                sourceUri = vscode.Uri.file(decodedSrc);
-            } else {
-                const documentDir = vscode.Uri.file(document.uri.fsPath.substring(0, document.uri.fsPath.lastIndexOf('/')));
-                sourceUri = vscode.Uri.joinPath(documentDir, decodedSrc);
-            }
-
-            if (sourceUri.scheme !== 'file') {
-                return null;
-            }
+            const sourceUri = this.resolveImageSourceUri(decodedSrc, document);
 
             try {
                 await vscode.workspace.fs.stat(sourceUri);
@@ -1700,19 +1761,10 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     return match;
                 }
 
-                // Get the document directory (where the .md file is located)
-                const documentDir = document.uri.fsPath.substring(0, document.uri.fsPath.lastIndexOf('/'));
-
-                // Try to make it relative to the document
-                let relativePath = fsPath;
-
-                // If the path starts with the document directory, make it relative
-                if (fsPath.startsWith(documentDir)) {
-                    relativePath = fsPath.substring(documentDir.length);
-                    // Remove leading slash
-                    if (relativePath.startsWith('/')) {
-                        relativePath = relativePath.substring(1);
-                    }
+                const documentDir = this.getDocumentDirectoryUri(document).fsPath;
+                let relativePath = path.relative(documentDir, fsPath).replace(/\\/g, '/');
+                if (!relativePath || relativePath.startsWith('..')) {
+                    relativePath = fsPath.replace(/\\/g, '/');
                 }
 
                 return `<img${sanitizedBefore}src="${relativePath}"${sanitizedAfter}>`;

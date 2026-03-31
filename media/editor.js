@@ -15282,8 +15282,11 @@ import { SearchManager } from './modules/SearchManager.js';
                 if (
                     t === 'files' ||
                     t === 'public.file-url' ||
+                    t === 'public.url' ||
                     t === 'application/x-moz-file' ||
-                    t === 'text/uri-list'
+                    t === 'text/uri-list' ||
+                    t === 'downloadurl' ||
+                    t === 'text/x-moz-url'
                 ) {
                     return true;
                 }
@@ -15341,14 +15344,77 @@ import { SearchManager } from './modules/SearchManager.js';
                 return null;
             };
 
+            const parseDownloadUrl = (downloadUrlValue) => {
+                if (!downloadUrlValue) return null;
+                const value = String(downloadUrlValue).trim();
+                if (!value) return null;
+
+                const firstColon = value.indexOf(':');
+                const secondColon = firstColon >= 0 ? value.indexOf(':', firstColon + 1) : -1;
+                if (firstColon < 0 || secondColon < 0) {
+                    return null;
+                }
+
+                const mimeType = value.slice(0, firstColon).trim().toLowerCase();
+                const url = value.slice(secondColon + 1).trim();
+                if (!mimeType.startsWith('image/') || !url) {
+                    return null;
+                }
+                return url;
+            };
+
+            const parseMozillaUrl = (mozUrlValue) => {
+                if (!mozUrlValue) return null;
+                const lines = String(mozUrlValue).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+                if (lines.length === 0) return null;
+                return lines[0];
+            };
+
+            const extractImageUriFromHtml = (htmlValue) => {
+                if (!htmlValue) return null;
+
+                const imgMatch = String(htmlValue).match(/<img\b[^>]*\bsrc=(["'])([^"']+)\1/i);
+                if (!imgMatch || !imgMatch[2]) {
+                    return null;
+                }
+
+                const src = imgMatch[2].trim();
+                if (!src || src.startsWith('blob:')) {
+                    return null;
+                }
+
+                if (/^data:image\//i.test(src) || /^https?:\/\//i.test(src) || /^file:\/\//i.test(src)) {
+                    return src;
+                }
+
+                return isImagePathLike(src) ? src : null;
+            };
+
             const uriList = dataTransfer.getData('text/uri-list');
             const fromUriList = parseUriList(uriList);
             if (fromUriList) return fromUriList;
 
+            const downloadUrl = parseDownloadUrl(dataTransfer.getData('DownloadURL'));
+            if (downloadUrl) return downloadUrl;
+
+            const publicFileUrl = parseUriList(dataTransfer.getData('public.file-url'));
+            if (publicFileUrl) return publicFileUrl;
+
+            const publicUrl = parseUriList(dataTransfer.getData('public.url'));
+            if (publicUrl) return publicUrl;
+
+            const mozUrl = parseMozillaUrl(dataTransfer.getData('text/x-moz-url'));
+            if (mozUrl && (/^data:image\//i.test(mozUrl) || /^https?:\/\//i.test(mozUrl) || /^file:\/\//i.test(mozUrl) || isImagePathLike(mozUrl))) {
+                return mozUrl;
+            }
+
             const plainText = (dataTransfer.getData('text/plain') || '').trim();
-            if (isImagePathLike(plainText)) {
+            if (/^data:image\//i.test(plainText) || isImagePathLike(plainText)) {
                 return plainText;
             }
+
+            const html = extractImageUriFromHtml(dataTransfer.getData('text/html'));
+            if (html) return html;
 
             return null;
         };
