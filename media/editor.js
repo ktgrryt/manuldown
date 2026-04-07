@@ -77,7 +77,9 @@ import { SearchManager } from './modules/SearchManager.js';
         tocPanelWidth: normalizeTocPanelWidth(initialSettings.tocPanelWidth),
         useVsCodeCtrlP: initialSettings.useVsCodeCtrlP !== false,
         listDashStyle: initialSettings.listDashStyle === true,
-        editorThemeMode: normalizeEditorThemeMode(initialSettings.editorThemeMode)
+        editorThemeMode: normalizeEditorThemeMode(initialSettings.editorThemeMode),
+        allowRemoteImages: initialSettings.allowRemoteImages === true,
+        allowRemoteImageImport: initialSettings.allowRemoteImageImport === true
     };
     const imageRenderMaxWidthPx = 820;
     let imageResolveRequestSeq = 0;
@@ -85,6 +87,9 @@ import { SearchManager } from './modules/SearchManager.js';
     let lastEditorTabSwitchTs = 0;
     let lastEditorTabSwitchDirection = null;
     let lastEditorCloseShortcutTs = 0;
+    const BLOCKED_REMOTE_IMAGE_PLACEHOLDER_DATA_URL = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="240" height="48" viewBox="0 0 240 48"><rect width="240" height="48" rx="6" fill="#f3f4f6"/><rect x="0.5" y="0.5" width="239" height="47" rx="5.5" fill="none" stroke="#cbd5e1"/><text x="120" y="29" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" fill="#475569">Remote image blocked</text></svg>'
+    )}`;
 
     const NETWORK_BLOCKED_ERROR_MESSAGE = 'External network requests are blocked in ManulDown webview.';
 
@@ -251,6 +256,309 @@ import { SearchManager } from './modules/SearchManager.js';
     }
 
     installExternalCommunicationGuards();
+
+    const SAFE_EDITOR_TAGS = new Set([
+        'a', 'abbr', 'b', 'blockquote', 'br', 'caption', 'code', 'col', 'colgroup',
+        'dd', 'del', 'details', 'dfn', 'div', 'dl', 'dt', 'em', 'figcaption', 'figure',
+        'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'hr', 'i', 'img', 'input', 'ins', 'kbd',
+        'li', 'mark', 'ol', 'p', 'pre', 'q', 'rp', 'rt', 'ruby', 's', 'samp', 'small',
+        'span', 'strong', 'sub', 'summary', 'sup', 'table', 'tbody', 'td', 'tfoot',
+        'th', 'thead', 'tr', 'u', 'ul', 'var', 'wbr'
+    ]);
+    const DROP_WITH_CONTENT_TAGS = new Set([
+        'applet', 'base', 'embed', 'frame', 'frameset', 'iframe', 'link', 'meta',
+        'object', 'script', 'style'
+    ]);
+
+    function isLikelyAbsoluteFsPath(value) {
+        const raw = String(value || '').trim();
+        return /^(?:\/|[A-Za-z]:[\\/])/.test(raw);
+    }
+
+    function hasExplicitScheme(value) {
+        return /^[a-z][a-z0-9+.-]*:/i.test(String(value || '').trim());
+    }
+
+    function isWebviewResourceUrl(urlLike) {
+        const raw = String(urlLike || '').trim();
+        if (!raw) return false;
+        if (raw.includes('vscode-resource') || raw.includes('vscode-webview-resource')) {
+            return true;
+        }
+        try {
+            return isInternalWebviewCdnUrl(new URL(raw, window.location.href));
+        } catch (_error) {
+            return false;
+        }
+    }
+
+    function sanitizeLinkHref(rawHref) {
+        const href = String(rawHref || '').trim();
+        if (!href) return null;
+        if (href.startsWith('#') || href.startsWith('/') || href.startsWith('./') || href.startsWith('../')) {
+            return href;
+        }
+        if (!hasExplicitScheme(href)) {
+            return href;
+        }
+        return /^(?:https?:|mailto:)/i.test(href) ? href : null;
+    }
+
+    function classifyImageSourceForEditor(rawSrc) {
+        const src = String(rawSrc || '').trim();
+        if (!src) {
+            return { kind: 'empty', original: '' };
+        }
+        if (/^data:image\//i.test(src)) {
+            return { kind: 'direct', src, original: src };
+        }
+        if (isWebviewResourceUrl(src)) {
+            return { kind: 'direct', src, original: src };
+        }
+        if (/^https?:\/\//i.test(src)) {
+            if (settingsState.allowRemoteImages) {
+                return { kind: 'direct', src, original: src };
+            }
+            return { kind: 'blocked-remote', original: src };
+        }
+        if (/^file:\/\//i.test(src) || isLikelyAbsoluteFsPath(src) || !hasExplicitScheme(src)) {
+            return { kind: 'resolve-local', original: src };
+        }
+        return { kind: 'blocked', original: src };
+    }
+
+    function applyImageSourcePolicy(image, rawSrc, options = {}) {
+        if (!image || image.tagName !== 'IMG') return;
+
+        const markdownPath = typeof options.markdownPath === 'string' && options.markdownPath.trim() !== ''
+            ? options.markdownPath.trim()
+            : (image.getAttribute('data-md-path') || '').trim();
+        const source = String(rawSrc || markdownPath || '').trim();
+        const classification = classifyImageSourceForEditor(source);
+        const setMarkdownPath = (value) => {
+            if (value && value.trim() !== '') {
+                image.setAttribute('data-md-path', value.trim());
+            } else {
+                image.removeAttribute('data-md-path');
+            }
+        };
+
+        image.removeAttribute('srcset');
+        image.removeAttribute('data-image-resolve-id');
+        image.removeAttribute('data-remote-image-blocked');
+
+        if (classification.kind === 'direct') {
+            image.src = classification.src;
+            setMarkdownPath(markdownPath);
+            return;
+        }
+
+        if (classification.kind === 'resolve-local') {
+            setMarkdownPath(markdownPath || classification.original);
+            image.removeAttribute('src');
+            requestImageSrcResolution(image, classification.original);
+            return;
+        }
+
+        if (classification.kind === 'blocked-remote') {
+            setMarkdownPath(markdownPath || classification.original);
+            image.src = BLOCKED_REMOTE_IMAGE_PLACEHOLDER_DATA_URL;
+            image.setAttribute('data-remote-image-blocked', 'true');
+            if (!(image.getAttribute('alt') || '').trim()) {
+                image.alt = 'Remote image blocked';
+            }
+            return;
+        }
+
+        setMarkdownPath(markdownPath);
+        image.removeAttribute('src');
+    }
+
+    function unwrapElement(element) {
+        if (!element || !element.parentNode) return;
+        const parent = element.parentNode;
+        while (element.firstChild) {
+            parent.insertBefore(element.firstChild, element);
+        }
+        element.remove();
+    }
+
+    function sanitizeFragmentForEditor(root, options = {}) {
+        const allowLocalImageResolution = options.allowLocalImageResolution !== false;
+        const sanitizeNode = (node) => {
+            if (!node) return;
+            if (node.nodeType === Node.COMMENT_NODE) {
+                node.remove();
+                return;
+            }
+            if (node.nodeType !== Node.ELEMENT_NODE) {
+                return;
+            }
+
+            const element = node;
+            const tag = String(element.tagName || '').toLowerCase();
+            if (DROP_WITH_CONTENT_TAGS.has(tag)) {
+                element.remove();
+                return;
+            }
+            if (!SAFE_EDITOR_TAGS.has(tag)) {
+                const children = Array.from(element.childNodes || []);
+                unwrapElement(element);
+                children.forEach((child) => sanitizeNode(child));
+                return;
+            }
+            if (tag === 'input') {
+                const inputType = (element.getAttribute('type') || '').toLowerCase();
+                if (inputType !== 'checkbox') {
+                    element.remove();
+                    return;
+                }
+            }
+
+            Array.from(element.attributes || []).forEach((attr) => {
+                const attrName = String(attr.name || '').toLowerCase();
+                if (!attrName) return;
+
+                if (
+                    attrName.startsWith('on') ||
+                    attrName === 'style' ||
+                    attrName === 'srcdoc' ||
+                    attrName === 'srcset' ||
+                    attrName === 'ping' ||
+                    attrName === 'formaction' ||
+                    attrName === 'action' ||
+                    attrName === 'integrity' ||
+                    attrName === 'nonce' ||
+                    attrName === 'crossorigin' ||
+                    attrName === 'referrerpolicy' ||
+                    attrName === 'target' ||
+                    attrName === 'download'
+                ) {
+                    element.removeAttribute(attr.name);
+                    return;
+                }
+
+                if (attrName === 'href') {
+                    if (tag !== 'a') {
+                        element.removeAttribute(attr.name);
+                        return;
+                    }
+                    const safeHref = sanitizeLinkHref(attr.value);
+                    if (safeHref) {
+                        element.setAttribute(attr.name, safeHref);
+                    } else {
+                        element.removeAttribute(attr.name);
+                    }
+                    return;
+                }
+
+                if (attrName === 'src') {
+                    if (tag !== 'img') {
+                        element.removeAttribute(attr.name);
+                    }
+                    return;
+                }
+
+                if (attrName.startsWith('data-')) {
+                    if (!/^data-(?:md-path|mdw-[a-z0-9-]+|exclude-from-markdown)$/i.test(attrName)) {
+                        element.removeAttribute(attr.name);
+                    }
+                    return;
+                }
+
+                if (attrName === 'class' || attrName === 'title' || attrName === 'lang' || attrName === 'dir' || attrName === 'id') {
+                    return;
+                }
+
+                if (tag === 'img' && (attrName === 'alt' || attrName === 'width' || attrName === 'height')) {
+                    return;
+                }
+                if (tag === 'input' && (attrName === 'type' || attrName === 'checked' || attrName === 'disabled')) {
+                    return;
+                }
+                if (tag === 'ol' && attrName === 'start') {
+                    return;
+                }
+                if (tag === 'details' && attrName === 'open') {
+                    return;
+                }
+                if ((tag === 'td' || tag === 'th') && (attrName === 'colspan' || attrName === 'rowspan' || attrName === 'align')) {
+                    return;
+                }
+                if ((tag === 'col' || tag === 'colgroup') && (attrName === 'span' || attrName === 'width')) {
+                    return;
+                }
+
+                element.removeAttribute(attr.name);
+            });
+
+            Array.from(element.childNodes || []).forEach((child) => sanitizeNode(child));
+
+            if (tag === 'a' && !element.getAttribute('href')) {
+                unwrapElement(element);
+                return;
+            }
+
+            if (tag === 'img') {
+                const originalSrc = element.getAttribute('src') || element.getAttribute('data-md-path') || '';
+                const classification = classifyImageSourceForEditor(originalSrc);
+                if (classification.kind === 'resolve-local' && !allowLocalImageResolution) {
+                    element.remove();
+                    return;
+                }
+                applyImageSourcePolicy(
+                    element,
+                    originalSrc,
+                    {
+                        markdownPath: element.getAttribute('data-md-path') || ''
+                    }
+                );
+            }
+        };
+
+        Array.from(root.childNodes || []).forEach((child) => sanitizeNode(child));
+    }
+
+    function createSanitizedContainerFromHtml(rawHtml, options = {}) {
+        const template = document.createElement('template');
+        template.innerHTML = typeof rawHtml === 'string' ? rawHtml : '';
+        sanitizeFragmentForEditor(template.content, options);
+        const container = document.createElement('div');
+        container.appendChild(template.content);
+        return container;
+    }
+
+    function replaceEditorContentFromHtml(rawHtml) {
+        if (!editor) return;
+        const sanitizedContainer = createSanitizedContainerFromHtml(rawHtml);
+        while (editor.firstChild) {
+            editor.removeChild(editor.firstChild);
+        }
+        while (sanitizedContainer.firstChild) {
+            editor.appendChild(sanitizedContainer.firstChild);
+        }
+    }
+
+    function reapplyImageSecurityPolicy(root = editor) {
+        if (!root || !root.querySelectorAll) return;
+        root.querySelectorAll('img').forEach((image) => {
+            const preferredSource = image.getAttribute('data-md-path') || image.getAttribute('src') || image.currentSrc || '';
+            applyImageSourcePolicy(image, preferredSource, {
+                markdownPath: image.getAttribute('data-md-path') || ''
+            });
+        });
+    }
+
+    function isImportableImageUri(rawSrc, source = 'paste') {
+        const src = String(rawSrc || '').trim();
+        if (!src) return false;
+        if (/^data:image\//i.test(src)) return true;
+        if (isWebviewResourceUrl(src)) return true;
+        if (source === 'drop' && /^file:\/\//i.test(src)) return true;
+        if (source === 'drop' && isLikelyAbsoluteFsPath(src)) return true;
+        if (settingsState.allowRemoteImageImport && /^https?:\/\//i.test(src)) return true;
+        return false;
+    }
 
     function hideImageResizeOverlaySafely() {
         if (typeof hideImageResizeOverlay === 'function') {
@@ -527,7 +835,9 @@ import { SearchManager } from './modules/SearchManager.js';
     const stateManager = new StateManager(editor, vscode);
     const cursorManager = new CursorManager(editor, domUtils);
     const listManager = new ListManager(editor, domUtils);
-    const markdownConverter = new MarkdownConverter(editor, domUtils);
+    const markdownConverter = new MarkdownConverter(editor, domUtils, {
+        applyImageSourcePolicy
+    });
     const codeBlockManager = new CodeBlockManager(
         editor,
         cursorManager,
@@ -549,6 +859,9 @@ import { SearchManager } from './modules/SearchManager.js';
 
     function applySettings(nextSettings) {
         if (!nextSettings) return;
+        const shouldRefreshImagePolicy =
+            typeof nextSettings.allowRemoteImages === 'boolean' &&
+            nextSettings.allowRemoteImages !== settingsState.allowRemoteImages;
         if (typeof nextSettings.toolbarVisible === 'boolean') {
             settingsState.toolbarVisible = nextSettings.toolbarVisible;
         }
@@ -567,11 +880,21 @@ import { SearchManager } from './modules/SearchManager.js';
         if (typeof nextSettings.editorThemeMode === 'string') {
             settingsState.editorThemeMode = normalizeEditorThemeMode(nextSettings.editorThemeMode);
         }
+        if (typeof nextSettings.allowRemoteImages === 'boolean') {
+            settingsState.allowRemoteImages = nextSettings.allowRemoteImages;
+        }
+        if (typeof nextSettings.allowRemoteImageImport === 'boolean') {
+            settingsState.allowRemoteImageImport = nextSettings.allowRemoteImageImport;
+        }
         syncBodySettings();
         codeBlockManager.setThemeMode(settingsState.editorThemeMode);
         applyTocPanelWidth();
         syncToolbarBulletLabel();
         tocManager.setEnabled(settingsState.tocEnabled);
+        if (shouldRefreshImagePolicy) {
+            reapplyImageSecurityPolicy();
+            applyImageRenderSizes();
+        }
         scheduleEditorOverflowStateUpdate();
     }
 
@@ -15581,9 +15904,9 @@ import { SearchManager } from './modules/SearchManager.js';
 
             const image = document.createElement('img');
             image.alt = alt;
-            image.src = src;
+            image.setAttribute('data-md-path', src);
+            applyImageSourcePolicy(image, src, { markdownPath: src });
             applyImageRenderSizeFromAlt(image);
-            requestImageSrcResolution(image, src);
             return image;
         };
 
@@ -15607,9 +15930,11 @@ import { SearchManager } from './modules/SearchManager.js';
                 .replace(/\\\)/g, ')')
                 .replace(/\\\(/g, '(');
             if (!href) return null;
+            const safeHref = sanitizeLinkHref(href);
+            if (!safeHref) return null;
 
             const link = document.createElement('a');
-            link.href = href;
+            link.href = safeHref;
             link.textContent = text;
             return link;
         };
@@ -15883,8 +16208,9 @@ import { SearchManager } from './modules/SearchManager.js';
                 return false;
             }
 
-            const container = document.createElement('div');
-            container.innerHTML = rawHtml;
+            const container = createSanitizedContainerFromHtml(rawHtml, {
+                allowLocalImageResolution: false
+            });
             container.querySelectorAll('[data-exclude-from-markdown="true"]').forEach((node) => node.remove());
 
             const autoLinkUrlTextNodesInContainer = (rootNode) => {
@@ -15986,8 +16312,9 @@ import { SearchManager } from './modules/SearchManager.js';
                 return null;
             }
 
-            const container = document.createElement('div');
-            container.innerHTML = rawHtml;
+            const container = createSanitizedContainerFromHtml(rawHtml, {
+                allowLocalImageResolution: false
+            });
             container.querySelectorAll('[data-exclude-from-markdown="true"]').forEach((node) => node.remove());
 
             const disallowed = container.querySelector([
@@ -16010,15 +16337,16 @@ import { SearchManager } from './modules/SearchManager.js';
             }
 
             const images = Array.from(container.querySelectorAll('img')).filter((image) => {
-                const src = (image.getAttribute('src') || image.currentSrc || '').trim();
-                return src !== '' && !src.startsWith('blob:');
+                const displaySrc = (image.getAttribute('src') || image.currentSrc || '').trim();
+                const originalSrc = (image.getAttribute('data-md-path') || displaySrc).trim();
+                return displaySrc !== '' && !displaySrc.startsWith('blob:') && isImportableImageUri(originalSrc, 'paste');
             });
             if (images.length !== 1) {
                 return null;
             }
 
             const image = images[0];
-            const src = (image.getAttribute('src') || image.currentSrc || '').trim();
+            const src = (image.getAttribute('data-md-path') || image.getAttribute('src') || image.currentSrc || '').trim();
             if (!src) {
                 return null;
             }
@@ -16596,8 +16924,9 @@ import { SearchManager } from './modules/SearchManager.js';
         };
         const internalHtmlIsListlessPlainText = (rawHtml) => {
             if (typeof rawHtml !== 'string' || rawHtml.trim() === '') return false;
-            const container = document.createElement('div');
-            container.innerHTML = rawHtml;
+            const container = createSanitizedContainerFromHtml(rawHtml, {
+                allowLocalImageResolution: false
+            });
             container.querySelectorAll('[data-exclude-from-markdown="true"]').forEach((node) => node.remove());
             const semanticSelector = [
                 'ul', 'ol', 'li',
@@ -17257,7 +17586,8 @@ import { SearchManager } from './modules/SearchManager.js';
                         vscode.postMessage({
                             type: 'saveImageFromUri',
                             uri: copiedImage.src,
-                            altText: copiedImage.altText
+                            altText: copiedImage.altText,
+                            source: 'paste'
                         });
                         return;
                     }
@@ -17913,7 +18243,7 @@ import { SearchManager } from './modules/SearchManager.js';
             const imageUri = imageFile ? null : extractImageUriFromDataTransfer(e.dataTransfer);
             e.preventDefault();
             e.stopPropagation();
-            if (!imageFile && !imageUri) return;
+            if (!imageFile && (!imageUri || !isImportableImageUri(imageUri, 'drop'))) return;
 
             editor.focus();
 
@@ -17929,7 +18259,8 @@ import { SearchManager } from './modules/SearchManager.js';
 
             vscode.postMessage({
                 type: 'saveImageFromUri',
-                uri: imageUri
+                uri: imageUri,
+                source: 'drop'
             });
         });
 
@@ -18855,7 +19186,7 @@ import { SearchManager } from './modules/SearchManager.js';
             case 'init':
                 temporarilySuppressImageRemovalSync();
                 isUpdating = true;
-                editor.innerHTML = message.content;
+                replaceEditorContentFromHtml(message.content);
                 isUpdating = false;
                 scheduleEditorOverflowStateUpdate();
                 normalizeCheckboxListItems();
@@ -18882,7 +19213,7 @@ import { SearchManager } from './modules/SearchManager.js';
                     temporarilySuppressImageRemovalSync();
                     isUpdating = true;
                     const scrollTop = editor.scrollTop;
-                    editor.innerHTML = message.content;
+                    replaceEditorContentFromHtml(message.content);
                     editor.scrollTop = scrollTop;
                     isUpdating = false;
                     normalizeCheckboxListItems();
@@ -18901,7 +19232,7 @@ import { SearchManager } from './modules/SearchManager.js';
                 temporarilySuppressImageRemovalSync();
                 isUpdating = true;
                 const scrollTopRefresh = editor.scrollTop;
-                editor.innerHTML = message.content;
+                replaceEditorContentFromHtml(message.content);
                 editor.scrollTop = scrollTopRefresh;
                 isUpdating = false;
                 normalizeCheckboxListItems();
@@ -18975,14 +19306,14 @@ import { SearchManager } from './modules/SearchManager.js';
 
                     const img = document.createElement('img');
                     const imageSrc = (typeof message.src === 'string' && message.src.trim() !== '') ? message.src : markdownPath;
-                    if (imageSrc) {
-                        img.src = imageSrc;
-                    }
                     img.alt = typeof message.alt === 'string' && message.alt !== ''
                         ? message.alt
                         : 'image';
                     if (markdownPath) {
                         img.setAttribute('data-md-path', markdownPath);
+                    }
+                    if (imageSrc) {
+                        applyImageSourcePolicy(img, imageSrc, { markdownPath });
                     }
                     applyImageRenderSizeFromAlt(img);
 

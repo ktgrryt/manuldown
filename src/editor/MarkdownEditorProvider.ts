@@ -303,6 +303,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         // Setup webview options
         webviewPanel.webview.options = {
             enableScripts: true,
+            localResourceRoots: this.getWebviewLocalResourceRoots(document),
         };
 
         // Set webview HTML content
@@ -410,7 +411,10 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                             document,
                             webviewPanel.webview,
                             {
-                                altText: typeof message.altText === 'string' ? message.altText : undefined
+                                altText: typeof message.altText === 'string' ? message.altText : undefined,
+                                source: message.source === 'drop' || message.source === 'paste'
+                                    ? message.source
+                                    : 'unknown'
                             }
                         );
                         break;
@@ -631,6 +635,22 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             MarkdownEditorProvider.customSlashTemplateDirectoryName
         );
         return vscode.Uri.file(rootPath);
+    }
+
+    private getWebviewLocalResourceRoots(document: vscode.TextDocument): vscode.Uri[] {
+        const roots = new Map<string, vscode.Uri>();
+        const pushRoot = (uri: vscode.Uri | undefined) => {
+            if (!uri) {
+                return;
+            }
+            roots.set(uri.toString(), uri);
+        };
+
+        pushRoot(this.context.extensionUri);
+        pushRoot(vscode.workspace.getWorkspaceFolder(document.uri)?.uri);
+        pushRoot(this.getDocumentDirectoryUri(document));
+
+        return Array.from(roots.values());
     }
 
     private normalizeSlashCommandIdFromFileName(fileName: string): string {
@@ -1638,7 +1658,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         imageUriText: string,
         document: vscode.TextDocument,
         webview: vscode.Webview,
-        options: { altText?: string } = {}
+        options: { altText?: string; source?: 'paste' | 'drop' | 'unknown' } = {}
     ): Promise<void> {
         try {
             if (!imageUriText || typeof imageUriText !== 'string') {
@@ -1665,18 +1685,39 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 return;
             }
 
+            const importSource = options.source ?? 'unknown';
+            const looksLikeAbsolutePath = path.win32.isAbsolute(raw) || path.posix.isAbsolute(raw);
+            const looksLikeExplicitScheme = /^[a-z][a-z0-9+.-]*:/i.test(raw);
+            const webviewBackedUri = this.resolveWebviewBackedImageUri(raw);
+            const allowRemoteImageImport = vscode.workspace
+                .getConfiguration('manulDown')
+                .get<boolean>('security.allowRemoteImageImport', false);
+
+            if (
+                importSource === 'paste' &&
+                !webviewBackedUri &&
+                (looksLikeAbsolutePath || !looksLikeExplicitScheme || /^file:/i.test(raw))
+            ) {
+                throw new Error('Pasted local image URIs are blocked for security reasons.');
+            }
+
             const sourceUri = this.resolveReadableImageSourceUri(raw, document);
             let bytes: Uint8Array;
             let mimeType = this.getImageMimeTypeFromPath(sourceUri.path || sourceUri.fsPath || raw);
 
             if (sourceUri.scheme === 'http' || sourceUri.scheme === 'https') {
+                if (!allowRemoteImageImport) {
+                    throw new Error('Remote image import is disabled.');
+                }
                 const remoteImage = await this.fetchRemoteImage(sourceUri);
                 bytes = remoteImage.bytes;
                 if (remoteImage.mimeType) {
                     mimeType = remoteImage.mimeType;
                 }
-            } else {
+            } else if (sourceUri.scheme === 'file' || !sourceUri.scheme) {
                 bytes = await vscode.workspace.fs.readFile(sourceUri);
+            } else {
+                throw new Error(`Unsupported image URI scheme: ${sourceUri.scheme}`);
             }
 
             const dataUrl = `data:${mimeType};base64,${Buffer.from(bytes).toString('base64')}`;
@@ -1876,6 +1917,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         useVsCodeCtrlP: boolean;
         listDashStyle: boolean;
         editorThemeMode: EditorThemeMode;
+        allowRemoteImages: boolean;
+        allowRemoteImageImport: boolean;
     } {
         const config = vscode.workspace.getConfiguration('manulDown');
         const configuredThemeMode = String(config.get<string>('editor.theme', 'vscode')).toLowerCase();
@@ -1891,6 +1934,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             useVsCodeCtrlP: true,
             listDashStyle: config.get<boolean>('list.dashStyle', false),
             editorThemeMode,
+            allowRemoteImages: config.get<boolean>('security.allowRemoteImages', false),
+            allowRemoteImageImport: config.get<boolean>('security.allowRemoteImageImport', false),
         };
     }
 

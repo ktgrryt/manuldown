@@ -5,9 +5,12 @@
  */
 
 export class MarkdownConverter {
-    constructor(editor, domUtils) {
+    constructor(editor, domUtils, options = {}) {
         this.editor = editor;
         this.domUtils = domUtils;
+        this.applyImageSourcePolicy = typeof options.applyImageSourcePolicy === 'function'
+            ? options.applyImageSourcePolicy
+            : null;
     }
 
     isIgnorableText(text) {
@@ -831,8 +834,13 @@ export class MarkdownConverter {
                         }
 
                         const image = document.createElement('img');
-                        image.setAttribute('src', src);
                         image.setAttribute('alt', alt);
+                        if (this.applyImageSourcePolicy) {
+                            image.setAttribute('data-md-path', src);
+                            this.applyImageSourcePolicy(image, src, { markdownPath: src });
+                        } else {
+                            image.setAttribute('src', src);
+                        }
                         fragment.appendChild(image);
 
                         let trailingTextNode = null;

@@ -3,7 +3,7 @@
   "displayName": "ManulDown",
   "description": "WYSIWYG editor for Markdown files in VSCode",
   "icon": "images/icon.png",
-  "version": "1.0.2",
+  "version": "1.0.4",
   "publisher": "ktgrryt",
   "license": "MIT",
   "repository": {
@@ -247,6 +247,16 @@
             "Indent nested list items with 4 spaces."
           ],
           "description": "Default indentation width for nested list items when no existing list indentation style can be detected."
+        },
+        "manulDown.security.allowRemoteImages": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow ManulDown to load remote http/https images inside the editor. Disabled by default to avoid automatic outbound requests when a document is opened."
+        },
+        "manulDown.security.allowRemoteImageImport": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow pasted or dropped remote http/https image URLs to be downloaded into the workspace."
         }
       }
     }
