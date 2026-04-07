@@ -1696,6 +1696,41 @@ import { SearchManager } from './modules/SearchManager.js';
     let caretScrollRaf = null;
     const caretScrollMargin = 8;
 
+    function ensureCodeBlockCaretVisible(range, caretRect) {
+        if (!range || !range.collapsed || !caretRect) return;
+
+        const codeBlock = domUtils.getParentElement(range.startContainer, 'CODE');
+        const preBlock = codeBlock ? domUtils.getParentElement(codeBlock, 'PRE') : null;
+        if (!codeBlock || !preBlock) return;
+        if (codeBlock.clientWidth <= 0 || codeBlock.scrollWidth <= codeBlock.clientWidth + 1) return;
+
+        const codeRect = codeBlock.getBoundingClientRect();
+        if (!codeRect || codeRect.width <= 0) return;
+
+        const caretLeft = Number.isFinite(caretRect.left) ? caretRect.left : caretRect.x;
+        const caretRightRaw = Number.isFinite(caretRect.right)
+            ? caretRect.right
+            : (Number.isFinite(caretRect.x) ? caretRect.x + (caretRect.width || 0) : null);
+        if (!Number.isFinite(caretLeft) || !Number.isFinite(caretRightRaw)) return;
+
+        const caretRight = Math.max(caretLeft, caretRightRaw);
+        const visibleLeft = codeRect.left + caretScrollMargin;
+        const visibleRight = codeRect.right - caretScrollMargin;
+        const maxScrollLeft = Math.max(0, codeBlock.scrollWidth - codeBlock.clientWidth);
+        let nextScrollLeft = codeBlock.scrollLeft;
+
+        if (caretLeft < visibleLeft) {
+            nextScrollLeft -= visibleLeft - caretLeft;
+        } else if (caretRight > visibleRight) {
+            nextScrollLeft += caretRight - visibleRight;
+        }
+
+        const clampedScrollLeft = Math.max(0, Math.min(maxScrollLeft, Math.ceil(nextScrollLeft)));
+        if (Math.abs(clampedScrollLeft - codeBlock.scrollLeft) >= 1) {
+            codeBlock.scrollLeft = clampedScrollLeft;
+        }
+    }
+
     function ensureCaretVisible() {
         if (isUpdating) return;
         // Mouse click placement should not trigger additional auto-scroll corrections.
@@ -1713,6 +1748,8 @@ import { SearchManager } from './modules/SearchManager.js';
         const rects = !isEditorBoundary && range.getClientRects ? range.getClientRects() : null;
         const caretRect = rectFromManager || (rects && rects.length ? rects[0] : null);
         if (!caretRect) return;
+
+        ensureCodeBlockCaretVisible(range, caretRect);
 
         const isEditorEndBoundary = range.startContainer === editor &&
             range.startOffset >= (editor.childNodes ? editor.childNodes.length : 0);
