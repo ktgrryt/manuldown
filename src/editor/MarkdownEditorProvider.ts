@@ -432,6 +432,19 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                             });
                         }
                         break;
+                    case 'updateConfiguration':
+                        {
+                            if (typeof message.key === 'string' && message.value !== undefined) {
+                                const config = vscode.workspace.getConfiguration();
+                                await config.update(message.key, message.value, vscode.ConfigurationTarget.Global);
+                            }
+                        }
+                        break;
+                    case 'openSettings':
+                        {
+                            vscode.commands.executeCommand('workbench.action.openSettings', 'manulDown');
+                        }
+                        break;
                     case 'openLink':
                         // Open the link in the default browser (http/https only)
                         if (message.url && /^https?:\/\//i.test(message.url)) {
@@ -1917,6 +1930,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         useVsCodeCtrlP: boolean;
         listDashStyle: boolean;
         editorThemeMode: EditorThemeMode;
+        editorStyle: string;
         allowRemoteImages: boolean;
         allowRemoteImageImport: boolean;
     } {
@@ -1934,6 +1948,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             useVsCodeCtrlP: true,
             listDashStyle: config.get<boolean>('list.dashStyle', false),
             editorThemeMode,
+            editorStyle: String(config.get<string>('editor.style', 'notion')).toLowerCase(),
             allowRemoteImages: config.get<boolean>('security.allowRemoteImages', false),
             allowRemoteImageImport: config.get<boolean>('security.allowRemoteImageImport', false),
         };
@@ -1964,6 +1979,11 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             vscode.Uri.joinPath(this.context.extensionUri, 'node_modules', 'prismjs', 'prism.js')
         );
 
+        // Codicons for VS Code native icons
+        const codiconsUri = webview.asWebviewUri(
+            vscode.Uri.joinPath(this.context.extensionUri, 'node_modules', '@vscode', 'codicons', 'dist', 'codicon.css')
+        );
+
         // Load common language components directly
         const prismPythonUri = webview.asWebviewUri(
             vscode.Uri.joinPath(this.context.extensionUri, 'node_modules', 'prismjs', 'components', 'prism-python.min.js')
@@ -1986,9 +2006,10 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src 'none'; frame-src 'none'; object-src 'none'; media-src 'none'; worker-src 'none'; child-src 'none'; form-action 'none'; base-uri 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; img-src ${webview.cspSource} https: data: vscode-resource:;">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src 'none'; frame-src 'none'; object-src 'none'; media-src 'none'; worker-src 'none'; child-src 'none'; form-action 'none'; base-uri 'none'; font-src ${webview.cspSource} vscode-resource: https: data:; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; img-src ${webview.cspSource} https: data: vscode-resource:;">
     <link href="${styleUri}" rel="stylesheet">
     <link href="${prismCssUri}" rel="stylesheet">
+    <link href="${codiconsUri}" rel="stylesheet">
     <title>ManulDown</title>
 </head>
 <body data-toolbar-visible="${toolbarVisibleAttr}" data-toc-enabled="${tocEnabledAttr}" data-theme-mode="${themeModeAttr}">
@@ -2025,6 +2046,19 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         </button>
         <button class="toolbar-btn" data-command="table" title="Insert Table">
             Table
+        </button>
+        <div class="toolbar-separator" style="flex-grow: 1; border: none; background: transparent;"></div>
+        <select class="toolbar-select" id="toolbar-theme-select" title="Editor Theme" style="background: transparent; color: inherit; border: 1px solid var(--vscode-editorGroup-border); border-radius: 3px; padding: 2px 6px; margin: 0 4px; outline: none; cursor: pointer; height: 24px; font-size: 11px;">
+            <option value="vscode" ${settings.editorThemeMode === 'vscode' ? 'selected' : ''} style="background: var(--vscode-editor-background); color: var(--vscode-editor-foreground);">VSCode Theme</option>
+            <option value="light" ${settings.editorThemeMode === 'light' ? 'selected' : ''} style="background: var(--vscode-editor-background); color: var(--vscode-editor-foreground);">Light</option>
+            <option value="dark" ${settings.editorThemeMode === 'dark' ? 'selected' : ''} style="background: var(--vscode-editor-background); color: var(--vscode-editor-foreground);">Dark</option>
+        </select>
+        <select class="toolbar-select" id="toolbar-style-select" title="Editor Style" style="background: transparent; color: inherit; border: 1px solid var(--vscode-editorGroup-border); border-radius: 3px; padding: 2px 6px; margin: 0 4px; outline: none; cursor: pointer; height: 24px; font-size: 11px;">
+            <option value="default" ${settings.editorStyle === 'default' ? 'selected' : ''} style="background: var(--vscode-editor-background); color: var(--vscode-editor-foreground);">Default</option>
+            <option value="notion" ${settings.editorStyle === 'notion' ? 'selected' : ''} style="background: var(--vscode-editor-background); color: var(--vscode-editor-foreground);">Notion</option>
+        </select>
+        <button class="toolbar-btn" id="toolbar-settings-btn" title="Open Settings" style="margin-left: 4px; padding: 2px 4px; display: inline-flex; align-items: center; justify-content: center; background: transparent; border: none; cursor: pointer; color: var(--vscode-icon-foreground);">
+            <i class="codicon codicon-settings-gear"></i>
         </button>
     </div>
     <div class="editor-container">

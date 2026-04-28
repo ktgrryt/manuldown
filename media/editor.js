@@ -78,6 +78,7 @@ import { SearchManager } from './modules/SearchManager.js';
         useVsCodeCtrlP: initialSettings.useVsCodeCtrlP !== false,
         listDashStyle: initialSettings.listDashStyle === true,
         editorThemeMode: normalizeEditorThemeMode(initialSettings.editorThemeMode),
+        editorStyle: typeof initialSettings.editorStyle === 'string' ? initialSettings.editorStyle : 'notion',
         allowRemoteImages: initialSettings.allowRemoteImages === true,
         allowRemoteImageImport: initialSettings.allowRemoteImageImport === true
     };
@@ -803,6 +804,7 @@ import { SearchManager } from './modules/SearchManager.js';
         document.body.dataset.tocEnabled = settingsState.tocEnabled ? 'true' : 'false';
         document.body.dataset.listDashStyle = settingsState.listDashStyle ? 'true' : 'false';
         document.body.dataset.themeMode = settingsState.editorThemeMode;
+        document.body.dataset.editorStyle = settingsState.editorStyle;
         document.body.dataset.platform = isMac ? 'mac' : 'other';
     };
     syncBodySettings();
@@ -879,6 +881,9 @@ import { SearchManager } from './modules/SearchManager.js';
         }
         if (typeof nextSettings.editorThemeMode === 'string') {
             settingsState.editorThemeMode = normalizeEditorThemeMode(nextSettings.editorThemeMode);
+        }
+        if (typeof nextSettings.editorStyle === 'string') {
+            settingsState.editorStyle = nextSettings.editorStyle;
         }
         if (typeof nextSettings.allowRemoteImages === 'boolean') {
             settingsState.allowRemoteImages = nextSettings.allowRemoteImages;
@@ -19487,6 +19492,32 @@ import { SearchManager } from './modules/SearchManager.js';
     } else {
         init();
     }
+
+    // Toolbar custom actions
+    const themeSelect = document.getElementById('toolbar-theme-select');
+    if (themeSelect) {
+        themeSelect.addEventListener('change', (e) => {
+            vscode.postMessage({ type: 'updateConfiguration', key: 'manulDown.editor.theme', value: e.target.value });
+            document.body.dataset.themeMode = e.target.value;
+            if (typeof settingsState !== 'undefined') settingsState.editorThemeMode = e.target.value;
+            if (typeof codeBlockManager !== 'undefined') codeBlockManager.setThemeMode(e.target.value);
+        });
+    }
+    const styleSelect = document.getElementById('toolbar-style-select');
+    if (styleSelect) {
+        styleSelect.addEventListener('change', (e) => {
+            vscode.postMessage({ type: 'updateConfiguration', key: 'manulDown.editor.style', value: e.target.value });
+            document.body.dataset.editorStyle = e.target.value;
+            if (typeof settingsState !== 'undefined') settingsState.editorStyle = e.target.value;
+        });
+    }
+    const settingsBtn = document.getElementById('toolbar-settings-btn');
+    if (settingsBtn) {
+        settingsBtn.addEventListener('click', () => {
+            vscode.postMessage({ type: 'openSettings' });
+        });
+    }
+
 })();
 
 // Made with Bob

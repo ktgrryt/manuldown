@@ -3,7 +3,7 @@
   "displayName": "ManulDown",
   "description": "WYSIWYG editor for Markdown files in VSCode",
   "icon": "images/icon.png",
-  "version": "1.0.4",
+  "version": "1.0.0",
   "publisher": "ktgrryt",
   "license": "MIT",
   "repository": {
@@ -235,6 +235,19 @@
           ],
           "description": "Theme mode for the ManulDown editor."
         },
+        "manulDown.editor.style": {
+          "type": "string",
+          "default": "notion",
+          "enum": [
+            "default",
+            "notion"
+          ],
+          "enumDescriptions": [
+            "Use the standard VS Code inspired full-width styling.",
+            "Use a Notion-like styling with center-aligned text and visual enhancements."
+          ],
+          "description": "Visual style for the ManulDown editor."
+        },
         "manulDown.list.indentSize": {
           "type": "number",
           "default": 2,
@@ -279,8 +292,9 @@
     "typescript": "^5.3.3"
   },
   "dependencies": {
-    "mermaid": "^10.9.0",
+    "@vscode/codicons": "^0.0.45",
     "marked": "^11.1.1",
+    "mermaid": "^10.9.0",
     "prismjs": "^1.30.0",
     "turndown": "^7.2.2",
     "turndown-plugin-gfm": "^1.0.2"
