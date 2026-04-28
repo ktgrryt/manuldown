@@ -5,7 +5,7 @@
 }
 
 body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+    font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol';
     height: 100vh;
     display: flex;
     flex-direction: column;
@@ -13,6 +13,8 @@ body {
     background-color: var(--vscode-editor-background);
     color: var(--vscode-editor-foreground);
     position: relative;
+    --notion-inline-code-color: #eb5757;
+    --notion-inline-code-bg: rgba(135, 131, 120, 0.15);
     --toc-panel-width: 150px;
     --toc-resizer-hit-width: 8px;
     --toc-content-offset: 0px;
@@ -72,11 +74,11 @@ body[data-theme-mode="vscode"].vscode-high-contrast-light {
 }
 
 body[data-theme-mode="light"] {
-    --vscode-font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    --vscode-font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
     --vscode-editor-background: #ffffff;
-    --vscode-editor-foreground: #24292f;
+    --vscode-editor-foreground: #37352f;
     --vscode-editorGroupHeader-tabsBackground: #f3f3f3;
-    --vscode-editorGroup-border: #d0d7de;
+    --vscode-editorGroup-border: #e9ecef;
     --vscode-scrollbarSlider-background: rgba(87, 96, 106, 0.28);
     --vscode-scrollbarSlider-hoverBackground: rgba(87, 96, 106, 0.45);
     --vscode-list-hoverBackground: #eaeef2;
@@ -123,11 +125,11 @@ body[data-theme-mode="light"] {
 }
 
 body[data-theme-mode="dark"] {
-    --vscode-font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    --vscode-editor-background: #1e1e1e;
+    --vscode-font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    --vscode-editor-background: #191919;
     --vscode-editor-foreground: #d4d4d4;
-    --vscode-editorGroupHeader-tabsBackground: #252526;
-    --vscode-editorGroup-border: #3c3c3c;
+    --vscode-editorGroupHeader-tabsBackground: #202020;
+    --vscode-editorGroup-border: #2f2f2f;
     --vscode-scrollbarSlider-background: rgba(121, 121, 121, 0.4);
     --vscode-scrollbarSlider-hoverBackground: rgba(121, 121, 121, 0.65);
     --vscode-list-hoverBackground: #2a2d2e;
@@ -316,6 +318,8 @@ body.toc-resizing {
     --editor-pad-bottom: clamp(120px, 45vh, 420px);
     --editor-pad-left: 20px;
     padding: var(--editor-pad-top) var(--editor-pad-right) var(--editor-pad-bottom) var(--editor-pad-left);
+
+
     overflow-y: auto;
     -ms-overflow-style: none;
     scrollbar-width: none;
@@ -328,6 +332,12 @@ body.toc-resizing {
 
 #editor.image-caret-edge-active {
     caret-color: transparent;
+}
+
+body[data-editor-style="notion"] #editor {
+    --editor-content-max-width: 900px;
+    --editor-pad-right: calc(max(32px, calc(50% - (var(--editor-content-max-width) / 2))) + var(--toc-content-offset));
+    --editor-pad-left: max(32px, calc(50% - (var(--editor-content-max-width) / 2)));
 }
 
 #editor.has-overflow {
@@ -410,25 +420,28 @@ body[data-toc-visible="true"] {
 
 /* Markdown styling */
 #editor h1 {
-    font-size: 2em;
-    font-weight: 600;
-    margin: 0.67em 0;
-    border-bottom: 1px solid var(--md-divider-color);
-    padding-bottom: 0.3em;
+    font-size: 2.25em;
+    font-weight: 700;
+    margin: 1em 0 0.5em 0;
+    border-bottom: none;
+    padding-bottom: 0;
+    line-height: 1.2;
 }
 
 #editor h2 {
-    font-size: 1.5em;
+    font-size: 1.75em;
     font-weight: 600;
-    margin: 0.75em 0 0.5em 0;
-    border-bottom: 1px solid var(--md-divider-color);
-    padding-bottom: 0.3em;
+    margin: 1.2em 0 0.5em 0;
+    border-bottom: none;
+    padding-bottom: 0;
+    line-height: 1.3;
 }
 
 #editor h3 {
-    font-size: 1.25em;
+    font-size: 1.4em;
     font-weight: 600;
-    margin: 0.83em 0 0.5em 0;
+    margin: 1em 0 0.5em 0;
+    line-height: 1.3;
 }
 
 #editor h4 {
@@ -773,6 +786,15 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
     border: 1px solid var(--vscode-editorGroup-border);
 }
 
+body[data-editor-style="notion"] #editor code:not(pre code) {
+    background-color: var(--notion-inline-code-bg);
+    padding: 3px 6px;
+    border-radius: 4px;
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    color: var(--notion-inline-code-color);
+    border: none;
+}
+
 #editor pre {
     background-color: rgba(128, 128, 128, 0.15);
     border: 1px solid var(--vscode-editorGroup-border);
@@ -783,6 +805,12 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
     overflow: visible;
     margin: 0.5em 0;
     position: relative;
+}
+
+body[data-editor-style="notion"] #editor pre {
+    background-color: rgba(128, 128, 128, 0.08);
+    border: none;
+    border-radius: 6px;
 }
 
 /* Code block toolbar */
@@ -1124,11 +1152,18 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
 }
 
 #editor blockquote {
-    border-left: 4px solid var(--vscode-editorGroup-border);
-    background-color: var(--vscode-textCodeBlock-background, rgba(127, 127, 127, 0.12));
-    border-radius: 0 4px 4px 0;
-    padding: 0.35em 0.9em;
-    margin: 0.65em 0;
+    background-color: rgba(128, 128, 128, 0.08);
+    border-left: 4px solid var(--vscode-textLink-foreground);
+    border-radius: 2px;
+    padding: 0.2em 0.8em;
+    margin: 0.8em 0;
+}
+
+body[data-editor-style="notion"] #editor blockquote {
+    border-left: 3px solid var(--vscode-editor-foreground);
+    background-color: transparent;
+    border-radius: 0;
+    padding: 0.1em 0.9em;
     color: var(--vscode-editor-foreground);
 }
 
@@ -1143,10 +1178,49 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
 #editor a {
     color: var(--vscode-textLink-foreground);
     text-decoration: none;
+    border-bottom: 1px solid transparent;
+    transition: border-bottom-color 0.1s;
 }
 
 #editor a:hover {
-    text-decoration: underline;
+    text-decoration: none;
+    border-bottom-color: var(--vscode-textLink-foreground);
+}
+
+/* Standalone links as Notion-style banners (bookmarks) */
+body[data-editor-style="notion"] #editor p:has(> a:only-child):not(:has(img)) {
+    margin: 1.2em 0;
+}
+
+body[data-editor-style="notion"] #editor p > a:only-child:not(:has(img)) {
+    display: flex;
+    flex-direction: column;
+    padding: 14px 16px;
+    border: 1px solid var(--vscode-editorGroup-border);
+    border-radius: 6px;
+    background-color: var(--vscode-editor-background);
+    text-decoration: none;
+    color: var(--vscode-editor-foreground);
+    transition: background-color 0.2s ease, border-color 0.2s ease;
+    border-bottom: 1px solid var(--vscode-editorGroup-border);
+}
+
+body[data-editor-style="notion"] #editor p > a:only-child:not(:has(img)):hover {
+    background-color: var(--vscode-list-hoverBackground);
+    border-color: var(--vscode-focusBorder);
+    border-bottom-color: var(--vscode-focusBorder);
+}
+
+body[data-editor-style="notion"] #editor p > a:only-child:not(:has(img))::before {
+    content: "🔗 " attr(href);
+    font-size: 0.85em;
+    color: var(--vscode-descriptionForeground);
+    margin-top: 6px;
+    order: 2;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    opacity: 0.8;
 }
 
 #editor hr {
@@ -1387,6 +1461,44 @@ body.toc-resizing #toc-resizer::before {
     top: 0.35em;
     margin: 0;
     cursor: pointer;
+}
+
+body[data-editor-style="notion"] #editor li > input[type="checkbox"]:first-child {
+    appearance: none;
+    -webkit-appearance: none;
+    width: 16px;
+    height: 16px;
+    border: 1.5px solid var(--vscode-editorGroup-border);
+    border-radius: 3px;
+    left: -1.3em;
+    top: 0.25em;
+    background-color: var(--vscode-editor-background);
+    transition: background-color 0.1s, border-color 0.1s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+body[data-editor-style="notion"] #editor li > input[type="checkbox"]:first-child:checked {
+    background-color: #2383e2;
+    border-color: #2383e2;
+}
+
+body[data-editor-style="notion"] #editor li > input[type="checkbox"]:first-child:checked::after {
+    content: '';
+    width: 4px;
+    height: 8px;
+    border: solid white;
+    border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
+    margin-top: -2px;
+}
+
+/* Strikethrough for checked task list items */
+body[data-editor-style="notion"] #editor li:has(> input[type="checkbox"]:first-child:checked) {
+    color: var(--vscode-descriptionForeground);
+    text-decoration: line-through;
+    opacity: 0.7;
 }
 
 #editor li > input[type="checkbox"].cursor-on {

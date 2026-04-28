@@ -146,6 +146,14 @@ export function activate(context: vscode.ExtensionContext) {
         context.subscriptions.push(disposable);
     });
 
+    const openSettingsCommand = vscode.commands.registerCommand(
+        'manulDown.openSettings',
+        () => {
+            vscode.commands.executeCommand('workbench.action.openSettings', 'manulDown');
+        }
+    );
+    context.subscriptions.push(openSettingsCommand);
+
     const configurationListener = vscode.workspace.onDidChangeConfiguration((event) => {
         if (event.affectsConfiguration(`${MANULDOWN_CONFIGURATION_SECTION}.${OPEN_BY_DEFAULT_SETTING_KEY}`)) {
             void syncDefaultMarkdownAssociationWithSetting();
