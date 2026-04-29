@@ -139,6 +139,11 @@ You can change the following options from VSCode settings (`Ctrl+,` / `Cmd+,`):
 | `manulDown.editor.theme` | `"vscode"` | Editor theme mode: `"vscode"` (follow VSCode), `"light"`, or `"dark"` |
 | `manulDown.list.dashStyle` | `false` | Use `-` as the bullet marker style |
 | `manulDown.list.indentSize` | `2` | Default nested list indentation width (`2` or `4` spaces) when the document style cannot be detected |
+| `manulDown.security.allowRemoteImages` | `false` | Allow remote http/https images to load inside the editor |
+| `manulDown.security.allowRemoteImageImport` | `false` | Allow pasted or dropped remote http/https image URLs to be downloaded into the workspace |
+| `manulDown.security.allowFileLinks` | `false` | Allow `file://` links to be opened from the editor |
+
+Security note: `manulDown.security.allowFileLinks` is disabled by default. Enabling it lets Markdown documents open local `file://` targets, which may include local files, applications, shortcuts, or Windows network shares. Only enable it when you trust the Markdown files you open and understand that links in those documents can trigger local or network file handling outside the editor.
 
 ### Markdown Syntax
 

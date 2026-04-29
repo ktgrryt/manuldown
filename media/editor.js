@@ -79,7 +79,8 @@ import { SearchManager } from './modules/SearchManager.js';
         listDashStyle: initialSettings.listDashStyle === true,
         editorThemeMode: normalizeEditorThemeMode(initialSettings.editorThemeMode),
         allowRemoteImages: initialSettings.allowRemoteImages === true,
-        allowRemoteImageImport: initialSettings.allowRemoteImageImport === true
+        allowRemoteImageImport: initialSettings.allowRemoteImageImport === true,
+        allowFileLinks: initialSettings.allowFileLinks === true
     };
     const imageRenderMaxWidthPx = 820;
     let imageResolveRequestSeq = 0;
@@ -301,7 +302,10 @@ import { SearchManager } from './modules/SearchManager.js';
         if (!hasExplicitScheme(href)) {
             return href;
         }
-        return /^(?:https?:|mailto:)/i.test(href) ? href : null;
+        if (/^(?:https?:|mailto:|file:)/i.test(href)) {
+            return href;
+        }
+        return null;
     }
 
     function classifyImageSourceForEditor(rawSrc) {
@@ -885,6 +889,9 @@ import { SearchManager } from './modules/SearchManager.js';
         }
         if (typeof nextSettings.allowRemoteImageImport === 'boolean') {
             settingsState.allowRemoteImageImport = nextSettings.allowRemoteImageImport;
+        }
+        if (typeof nextSettings.allowFileLinks === 'boolean') {
+            settingsState.allowFileLinks = nextSettings.allowFileLinks;
         }
         syncBodySettings();
         codeBlockManager.setThemeMode(settingsState.editorThemeMode);
@@ -18383,7 +18390,7 @@ import { SearchManager } from './modules/SearchManager.js';
             const openButton = linkPopover.querySelector('[data-action="open"]');
             if (!openButton) return;
             const normalized = String(urlValue || '').trim();
-            const canOpen = isHttpUrl(normalized);
+            const canOpen = isOpenableLinkUrl(normalized);
             openButton.disabled = !canOpen;
             openButton.setAttribute('aria-disabled', canOpen ? 'false' : 'true');
         }
@@ -18419,8 +18426,8 @@ import { SearchManager } from './modules/SearchManager.js';
             setTimeout(() => input.select(), 0);
         }
 
-        function isHttpUrl(url) {
-            return /^https?:\/\//i.test(url);
+        function isOpenableLinkUrl(url) {
+            return /^https?:\/\//i.test(url) || (settingsState.allowFileLinks && /^file:/i.test(url));
         }
 
         function saveLinkUrlIfChanged() {
@@ -18429,8 +18436,9 @@ import { SearchManager } from './modules/SearchManager.js';
                 const newUrl = input.value.trim();
                 const oldUrl = currentLink.getAttribute('href') || '';
                 if (newUrl && newUrl !== oldUrl) {
-                    if (!isHttpUrl(newUrl)) {
-                        // http/https以外はリンクとして設定不可 - 元のURLに戻す
+                    if (!isOpenableLinkUrl(newUrl)) {
+                        // Opening file:// links is opt-in because they can launch local files,
+                        // applications, or network shares.
                         input.value = oldUrl;
                         syncLinkPopoverOpenButtonState(input.value);
                         return;
@@ -18486,7 +18494,7 @@ import { SearchManager } from './modules/SearchManager.js';
             saveLinkUrlIfChanged();
             if (currentLink) {
                 const url = currentLink.getAttribute('href');
-                if (url && isHttpUrl(url)) {
+                if (url && isOpenableLinkUrl(url)) {
                     vscode.postMessage({
                         type: 'openLink',
                         url: url

@@ -269,7 +269,9 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             .map((line) => line.replace(/[ \t\f\v]+/g, ' ').trim());
 
         // Keep leading empty lines to preserve intentional first-line breaks in table cells.
-        while (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+        while (lines.length > 0 && lines[lines.length - 1] === '') {
+            lines.pop();
+        }
 
         if (lines.length === 0) {
             return '';
@@ -433,9 +435,20 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                         }
                         break;
                     case 'openLink':
-                        // Open the link in the default browser (http/https only)
-                        if (message.url && /^https?:\/\//i.test(message.url)) {
-                            vscode.env.openExternal(vscode.Uri.parse(message.url));
+                        // Open external links. file:// links are opt-in because they can
+                        // launch local files, applications, or network shares.
+                        if (typeof message.url === 'string') {
+                            const targetUri = vscode.Uri.parse(message.url);
+                            const allowFileLinks = vscode.workspace
+                                .getConfiguration('manulDown')
+                                .get<boolean>('security.allowFileLinks', false);
+                            if (
+                                targetUri.scheme === 'http' ||
+                                targetUri.scheme === 'https' ||
+                                (allowFileLinks && targetUri.scheme === 'file')
+                            ) {
+                                vscode.env.openExternal(targetUri);
+                            }
                         }
                         break;
                     case 'writeClipboard':
@@ -520,7 +533,9 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
 
     public postMessageToActiveEditor(message: any, options?: { reveal?: boolean }): boolean {
         const panel = this.getActiveWebviewPanel();
-        if (!panel) return false;
+        if (!panel) {
+            return false;
+        }
         if (options?.reveal) {
             panel.reveal(panel.viewColumn, false);
             this.lastActivePanel = panel;
@@ -1259,7 +1274,9 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     inTaskCodeBlock = !inTaskCodeBlock;
                     continue;
                 }
-                if (inTaskCodeBlock) continue;
+                if (inTaskCodeBlock) {
+                    continue;
+                }
                 taskLines[i] = line.replace(
                     /^(\s*(?:[-*+]|\d+\.)\s+)\\\[(\s|x|X)\\\](?=\s|$)/,
                     (_match, prefix, marker) => {
@@ -1502,16 +1519,36 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     private getImageMimeTypeFromPath(pathLike: string): string {
         const normalized = (pathLike || '').split('#')[0].split('?')[0].toLowerCase();
 
-        if (normalized.endsWith('.jpg') || normalized.endsWith('.jpeg')) return 'image/jpeg';
-        if (normalized.endsWith('.gif')) return 'image/gif';
-        if (normalized.endsWith('.bmp')) return 'image/bmp';
-        if (normalized.endsWith('.webp')) return 'image/webp';
-        if (normalized.endsWith('.svg')) return 'image/svg+xml';
-        if (normalized.endsWith('.avif')) return 'image/avif';
-        if (normalized.endsWith('.ico')) return 'image/x-icon';
-        if (normalized.endsWith('.heic')) return 'image/heic';
-        if (normalized.endsWith('.heif')) return 'image/heif';
-        if (normalized.endsWith('.tif') || normalized.endsWith('.tiff')) return 'image/tiff';
+        if (normalized.endsWith('.jpg') || normalized.endsWith('.jpeg')) {
+            return 'image/jpeg';
+        }
+        if (normalized.endsWith('.gif')) {
+            return 'image/gif';
+        }
+        if (normalized.endsWith('.bmp')) {
+            return 'image/bmp';
+        }
+        if (normalized.endsWith('.webp')) {
+            return 'image/webp';
+        }
+        if (normalized.endsWith('.svg')) {
+            return 'image/svg+xml';
+        }
+        if (normalized.endsWith('.avif')) {
+            return 'image/avif';
+        }
+        if (normalized.endsWith('.ico')) {
+            return 'image/x-icon';
+        }
+        if (normalized.endsWith('.heic')) {
+            return 'image/heic';
+        }
+        if (normalized.endsWith('.heif')) {
+            return 'image/heif';
+        }
+        if (normalized.endsWith('.tif') || normalized.endsWith('.tiff')) {
+            return 'image/tiff';
+        }
 
         return 'image/png';
     }
@@ -1919,6 +1956,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         editorThemeMode: EditorThemeMode;
         allowRemoteImages: boolean;
         allowRemoteImageImport: boolean;
+        allowFileLinks: boolean;
     } {
         const config = vscode.workspace.getConfiguration('manulDown');
         const configuredThemeMode = String(config.get<string>('editor.theme', 'vscode')).toLowerCase();
@@ -1936,6 +1974,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             editorThemeMode,
             allowRemoteImages: config.get<boolean>('security.allowRemoteImages', false),
             allowRemoteImageImport: config.get<boolean>('security.allowRemoteImageImport', false),
+            allowFileLinks: config.get<boolean>('security.allowFileLinks', false),
         };
     }
 

@@ -257,6 +257,11 @@
           "type": "boolean",
           "default": false,
           "description": "Allow pasted or dropped remote http/https image URLs to be downloaded into the workspace."
+        },
+        "manulDown.security.allowFileLinks": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow file:// links in Markdown documents to be opened from ManulDown. Disabled by default because file links can open local files, applications, or network shares."
         }
       }
     }
