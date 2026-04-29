@@ -756,7 +756,7 @@ export class MarkdownConverter {
 
         // 引用構文をチェック > text（テキストが必要）
         const blockquoteMatch = normalizedText.match(/^\s*>\s+(.+)$/);
-        if (!isInTableCell && blockquoteMatch) {
+        if (!isInTableCell && !isInListItem && blockquoteMatch) {
             const content = blockquoteMatch[1];
 
             const blockquote = document.createElement('blockquote');

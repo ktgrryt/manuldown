@@ -3035,6 +3035,8 @@ import { SearchManager } from './modules/SearchManager.js';
     let pendingSlashCheckboxCaretListItem = null;
 
     function insertSlashTable() {
+        if (isSelectionInListItem()) return;
+
         const selection = window.getSelection();
         if (!selection || !selection.rangeCount) return;
 
@@ -3297,14 +3299,37 @@ import { SearchManager } from './modules/SearchManager.js';
     }
 
     function insertSlashQuote() {
+        if (isSelectionInListItem()) return;
         if (tryWrapQuoteAtCaret()) return;
         insertEmptyQuote();
     }
 
     function insertToolbarQuote() {
+        if (isSelectionInListItem()) return;
         if (tryWrapQuoteFromSelection()) return;
         if (tryWrapQuoteAtCaret()) return;
         insertEmptyQuote();
+    }
+
+    function isSelectionInListItem() {
+        const selection = window.getSelection();
+        if (!selection || !selection.rangeCount) return false;
+
+        for (let i = 0; i < selection.rangeCount; i++) {
+            const range = selection.getRangeAt(i);
+            const nodes = [range.startContainer, range.endContainer];
+            for (const node of nodes) {
+                const element = node && node.nodeType === Node.ELEMENT_NODE
+                    ? node
+                    : node && node.parentElement;
+                const listItem = element ? element.closest('li') : null;
+                if (listItem && editor.contains(listItem)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     function insertToolbarCodeBlock() {
@@ -3312,6 +3337,8 @@ import { SearchManager } from './modules/SearchManager.js';
     }
 
     function insertSlashCodeBlock() {
+        if (isSelectionInListItem()) return;
+
         const selection = window.getSelection();
         if (!selection || !selection.rangeCount) return;
 
@@ -3801,6 +3828,7 @@ import { SearchManager } from './modules/SearchManager.js';
         { id: 'checkbox', source: 'builtin', description: 'Create a checklist item', action: insertSlashCheckbox }
     ];
     const builtInSlashCommandIdSet = new Set(builtInSlashCommands.map((cmd) => cmd.id.toLowerCase()));
+    const listRestrictedSlashCommandIds = new Set(['table', 'quote', 'code']);
 
     function getAllSlashCommands() {
         return builtInSlashCommands.concat(customSlashCommands);
@@ -3954,7 +3982,10 @@ import { SearchManager } from './modules/SearchManager.js';
 
     function getFilteredSlashCommands(query) {
         const q = (query || '').toLowerCase();
-        const allSlashCommands = getAllSlashCommands();
+        const allSlashCommands = getAllSlashCommands().filter((cmd) => {
+            if (!isSelectionInListItem()) return true;
+            return !(cmd.source === 'builtin' && listRestrictedSlashCommandIds.has(cmd.id));
+        });
         if (!q) return allSlashCommands;
         return allSlashCommands.filter(cmd => cmd.id.toLowerCase().startsWith(q));
     }
@@ -4170,6 +4201,15 @@ import { SearchManager } from './modules/SearchManager.js';
     function executeSlashCommand(cmd) {
         const match = slashMenuState.match || getSlashCommandMatch();
         if (!match) return;
+        if (
+            isSelectionInListItem() &&
+            cmd &&
+            cmd.source === 'builtin' &&
+            listRestrictedSlashCommandIds.has(cmd.id)
+        ) {
+            hideSlashCommandMenu();
+            return;
+        }
 
         hideSlashCommandMenu();
         removeSlashCommandText(match);

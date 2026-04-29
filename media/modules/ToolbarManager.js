@@ -42,6 +42,14 @@ export class ToolbarManager {
             'h2',
             'h3',
         ]);
+        this.listRestrictedCommands = new Set([
+            'h1',
+            'h2',
+            'h3',
+            'quote',
+            'codeblock',
+            'table',
+        ]);
     }
 
     /**
@@ -106,6 +114,11 @@ export class ToolbarManager {
         }
 
         if (this.headingLevelCommands.has(command) && this.getActiveHeadingCommand() === command) {
+            this.updateToolbarState();
+            return;
+        }
+
+        if (this.listRestrictedCommands.has(command) && this.isSelectionInListContext()) {
             this.updateToolbarState();
             return;
         }
@@ -192,6 +205,7 @@ export class ToolbarManager {
     updateCommandAvailability() {
         const inTableCellContext = this.isSelectionInTableCellContext();
         const inHeadingContext = this.isSelectionInHeadingContext();
+        const inListContext = this.isSelectionInListContext();
         const activeHeadingCommand = this.getActiveHeadingCommand();
 
         this.commandButtons.forEach((button, command) => {
@@ -205,10 +219,12 @@ export class ToolbarManager {
                 this.headingLevelCommands.has(command) &&
                 !!activeHeadingCommand &&
                 activeHeadingCommand === command;
+            const disabledByList = this.listRestrictedCommands.has(command) && inListContext;
             const isDisabled =
                 disabledByTable ||
                 disabledBoldInHeading ||
-                disabledSameHeadingLevel;
+                disabledSameHeadingLevel ||
+                disabledByList;
             button.disabled = isDisabled;
             button.classList.toggle('is-disabled', isDisabled);
             button.classList.toggle('is-current-heading', isCurrentHeadingLevel);
@@ -320,6 +336,25 @@ export class ToolbarManager {
 
         // TableManager uses these classes for active table selections.
         return !!this.editor.querySelector('.md-table-cell-selected, .md-table-structure-selected-cell');
+    }
+
+    isSelectionInListContext() {
+        const selection = window.getSelection();
+        if (!selection || selection.rangeCount === 0) {
+            return false;
+        }
+
+        for (let i = 0; i < selection.rangeCount; i++) {
+            const range = selection.getRangeAt(i);
+            if (!this.editor.contains(range.startContainer) && !this.editor.contains(range.endContainer)) {
+                continue;
+            }
+            if (this._getClosestListForNode(range.startContainer) || this._getClosestListForNode(range.endContainer)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     _isNodeInTableCell(node) {
