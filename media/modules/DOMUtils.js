@@ -470,13 +470,19 @@ export class DOMUtils {
      * ゴーストスタイル（削除されたインラインコードのスタイルが残ったもの）をクリーンアップ
      */
     cleanupGhostStyles() {
-        // fontタグと、スタイルを持つspanタグを検索
-        // Markdownエディタとして不要なスタイル属性を持つspanを対象にする
-        const ghostElements = this.editor.querySelectorAll('font, span[style*="font-family"], span[style*="background-color"], span[style*="font-size"]');
         let cleaned = false;
 
-        ghostElements.forEach(element => {
-            // 要素をアンラップ（子要素を保持したまま親要素のみ削除）
+        // Pasting from rich text editors can leave visual styles in the live
+        // contenteditable DOM even when the saved Markdown cannot represent them.
+        this.editor.querySelectorAll('[style]').forEach(element => {
+            if (element.tagName === 'IMG') {
+                return;
+            }
+            element.removeAttribute('style');
+            cleaned = true;
+        });
+
+        this.editor.querySelectorAll('font, span').forEach(element => {
             const parent = element.parentNode;
             if (!parent) return;
 
