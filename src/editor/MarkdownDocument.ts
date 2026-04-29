@@ -62,7 +62,7 @@ export class MarkdownDocument {
     }
 
     public toHtml(): string {
-        const markdown = this.document.getText();
+        const markdown = this.normalizeIgnoredLineWhitespace(this.document.getText());
         try {
             const escapedPlaceholderMarkdown = this.escapePlaceholderAngleBrackets(markdown);
             const explicitBlockquoteMarkdown = this.breakLazyBlockquoteContinuations(escapedPlaceholderMarkdown);
@@ -102,18 +102,16 @@ export class MarkdownDocument {
                         return match;
                     }
                     if (!normalizedTrailing) {
-                        // Keep hard-break intent for round-trip so
-                        // "![...](...)  " is not lost on save, while the webview
-                        // still exposes a blank editable line below the image.
+                        // Keep a blank editable line below an image when the parsed
+                        // HTML contains an actual break after the image.
                         return `<p ${MarkdownDocument.imageHardBreakMarkerAttr}>${normalizedImage}</p>${MarkdownDocument.imageHardBreakPlaceholderHtml}`;
                     }
                     return `<p ${MarkdownDocument.imageHardBreakMarkerAttr}>${normalizedImage}</p><p>${normalizedTrailing}</p>`;
                 }
             );
 
-            // Mark image-only paragraphs that carry trailing hard-break spaces
-            // (marked keeps them as literal spaces, not <br>) so the webview can
-            // ignore the spacing artifact but still allow caret movement below.
+            // Normalize any remaining parsed image-only paragraphs that carry
+            // literal trailing spaces from external HTML input.
             html = html.replace(
                 /<p>\s*((?:<a\b[^>]*>\s*)?<img\b[^>]*>(?:\s*<\/a>)?)([ \t]{2,})<\/p>/gi,
                 (_match, imageSegment) => {
@@ -181,6 +179,54 @@ export class MarkdownDocument {
             console.error('Error parsing markdown:', error);
             return '<p>Error parsing markdown</p>';
         }
+    }
+
+    private normalizeIgnoredLineWhitespace(markdown: string): string {
+        const segments = markdown.match(/[^\n]*\n|[^\n]+$/g);
+        if (!segments || segments.length === 0) {
+            return markdown;
+        }
+
+        const output: string[] = [];
+        let inFence = false;
+        let fenceMarker: '`' | '~' | null = null;
+        let fenceLength = 0;
+
+        for (const segment of segments) {
+            const lineEnding = segment.endsWith('\r\n')
+                ? '\r\n'
+                : (segment.endsWith('\n') ? '\n' : '');
+            const lineWithoutEnding = lineEnding
+                ? segment.slice(0, -lineEnding.length)
+                : segment;
+            const line = this.stripTrailingCarriageReturn(lineWithoutEnding);
+
+            if (inFence) {
+                output.push(segment);
+                if (fenceMarker && this.isFenceClosingLine(line, fenceMarker, fenceLength)) {
+                    inFence = false;
+                    fenceMarker = null;
+                    fenceLength = 0;
+                }
+                continue;
+            }
+
+            const openingFence = this.parseFenceOpeningLine(line);
+            if (openingFence) {
+                output.push(segment);
+                inFence = true;
+                fenceMarker = openingFence.marker;
+                fenceLength = openingFence.length;
+                continue;
+            }
+
+            const normalizedLine = line.trim() === ''
+                ? ''
+                : line.replace(/[ \t]+$/, '');
+            output.push(`${normalizedLine}${lineEnding}`);
+        }
+
+        return output.join('');
     }
 
     private preserveExtraBlankLines(markdown: string): string {
