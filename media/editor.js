@@ -1786,6 +1786,18 @@ import { SearchManager } from './modules/SearchManager.js';
         });
     }
 
+    function focusEditorAndRevealCaret() {
+        try {
+            editor.focus({ preventScroll: true });
+        } catch (e) {
+            editor.focus();
+        }
+        ensureCaretVisible();
+        requestAnimationFrame(() => {
+            ensureCaretVisible();
+        });
+    }
+
     function createCheckboxElement() {
         const checkbox = document.createElement('input');
         checkbox.type = 'checkbox';
@@ -6792,7 +6804,7 @@ import { SearchManager } from './modules/SearchManager.js';
                         firstNewItem.appendChild(createCheckboxElement());
                         firstNewItem.setAttribute('data-preserve-empty', 'true');
                     }
-                    const firstTextNode = document.createTextNode(isCheckboxItem ? '\u200B' : '');
+                    const firstTextNode = document.createTextNode('\u200B');
                     firstNewItem.appendChild(firstTextNode);
 
                     const secondNewItem = document.createElement('li');
@@ -6820,7 +6832,7 @@ import { SearchManager } from './modules/SearchManager.js';
                         newRange.collapse(true);
                         selection.removeAllRanges();
                         selection.addRange(newRange);
-                        editor.focus();
+                        focusEditorAndRevealCaret();
 
                         // Update list item classes after cursor is set
                         updateListItemClasses();
@@ -6831,7 +6843,7 @@ import { SearchManager } from './modules/SearchManager.js';
                         newListItem.appendChild(createCheckboxElement());
                         newListItem.setAttribute('data-preserve-empty', 'true');
                     }
-                    const textNode = document.createTextNode(isCheckboxItem ? '\u200B' : '');
+                    const textNode = document.createTextNode('\u200B');
                     newListItem.appendChild(textNode);
 
                     // Insert the new list item after the current item in the parent list
@@ -6849,7 +6861,7 @@ import { SearchManager } from './modules/SearchManager.js';
                         newRange.collapse(true);
                         selection.removeAllRanges();
                         selection.addRange(newRange);
-                        editor.focus();
+                        focusEditorAndRevealCaret();
 
                         // Update list item classes after cursor is set
                         updateListItemClasses();
@@ -6966,7 +6978,7 @@ import { SearchManager } from './modules/SearchManager.js';
                             n.remove();
                         }
                     });
-                    const textNode = document.createTextNode(isCheckboxItem ? '\u200B' : '');
+                    const textNode = document.createTextNode('\u200B');
                     newListItem.appendChild(textNode);
                     if (isCheckboxItem) {
                         newListItem.setAttribute('data-preserve-empty', 'true');
