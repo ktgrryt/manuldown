@@ -143,7 +143,9 @@ You can change the following options from VSCode settings (`Ctrl+,` / `Cmd+,`):
 | `manulDown.security.allowRemoteImageImport` | `false` | Allow pasted or dropped remote http/https image URLs to be downloaded into the workspace |
 | `manulDown.security.allowFileLinks` | `false` | Allow `file://` links to be opened from the editor |
 
-Security note: `manulDown.security.allowFileLinks` is disabled by default. Enabling it lets Markdown documents open local `file://` targets, which may include local files, applications, shortcuts, or Windows network shares. Only enable it when you trust the Markdown files you open and understand that links in those documents can trigger local or network file handling outside the editor.
+Security notes:
+
+The `manulDown.security.*` options are disabled by default. Enabling them can let Markdown documents trigger outbound network requests, download files from external sources, disclose network metadata such as IP address or access time, or open local `file://` targets such as files, applications, shortcuts, or Windows network shares. Only enable these options when you trust the Markdown files you open.
 
 ### Markdown Syntax
 
