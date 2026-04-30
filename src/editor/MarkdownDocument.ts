@@ -331,11 +331,6 @@ export class MarkdownDocument {
             const stackKey = blockquotePrefix;
             let stack = activeListStacks.get(stackKey) ?? [];
 
-            if (sourceIndent >= 4 && stack.length === 0) {
-                output.push(segment);
-                continue;
-            }
-
             let sourceDepth = 0;
             let sameIndentIndex = -1;
             for (let i = stack.length - 1; i >= 0; i--) {
@@ -363,7 +358,9 @@ export class MarkdownDocument {
                     sourceDepth = stack[parentIndex].depth + depthDelta;
                     stack = stack.slice(0, parentIndex + 1);
                 } else {
-                    sourceDepth = 0;
+                    sourceDepth = sourceIndent >= parserNestedIndent
+                        ? Math.max(1, Math.round(sourceIndent / parserNestedIndent))
+                        : 0;
                     stack = [];
                 }
             }

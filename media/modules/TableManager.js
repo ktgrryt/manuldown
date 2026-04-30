@@ -2323,6 +2323,123 @@ export class TableManager {
         return lines.map(line => line.split('\t'));
     }
 
+    _resolveDirectLinkTarget(text) {
+        const normalized = String(text || '').trim();
+        if (!normalized) return null;
+
+        if (/^https?:\/\/[^\s<>"'`]+$/i.test(normalized)) {
+            return {
+                type: 'url',
+                text: normalized,
+                href: normalized
+            };
+        }
+
+        if (/^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i.test(normalized)) {
+            return {
+                type: 'email',
+                text: normalized,
+                href: `mailto:${normalized}`
+            };
+        }
+
+        return null;
+    }
+
+    _trimTrailingLinkPunctuation(value) {
+        let candidate = value;
+        let trailing = '';
+
+        while (candidate.length > 0 && /[.,!?;:。．、，！？]$/.test(candidate)) {
+            trailing = candidate.slice(-1) + trailing;
+            candidate = candidate.slice(0, -1);
+        }
+
+        while (candidate.endsWith(')')) {
+            const opens = (candidate.match(/\(/g) || []).length;
+            const closes = (candidate.match(/\)/g) || []).length;
+            if (closes <= opens) break;
+            trailing = ')' + trailing;
+            candidate = candidate.slice(0, -1);
+        }
+
+        return { candidate, trailing };
+    }
+
+    _splitTextByDetectedLinks(rawText) {
+        const source = String(rawText || '').replace(/\r\n?/g, '\n');
+        const detectedLinkPattern = /https?:\/\/[^\s<>"'`]+|[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+        const tokens = [];
+        let lastIndex = 0;
+        let match;
+
+        while ((match = detectedLinkPattern.exec(source)) !== null) {
+            const index = match.index;
+            const matchedText = match[0] || '';
+
+            if (index > lastIndex) {
+                tokens.push({ type: 'text', value: source.slice(lastIndex, index) });
+            }
+
+            const { candidate, trailing } = this._trimTrailingLinkPunctuation(matchedText);
+            const resolvedLink = this._resolveDirectLinkTarget(candidate);
+            if (resolvedLink) {
+                tokens.push({
+                    type: resolvedLink.type,
+                    value: resolvedLink.text,
+                    href: resolvedLink.href
+                });
+            } else if (matchedText) {
+                tokens.push({ type: 'text', value: matchedText });
+            }
+            if (trailing) {
+                tokens.push({ type: 'text', value: trailing });
+            }
+
+            lastIndex = index + matchedText.length;
+        }
+
+        if (lastIndex < source.length) {
+            tokens.push({ type: 'text', value: source.slice(lastIndex) });
+        }
+
+        return tokens;
+    }
+
+    _appendTextWithAutoLinks(parent, text) {
+        const tokens = this._splitTextByDetectedLinks(text);
+
+        tokens.forEach((token) => {
+            if (!token || !token.value) return;
+
+            if (token.type === 'url' || token.type === 'email') {
+                const link = document.createElement('a');
+                link.href = token.href || token.value;
+                link.textContent = token.value;
+                parent.appendChild(link);
+                return;
+            }
+
+            parent.appendChild(document.createTextNode(token.value));
+        });
+    }
+
+    _setCellPastedText(cell, text) {
+        if (!cell) return;
+        const directHandles = Array.from(cell.querySelectorAll(':scope > .md-table-structure-handle'));
+        directHandles.forEach(handle => handle.remove());
+
+        cell.textContent = '';
+        const fragment = document.createDocumentFragment();
+        this._appendTextWithAutoLinks(fragment, text);
+        cell.appendChild(fragment);
+        this._ensureCellNotEmpty(cell);
+
+        directHandles.forEach(handle => {
+            cell.appendChild(handle);
+        });
+    }
+
     _applyMatrix(startCell, matrix) {
         const info = this._getCellInfo(startCell);
         if (!info) return;
@@ -2334,7 +2451,7 @@ export class TableManager {
             for (let c = 0; c < matrix[r].length; c++) {
                 const cell = row.cells[startCol + c];
                 if (!cell) continue;
-                this._setCellPlainText(cell, matrix[r][c]);
+                this._setCellPastedText(cell, matrix[r][c]);
             }
         }
 
@@ -3224,7 +3341,14 @@ export class TableManager {
         const range = document.createRange();
         const textNode = this.domUtils.getLastTextNode(cell);
         if (textNode) {
-            range.setStart(textNode, textNode.textContent.length);
+            const parentLink = textNode.parentElement && textNode.parentElement.closest
+                ? textNode.parentElement.closest('a')
+                : null;
+            if (parentLink && cell.contains(parentLink)) {
+                range.setStartAfter(parentLink);
+            } else {
+                range.setStart(textNode, textNode.textContent.length);
+            }
         } else if (this._isCellEmpty(cell)) {
             // For empty cells, placing caret after placeholder <br> makes typing start on the next visual line.
             range.setStart(cell, 0);
