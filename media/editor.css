@@ -505,6 +505,23 @@ body[data-list-dash-style="true"] #editor ul ul ul {
     list-style: none;
 }
 
+#editor li[data-mdw-indent-wrapper="true"] {
+    list-style: none;
+    margin-top: 0;
+    margin-bottom: 0;
+}
+
+#editor li.nested-list-only::marker,
+#editor li[data-mdw-indent-wrapper="true"]::marker {
+    content: '';
+}
+
+#editor li[data-mdw-indent-wrapper="true"]>ul,
+#editor li[data-mdw-indent-wrapper="true"]>ol {
+    margin-top: 0;
+    margin-bottom: 0;
+}
+
 #editor ol {
     list-style-type: decimal;
 }

@@ -10,60 +10,163 @@ export class ListManager {
         this.domUtils = domUtils;
     }
 
-    _getLastDirectListItem(listElement) {
-        if (!listElement || (listElement.tagName !== 'UL' && listElement.tagName !== 'OL')) {
-            return null;
-        }
-        const children = Array.from(listElement.children || []);
-        for (let i = children.length - 1; i >= 0; i--) {
-            const child = children[i];
-            if (child && child.tagName === 'LI') {
-                return child;
-            }
-        }
-        return null;
+    _isListElement(element) {
+        return !!(element && (element.tagName === 'UL' || element.tagName === 'OL'));
     }
 
-    _findTailListItem(node) {
-        if (!node || node.nodeType !== Node.ELEMENT_NODE) {
-            return null;
+    _getDirectNestedLists(listItem) {
+        if (!listItem || listItem.tagName !== 'LI') {
+            return [];
         }
-
-        if (node.tagName === 'LI') {
-            return node;
-        }
-
-        const directListItem = this._getLastDirectListItem(node);
-        if (directListItem) {
-            return directListItem;
-        }
-
-        const children = Array.from(node.children || []);
-        for (let i = children.length - 1; i >= 0; i--) {
-            const candidate = this._findTailListItem(children[i]);
-            if (candidate) {
-                return candidate;
-            }
-        }
-        return null;
+        return Array.from(listItem.children || []).filter((child) => this._isListElement(child));
     }
 
-    _findPreviousIndentTargetListItem(listItem, parentList) {
-        if (!parentList) return null;
+    _hasDirectTextContent(listItem) {
+        if (!listItem || listItem.tagName !== 'LI') {
+            return false;
+        }
+        let directText = '';
+        for (const child of Array.from(listItem.childNodes || [])) {
+            if (child.nodeType === Node.TEXT_NODE) {
+                directText += child.textContent || '';
+                continue;
+            }
+            if (child.nodeType === Node.ELEMENT_NODE && !this._isListElement(child)) {
+                directText += child.textContent || '';
+            }
+        }
+        return directText.replace(/[\u00A0\u200B\uFEFF]/g, '').trim() !== '';
+    }
 
-        let current = parentList;
-        while (current && current !== this.editor) {
-            let prev = current.previousElementSibling;
-            while (prev) {
-                const candidate = this._findTailListItem(prev);
-                if (candidate && candidate !== listItem && candidate.tagName === 'LI') {
-                    return candidate;
+    _markIndentWrapper(listItem) {
+        if (!listItem || listItem.tagName !== 'LI') {
+            return;
+        }
+        listItem.setAttribute('data-mdw-indent-wrapper', 'true');
+        listItem.classList.add('nested-list-only');
+    }
+
+    _clearSourceIndentMetadata(listItem) {
+        if (!listItem || listItem.tagName !== 'LI') {
+            return;
+        }
+        listItem.removeAttribute('data-mdw-source-indent');
+        Array.from(listItem.querySelectorAll ? listItem.querySelectorAll('li[data-mdw-source-indent]') : [])
+            .forEach((child) => child.removeAttribute('data-mdw-source-indent'));
+    }
+
+    _createIndentWrapper(parentList, referenceNode = null) {
+        if (!this._isListElement(parentList)) {
+            return null;
+        }
+        const wrapper = document.createElement('li');
+        this._markIndentWrapper(wrapper);
+        const sublist = document.createElement(parentList.tagName);
+        wrapper.appendChild(sublist);
+        parentList.insertBefore(wrapper, referenceNode);
+        return { wrapper, sublist };
+    }
+
+    _ensureDirectSublist(listItem, tagName) {
+        if (!listItem || listItem.tagName !== 'LI') {
+            return null;
+        }
+        const normalizedTagName = tagName === 'OL' ? 'OL' : 'UL';
+        let sublist = Array.from(listItem.children || []).find(
+            (child) => child.tagName === normalizedTagName
+        );
+        if (!sublist) {
+            sublist = document.createElement(normalizedTagName);
+            listItem.appendChild(sublist);
+        }
+        return sublist;
+    }
+
+    _detachDirectNestedLists(listItem) {
+        const nestedLists = this._getDirectNestedLists(listItem);
+        nestedLists.forEach((nestedList) => nestedList.remove());
+        return nestedLists;
+    }
+
+    _collectFollowingListItems(listItem) {
+        const followingSiblings = [];
+        let nextSibling = listItem ? listItem.nextElementSibling : null;
+        while (nextSibling) {
+            const sibling = nextSibling;
+            nextSibling = nextSibling.nextElementSibling;
+            if (sibling.tagName === 'LI') {
+                followingSiblings.push(sibling);
+            }
+        }
+        return followingSiblings;
+    }
+
+    _cleanupEmptyWrapper(wrapper) {
+        if (!wrapper || wrapper.tagName !== 'LI') {
+            return;
+        }
+        if (this._hasDirectTextContent(wrapper)) {
+            wrapper.removeAttribute('data-mdw-indent-wrapper');
+            wrapper.classList.remove('nested-list-only');
+            return;
+        }
+        const nestedLists = this._getDirectNestedLists(wrapper).filter(
+            (list) => Array.from(list.children || []).some((child) => child.tagName === 'LI')
+        );
+        if (nestedLists.length === 0) {
+            wrapper.remove();
+            return;
+        }
+        if (wrapper.getAttribute('data-preserve-empty') !== 'true') {
+            this._markIndentWrapper(wrapper);
+        }
+    }
+
+    _restoreCursorInMovedListItem(listItem, cursorNode, cursorOffset, fallbackOffset = 0) {
+        requestAnimationFrame(() => {
+            this.editor.focus();
+
+            const selection = window.getSelection();
+            if (!selection) return;
+
+            let targetTextNode = this.domUtils.getFirstTextNode(listItem);
+            if (!targetTextNode) {
+                targetTextNode = document.createTextNode('');
+                const firstSublist = this._getDirectNestedLists(listItem)[0] || null;
+                listItem.insertBefore(targetTextNode, firstSublist);
+            }
+
+            if (cursorNode && listItem.contains(cursorNode)) {
+                try {
+                    const range = document.createRange();
+                    const safeOffset = Math.max(0, Math.min(
+                        cursorOffset,
+                        cursorNode.nodeType === Node.TEXT_NODE
+                            ? (cursorNode.textContent || '').length
+                            : (cursorNode.childNodes ? cursorNode.childNodes.length : 0)
+                    ));
+                    range.setStart(cursorNode, safeOffset);
+                    range.collapse(true);
+                    selection.removeAllRanges();
+                    selection.addRange(range);
+                    return;
+                } catch (e) {
                 }
-                prev = prev.previousElementSibling;
             }
-            current = current.parentElement;
-        }
-        return null;
+
+            try {
+                const range = document.createRange();
+                range.setStart(
+                    targetTextNode,
+                    Math.max(0, Math.min(fallbackOffset, (targetTextNode.textContent || '').length))
+                );
+                range.collapse(true);
+                selection.removeAllRanges();
+                selection.addRange(range);
+            } catch (e) {
+                console.error('[ListManager] Failed to restore cursor:', e);
+            }
+        });
     }
 
     /**
@@ -73,115 +176,113 @@ export class ListManager {
      * @param {number} offset - オフセット（未使用だが互換性のため保持）
      */
     indentListItem(listItem, textNode, offset) {
+        this._clearSourceIndentMetadata(listItem);
+
         const parentList = listItem.parentElement;
         let previousSibling = listItem.previousElementSibling;
-        if (!previousSibling || previousSibling.tagName !== 'LI') {
-            previousSibling = this._findPreviousIndentTargetListItem(listItem, parentList);
-        }
-        if (!previousSibling) {
-            // エディタのフォーカスを維持
+        if (!this._isListElement(parentList)) {
             this.editor.focus();
             return;
         }
-        
 
         // 移動前に現在の選択範囲を保存
         const selection = window.getSelection();
-        const currentRange = selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
+        const currentRange = selection && selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
         const cursorNode = currentRange ? currentRange.startContainer : null;
         const cursorOffset = currentRange ? currentRange.startOffset : 0;
 
-        // 前の兄弟要素がサブリスト(<ul>または<ol>)の場合、
-        // そのサブリストの最後の<li>を前の兄弟要素として扱う
-        if (previousSibling.tagName === 'UL' || previousSibling.tagName === 'OL') {
-            const lastLi = previousSibling.lastElementChild;
-            if (lastLi && lastLi.tagName === 'LI') {
-                previousSibling = lastLi;
-            } else {
+        let sublist = null;
+        let targetParentItem = null;
+        if (previousSibling && previousSibling.tagName === 'LI') {
+            targetParentItem = previousSibling;
+            sublist = this._ensureDirectSublist(previousSibling, parentList.tagName);
+        } else {
+            const wrapperInfo = this._createIndentWrapper(parentList, listItem);
+            if (!wrapperInfo) {
                 this.editor.focus();
                 return;
             }
+            targetParentItem = wrapperInfo.wrapper;
+            sublist = wrapperInfo.sublist;
         }
 
-        // 前の兄弟要素の中のサブリストを探す
-        // 重要: 前の兄弟要素が<li>の場合、その中の最後のサブリストを探す
-        // これにより、正しいネスト構造が維持される
-        let sublist = null;
-        
-        // 前の兄弟要素が<li>の場合、その中の最後のサブリストを探す
-        if (previousSibling.tagName === 'LI') {
-            // 前の兄弟要素の直接の子要素を逆順でチェック（最後のサブリストを見つける）
-            const children = Array.from(previousSibling.children);
-            for (let i = children.length - 1; i >= 0; i--) {
-                const child = children[i];
-                if (child.tagName === 'UL' || child.tagName === 'OL') {
-                    sublist = child;
-                    break;
-                }
-            }
-            
-            // サブリストが存在しない場合は作成
-            if (!sublist) {
-                sublist = document.createElement(parentList.tagName);
-                // 重要: 前の兄弟要素(<li>)の最後の子要素として追加
-                previousSibling.appendChild(sublist);
-            }
-        } else {
-            // 前の兄弟要素が<li>でない場合（通常はありえないが念のため）
-            sublist = document.createElement(parentList.tagName);
-            previousSibling.appendChild(sublist);
-        }
-
-        // リストアイテムをサブリストに移動
+        const detachedNestedLists = this._detachDirectNestedLists(listItem);
         sublist.appendChild(listItem);
+
+        detachedNestedLists.forEach((nestedList) => {
+            if (nestedList.tagName === sublist.tagName) {
+                while (nestedList.firstElementChild) {
+                    sublist.appendChild(nestedList.firstElementChild);
+                }
+                nestedList.remove();
+            } else if (targetParentItem) {
+                targetParentItem.insertBefore(nestedList, sublist.nextSibling);
+            }
+        });
+
         if (parentList && parentList.children.length === 0) {
             parentList.remove();
         }
-        
-        // カーソルとフォーカスを復元
-        // DOMが更新されるまで待つためにrequestAnimationFrameを使用
-        requestAnimationFrame(() => {
-            // エディタにフォーカスを確保
-            this.editor.focus();
-            
-            // リストアイテムにテキストノードがあることを確認
-            let targetTextNode = this.domUtils.getFirstTextNode(listItem);
-            if (!targetTextNode) {
-                // テキストノードが存在しない場合は作成
-                targetTextNode = document.createTextNode('');
-                // サブリストの前に挿入
-                const firstChild = listItem.firstChild;
-                if (firstChild && (firstChild.tagName === 'UL' || firstChild.tagName === 'OL')) {
-                    listItem.insertBefore(targetTextNode, firstChild);
-                } else {
-                    listItem.insertBefore(targetTextNode, firstChild);
-                }
+
+        this._cleanupEmptyWrapper(targetParentItem);
+        this._restoreCursorInMovedListItem(listItem, cursorNode, cursorOffset, 0);
+    }
+
+    _outdentListItemIndependently(listItem) {
+        const parentList = listItem ? listItem.parentElement : null;
+        if (!this._isListElement(parentList)) {
+            return false;
+        }
+
+        const grandParentItem = parentList.parentElement;
+        if (!grandParentItem || grandParentItem.tagName !== 'LI') {
+            return false;
+        }
+
+        const grandParentList = grandParentItem.parentElement;
+        if (!this._isListElement(grandParentList)) {
+            return false;
+        }
+
+        this._clearSourceIndentMetadata(listItem);
+
+        const selection = window.getSelection();
+        const currentRange = selection && selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
+        const cursorNode = currentRange ? currentRange.startContainer : null;
+        const cursorOffset = currentRange ? currentRange.startOffset : 0;
+
+        const detachedNestedLists = this._detachDirectNestedLists(listItem);
+        const followingSiblings = this._collectFollowingListItems(listItem);
+        const insertBeforeNode = grandParentItem.nextSibling;
+
+        grandParentList.insertBefore(listItem, insertBeforeNode);
+
+        let continuationSublist = null;
+        const ensureContinuationSublist = () => {
+            if (!continuationSublist || !continuationSublist.isConnected) {
+                continuationSublist = this._ensureDirectSublist(listItem, parentList.tagName);
             }
-            
-            // カーソルが実際にこのリストアイテム内にあった場合のみ復元を試みる
-            if (cursorNode && listItem.contains(cursorNode)) {
-                try {
-                    const range = document.createRange();
-                    range.setStart(cursorNode, cursorOffset);
-                    range.collapse(true);
-                    selection.removeAllRanges();
-                    selection.addRange(range);
-                    return;
-                } catch (e) {
-                }
-            }
-            
-            // フォールバック：テキストノードの先頭にカーソルを配置
-            try {
-                const range = document.createRange();
-                range.setStart(targetTextNode, 0);
-                range.collapse(true);
-                selection.removeAllRanges();
-                selection.addRange(range);
-            } catch (e) {
-                console.error('[ListManager.indentListItem] Failed to set cursor:', e);
-            }
+            return continuationSublist;
+        };
+
+        detachedNestedLists.forEach((nestedList) => {
+            const wrapper = document.createElement('li');
+            this._markIndentWrapper(wrapper);
+            wrapper.appendChild(nestedList);
+            ensureContinuationSublist().appendChild(wrapper);
         });
+
+        followingSiblings.forEach((sibling) => {
+            ensureContinuationSublist().appendChild(sibling);
+        });
+
+        if (parentList.children.length === 0) {
+            parentList.remove();
+        }
+
+        this._cleanupEmptyWrapper(grandParentItem);
+        this._restoreCursorInMovedListItem(listItem, cursorNode, cursorOffset, 0);
+        return true;
     }
 
     /**
@@ -191,6 +292,10 @@ export class ListManager {
      * @param {number} offset - オフセット（未使用だが互換性のため保持）
      */
     outdentListItem(listItem, textNode, offset) {
+        if (this._outdentListItemIndependently(listItem)) {
+            return;
+        }
+
         const parentList = listItem.parentElement;
         const grandParentItem = parentList.parentElement;
         

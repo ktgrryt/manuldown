@@ -763,6 +763,20 @@ export class CursorManager {
         if (!container) {
             return null;
         }
+        const getDirectListItems = (list) => list
+            ? Array.from(list.children || []).filter((child) => child.tagName === 'LI')
+            : [];
+        const resolveVisibleListItem = (listItem, preferredDirection = direction) => {
+            if (!this._isIndentWrapperListItem(listItem)) {
+                return listItem;
+            }
+            const nestedList = this._getNestedListContainer(listItem);
+            const children = getDirectListItems(nestedList);
+            const target = preferredDirection === 'up'
+                ? children[children.length - 1]
+                : children[0];
+            return target ? resolveVisibleListItem(target, preferredDirection) : listItem;
+        };
         const findListItemAroundIndex = (nodes, index, searchDirection) => {
             if (!nodes || nodes.length === 0) {
                 return null;
@@ -771,13 +785,13 @@ export class CursorManager {
                 for (let i = index; i < nodes.length; i++) {
                     const node = nodes[i];
                     if (node && node.nodeType === Node.ELEMENT_NODE && node.tagName === 'LI') {
-                        return node;
+                        return resolveVisibleListItem(node, searchDirection);
                     }
                 }
                 for (let i = index - 1; i >= 0; i--) {
                     const node = nodes[i];
                     if (node && node.nodeType === Node.ELEMENT_NODE && node.tagName === 'LI') {
-                        return node;
+                        return resolveVisibleListItem(node, searchDirection);
                     }
                 }
                 return null;
@@ -785,13 +799,13 @@ export class CursorManager {
             for (let i = index; i >= 0; i--) {
                 const node = nodes[i];
                 if (node && node.nodeType === Node.ELEMENT_NODE && node.tagName === 'LI') {
-                    return node;
+                    return resolveVisibleListItem(node, searchDirection);
                 }
             }
             for (let i = index + 1; i < nodes.length; i++) {
                 const node = nodes[i];
                 if (node && node.nodeType === Node.ELEMENT_NODE && node.tagName === 'LI') {
-                    return node;
+                    return resolveVisibleListItem(node, searchDirection);
                 }
             }
             return null;
@@ -807,6 +821,9 @@ export class CursorManager {
 
             if (direction === 'up' && parentListItem && offset <= 0) {
                 const firstChildListItem = listItemChildren.length > 0 ? listItemChildren[0] : null;
+                if (this._isIndentWrapperListItem(parentListItem) && firstChildListItem) {
+                    return firstChildListItem;
+                }
                 if (firstChildListItem) {
                     const selection = window.getSelection();
                     if (selection && selection.rangeCount > 0) {
@@ -831,6 +848,9 @@ export class CursorManager {
             }
 
             if (direction === 'down' && parentListItem && offset >= children.length) {
+                if (this._isIndentWrapperListItem(parentListItem) && listItemChildren.length > 0) {
+                    return listItemChildren[listItemChildren.length - 1];
+                }
                 return parentListItem;
             }
 
@@ -892,7 +912,7 @@ export class CursorManager {
                 return parentListItem;
             }
         }
-        return this.domUtils.getParentElement(container, 'LI');
+        return resolveVisibleListItem(this.domUtils.getParentElement(container, 'LI'), direction);
     }
 
     _getNextNavigableElementInDocument(element) {
@@ -2131,12 +2151,21 @@ export class CursorManager {
         return nodes.length ? nodes[nodes.length - 1] : null;
     }
 
+    _isIndentWrapperListItem(listItem) {
+        return !!(
+            listItem &&
+            listItem.tagName === 'LI' &&
+            listItem.getAttribute &&
+            listItem.getAttribute('data-mdw-indent-wrapper') === 'true'
+        );
+    }
+
     _getAdjacentListItem(listItem, direction) {
         if (!listItem) {
             return null;
         }
         const isList = (node) => node && (node.tagName === 'UL' || node.tagName === 'OL');
-        const getFirstLiInList = (list) => {
+        const getFirstDirectLiInList = (list) => {
             if (!list) {
                 return null;
             }
@@ -2147,7 +2176,7 @@ export class CursorManager {
             }
             return null;
         };
-        const getLastLiInList = (list) => {
+        const getLastDirectLiInList = (list) => {
             if (!list) {
                 return null;
             }
@@ -2159,29 +2188,46 @@ export class CursorManager {
             }
             return null;
         };
+        const getFirstDescendantLi = (li) => {
+            if (!li) {
+                return null;
+            }
+            if (!this._isIndentWrapperListItem(li)) {
+                return li;
+            }
+            const nestedList = this._getNestedListContainer(li);
+            const firstChild = getFirstDirectLiInList(nestedList);
+            return firstChild ? getFirstDescendantLi(firstChild) : null;
+        };
         const getLastDescendantLi = (li) => {
             let current = li;
             while (current) {
                 const nestedList = this._getNestedListContainer(current);
-                const lastChild = getLastLiInList(nestedList);
+                const lastChild = getLastDirectLiInList(nestedList);
                 if (!lastChild) {
                     break;
                 }
                 current = lastChild;
             }
-            return current;
+            return this._isIndentWrapperListItem(current) ? null : current;
         };
 
         if (direction === 'prev') {
             let prev = listItem.previousElementSibling;
             while (prev) {
                 if (prev.tagName === 'LI') {
-                    return getLastDescendantLi(prev);
+                    const candidate = getLastDescendantLi(prev);
+                    if (candidate) {
+                        return candidate;
+                    }
                 }
                 if (isList(prev)) {
-                    const lastChild = getLastLiInList(prev);
+                    const lastChild = getLastDirectLiInList(prev);
                     if (lastChild) {
-                        return getLastDescendantLi(lastChild);
+                        const candidate = getLastDescendantLi(lastChild);
+                        if (candidate) {
+                            return candidate;
+                        }
                     }
                 }
                 prev = prev.previousElementSibling;
@@ -2189,25 +2235,39 @@ export class CursorManager {
             const parentList = listItem.parentElement;
             const parentLi = parentList ? this.domUtils.getParentElement(parentList, 'LI') : null;
             if (parentLi) {
+                if (this._isIndentWrapperListItem(parentLi)) {
+                    return this._getAdjacentListItem(parentLi, 'prev');
+                }
                 return parentLi;
             }
         }
 
         if (direction === 'next') {
-            const nestedList = this._getNestedListContainer(listItem);
-            const firstChild = getFirstLiInList(nestedList);
-            if (firstChild) {
-                return firstChild;
+            if (!this._isIndentWrapperListItem(listItem)) {
+                const nestedList = this._getNestedListContainer(listItem);
+                const firstChild = getFirstDirectLiInList(nestedList);
+                if (firstChild) {
+                    const candidate = getFirstDescendantLi(firstChild);
+                    if (candidate) {
+                        return candidate;
+                    }
+                }
             }
             let next = listItem.nextElementSibling;
             while (next) {
                 if (next.tagName === 'LI') {
-                    return next;
+                    const candidate = getFirstDescendantLi(next);
+                    if (candidate) {
+                        return candidate;
+                    }
                 }
                 if (isList(next)) {
-                    const firstInList = getFirstLiInList(next);
+                    const firstInList = getFirstDirectLiInList(next);
                     if (firstInList) {
-                        return firstInList;
+                        const candidate = getFirstDescendantLi(firstInList);
+                        if (candidate) {
+                            return candidate;
+                        }
                     }
                 }
                 next = next.nextElementSibling;
@@ -2218,12 +2278,18 @@ export class CursorManager {
                 let nextSibling = parentLi.nextElementSibling;
                 while (nextSibling) {
                     if (nextSibling.tagName === 'LI') {
-                        return nextSibling;
+                        const candidate = getFirstDescendantLi(nextSibling);
+                        if (candidate) {
+                            return candidate;
+                        }
                     }
                     if (isList(nextSibling)) {
-                        const firstInList = getFirstLiInList(nextSibling);
+                        const firstInList = getFirstDirectLiInList(nextSibling);
                         if (firstInList) {
-                            return firstInList;
+                            const candidate = getFirstDescendantLi(firstInList);
+                            if (candidate) {
+                                return candidate;
+                            }
                         }
                     }
                     nextSibling = nextSibling.nextElementSibling;
@@ -2239,6 +2305,19 @@ export class CursorManager {
     _placeCursorInListItemAtX(listItem, currentX, direction, selection) {
         if (!listItem || !selection) {
             return false;
+        }
+        if (this._isIndentWrapperListItem(listItem)) {
+            const nestedList = this._getNestedListContainer(listItem);
+            const items = nestedList
+                ? Array.from(nestedList.children || []).filter((child) => child.tagName === 'LI')
+                : [];
+            const target = direction === 'up' ? items[items.length - 1] : items[0];
+            if (target && target !== listItem) {
+                return this._placeCursorInListItemAtX(target, currentX, direction, selection);
+            }
+            const adjacentDirection = direction === 'up' ? 'prev' : 'next';
+            const adjacent = this._getAdjacentListItem(listItem, adjacentDirection);
+            return adjacent ? this._placeCursorInListItemAtX(adjacent, currentX, direction, selection) : false;
         }
 
         const textNodes = this._getDirectTextNodes(listItem);
@@ -4131,6 +4210,17 @@ export class CursorManager {
                             }
 
                             if (targetListItem) {
+                                if (this._isIndentWrapperListItem(targetListItem)) {
+                                    const resolvedListItem =
+                                        this._getAdjacentListItem(targetListItem, 'prev') ||
+                                        this._getAdjacentListItem(targetListItem, 'next');
+                                    if (resolvedListItem &&
+                                        this._placeCursorInListItemAtX(resolvedListItem, currentX, 'up', selection)) {
+                                        return true;
+                                    }
+                                    return false;
+                                }
+
                                 // リストアイテムのテキスト部分（ネストされたリストを除く）のテキストノードを取得
                                 const textNodes = [];
                                 const walker = document.createTreeWalker(
@@ -6433,6 +6523,16 @@ export class CursorManager {
                     );
                 }
                 if (targetListItem) {
+                    if (this._isIndentWrapperListItem(targetListItem)) {
+                        const resolvedListItem =
+                            this._getAdjacentListItem(targetListItem, 'next') ||
+                            this._getAdjacentListItem(targetListItem, 'prev');
+                        return !!(
+                            resolvedListItem &&
+                            this._placeCursorInListItemAtX(resolvedListItem, currentX, 'down', selection)
+                        );
+                    }
+
                     if (originListHasVisualLineBelow &&
                         originListItem &&
                         targetListItem !== originListItem) {

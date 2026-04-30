@@ -68,7 +68,9 @@ export class MarkdownDocument {
             const explicitBlockquoteMarkdown = this.breakLazyBlockquoteContinuations(escapedPlaceholderMarkdown);
             const blockquoteBlankPreservedMarkdown = this.preserveEmptyBlockquoteLines(explicitBlockquoteMarkdown);
             const preprocessedMarkdown = this.preserveExtraBlankLines(blockquoteBlankPreservedMarkdown);
-            let html = marked.parse(preprocessedMarkdown) as string;
+            const sourceIndentAnnotatedMarkdown = this.annotateListItemSourceIndents(preprocessedMarkdown);
+            let html = marked.parse(sourceIndentAnnotatedMarkdown) as string;
+            html = this.applyListItemSourceIndentMarkers(html);
 
 
             // Fix malformed HTML: Remove <p> tags that wrap <ul> or <ol> elements
@@ -138,12 +140,12 @@ export class MarkdownDocument {
             // Fix marked's incorrect parsing of empty list items as headings
             // Pattern: <li><h1></h1> to <li>, <li><h2></h2> to <li>, etc.
             // This happens when there's an empty list item followed by spaces
-            html = html.replace(/<li>\s*<h[1-6]>\s*<\/h[1-6]>\s*/gi, '<li>');
+            html = html.replace(/<li\b([^>]*)>\s*<h[1-6]>\s*<\/h[1-6]>\s*/gi, '<li$1>');
 
             // Fix empty list items: add &nbsp; to preserve them
             // Pattern: <li></li> or <li>\s*</li> (empty or whitespace only)
             // But NOT if it contains nested lists
-            html = html.replace(/<li>(\s*)<\/li>/gi, '<li>&nbsp;</li>');
+            html = html.replace(/<li\b([^>]*)>(\s*)<\/li>/gi, '<li$1>&nbsp;</li>');
 
             // Fix empty list items that only contain nested lists
             // Pattern: <li><ul>...</ul></li> or <li><ol>...</ol></li>
@@ -179,6 +181,225 @@ export class MarkdownDocument {
             console.error('Error parsing markdown:', error);
             return '<p>Error parsing markdown</p>';
         }
+    }
+
+    private getVisualIndentWidth(value: string): number {
+        let width = 0;
+        for (const char of value) {
+            width += char === '\t' ? 4 : 1;
+        }
+        return width;
+    }
+
+    private detectListIndentSize(markdown: string): number | null {
+        const lines = markdown.split(/\r?\n/);
+        let activeFenceChar: '`' | '~' | null = null;
+        let activeFenceLength = 0;
+        const indentDeltaCandidates: number[] = [];
+        const positiveIndentSamples: number[] = [];
+        const previousIndentByBlockquoteDepth = new Map<number, number>();
+
+        for (const line of lines) {
+            const fenceMatch = line.match(/^ {0,3}(`{3,}|~{3,})/);
+            if (fenceMatch) {
+                const fenceToken = fenceMatch[1];
+                const fenceChar = fenceToken[0] as '`' | '~';
+                const fenceLength = fenceToken.length;
+                if (activeFenceChar === null) {
+                    activeFenceChar = fenceChar;
+                    activeFenceLength = fenceLength;
+                } else if (activeFenceChar === fenceChar && fenceLength >= activeFenceLength) {
+                    activeFenceChar = null;
+                    activeFenceLength = 0;
+                }
+                continue;
+            }
+
+            if (activeFenceChar !== null) {
+                continue;
+            }
+
+            const blockquotePrefixMatch = line.match(/^((?:\s*>[ \t]?)*)(.*)$/);
+            const blockquotePrefix = blockquotePrefixMatch?.[1] ?? '';
+            const lineWithoutBlockquotePrefix = blockquotePrefixMatch?.[2] ?? line;
+            const trimmed = lineWithoutBlockquotePrefix.trim();
+            if (/^([*-])(?:\s*\1){2,}\s*$/.test(trimmed)) {
+                continue;
+            }
+
+            const listMatch = lineWithoutBlockquotePrefix.match(/^([ \t]*)(?:[*+-]|\d+[.)])\s+/);
+            if (!listMatch) {
+                continue;
+            }
+
+            const indentWidth = this.getVisualIndentWidth(listMatch[1]);
+            const blockquoteDepth = (blockquotePrefix.match(/>/g) || []).length;
+            const previousIndent = previousIndentByBlockquoteDepth.get(blockquoteDepth);
+            if (typeof previousIndent === 'number' && indentWidth > previousIndent) {
+                indentDeltaCandidates.push(indentWidth - previousIndent);
+            }
+            previousIndentByBlockquoteDepth.set(blockquoteDepth, indentWidth);
+
+            if (indentWidth > 0) {
+                positiveIndentSamples.push(indentWidth);
+            }
+        }
+
+        const delta2Count = indentDeltaCandidates.filter((value) => value === 2).length;
+        const delta4Count = indentDeltaCandidates.filter((value) => value === 4).length;
+        if (delta2Count > 0 || delta4Count > 0) {
+            return delta2Count > 0 ? 2 : 4;
+        }
+
+        const indent2Count = positiveIndentSamples.filter((value) => value === 2).length;
+        const indent4Count = positiveIndentSamples.filter((value) => value === 4).length;
+        if (indent2Count > 0 || indent4Count > 0) {
+            return indent2Count > 0 ? 2 : 4;
+        }
+
+        if (positiveIndentSamples.length > 0) {
+            const minimumIndent = Math.min(...positiveIndentSamples);
+            if (minimumIndent >= 4) {
+                return 4;
+            }
+        }
+
+        return null;
+    }
+
+    private annotateListItemSourceIndents(markdown: string): string {
+        const segments = markdown.match(/[^\n]*\n|[^\n]+$/g);
+        if (!segments || segments.length === 0) {
+            return markdown;
+        }
+
+        const output: string[] = [];
+        let activeFenceChar: '`' | '~' | null = null;
+        let activeFenceLength = 0;
+        const activeListStacks = new Map<string, Array<{ sourceIndent: number; depth: number }>>();
+        const parserNestedIndent = this.detectListIndentSize(markdown) ?? 2;
+
+        for (const segment of segments) {
+            const lineEnding = segment.endsWith('\r\n')
+                ? '\r\n'
+                : (segment.endsWith('\n') ? '\n' : '');
+            const lineWithoutEnding = lineEnding
+                ? segment.slice(0, -lineEnding.length)
+                : segment;
+
+            const fenceMatch = lineWithoutEnding.match(/^ {0,3}(`{3,}|~{3,})/);
+            if (fenceMatch) {
+                output.push(segment);
+                const fenceToken = fenceMatch[1];
+                const fenceChar = fenceToken[0] as '`' | '~';
+                const fenceLength = fenceToken.length;
+                if (activeFenceChar === null) {
+                    activeFenceChar = fenceChar;
+                    activeFenceLength = fenceLength;
+                } else if (activeFenceChar === fenceChar && fenceLength >= activeFenceLength) {
+                    activeFenceChar = null;
+                    activeFenceLength = 0;
+                }
+                continue;
+            }
+
+            if (activeFenceChar !== null) {
+                output.push(segment);
+                continue;
+            }
+
+            const trimmed = lineWithoutEnding.trim();
+            if (/^([*-])(?:\s*\1){2,}\s*$/.test(trimmed)) {
+                activeListStacks.clear();
+                output.push(segment);
+                continue;
+            }
+
+            const listMatch = lineWithoutEnding.match(/^((?:\s*>[ \t]?)*)([ \t]*)([*+-]|\d+[.)])([ \t]+)((?:\[[ xX]\][ \t]+)?)/);
+            if (!listMatch) {
+                if (trimmed !== '' && !/^<p\b[^>]*\bdata-mdw-blankline=/i.test(trimmed)) {
+                    activeListStacks.clear();
+                }
+                output.push(segment);
+                continue;
+            }
+
+            const [, blockquotePrefix, indent, marker, spacing, taskPrefix] = listMatch;
+            const originalMarkerPrefix = `${blockquotePrefix}${indent}${marker}${spacing}${taskPrefix}`;
+            const rest = lineWithoutEnding.slice(originalMarkerPrefix.length);
+            const sourceIndent = this.getVisualIndentWidth(indent);
+            const stackKey = blockquotePrefix;
+            let stack = activeListStacks.get(stackKey) ?? [];
+
+            if (sourceIndent >= 4 && stack.length === 0) {
+                output.push(segment);
+                continue;
+            }
+
+            let sourceDepth = 0;
+            let sameIndentIndex = -1;
+            for (let i = stack.length - 1; i >= 0; i--) {
+                if (stack[i].sourceIndent === sourceIndent) {
+                    sameIndentIndex = i;
+                    break;
+                }
+            }
+
+            if (sameIndentIndex >= 0) {
+                sourceDepth = stack[sameIndentIndex].depth;
+                stack = stack.slice(0, sameIndentIndex);
+            } else {
+                let parentIndex = -1;
+                for (let i = stack.length - 1; i >= 0; i--) {
+                    if (stack[i].sourceIndent < sourceIndent) {
+                        parentIndex = i;
+                        break;
+                    }
+                }
+
+                if (parentIndex >= 0) {
+                    const sourceIndentDelta = sourceIndent - stack[parentIndex].sourceIndent;
+                    const depthDelta = Math.max(1, Math.round(sourceIndentDelta / parserNestedIndent));
+                    sourceDepth = stack[parentIndex].depth + depthDelta;
+                    stack = stack.slice(0, parentIndex + 1);
+                } else {
+                    sourceDepth = 0;
+                    stack = [];
+                }
+            }
+
+            const parentDepth = stack.length > 0 ? stack[stack.length - 1].depth : -1;
+            for (let depth = parentDepth + 1; depth < sourceDepth; depth++) {
+                const wrapperIndentText = ' '.repeat(depth * parserNestedIndent);
+                const wrapperPrefix = `${blockquotePrefix}${wrapperIndentText}${marker}${spacing}`;
+                output.push(`${wrapperPrefix}<!--MDW-INDENT-WRAPPER-->${lineEnding}`);
+            }
+
+            const parserIndent = sourceDepth > 0
+                ? sourceDepth * parserNestedIndent
+                : Math.min(sourceIndent, 3);
+            const parserIndentText = ' '.repeat(Math.max(0, parserIndent));
+            const markerPrefix = `${blockquotePrefix}${parserIndentText}${marker}${spacing}${taskPrefix}`;
+            output.push(`${markerPrefix}<!--MDW-LIST-INDENT:${sourceIndent}-->${rest}${lineEnding}`);
+            stack.push({ sourceIndent, depth: sourceDepth });
+            activeListStacks.set(stackKey, stack);
+        }
+
+        return output.join('');
+    }
+
+    private applyListItemSourceIndentMarkers(html: string): string {
+        return html
+            .replace(
+                /<li\b([^>]*)>((?:\s|<input\b[^>]*>\s*)*)<!--MDW-INDENT-WRAPPER-->/gi,
+                (_match, attrs, prefix) => `<li${attrs} data-mdw-indent-wrapper="true" class="nested-list-only">${prefix}`
+            )
+            .replace(
+                /<li\b([^>]*)>((?:\s|<input\b[^>]*>\s*)*)<!--MDW-LIST-INDENT:(\d+)-->/gi,
+                (_match, attrs, prefix, indent) => `<li${attrs} data-mdw-source-indent="${indent}">${prefix}`
+            )
+            .replace(/<!--MDW-INDENT-WRAPPER-->/g, '')
+            .replace(/<!--MDW-LIST-INDENT:\d+-->/g, '');
     }
 
     private normalizeIgnoredLineWhitespace(markdown: string): string {

@@ -13,6 +13,14 @@ type CustomSlashCommandTemplate = {
 };
 type UnorderedListMarker = '-' | '*' | '+';
 type EditorThemeMode = 'vscode' | 'light' | 'dark';
+type MarkdownListLineInfo = {
+    lineIndex: number;
+    sequenceIndex: number;
+    blockquotePrefix: string;
+    indentWidth: number;
+    textKey: string;
+    isEmpty: boolean;
+};
 
 export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     private static readonly viewType = 'manulDown.editor';
@@ -124,6 +132,117 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 const hasNbsp = directText.includes('\u00A0');
                 const isEmptyWithNestedList = hasNestedList && directText.trim() === '';
                 const isPreservedEmptyWithNestedList = hasNestedList && hasNbsp && directText.replace(/\u00A0/g, '').trim() === '';
+                const isIndependentIndentWrapper = !!(
+                    node &&
+                    typeof node.getAttribute === 'function' &&
+                    node.getAttribute('data-mdw-indent-wrapper') === 'true' &&
+                    hasNestedList &&
+                    directText.replace(/\u00A0/g, '').trim() === ''
+                );
+                const getSourceIndent = (element: any): number | null => {
+                    if (!element || typeof element.getAttribute !== 'function') {
+                        return null;
+                    }
+                    const rawValue = element.getAttribute('data-mdw-source-indent');
+                    if (rawValue === null || rawValue === undefined || rawValue === '') {
+                        return null;
+                    }
+                    const parsed = Number(rawValue);
+                    return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+                };
+                const findSourceIndentInListItem = (element: any): number | null => {
+                    const ownIndent = getSourceIndent(element);
+                    if (ownIndent !== null) {
+                        return ownIndent;
+                    }
+                    const children = Array.prototype.slice.call(element?.children || []);
+                    for (const child of children) {
+                        const tagName = child.tagName || child.nodeName;
+                        if (tagName !== 'UL' && tagName !== 'OL') {
+                            continue;
+                        }
+                        const listItems = Array.prototype.slice.call(child.children || []);
+                        for (const listItem of listItems) {
+                            if ((listItem.tagName || listItem.nodeName) !== 'LI') {
+                                continue;
+                            }
+                            const nestedIndent = findSourceIndentInListItem(listItem);
+                            if (nestedIndent !== null) {
+                                return nestedIndent;
+                            }
+                        }
+                    }
+                    return null;
+                };
+                const getFirstLineIndentWidth = (value: string): number => {
+                    const lines = String(value || '').split('\n');
+                    for (const line of lines) {
+                        if (line.trim() === '') {
+                            continue;
+                        }
+                        const indentMatch = line.match(/^([ \t]*)/);
+                        return provider.getVisualIndentWidth(indentMatch ? indentMatch[1] : '');
+                    }
+                    return 0;
+                };
+                const inferSourceIndentFromAncestors = (element: any): number | null => {
+                    if (!element) {
+                        return null;
+                    }
+
+                    const indentUnit = Math.max(1, provider.getVisualIndentWidth(provider.currentListIndent));
+                    let listLevelsFromSourceAncestor = 0;
+                    let currentList = element.parentNode;
+
+                    while (currentList) {
+                        const listTagName = currentList.tagName || currentList.nodeName;
+                        if (listTagName !== 'UL' && listTagName !== 'OL') {
+                            currentList = currentList.parentNode;
+                            continue;
+                        }
+
+                        const parentItem = currentList.parentNode;
+                        if (!parentItem || (parentItem.tagName || parentItem.nodeName) !== 'LI') {
+                            return listLevelsFromSourceAncestor * indentUnit;
+                        }
+
+                        listLevelsFromSourceAncestor++;
+                        const parentSourceIndent = getSourceIndent(parentItem);
+                        if (parentSourceIndent !== null) {
+                            return parentSourceIndent + (listLevelsFromSourceAncestor * indentUnit);
+                        }
+
+                        currentList = parentItem.parentNode;
+                    }
+
+                    return null;
+                };
+                const getNestedContentIndent = (nestedContent: string): string => {
+                    const parentSourceIndent = getSourceIndent(node) ?? inferSourceIndentFromAncestors(node);
+                    if (parentSourceIndent === null) {
+                        return provider.currentListIndent;
+                    }
+
+                    const nestedLists = Array.prototype.slice.call(node.children || []).filter((child: any) => {
+                        const tagName = child.tagName || child.nodeName;
+                        return tagName === 'UL' || tagName === 'OL';
+                    });
+                    for (const nestedList of nestedLists) {
+                        const listItems = Array.prototype.slice.call(nestedList.children || []);
+                        for (const listItem of listItems) {
+                            if ((listItem.tagName || listItem.nodeName) !== 'LI') {
+                                continue;
+                            }
+                            const childSourceIndent = findSourceIndentInListItem(listItem);
+                            if (childSourceIndent !== null && childSourceIndent > parentSourceIndent) {
+                                const targetRelativeIndent = childSourceIndent - parentSourceIndent;
+                                const existingRelativeIndent = getFirstLineIndentWidth(nestedContent);
+                                return ' '.repeat(Math.max(0, targetRelativeIndent - existingRelativeIndent));
+                            }
+                        }
+                    }
+                    return provider.currentListIndent;
+                };
 
                 // Check if this list item contains a checkbox (task list item)
                 const hasCheckbox = node.querySelector('input[type="checkbox"]') !== null;
@@ -133,14 +252,30 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 const isCompletelyEmpty = !hasCheckbox && !hasNestedList && (directText.trim() === '' || directText.trim() === '\u00A0');
                 const isNestedListItem = node.parentNode && node.parentNode.parentNode && node.parentNode.parentNode.nodeName === 'LI';
 
-                if (isPreservedEmptyWithNestedList) {
+                if (isIndependentIndentWrapper) {
+                    content = content
+                        .replace(/^\n+/, '')
+                        .replace(/\n+$/, '\n')
+                        .replace(/^(?=.)/gm, provider.currentListIndent);
+
+                    return content + (node.nextSibling && !/\n$/.test(content) ? '\n' : '');
+                } else if (isPreservedEmptyWithNestedList) {
                     // Preserved empty list item with nested list: <li>&nbsp;<ul><li>c</li></ul></li>
                     // This is intentionally created by the user (e.g., after backspace)
                     // Use a special marker that will be replaced with &nbsp; later
                     content = content
                         .replace(/^\n+/, '') // remove leading newlines
-                        .replace(/\n+$/, '\n') // replace trailing newlines with just a single one
-                        .replace(/\n/gm, `\n${provider.currentListIndent}`); // indent nested content
+                        .replace(/\n+$/, '\n'); // replace trailing newlines with just a single one
+
+                    const contentLines = content.split('\n');
+                    while (
+                        contentLines.length > 0 &&
+                        contentLines[0].replace(/&nbsp;/gi, '').replace(/\u00A0/g, '').trim() === ''
+                    ) {
+                        contentLines.shift();
+                    }
+                    content = contentLines.join('\n');
+                    content = content.replace(/^(?=.)/gm, getNestedContentIndent(content)); // indent nested content
 
                     let prefix = options.bulletListMarker + ' ';
                     const parent = node.parentNode;
@@ -933,13 +1068,13 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         const delta2Count = indentDeltaCandidates.filter((value) => value === 2).length;
         const delta4Count = indentDeltaCandidates.filter((value) => value === 4).length;
         if (delta2Count > 0 || delta4Count > 0) {
-            return delta4Count >= delta2Count ? 4 : 2;
+            return delta2Count > 0 ? 2 : 4;
         }
 
         const indent2Count = positiveIndentSamples.filter((value) => value === 2).length;
         const indent4Count = positiveIndentSamples.filter((value) => value === 4).length;
         if (indent2Count > 0 || indent4Count > 0) {
-            return indent4Count >= indent2Count ? 4 : 2;
+            return indent2Count > 0 ? 2 : 4;
         }
 
         if (positiveIndentSamples.length > 0) {
@@ -995,6 +1130,128 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         }
 
         return null;
+    }
+
+    private normalizeListLineTextKey(value: string): string {
+        return String(value || '')
+            .replace(/\u00A0/g, ' ')
+            .replace(/&nbsp;|&#160;/gi, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+
+    private getMarkdownListLineInfos(markdown: string): MarkdownListLineInfo[] {
+        const lines = markdown.split(/\r?\n/);
+        const items: MarkdownListLineInfo[] = [];
+        let activeFenceChar: '`' | '~' | null = null;
+        let activeFenceLength = 0;
+
+        for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+            const line = lines[lineIndex];
+            const lineWithoutBlockquotePrefix = this.stripLeadingBlockquotePrefix(line);
+            const fenceMatch = lineWithoutBlockquotePrefix.match(/^ {0,3}(`{3,}|~{3,})/);
+            if (fenceMatch) {
+                const fenceToken = fenceMatch[1];
+                const fenceChar = fenceToken[0] as '`' | '~';
+                const fenceLength = fenceToken.length;
+                if (activeFenceChar === null) {
+                    activeFenceChar = fenceChar;
+                    activeFenceLength = fenceLength;
+                } else if (activeFenceChar === fenceChar && fenceLength >= activeFenceLength) {
+                    activeFenceChar = null;
+                    activeFenceLength = 0;
+                }
+                continue;
+            }
+
+            if (activeFenceChar !== null) {
+                continue;
+            }
+
+            const trimmed = lineWithoutBlockquotePrefix.trim();
+            if (/^([*-])(?:\s*\1){2,}\s*$/.test(trimmed)) {
+                continue;
+            }
+
+            const listMatch = line.match(/^((?:\s*>[ \t]?)*)([ \t]*)([*+-]|\d+[.)])([ \t]+)((?:\[[ xX]\][ \t]+)?)(.*)$/);
+            if (!listMatch) {
+                continue;
+            }
+
+            const [, blockquotePrefix, indent, _marker, _spacing, _taskPrefix, text] = listMatch;
+            const textKey = this.normalizeListLineTextKey(text);
+            items.push({
+                lineIndex,
+                sequenceIndex: items.length,
+                blockquotePrefix,
+                indentWidth: this.getVisualIndentWidth(indent),
+                textKey,
+                isEmpty: textKey === ''
+            });
+        }
+
+        return items;
+    }
+
+    private restorePreservedEmptyListChildIndents(markdown: string, previousMarkdown: string): string {
+        if (!markdown || !previousMarkdown) {
+            return markdown;
+        }
+
+        const previousItems = this.getMarkdownListLineInfos(previousMarkdown);
+        const currentItems = this.getMarkdownListLineInfos(markdown);
+        if (previousItems.length === 0 || currentItems.length === 0) {
+            return markdown;
+        }
+
+        const previousItemsByText = new Map<string, MarkdownListLineInfo[]>();
+        for (const item of previousItems) {
+            if (item.isEmpty) {
+                continue;
+            }
+            const matchingItems = previousItemsByText.get(item.textKey) || [];
+            matchingItems.push(item);
+            previousItemsByText.set(item.textKey, matchingItems);
+        }
+
+        const lines = markdown.split('\n');
+        let changed = false;
+
+        for (let i = 0; i < currentItems.length; i++) {
+            const currentItem = currentItems[i];
+            if (currentItem.isEmpty) {
+                continue;
+            }
+
+            const previousMatches = previousItemsByText.get(currentItem.textKey);
+            const previousItem = previousMatches ? previousMatches.shift() : undefined;
+            if (!previousItem || previousItem.indentWidth <= currentItem.indentWidth) {
+                continue;
+            }
+
+            const currentPreviousItem = currentItems[i - 1];
+            const previousSourceItem = previousItems[previousItem.sequenceIndex - 1];
+            if (
+                !currentPreviousItem ||
+                !currentPreviousItem.isEmpty ||
+                !previousSourceItem ||
+                currentPreviousItem.blockquotePrefix !== currentItem.blockquotePrefix ||
+                previousSourceItem.blockquotePrefix !== previousItem.blockquotePrefix ||
+                previousSourceItem.indentWidth !== currentPreviousItem.indentWidth ||
+                currentPreviousItem.indentWidth >= previousItem.indentWidth
+            ) {
+                continue;
+            }
+
+            lines[currentItem.lineIndex] = lines[currentItem.lineIndex].replace(
+                /^((?:\s*>[ \t]?)*)([ \t]*)([*+-]|\d+[.)])/,
+                (_match, blockquotePrefix: string, _indent: string, marker: string) =>
+                    `${blockquotePrefix}${' '.repeat(previousItem.indentWidth)}${marker}`
+            );
+            changed = true;
+        }
+
+        return changed ? lines.join('\n') : markdown;
     }
 
     private getPreferredUnorderedListMarker(document: vscode.TextDocument): UnorderedListMarker {
@@ -1152,12 +1409,18 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             // BUT: Don't merge if the list item has data-preserve-empty attribute (user intentionally created it)
             // Mark &nbsp; empty items as preserved so they don't get merged away
             html = html.replace(/<li([^>]*)>\s*(?:&nbsp;|\u00A0)\s*(<ul>|<ol>)/gi, (match, attrs, openTag) => {
+                if (attrs.includes('data-mdw-indent-wrapper="true"')) {
+                    return `<li${attrs}>${openTag}`;
+                }
                 if (attrs.includes('data-preserve-empty="true"')) {
                     return `<li${attrs}>&nbsp;${openTag}`;
                 }
                 return `<li${attrs} data-preserve-empty="true">&nbsp;${openTag}`;
             });
             html = html.replace(/<li([^>]*)>(\s|&nbsp;)*(<ul>|<ol>)([\s\S]*?)(<\/ul>|<\/ol>)\s*<\/li>/gi, (match, attrs, space, openTag, content, closeTag) => {
+                if (attrs.includes('data-mdw-indent-wrapper="true"')) {
+                    return `<li${attrs}>${openTag}${content}${closeTag}</li>`;
+                }
                 // Check if this list item has data-preserve-empty attribute
                 if (attrs.includes('data-preserve-empty="true"')) {
                     // Don't mark for merging - preserve as-is with a special marker
@@ -1378,6 +1641,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
 
             // Join lines
             markdown = processedLines.join('\n');
+            markdown = this.restorePreservedEmptyListChildIndents(markdown, document.getText());
 
             // Don't trim trailing whitespace - it may be part of code blocks
             // Just ensure we end with a single newline

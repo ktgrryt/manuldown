@@ -21,6 +21,7 @@ import { SearchManager } from './modules/SearchManager.js';
     let pendingDeleteListItem = null;
     let pendingStrikeCleanup = false;
     let pendingEmptyListItemInsert = null;
+    let pendingListStructureRestore = null;
     let pendingCtrlKDeleteSync = false;
     let pendingListMouseAdjustment = null;
     let pendingInlineCodeRightClickAdjustment = null;
@@ -937,6 +938,479 @@ import { SearchManager } from './modules/SearchManager.js';
 
     function hasNestedListChild(listItem) {
         return !!getNestedListContainerForListItem(listItem);
+    }
+
+    function isNodeInsideListItemSublist(listItem, node) {
+        let current = node && node.nodeType === Node.ELEMENT_NODE
+            ? node
+            : (node ? node.parentElement : null);
+        while (current && current !== listItem) {
+            if (current.tagName === 'UL' || current.tagName === 'OL') {
+                return true;
+            }
+            current = current.parentElement;
+        }
+        return false;
+    }
+
+    function getDirectTextNodesForListItem(listItem) {
+        if (!listItem || listItem.tagName !== 'LI') return [];
+        const nodes = [];
+        const walker = document.createTreeWalker(listItem, NodeFilter.SHOW_TEXT, {
+            acceptNode: (node) => isNodeInsideListItemSublist(listItem, node)
+                ? NodeFilter.FILTER_REJECT
+                : NodeFilter.FILTER_ACCEPT
+        });
+        let node;
+        while (node = walker.nextNode()) {
+            nodes.push(node);
+        }
+        return nodes;
+    }
+
+    function getDirectTextPositionInListItem(listItem, container, offset) {
+        const textNodes = getDirectTextNodesForListItem(listItem);
+        let position = 0;
+        for (const textNode of textNodes) {
+            const textLength = (textNode.textContent || '').length;
+            if (container === textNode) {
+                return position + Math.max(0, Math.min(offset, textLength));
+            }
+            position += textLength;
+        }
+
+        if (container === listItem && typeof offset === 'number') {
+            let childPosition = 0;
+            for (let i = 0; i < Math.min(offset, listItem.childNodes.length); i++) {
+                const child = listItem.childNodes[i];
+                if (child.nodeType === Node.ELEMENT_NODE &&
+                    (child.tagName === 'UL' || child.tagName === 'OL')) {
+                    continue;
+                }
+                childPosition += child.textContent ? child.textContent.length : 0;
+            }
+            return childPosition;
+        }
+
+        if (container && listItem.contains(container) && !isNodeInsideListItemSublist(listItem, container)) {
+            return 0;
+        }
+
+        return null;
+    }
+
+    function getDirectTextRangeOffsetsInListItem(listItem, range) {
+        if (!range || !listItem || !listItem.contains(range.startContainer) || !listItem.contains(range.endContainer)) {
+            return null;
+        }
+        if (isNodeInsideListItemSublist(listItem, range.startContainer) ||
+            isNodeInsideListItemSublist(listItem, range.endContainer)) {
+            return null;
+        }
+
+        const start = getDirectTextPositionInListItem(listItem, range.startContainer, range.startOffset);
+        const end = getDirectTextPositionInListItem(listItem, range.endContainer, range.endOffset);
+        if (start === null || end === null) {
+            return null;
+        }
+        return {
+            start: Math.min(start, end),
+            end: Math.max(start, end)
+        };
+    }
+
+    function deleteDirectTextInListItemByOffsets(listItem, startOffset, endOffset) {
+        const textNodes = getDirectTextNodesForListItem(listItem);
+        let position = 0;
+        textNodes.forEach((textNode) => {
+            const text = textNode.textContent || '';
+            const nodeStart = position;
+            const nodeEnd = position + text.length;
+            position = nodeEnd;
+
+            if (endOffset <= nodeStart || startOffset >= nodeEnd) {
+                return;
+            }
+
+            const deleteStart = Math.max(0, startOffset - nodeStart);
+            const deleteEnd = Math.min(text.length, endOffset - nodeStart);
+            textNode.textContent = text.slice(0, deleteStart) + text.slice(deleteEnd);
+        });
+    }
+
+    function makeListItemDirectContentEmpty(listItem, selection) {
+        let nestedList = Array.from(listItem.children || []).find(
+            child => child.tagName === 'UL' || child.tagName === 'OL'
+        );
+        if (!nestedList &&
+            listItem.nextElementSibling &&
+            (listItem.nextElementSibling.tagName === 'UL' || listItem.nextElementSibling.tagName === 'OL')) {
+            nestedList = listItem.nextElementSibling;
+            listItem.appendChild(nestedList);
+        }
+
+        Array.from(listItem.childNodes || []).forEach((child) => {
+            if (child.nodeType === Node.ELEMENT_NODE &&
+                (child.tagName === 'UL' || child.tagName === 'OL')) {
+                return;
+            }
+            child.remove();
+        });
+
+        const nbspNode = document.createTextNode('\u00A0');
+        listItem.insertBefore(nbspNode, nestedList || null);
+        listItem.setAttribute('data-preserve-empty', 'true');
+
+        if (selection) {
+            const nextRange = document.createRange();
+            nextRange.setStart(nbspNode, 0);
+            nextRange.collapse(true);
+            selection.removeAllRanges();
+            selection.addRange(nextRange);
+        }
+
+        normalizeListRenderingAfterStructureChange(listItem);
+        return true;
+    }
+
+    function handleIndependentListItemDirectDelete(selection, range, direction) {
+        if (!selection || !range) return false;
+
+        const listItem = domUtils.getParentElement(range.startContainer, 'LI') ||
+            getListItemFromRange(range, 'down') ||
+            getListItemFromRange(range, 'up');
+        if (!listItem ||
+            hasCheckboxAtStart(listItem) ||
+            !isRangeInListItemDirectContent(range, listItem)) {
+            return false;
+        }
+
+        const textNodes = getDirectTextNodesForListItem(listItem);
+        const directText = textNodes.map(node => node.textContent || '').join('');
+        if (directText.replace(/[\u00A0\u200B\uFEFF]/g, '').trim() === '') {
+            return false;
+        }
+
+        let deleteStart = 0;
+        let deleteEnd = 0;
+        if (range.collapsed) {
+            const caretOffset = getDirectTextPositionInListItem(listItem, range.startContainer, range.startOffset);
+            if (caretOffset === null) return false;
+
+            if (direction === 'backward') {
+                if (caretOffset <= 0) return false;
+                deleteStart = caretOffset - 1;
+                deleteEnd = caretOffset;
+            } else if (direction === 'forward') {
+                if (caretOffset >= directText.length) return false;
+                deleteStart = caretOffset;
+                deleteEnd = caretOffset + 1;
+            } else {
+                return false;
+            }
+        } else {
+            const offsets = getDirectTextRangeOffsetsInListItem(listItem, range);
+            if (!offsets || offsets.start === offsets.end) return false;
+            deleteStart = offsets.start;
+            deleteEnd = offsets.end;
+        }
+
+        const remainingText = directText.slice(0, deleteStart) + directText.slice(deleteEnd);
+        if (remainingText.replace(/[\u00A0\u200B\uFEFF]/g, '').trim() !== '') {
+            return false;
+        }
+
+        stateManager.saveState();
+        deleteDirectTextInListItemByOffsets(listItem, deleteStart, deleteEnd);
+        makeListItemDirectContentEmpty(listItem, selection);
+        notifyChangeImmediate();
+        return true;
+    }
+
+    function convertEmptyNestedListItemToIndentWrapper(listItem, selection) {
+        if (!listItem ||
+            listItem.tagName !== 'LI' ||
+            hasDirectTextContent(listItem) ||
+            hasCheckboxAtStart(listItem)) {
+            return false;
+        }
+
+        let nestedList = Array.from(listItem.children || []).find(
+            child => child.tagName === 'UL' || child.tagName === 'OL'
+        );
+        if (!nestedList &&
+            listItem.nextElementSibling &&
+            (listItem.nextElementSibling.tagName === 'UL' || listItem.nextElementSibling.tagName === 'OL')) {
+            nestedList = listItem.nextElementSibling;
+            listItem.appendChild(nestedList);
+        }
+        if (!nestedList) return false;
+
+        Array.from(listItem.childNodes || []).forEach((child) => {
+            if (child.nodeType === Node.ELEMENT_NODE &&
+                (child.tagName === 'UL' || child.tagName === 'OL')) {
+                return;
+            }
+            child.remove();
+        });
+
+        listItem.removeAttribute('data-preserve-empty');
+        listItem.setAttribute('data-mdw-indent-wrapper', 'true');
+        listItem.classList.add('nested-list-only');
+        normalizeListRenderingAfterStructureChange(listItem);
+
+        const firstChildItem = Array.from(nestedList.children || []).find(
+            child => child.tagName === 'LI'
+        );
+        if (selection && firstChildItem) {
+            const targetNode =
+                getFirstDirectTextNode(firstChildItem) ||
+                domUtils.getFirstTextNode(firstChildItem) ||
+                firstChildItem;
+            try {
+                const nextRange = document.createRange();
+                nextRange.setStart(targetNode, targetNode.nodeType === Node.TEXT_NODE ? 0 : 0);
+                nextRange.collapse(true);
+                selection.removeAllRanges();
+                selection.addRange(nextRange);
+            } catch (e) {
+                // Keep the structural edit even if caret placement fails.
+            }
+        }
+
+        return true;
+    }
+
+    function placeSelectionAtEmptyParagraphStart(paragraph, selection) {
+        if (!paragraph || !selection) return false;
+        try {
+            const nextRange = document.createRange();
+            nextRange.setStart(paragraph, 0);
+            nextRange.collapse(true);
+            selection.removeAllRanges();
+            selection.addRange(nextRange);
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function convertTopLevelEmptyNestedListItemToParagraphGap(listItem, selection) {
+        if (!listItem || listItem.tagName !== 'LI') return false;
+
+        const parentList = listItem.parentElement;
+        const parentContainer = parentList ? parentList.parentElement : null;
+        if (!parentList || !parentContainer || parentList.parentElement?.tagName === 'LI') {
+            return false;
+        }
+
+        const paragraph = document.createElement('p');
+        paragraph.appendChild(document.createElement('br'));
+
+        if (!convertEmptyNestedListItemToIndentWrapper(listItem, null)) {
+            return false;
+        }
+
+        const followingList = document.createElement(parentList.tagName);
+        let itemToMove = listItem;
+        while (itemToMove) {
+            const nextItem = itemToMove.nextElementSibling;
+            followingList.appendChild(itemToMove);
+            itemToMove = nextItem;
+        }
+
+        if (parentList.children.length > 0) {
+            parentContainer.insertBefore(paragraph, parentList.nextSibling);
+            parentContainer.insertBefore(followingList, paragraph.nextSibling);
+        } else {
+            parentContainer.insertBefore(paragraph, parentList);
+            parentContainer.insertBefore(followingList, parentList);
+            parentList.remove();
+        }
+
+        placeSelectionAtEmptyParagraphStart(paragraph, selection);
+        requestAnimationFrame(() => {
+            placeSelectionAtEmptyParagraphStart(paragraph, window.getSelection());
+            focusEditorAndRevealCaret();
+            updateListItemClasses();
+        });
+
+        return true;
+    }
+
+    function handleEmptyNestedListItemDelete(selection, range) {
+        if (!selection || !range) return false;
+        const listItem = domUtils.getParentElement(range.startContainer, 'LI') ||
+            getListItemFromRange(range, 'down') ||
+            getListItemFromRange(range, 'up');
+        if (!listItem ||
+            hasDirectTextContent(listItem) ||
+            !getNestedListContainerForListItem(listItem) ||
+            !isRangeInListItemDirectContent(range, listItem)) {
+            return false;
+        }
+
+        stateManager.saveState();
+        if (!convertEmptyNestedListItemToIndentWrapper(listItem, selection)) {
+            return false;
+        }
+        notifyChangeImmediate();
+        return true;
+    }
+
+    function handleBackspaceRemoveBlankLineBeforeNestedList(selection, range) {
+        if (!selection || !range || !range.collapsed) return false;
+
+        const isListElement = (node) => !!(
+            node &&
+            node.nodeType === Node.ELEMENT_NODE &&
+            (node.tagName === 'UL' || node.tagName === 'OL')
+        );
+        const getDirectListChildren = (list) => Array.from(list?.children || [])
+            .filter(child => child && child.tagName === 'LI');
+        const getLastVisibleListItemInItem = (listItem) => {
+            if (!listItem || listItem.tagName !== 'LI') return null;
+            const nestedLists = Array.from(listItem.children || [])
+                .filter(isListElement);
+            for (let i = nestedLists.length - 1; i >= 0; i--) {
+                const candidate = getLastVisibleListItemInList(nestedLists[i]);
+                if (candidate) return candidate;
+            }
+            return listItem.getAttribute?.('data-mdw-indent-wrapper') === 'true' ? null : listItem;
+        };
+        const getLastVisibleListItemInList = (list) => {
+            const items = getDirectListChildren(list);
+            for (let i = items.length - 1; i >= 0; i--) {
+                const candidate = getLastVisibleListItemInItem(items[i]);
+                if (candidate) return candidate;
+            }
+            return null;
+        };
+        const placeCaretAtListItemDirectEnd = (listItem) => {
+            const targetNode =
+                getLastMeaningfulDirectTextNode(listItem) ||
+                getLastDirectTextNode(listItem) ||
+                getFirstDirectTextNode(listItem);
+            const nextRange = document.createRange();
+            if (targetNode && targetNode.nodeType === Node.TEXT_NODE) {
+                nextRange.setStart(targetNode, (targetNode.textContent || '').length);
+            } else {
+                const firstSublist = Array.from(listItem.childNodes || []).findIndex(isListElement);
+                nextRange.setStart(
+                    listItem,
+                    firstSublist >= 0 ? firstSublist : (listItem.childNodes ? listItem.childNodes.length : 0)
+                );
+            }
+            nextRange.collapse(true);
+            selection.removeAllRanges();
+            selection.addRange(nextRange);
+        };
+        const makeListItemIndentWrapper = (listItem, adjacentList = null) => {
+            if (!listItem || listItem.tagName !== 'LI') return false;
+            if (adjacentList && isListElement(adjacentList)) {
+                listItem.appendChild(adjacentList);
+            }
+            const hasNestedList = Array.from(listItem.children || []).some(isListElement);
+            if (!hasNestedList) return false;
+
+            Array.from(listItem.childNodes || []).forEach((child) => {
+                if (isListElement(child)) return;
+                child.remove();
+            });
+            listItem.removeAttribute('data-preserve-empty');
+            listItem.setAttribute('data-mdw-indent-wrapper', 'true');
+            listItem.classList.add('nested-list-only');
+            return true;
+        };
+
+        const currentListItem = domUtils.getParentElement(range.startContainer, 'LI') ||
+            getListItemFromRange(range, 'down') ||
+            getListItemFromRange(range, 'up');
+        if (
+            currentListItem &&
+            !hasCheckboxAtStart(currentListItem) &&
+            !hasDirectTextContent(currentListItem) &&
+            isRangeInListItemDirectContent(range, currentListItem)
+        ) {
+            const previousItem = currentListItem.previousElementSibling &&
+                currentListItem.previousElementSibling.tagName === 'LI'
+                ? getLastVisibleListItemInItem(currentListItem.previousElementSibling)
+                : null;
+            const nestedLists = Array.from(currentListItem.children || []).filter(isListElement);
+            const adjacentNestedList = currentListItem.nextElementSibling &&
+                isListElement(currentListItem.nextElementSibling)
+                ? currentListItem.nextElementSibling
+                : null;
+            const hasFollowingList = nestedLists.length > 0 || !!adjacentNestedList;
+
+            if (previousItem && hasFollowingList) {
+                stateManager.saveState();
+                if (!makeListItemIndentWrapper(currentListItem, adjacentNestedList)) {
+                    return false;
+                }
+                placeCaretAtListItemDirectEnd(previousItem);
+                normalizeListRenderingAfterStructureChange();
+                notifyChangeImmediate();
+                return true;
+            }
+        }
+
+        const currentBlock = range.startContainer.nodeType === Node.ELEMENT_NODE
+            ? range.startContainer
+            : range.startContainer.parentElement;
+        let emptyBlock = currentBlock;
+        while (emptyBlock && emptyBlock !== editor && !domUtils.isBlockElement(emptyBlock)) {
+            emptyBlock = emptyBlock.parentElement;
+        }
+        if (
+            !emptyBlock ||
+            emptyBlock === editor ||
+            !/^(P|DIV)$/.test(emptyBlock.tagName) ||
+            !isEffectivelyEmptyBlock(emptyBlock)
+        ) {
+            return false;
+        }
+
+        const followingList = getNextElementSibling(emptyBlock);
+        if (!isListElement(followingList)) {
+            const previousElement = getPreviousElementSibling(emptyBlock);
+            if (isListElement(previousElement)) {
+                const previousItem = getLastVisibleListItemInList(previousElement);
+                if (previousItem) {
+                    stateManager.saveState();
+                    emptyBlock.remove();
+                    placeCaretAtListItemDirectEnd(previousItem);
+                    normalizeListRenderingAfterStructureChange();
+                    notifyChangeImmediate();
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        let previousItem = null;
+        const parentItem = domUtils.getParentElement(emptyBlock, 'LI');
+        if (parentItem) {
+            previousItem = parentItem;
+        }
+        if (!previousItem) {
+            const previousElement = getPreviousElementSibling(emptyBlock);
+            if (isListElement(previousElement)) {
+                previousItem = getLastVisibleListItemInList(previousElement);
+            } else if (previousElement && previousElement.tagName === 'LI') {
+                previousItem = getLastVisibleListItemInItem(previousElement);
+            }
+        }
+        if (!previousItem) {
+            return false;
+        }
+
+        stateManager.saveState();
+        emptyBlock.remove();
+        placeCaretAtListItemDirectEnd(previousItem);
+        normalizeListRenderingAfterStructureChange();
+        notifyChangeImmediate();
+        return true;
     }
 
     function isRangeInListItemDirectContent(range, listItem) {
@@ -2300,6 +2774,21 @@ import { SearchManager } from './modules/SearchManager.js';
 
     function getListItemFromRange(range, direction = 'down') {
         if (!range) return null;
+        const resolveVisibleListItem = (listItem, preferredDirection = direction) => {
+            if (!listItem ||
+                listItem.tagName !== 'LI' ||
+                listItem.getAttribute?.('data-mdw-indent-wrapper') !== 'true') {
+                return listItem;
+            }
+            const nestedList = getNestedListContainerForListItem(listItem);
+            const children = nestedList
+                ? Array.from(nestedList.children || []).filter(child => child.tagName === 'LI')
+                : [];
+            const target = preferredDirection === 'up'
+                ? children[children.length - 1]
+                : children[0];
+            return target ? resolveVisibleListItem(target, preferredDirection) : listItem;
+        };
 
         const resolveFromListContainerBoundary = (container, offset) => {
             if (!container) return null;
@@ -2321,13 +2810,13 @@ import { SearchManager } from './modules/SearchManager.js';
                     for (let i = clamped; i >= 0; i--) {
                         const node = nodes[i];
                         if (node && node.nodeType === Node.ELEMENT_NODE && node.tagName === 'LI') {
-                            return node;
+                            return resolveVisibleListItem(node, direction);
                         }
                     }
                     for (let i = clamped + 1; i < nodes.length; i++) {
                         const node = nodes[i];
                         if (node && node.nodeType === Node.ELEMENT_NODE && node.tagName === 'LI') {
-                            return node;
+                            return resolveVisibleListItem(node, direction);
                         }
                     }
                     return null;
@@ -2335,13 +2824,13 @@ import { SearchManager } from './modules/SearchManager.js';
                 for (let i = clamped; i < nodes.length; i++) {
                     const node = nodes[i];
                     if (node && node.nodeType === Node.ELEMENT_NODE && node.tagName === 'LI') {
-                        return node;
+                        return resolveVisibleListItem(node, direction);
                     }
                 }
                 for (let i = clamped - 1; i >= 0; i--) {
                     const node = nodes[i];
                     if (node && node.nodeType === Node.ELEMENT_NODE && node.tagName === 'LI') {
-                        return node;
+                        return resolveVisibleListItem(node, direction);
                     }
                 }
                 return null;
@@ -2353,6 +2842,9 @@ import { SearchManager } from './modules/SearchManager.js';
                     const firstChildListItem = nodes.find(
                         node => node && node.nodeType === Node.ELEMENT_NODE && node.tagName === 'LI'
                     ) || null;
+                    if (parentListItem.getAttribute?.('data-mdw-indent-wrapper') === 'true' && firstChildListItem) {
+                        return firstChildListItem;
+                    }
                     if (firstChildListItem && cursorManager && typeof cursorManager._getCaretRect === 'function') {
                         const caretRect = cursorManager._getCaretRect(range);
                         const firstChildRect = firstChildListItem.getBoundingClientRect
@@ -2368,25 +2860,33 @@ import { SearchManager } from './modules/SearchManager.js';
                     return parentListItem;
                 }
                 if (direction === 'down' && parentListItem && offset >= nodes.length) {
+                    if (parentListItem.getAttribute?.('data-mdw-indent-wrapper') === 'true') {
+                        for (let i = nodes.length - 1; i >= 0; i--) {
+                            const node = nodes[i];
+                            if (node && node.nodeType === Node.ELEMENT_NODE && node.tagName === 'LI') {
+                                return node;
+                            }
+                        }
+                    }
                     return parentListItem;
                 }
                 const baseIndex = direction === 'up' ? offset - 1 : offset;
                 return pickFromIndex(baseIndex);
             }
 
-            const boundaryIndex = nodes.indexOf(container);
-            if (boundaryIndex === -1) {
-                return null;
-            }
-            const baseIndex = direction === 'up' ? boundaryIndex - 1 : boundaryIndex + 1;
-            return pickFromIndex(baseIndex);
-        };
+	            const boundaryIndex = nodes.indexOf(container);
+	            if (boundaryIndex === -1) {
+	                return null;
+	            }
+	            const baseIndex = direction === 'up' ? boundaryIndex - 1 : boundaryIndex + 1;
+	            return pickFromIndex(baseIndex);
+	        };
 
-        const resolveFromContainer = (container, offset) => {
-            const fromBoundary = resolveFromListContainerBoundary(container, offset);
-            if (fromBoundary) return fromBoundary;
-            return domUtils.getParentElement(container, 'LI');
-        };
+	        const resolveFromContainer = (container, offset) => {
+	            const fromBoundary = resolveFromListContainerBoundary(container, offset);
+	            if (fromBoundary) return fromBoundary;
+	            return resolveVisibleListItem(domUtils.getParentElement(container, 'LI'), direction);
+	        };
 
         let listItem = resolveFromContainer(range.startContainer, range.startOffset);
         if (listItem) return listItem;
@@ -4406,18 +4906,35 @@ import { SearchManager } from './modules/SearchManager.js';
             const hasNestedList = hasNestedListChild(li);
             let isPreservedEmpty = li.getAttribute('data-preserve-empty') === 'true';
             const isActiveItem = activeListItem && li === activeListItem;
+            let isIndentWrapper = li.getAttribute('data-mdw-indent-wrapper') === 'true';
 
-            if (!isPreservedEmpty && !hasNestedList && !hasTextContent) {
+            const removeDirectPlaceholderText = () => {
+                Array.from(li.childNodes || []).forEach(child => {
+                    if (child.nodeType !== Node.TEXT_NODE) return;
+                    const withoutPlaceholders = (child.textContent || '').replace(/[\u00A0\u200B\uFEFF]/g, '');
+                    if (withoutPlaceholders.trim() === '') {
+                        child.remove();
+                    }
+                });
+            };
+
+            if (isIndentWrapper && hasNestedList && !hasTextContent) {
+                li.removeAttribute('data-preserve-empty');
+                removeDirectPlaceholderText();
+                isPreservedEmpty = false;
+            }
+
+            if (!isIndentWrapper && !isPreservedEmpty && !hasNestedList && !hasTextContent) {
                 li.setAttribute('data-preserve-empty', 'true');
                 isPreservedEmpty = true;
             }
 
-            if (!isPreservedEmpty && isActiveItem && hasNestedList && !hasTextContent) {
+            if (!isIndentWrapper && !isPreservedEmpty && isActiveItem && hasNestedList && !hasTextContent) {
                 li.setAttribute('data-preserve-empty', 'true');
                 isPreservedEmpty = true;
             }
 
-            if (!isPreservedEmpty && hasNestedList && !hasTextContent && directText.includes('\u00A0')) {
+            if (!isIndentWrapper && !isPreservedEmpty && hasNestedList && !hasTextContent && directText.includes('\u00A0')) {
                 li.setAttribute('data-preserve-empty', 'true');
                 isPreservedEmpty = true;
             }
@@ -4461,15 +4978,38 @@ import { SearchManager } from './modules/SearchManager.js';
                 }
             }
 
+            if (!isIndentWrapper && !isPreservedEmpty && hasNestedList && !hasTextContent) {
+                li.setAttribute('data-preserve-empty', 'true');
+                isPreservedEmpty = true;
+                const hasNbspNode = Array.from(li.childNodes).some(
+                    child => child.nodeType === Node.TEXT_NODE && child.textContent.includes('\u00A0')
+                );
+                if (!hasNbspNode) {
+                    const nbspNode = document.createTextNode('\u00A0');
+                    const firstSublist = Array.from(li.children).find(
+                        child => child.tagName === 'UL' || child.tagName === 'OL'
+                    );
+                    li.insertBefore(nbspNode, firstSublist || li.firstChild);
+                }
+            } else if (isIndentWrapper && (hasTextContent || !hasNestedList)) {
+                li.removeAttribute('data-mdw-indent-wrapper');
+                isIndentWrapper = false;
+            }
+
             // Add or remove class based on content
             // Always hide marker if there's a nested list and no text content
             // Even if the cursor is in this list item
-            if (hasNestedList && !hasTextContent && !isPreservedEmpty) {
+            if (isIndentWrapper || (hasNestedList && !hasTextContent && !isPreservedEmpty)) {
                 li.classList.add('nested-list-only');
             } else {
                 li.classList.remove('nested-list-only');
             }
         });
+    }
+
+    function normalizeListRenderingAfterStructureChange() {
+        updateListItemClasses();
+        return false;
     }
 
     function preserveEmptyListItemAfterDelete(listItem) {
@@ -4553,6 +5093,121 @@ import { SearchManager } from './modules/SearchManager.js';
         return true;
     }
 
+    function getDirectNestedListsForListItem(listItem) {
+        if (!listItem || listItem.tagName !== 'LI') return [];
+        return Array.from(listItem.children || []).filter(
+            child => child.tagName === 'UL' || child.tagName === 'OL'
+        );
+    }
+
+    function cloneNestedListSnapshots(sublists) {
+        return sublists
+            .filter(sublist => Array.from(sublist.children || []).some(child => child.tagName === 'LI'))
+            .map(sublist => ({
+                tagName: sublist.tagName,
+                clone: sublist.cloneNode(true)
+            }));
+    }
+
+    function captureListStructureForDelete(range) {
+        if (!range) return null;
+
+        const candidates = new Set();
+        const addCandidateFromNode = (node) => {
+            const listItem = node ? domUtils.getParentElement(node, 'LI') : null;
+            if (listItem) {
+                candidates.add(listItem);
+            }
+        };
+
+        addCandidateFromNode(range.startContainer);
+        addCandidateFromNode(range.endContainer);
+
+        if (!range.collapsed) {
+            getSelectedListItemsFromRange(range).forEach(item => candidates.add(item));
+        }
+
+        const snapshots = [];
+        candidates.forEach(listItem => {
+            if (!listItem || !listItem.isConnected || hasCheckboxAtStart(listItem)) return;
+            if (!hasNestedListChild(listItem)) return;
+
+            const affectsDirectContent = range.collapsed
+                ? isRangeInListItemDirectContent(range, listItem)
+                : rangeIntersectsListItemDirectContent(range, listItem);
+            if (!affectsDirectContent) return;
+
+            const sublists = cloneNestedListSnapshots(getDirectNestedListsForListItem(listItem));
+            if (sublists.length === 0) return;
+
+            snapshots.push({
+                listItem,
+                parentList: listItem.parentElement,
+                nextSibling: listItem.nextElementSibling,
+                sourceIndent: listItem.getAttribute('data-mdw-source-indent'),
+                sublists
+            });
+        });
+
+        return snapshots.length > 0 ? snapshots : null;
+    }
+
+    function restoreListStructureAfterDelete(snapshots) {
+        if (!Array.isArray(snapshots) || snapshots.length === 0) return false;
+
+        let changed = false;
+        snapshots.forEach(snapshot => {
+            let listItem = snapshot.listItem;
+            if (!listItem || !listItem.isConnected) {
+                const parentList = snapshot.parentList;
+                if (!parentList || !parentList.isConnected) return;
+
+                listItem = document.createElement('li');
+                if (snapshot.nextSibling && snapshot.nextSibling.parentElement === parentList) {
+                    parentList.insertBefore(listItem, snapshot.nextSibling);
+                } else {
+                    parentList.appendChild(listItem);
+                }
+                snapshot.listItem = listItem;
+                changed = true;
+            }
+
+            if (
+                typeof snapshot.sourceIndent === 'string' &&
+                /^\d+$/.test(snapshot.sourceIndent) &&
+                listItem.getAttribute('data-mdw-source-indent') !== snapshot.sourceIndent
+            ) {
+                listItem.setAttribute('data-mdw-source-indent', snapshot.sourceIndent);
+                changed = true;
+            }
+
+            const directTextAfterDelete = getDirectTextContent(listItem)
+                .replace(/[\u00A0\u200B\uFEFF]/g, '')
+                .trim();
+            if (directTextAfterDelete !== '') return;
+
+            getDirectNestedListsForListItem(listItem).forEach(sublist => {
+                sublist.remove();
+                changed = true;
+            });
+
+            snapshot.sublists.forEach(info => {
+                const clonedSublist = info.clone && info.clone.cloneNode
+                    ? info.clone.cloneNode(true)
+                    : document.createElement(info.tagName || 'UL');
+                listItem.appendChild(clonedSublist);
+                changed = true;
+            });
+
+            if (listItem.getAttribute('data-preserve-empty') !== 'true') {
+                listItem.setAttribute('data-preserve-empty', 'true');
+                changed = true;
+            }
+        });
+
+        return changed;
+    }
+
     function clearNotifyTimeout() {
         if (notifyTimeout) {
             clearTimeout(notifyTimeout);
@@ -4602,7 +5257,7 @@ import { SearchManager } from './modules/SearchManager.js';
         domUtils.cleanupGhostStyles();
 
         // Update list item classes before notifying
-        updateListItemClasses();
+        normalizeListRenderingAfterStructureChange();
 
         // 隣接する同タイプのリスト(ol+ol, ul+ul)を自動マージ
         mergeAdjacentLists();
@@ -5620,15 +6275,19 @@ import { SearchManager } from './modules/SearchManager.js';
 
                 const isEmpty = !hasDirectTextContent(listItem);
 
+                if (isEmpty && hasNestedListChild(listItem)) {
+                    if (convertEmptyNestedListItemToIndentWrapper(listItem, selection)) {
+                        notifyChangeImmediate();
+                        return true;
+                    }
+                }
+
                 if (grandParentItem && grandParentItem.tagName === 'LI') {
                     // ネストされたリスト
                     listManager.outdentListItem(listItem, firstTextNode, offset);
                     notifyChange();
                     return true;
                 } else {
-                    if (isEmpty && hasNestedListChild(listItem)) {
-                        return replaceEmptyListItemWithParagraphAndPromotedNestedItems(listItem, false);
-                    }
                     // トップレベルでのみチェックボックスを解除
                     if (hasCheckbox(listItem)) {
                         const checkbox = getCheckboxInListItemDirectContent(listItem);
@@ -6104,13 +6763,11 @@ import { SearchManager } from './modules/SearchManager.js';
 
                         if (isLastVisibleCharDeleted) {
                             restoreInfo = {
+                                listItem,
                                 parentList: listItem.parentElement,
                                 nextSibling: listItem.nextElementSibling,
-                                sublists: sublists.map(sublist => ({
-                                    element: sublist,
-                                    tagName: sublist.tagName,
-                                    items: Array.from(sublist.children).filter(child => child.tagName === 'LI')
-                                }))
+                                sourceIndent: listItem.getAttribute('data-mdw-source-indent'),
+                                sublists: cloneNestedListSnapshots(sublists)
                             };
                         }
                     }
@@ -6131,37 +6788,9 @@ import { SearchManager } from './modules/SearchManager.js';
             let emptyListItemForCursor = null;
             let cursorTextNode = null;
 
-            if (restoreInfo && listItemBeforeDelete && !listItemBeforeDelete.isConnected) {
-                const parentList = restoreInfo.parentList;
-                if (parentList && parentList.isConnected) {
-                    const restoredListItem = document.createElement('li');
-
-                    restoreInfo.sublists.forEach(info => {
-                        let sublistElement = info.element;
-                        if (!sublistElement || sublistElement.tagName !== info.tagName) {
-                            sublistElement = document.createElement(info.tagName);
-                        }
-
-                        info.items.forEach(item => {
-                            if (item && item.tagName === 'LI') {
-                                if (item.parentElement !== sublistElement) {
-                                    sublistElement.appendChild(item);
-                                }
-                            }
-                        });
-
-                        restoredListItem.appendChild(sublistElement);
-                    });
-
-                    if (restoreInfo.nextSibling && restoreInfo.nextSibling.parentElement === parentList) {
-                        parentList.insertBefore(restoredListItem, restoreInfo.nextSibling);
-                    } else {
-                        parentList.appendChild(restoredListItem);
-                    }
-
-                    listItemBeforeDelete = restoredListItem;
-                    cursorContainer = restoredListItem;
-                }
+            if (restoreInfo && restoreListStructureAfterDelete([restoreInfo])) {
+                listItemBeforeDelete = restoreInfo.listItem || listItemBeforeDelete;
+                cursorContainer = listItemBeforeDelete;
             }
 
             const allListItems = editor.querySelectorAll('li');
@@ -6240,6 +6869,19 @@ import { SearchManager } from './modules/SearchManager.js';
                                 cursorInDirectContent = !inSublist;
                             }
                             const isPreservedEmpty = li.getAttribute('data-preserve-empty') === 'true';
+                            const isIndentWrapper = li.getAttribute('data-mdw-indent-wrapper') === 'true';
+                            if (isIndentWrapper) {
+                                li.removeAttribute('data-preserve-empty');
+                                Array.from(li.childNodes || []).forEach(child => {
+                                    if (child.nodeType === Node.ELEMENT_NODE &&
+                                        (child.tagName === 'UL' || child.tagName === 'OL')) {
+                                        return;
+                                    }
+                                    child.remove();
+                                });
+                                li.classList.add('nested-list-only');
+                                return;
+                            }
                             const shouldPreserveEmptyItem =
                                 li === listItemBeforeDelete || cursorInThisItem || isPreservedEmpty;
 
@@ -6298,8 +6940,8 @@ import { SearchManager } from './modules/SearchManager.js';
                 }
             }
 
-            // Re-evaluate list markers after DOM adjustments for preserved empty items.
-            updateListItemClasses();
+            // Re-evaluate list markers and source-indent wrappers after DOM adjustments.
+            normalizeListRenderingAfterStructureChange();
         });
 
         notifyChange();
@@ -6606,7 +7248,9 @@ import { SearchManager } from './modules/SearchManager.js';
                 listManager.outdentListItem(activeListItem, textNode, offset);
             } else {
                 if (hasNestedListChild(activeListItem)) {
-                    return replaceEmptyListItemWithParagraphAndPromotedNestedItems(activeListItem, false);
+                    convertTopLevelEmptyNestedListItemToParagraphGap(activeListItem, selection);
+                    notifyChange();
+                    return true;
                 }
                 // Top-level list - convert to paragraph
                 const p = document.createElement('p');
@@ -6795,46 +7439,31 @@ import { SearchManager } from './modules/SearchManager.js';
                 );
 
                 if (sublist) {
-                    // If there's a sublist, create TWO new list items:
-                    // 1. First empty item (where cursor will be)
-                    // 2. Second item with the sublist
-
-                    const firstNewItem = document.createElement('li');
+                    const nextListItem = document.createElement('li');
                     if (isCheckboxItem) {
-                        firstNewItem.appendChild(createCheckboxElement());
-                        firstNewItem.setAttribute('data-preserve-empty', 'true');
+                        nextListItem.appendChild(createCheckboxElement());
                     }
-                    const firstTextNode = document.createTextNode('\u200B');
-                    firstNewItem.appendChild(firstTextNode);
+                    nextListItem.setAttribute('data-preserve-empty', 'true');
+                    const emptyTextNode = document.createTextNode('\u00A0');
+                    nextListItem.appendChild(emptyTextNode);
 
-                    const secondNewItem = document.createElement('li');
-                    const secondTextNode = document.createTextNode('');
-                    secondNewItem.appendChild(secondTextNode);
-
-                    // Move the sublist to the second item
                     sublist.remove();
-                    secondNewItem.appendChild(sublist);
+                    nextListItem.appendChild(sublist);
 
-                    // Insert both items after the current item
                     if (activeListItem.nextSibling) {
-                        parentList.insertBefore(firstNewItem, activeListItem.nextSibling);
-                        parentList.insertBefore(secondNewItem, firstNewItem.nextSibling);
+                        parentList.insertBefore(nextListItem, activeListItem.nextSibling);
                     } else {
-                        parentList.appendChild(firstNewItem);
-                        parentList.appendChild(secondNewItem);
+                        parentList.appendChild(nextListItem);
                     }
 
-                    // Set cursor in the first new item
                     requestAnimationFrame(() => {
                         const newRange = document.createRange();
-                        const startOffset = isCheckboxItem ? getCheckboxTextMinOffset(firstNewItem) : 0;
-                        newRange.setStart(firstTextNode, startOffset);
+                        const startOffset = isCheckboxItem ? getCheckboxTextMinOffset(nextListItem) : 0;
+                        newRange.setStart(emptyTextNode, Math.min(startOffset, emptyTextNode.textContent.length));
                         newRange.collapse(true);
                         selection.removeAllRanges();
                         selection.addRange(newRange);
                         focusEditorAndRevealCaret();
-
-                        // Update list item classes after cursor is set
                         updateListItemClasses();
                     });
                 } else {
@@ -7357,6 +7986,27 @@ import { SearchManager } from './modules/SearchManager.js';
                 e.preventDefault();
             }
 
+            const independentDeleteDirection = isBackwardDelete
+                ? 'backward'
+                : (isForwardDelete ? 'forward' : null);
+            if (isBackwardDelete && handleBackspaceRemoveBlankLineBeforeNestedList(selection, range)) {
+                e.preventDefault();
+                e.stopPropagation();
+                return true;
+            }
+            if (independentDeleteDirection &&
+                handleEmptyNestedListItemDelete(selection, range)) {
+                e.preventDefault();
+                e.stopPropagation();
+                return true;
+            }
+            if (independentDeleteDirection &&
+                handleIndependentListItemDirectDelete(selection, range, independentDeleteDirection)) {
+                e.preventDefault();
+                e.stopPropagation();
+                return true;
+            }
+
             if (!range.collapsed) {
                 if (isRangeCoveringEntireEditor(range)) {
                     stateManager.saveState();
@@ -7373,6 +8023,7 @@ import { SearchManager } from './modules/SearchManager.js';
                 }
                 const selectedListItems = getSelectedListItemsFromRange(range);
                 const rangeDeleteListAnchor = captureRangeDeleteListAnchor(selectedListItems);
+                const listStructureRestore = captureListStructureForDelete(range);
                 // 選択範囲がある場合は状態を保存
                 stateManager.saveState();
                 e.preventDefault();
@@ -7390,13 +8041,14 @@ import { SearchManager } from './modules/SearchManager.js';
                 }
                 requestAnimationFrame(() => {
                     try {
+                        const didRestore = restoreListStructureAfterDelete(listStructureRestore);
                         const didPrune = pruneEmptyListItemsAfterRangeDelete(selectedListItems);
                         const restoredAnchorLine = restoreEmptyLineAtRangeDeleteAnchor(
                             rangeDeleteListAnchor,
                             selectedListItems
                         );
-                        if (didPrune || restoredAnchorLine) {
-                            updateListItemClasses();
+                        if (didRestore || didPrune || restoredAnchorLine) {
+                            normalizeListRenderingAfterStructureChange();
                         }
                         clearEditorIfOnlyEmptyBlockquoteShell(selection);
                     } catch (error) {
@@ -14661,9 +15313,19 @@ import { SearchManager } from './modules/SearchManager.js';
         }
 
         const container = range.commonAncestorContainer;
-        const listItem = domUtils.getParentElement(container, 'LI') ||
-            getListItemFromRange(range, 'down') ||
-            getListItemFromRange(range, 'up');
+        const listItem = (() => {
+            const isListBoundary = container &&
+                container.nodeType === Node.ELEMENT_NODE &&
+                (container.tagName === 'UL' || container.tagName === 'OL');
+            if (isListBoundary) {
+                return getListItemFromRange(range, 'down') ||
+                    getListItemFromRange(range, 'up') ||
+                    domUtils.getParentElement(container, 'LI');
+            }
+            return domUtils.getParentElement(container, 'LI') ||
+                getListItemFromRange(range, 'down') ||
+                getListItemFromRange(range, 'up');
+        })();
         const context = { selection, range, container, listItem };
 
         if (tableManager.handleKeydown(e)) {
@@ -14719,6 +15381,11 @@ import { SearchManager } from './modules/SearchManager.js';
                 // 空の箇条書き（子リストなし）は、箇条書きを外して空行にする
                 if (!nestedList) {
                     deleteCheckboxListItem(ctrlKListItem, true);
+                    finalizeCtrlKDeleteTurn();
+                    return;
+                }
+                if (convertEmptyNestedListItemToIndentWrapper(ctrlKListItem, selection)) {
+                    notifyChangeImmediate();
                     finalizeCtrlKDeleteTurn();
                     return;
                 }
@@ -15269,11 +15936,38 @@ import { SearchManager } from './modules/SearchManager.js';
                     stateManager.saveState();
                     clearEditorContentAndPlaceCaret(selection);
                     pendingDeleteListItem = null;
+                    pendingListStructureRestore = null;
                     pendingStrikeCleanup = false;
                     pendingCtrlKDeleteSync = false;
                     notifyChangeImmediate();
                     return;
                 }
+                const independentDeleteDirection = /Backward/i.test(e.inputType)
+                    ? 'backward'
+                    : (/Forward/i.test(e.inputType) ? 'forward' : 'selection');
+                if (independentDeleteDirection === 'backward' &&
+                    handleBackspaceRemoveBlankLineBeforeNestedList(selection, range)) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    pendingDeleteListItem = null;
+                    pendingListStructureRestore = null;
+                    return;
+                }
+                if (handleEmptyNestedListItemDelete(selection, range)) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    pendingDeleteListItem = null;
+                    pendingListStructureRestore = null;
+                    return;
+                }
+                if (handleIndependentListItemDirectDelete(selection, range, independentDeleteDirection)) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    pendingDeleteListItem = null;
+                    pendingListStructureRestore = null;
+                    return;
+                }
+                pendingListStructureRestore = captureListStructureForDelete(range);
                 if (shouldFlagStrikeCleanupForDelete(range)) {
                     pendingStrikeCleanup = true;
                 }
@@ -15410,6 +16104,10 @@ import { SearchManager } from './modules/SearchManager.js';
                 }
 
                 if (isDeleteInput) {
+                    if (pendingListStructureRestore) {
+                        restoreListStructureAfterDelete(pendingListStructureRestore);
+                        pendingListStructureRestore = null;
+                    }
                     if (pendingDeleteListItem) {
                         preserveEmptyListItemAfterDelete(pendingDeleteListItem);
                     }
@@ -15418,12 +16116,17 @@ import { SearchManager } from './modules/SearchManager.js';
                     if (removedStrike) {
                         pendingStrikeCleanup = true;
                     }
-                } else if (pendingDeleteListItem) {
+                } else {
                     pendingDeleteListItem = null;
+                    pendingListStructureRestore = null;
                 }
 
-                // Update list item classes on input
-                updateListItemClasses();
+                // Update list item classes and keep source-indent wrappers in sync after delete.
+                if (isDeleteInput) {
+                    normalizeListRenderingAfterStructureChange();
+                } else {
+                    updateListItemClasses();
+                }
 
                 if (isComposing || e.isComposing) {
                     hideSlashCommandMenu();
