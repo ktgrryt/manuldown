@@ -852,6 +852,19 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
     padding: 1px 5px;
 }
 
+.code-block-language-input {
+    width: 12ch;
+    min-width: 6ch;
+    max-width: 24ch;
+    border: 0;
+    outline: none;
+    padding: 0;
+    margin: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+}
+
 .code-block-language.nav-selected {
     background-color: var(--vscode-list-focusBackground);
     color: var(--vscode-list-focusForeground);

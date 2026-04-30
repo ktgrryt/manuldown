@@ -7177,7 +7177,7 @@ import { SearchManager } from './modules/SearchManager.js';
             }, 0);
         }
 
-        notifyChange();
+        notifyChangeImmediate();
         return true;
     }
 
@@ -8944,6 +8944,31 @@ import { SearchManager } from './modules/SearchManager.js';
             return true;
         }
         return false;
+    }
+
+    function replaceEditingCodeBlockLanguageLabelText(label, text) {
+        if (!label || !label.classList.contains('editing')) return false;
+        if (typeof label.__setEditingText === 'function') {
+            return label.__setEditingText(text);
+        }
+        label.textContent = text;
+
+        const selection = window.getSelection();
+        if (selection) {
+            const range = document.createRange();
+            const textNode = label.firstChild;
+            if (textNode && textNode.nodeType === Node.TEXT_NODE) {
+                range.setStart(textNode, (textNode.textContent || '').length);
+            } else {
+                range.setStart(label, label.childNodes.length);
+            }
+            range.collapse(true);
+            selection.removeAllRanges();
+            selection.addRange(range);
+        }
+
+        label.dispatchEvent(new Event('input', { bubbles: true }));
+        return true;
     }
 
     function selectCodeBlockLanguageLabel(pre) {
@@ -15286,7 +15311,11 @@ import { SearchManager } from './modules/SearchManager.js';
             }
             const isPrintable = e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey;
             if (isPrintable && !e.isComposing) {
-                startEditingCodeBlockLanguageLabel(selectedLabel);
+                e.preventDefault();
+                e.stopPropagation();
+                if (startEditingCodeBlockLanguageLabel(selectedLabel)) {
+                    replaceEditingCodeBlockLanguageLabelText(selectedLabel, e.key);
+                }
                 return;
             }
         }
@@ -16238,6 +16267,12 @@ import { SearchManager } from './modules/SearchManager.js';
 
                 updateSlashCommandMenu();
                 syncImageResizeOverlayPosition();
+            }
+        });
+
+        editor.addEventListener('manuldown-code-block-language-change', () => {
+            if (!isUpdating) {
+                notifyChangeImmediate();
             }
         });
 

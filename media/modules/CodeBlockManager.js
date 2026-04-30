@@ -1080,6 +1080,7 @@ export class CodeBlockManager {
         langLabel.className = 'code-block-language';
         langLabel.textContent = language || 'plaintext';
         langLabel.title = 'Click to change language';
+        langLabel.tabIndex = 0;
         
         // サジェストドロップダウンを作成
         const suggestionBox = document.createElement('div');
@@ -1090,7 +1091,7 @@ export class CodeBlockManager {
         let selectedIndex = -1;
         let languageSuggestionKeyboardNavigationActive = false;
         let languageSuggestionPointerHoverActive = false;
-        let handleInput, handleKeydown, handleKeypress, finishEditing;
+        let handleInput, handleBeforeInput, handleKeydown, handleBlur, stopEditingInputEvent, finishEditing;
 
         const setLanguageSuggestionKeyboardNavigationActive = (active) => {
             languageSuggestionKeyboardNavigationActive = !!active;
@@ -1132,21 +1133,15 @@ export class CodeBlockManager {
                 item.addEventListener('mousedown', (e) => {
                     e.preventDefault();
                     e.stopPropagation();
-                    
-                    // イベントリスナーを削除
-                    langLabel.removeEventListener('input', handleInput);
-                    langLabel.removeEventListener('keydown', handleKeydown);
-                    langLabel.removeEventListener('keypress', handleKeypress);
-                    langLabel.removeEventListener('blur', finishEditing);
-                    
+
+                    if (editingInput && typeof finishEditing === 'function') {
+                        setEditingInputValue(lang);
+                        finishEditing(true);
+                        return;
+                    }
+
+                    hideSuggestions();
                     langLabel.textContent = lang;
-                    setLanguageSuggestionKeyboardNavigationActive(false);
-                    setLanguageSuggestionPointerHoverActive(false);
-                    suggestionBox.style.display = 'none';
-                    langLabel.classList.remove('editing');
-                    langLabel.contentEditable = 'false';
-                    
-                    // コードブロックの言語を直接更新
                     this.updateCodeBlockLanguage(pre, lang);
                 });
                 
@@ -1173,11 +1168,47 @@ export class CodeBlockManager {
             setLanguageSuggestionKeyboardNavigationActive(false);
             setLanguageSuggestionPointerHoverActive(false);
         };
+
+        const isPlainTextEditKey = (e) => {
+            return !!(
+                e &&
+                !e.isComposing &&
+                typeof e.key === 'string' &&
+                e.key.length === 1 &&
+                !e.metaKey &&
+                !e.ctrlKey &&
+                !e.altKey
+            );
+        };
+
+        let editingInput = null;
+        let editingOriginalLanguage = '';
+        let isFinishingLanguageEdit = false;
+
+        const normalizeLanguageText = (value) => {
+            const normalized = String(value || '').trim().toLowerCase();
+            return normalized || 'plaintext';
+        };
+
+        const setEditingInputValue = (value, { select = false } = {}) => {
+            if (!editingInput) {
+                return false;
+            }
+            editingInput.value = String(value || '');
+            if (select) {
+                editingInput.select();
+            } else {
+                const end = editingInput.value.length;
+                editingInput.setSelectionRange(end, end);
+            }
+            showSuggestions(editingInput.value.trim());
+            return true;
+        };
         
         // 言語ラベルをクリックで編集可能にする
         const beginEditing = (e) => {
             if (langLabel.classList.contains('editing')) {
-                return;
+                return editingInput;
             }
 
             if (e) {
@@ -1185,24 +1216,38 @@ export class CodeBlockManager {
                 e.stopPropagation();
             }
 
-            const currentLang = langLabel.textContent;
+            const currentLang = langLabel.textContent || 'plaintext';
+            editingOriginalLanguage = currentLang;
+            isFinishingLanguageEdit = false;
             langLabel.classList.add('editing');
-            langLabel.contentEditable = 'true';
-            langLabel.focus();
+            langLabel.textContent = '';
 
-            // すべてのテキストを選択
-            const range = document.createRange();
-            range.selectNodeContents(langLabel);
-            const sel = window.getSelection();
-            sel.removeAllRanges();
-            sel.addRange(range);
+            editingInput = document.createElement('input');
+            editingInput.className = 'code-block-language-input';
+            editingInput.type = 'text';
+            editingInput.value = currentLang;
+            editingInput.spellcheck = false;
+            editingInput.autocomplete = 'off';
+            editingInput.setAttribute('aria-label', 'Code block language');
+            langLabel.appendChild(editingInput);
 
             // 最初にすべてのサジェストを表示
             showSuggestions('');
 
             // 入力を処理してサジェストをフィルタ
-            handleInput = () => {
-                const text = langLabel.textContent.trim();
+            stopEditingInputEvent = (event) => {
+                if (event && typeof event.stopPropagation === 'function') {
+                    event.stopPropagation();
+                }
+            };
+
+            handleBeforeInput = (event) => {
+                stopEditingInputEvent(event);
+            };
+
+            handleInput = (event) => {
+                stopEditingInputEvent(event);
+                const text = editingInput ? editingInput.value.trim() : '';
                 showSuggestions(text);
             };
 
@@ -1221,28 +1266,37 @@ export class CodeBlockManager {
             };
 
             // ブラー（編集終了）を処理
-            finishEditing = () => {
-                langLabel.classList.remove('editing');
-                langLabel.contentEditable = 'false';
-                hideSuggestions();
-
-                let newLang = langLabel.textContent.trim().toLowerCase();
-                if (!newLang) {
-                    newLang = 'plaintext';
+            finishEditing = (commit = true) => {
+                if (isFinishingLanguageEdit) {
+                    return;
                 }
+                isFinishingLanguageEdit = true;
+
+                const rawValue = editingInput ? editingInput.value : editingOriginalLanguage;
+                const newLang = commit ? normalizeLanguageText(rawValue) : normalizeLanguageText(editingOriginalLanguage);
+
+                if (editingInput) {
+                    editingInput.removeEventListener('beforeinput', handleBeforeInput);
+                    editingInput.removeEventListener('input', handleInput);
+                    editingInput.removeEventListener('keydown', handleKeydown);
+                    editingInput.removeEventListener('keyup', stopEditingInputEvent);
+                    editingInput.removeEventListener('keypress', stopEditingInputEvent);
+                    editingInput.removeEventListener('compositionstart', stopEditingInputEvent);
+                    editingInput.removeEventListener('compositionupdate', stopEditingInputEvent);
+                    editingInput.removeEventListener('compositionend', stopEditingInputEvent);
+                    editingInput.removeEventListener('blur', handleBlur);
+                }
+
+                editingInput = null;
+                langLabel.classList.remove('editing');
+                hideSuggestions();
+                langLabel.textContent = newLang;
 
                 // 言語が変更された場合は更新
-                if (newLang !== currentLang.toLowerCase()) {
+                if (commit && newLang !== normalizeLanguageText(editingOriginalLanguage)) {
                     this.updateCodeBlockLanguage(pre, newLang);
-                } else {
-                    langLabel.textContent = currentLang;
                 }
                 moveCursorToCodeStart();
-
-                // イベントリスナーを削除
-                langLabel.removeEventListener('input', handleInput);
-                langLabel.removeEventListener('keydown', handleKeydown);
-                langLabel.removeEventListener('keypress', handleKeypress);
             };
 
             // EnterとEscapeキーを処理
@@ -1280,57 +1334,85 @@ export class CodeBlockManager {
                     e.preventDefault();
                     e.stopPropagation();
                     moveSelection(-1);
+                } else if (
+                    isPlainTextEditKey(e) ||
+                    e.key === 'Backspace' ||
+                    e.key === 'Delete' ||
+                    e.key === 'ArrowLeft' ||
+                    e.key === 'ArrowRight' ||
+                    e.key === 'Home' ||
+                    e.key === 'End'
+                ) {
+                    e.stopPropagation();
+                } else if (this._isMac && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'h') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (editingInput) {
+                        const start = editingInput.selectionStart || 0;
+                        const end = editingInput.selectionEnd || start;
+                        if (start !== end) {
+                            editingInput.setRangeText('', start, end, 'start');
+                        } else if (start > 0) {
+                            editingInput.setRangeText('', start - 1, start, 'start');
+                        }
+                        handleInput();
+                    }
                 } else if (e.key === 'Enter') {
                     e.preventDefault();
                     e.stopPropagation();
                     if (selectedIndex >= 0 && suggestions[selectedIndex]) {
                         const selectedLang = suggestions[selectedIndex].textContent;
-                        
-                        // イベントリスナーを削除
-                        langLabel.removeEventListener('input', handleInput);
-                        langLabel.removeEventListener('keydown', handleKeydown);
-                        langLabel.removeEventListener('keypress', handleKeypress);
-                        langLabel.removeEventListener('blur', finishEditing);
-                        
-                        // UIを即座に更新 - 最初に編集を無効化
-                        langLabel.classList.remove('editing');
-                        langLabel.contentEditable = 'false';
-                        hideSuggestions();
-                        langLabel.textContent = selectedLang;
-                        
-                        // コードブロックの言語を更新
-                        this.updateCodeBlockLanguage(pre, selectedLang);
-
-                        // カーソルをコードブロック先頭へ移動
-                        moveCursorToCodeStart();
+                        setEditingInputValue(selectedLang);
+                        finishEditing(true);
                     } else {
-                        langLabel.blur();
+                        finishEditing(true);
                     }
                 } else if (e.key === 'Escape') {
                     e.preventDefault();
                     e.stopPropagation();
-                    langLabel.textContent = currentLang;
-                    hideSuggestions();
-                    langLabel.blur();
+                    finishEditing(false);
                 }
             };
-            
-            // Enterで改行を作成しないようにする
-            handleKeypress = (e) => {
-                if (e.key === 'Enter') {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    return false;
-                }
-            };
-            
-            langLabel.addEventListener('input', handleInput);
-            langLabel.addEventListener('blur', finishEditing, { once: true });
-            langLabel.addEventListener('keydown', handleKeydown);
-            langLabel.addEventListener('keypress', handleKeypress);
+
+            handleBlur = () => finishEditing(true);
+
+            editingInput.addEventListener('beforeinput', handleBeforeInput);
+            editingInput.addEventListener('input', handleInput);
+            editingInput.addEventListener('keydown', handleKeydown);
+            editingInput.addEventListener('keyup', stopEditingInputEvent);
+            editingInput.addEventListener('keypress', stopEditingInputEvent);
+            editingInput.addEventListener('compositionstart', stopEditingInputEvent);
+            editingInput.addEventListener('compositionupdate', stopEditingInputEvent);
+            editingInput.addEventListener('compositionend', stopEditingInputEvent);
+            editingInput.addEventListener('blur', handleBlur, { once: true });
+            editingInput.focus();
+            editingInput.select();
+            return editingInput;
         };
 
         langLabel.__startEditing = beginEditing;
+        langLabel.__setEditingText = (text) => setEditingInputValue(text);
+
+        langLabel.addEventListener('keydown', (e) => {
+            if (langLabel.classList.contains('editing')) {
+                return;
+            }
+
+            if (isPlainTextEditKey(e)) {
+                e.preventDefault();
+                e.stopPropagation();
+                beginEditing(e);
+                setEditingInputValue(e.key);
+                return;
+            }
+
+            if (e.key === 'Backspace' || e.key === 'Delete') {
+                e.preventDefault();
+                e.stopPropagation();
+                beginEditing(e);
+                setEditingInputValue('');
+            }
+        });
 
         langLabel.addEventListener('click', (e) => {
             beginEditing(e);
@@ -1464,6 +1546,12 @@ export class CodeBlockManager {
         
         // 新しい言語でツールバーを更新
         this.addCodeBlockControls(pre, newLang);
+
+        if (this.editor && typeof this.editor.dispatchEvent === 'function') {
+            this.editor.dispatchEvent(new CustomEvent('manuldown-code-block-language-change', {
+                bubbles: true
+            }));
+        }
     }
 }
 

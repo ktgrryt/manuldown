@@ -1356,21 +1356,26 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             // Remove drag handles (row-handle and col-handle)
             html = html.replace(/<div class="(row|col)-handle"[^>]*><\/div>/gi, '');
 
-            // Normalize code blocks: remove leading/trailing whitespace inside <code> tags
-            // BUT preserve trailing newlines in code blocks (for proper markdown conversion)
-            html = html.replace(/<code([^>]*)>([\s\S]*?)<\/code>/gi, (match, attrs, content) => {
-                // For code blocks inside <pre>, preserve trailing newlines
-                // For inline code, trim all whitespace
-                const isInPre = attrs.includes('language-');
-                if (isInPre) {
-                    // Preserve trailing newlines for code blocks
+            // Normalize code blocks before inline code so language-less fenced blocks
+            // preserve intentional trailing newlines.
+            const codeBlockPlaceholders: string[] = [];
+            html = html.replace(/<pre([^>]*)>\s*<code([^>]*)>([\s\S]*?)<\/code>\s*<\/pre>/gi,
+                (_match, preAttrs, codeAttrs, content) => {
+                    const placeholder = `MDW_CODE_BLOCK_${codeBlockPlaceholders.length}_PLACEHOLDER`;
                     const trimmedContent = content.replace(/^\s+/g, '');
-                    return `<code${attrs}>${trimmedContent}</code>`;
-                } else {
-                    // Trim all whitespace for inline code
-                    const trimmedContent = content.replace(/^\s+|\s+$/g, '');
-                    return `<code${attrs}>${trimmedContent}</code>`;
-                }
+                    codeBlockPlaceholders.push(`<pre${preAttrs}><code${codeAttrs}>${trimmedContent}</code></pre>`);
+                    return placeholder;
+                });
+
+            // Normalize inline code: trim all surrounding whitespace.
+            html = html.replace(/<code([^>]*)>([\s\S]*?)<\/code>/gi, (_match, attrs, content) => {
+                const trimmedContent = content.replace(/^\s+|\s+$/g, '');
+                return `<code${attrs}>${trimmedContent}</code>`;
+            });
+
+            html = html.replace(/MDW_CODE_BLOCK_(\d+)_PLACEHOLDER/g, (match, indexText) => {
+                const index = Number(indexText);
+                return codeBlockPlaceholders[index] ?? match;
             });
 
             // Handle empty code blocks by adding a placeholder
