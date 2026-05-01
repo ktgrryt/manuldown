@@ -1324,7 +1324,7 @@ export class TableManager {
         if (!node) return true;
 
         if (node.nodeType === Node.TEXT_NODE) {
-            return (node.textContent || '').replace(/[\u200B\u00A0\uFEFF]/g, '').trim() === '';
+            return (node.textContent || '').replace(/[\u200B\u2060\u00A0\uFEFF]/g, '').trim() === '';
         }
 
         if (node.nodeType !== Node.ELEMENT_NODE) {
@@ -2905,12 +2905,12 @@ export class TableManager {
         const textNode = this._getFirstDirectTextNodeAfterCheckbox(listItem);
         if (!textNode) return 0;
         const text = textNode.textContent || '';
-        const visibleText = text.replace(/[\u200B\uFEFF\u00A0]/g, '');
+        const visibleText = text.replace(/[\u200B\u2060\uFEFF\u00A0]/g, '');
         if (visibleText === '') {
             return 0;
         }
         let offset = 0;
-        while (offset < text.length && text[offset] === '\u200B') {
+        while (offset < text.length && (text[offset] === '\u200B' || text[offset] === '\u2060')) {
             offset += 1;
         }
         return offset;
@@ -2930,7 +2930,7 @@ export class TableManager {
                 directText += child.textContent || '';
             }
         }
-        return directText.replace(/[\u200B\uFEFF\u00A0]/g, '').trim() === '';
+        return directText.replace(/[\u200B\u2060\uFEFF\u00A0]/g, '').trim() === '';
     }
 
     _ensureCheckboxTextAnchor(listItem) {
@@ -2939,7 +2939,7 @@ export class TableManager {
         const checkbox = this._getCheckboxInListItemDirectContent(listItem);
         if (!checkbox) return null;
 
-        const anchorNode = document.createTextNode('\u200B');
+        const anchorNode = document.createTextNode('');
         const firstSublist = Array.from(listItem.children || []).find(
             child => child.tagName === 'UL' || child.tagName === 'OL'
         );
@@ -3149,7 +3149,7 @@ export class TableManager {
         const tempRange = document.createRange();
         tempRange.selectNodeContents(block);
         tempRange.setEnd(range.startContainer, range.startOffset);
-        const beforeText = tempRange.toString().replace(/\u200B/g, '');
+        const beforeText = tempRange.toString().replace(/[\u200B\u2060]/g, '');
         return beforeText.length === 0;
     }
 
@@ -3157,7 +3157,7 @@ export class TableManager {
         const tempRange = document.createRange();
         tempRange.selectNodeContents(block);
         tempRange.setStart(range.endContainer, range.endOffset);
-        const afterText = tempRange.toString().replace(/\u200B/g, '');
+        const afterText = tempRange.toString().replace(/[\u200B\u2060]/g, '');
         return afterText.length === 0;
     }
 
@@ -3252,7 +3252,7 @@ export class TableManager {
         let next = node ? node.nextSibling : null;
         while (next) {
             if (next.nodeType === Node.TEXT_NODE) {
-                const text = (next.textContent || '').replace(/[\u200B\u00A0]/g, '');
+                const text = (next.textContent || '').replace(/[\u200B\u2060\u00A0]/g, '');
                 if (text.trim() !== '') {
                     return next;
                 }
@@ -3277,7 +3277,7 @@ export class TableManager {
         let prev = node ? node.previousSibling : null;
         while (prev) {
             if (prev.nodeType === Node.TEXT_NODE) {
-                const text = (prev.textContent || '').replace(/[\u200B\u00A0]/g, '');
+                const text = (prev.textContent || '').replace(/[\u200B\u2060\u00A0]/g, '');
                 if (text.trim() !== '') {
                     return prev;
                 }
@@ -3727,7 +3727,7 @@ export class TableManager {
                     guard++;
                     if (guard > 12000) return best;
                     const ch = text[i];
-                    if (ch === '\n' || ch === '\r' || ch === '\u200B' || ch === '\uFEFF') {
+                    if (ch === '\n' || ch === '\r' || ch === '\u200B' || ch === '\u2060' || ch === '\uFEFF') {
                         continue;
                     }
                     if (skipWhitespace && /\s/.test(ch)) {
@@ -3977,7 +3977,7 @@ export class TableManager {
                     guard++;
                     if (guard > 20000) break;
                     const ch = text[i];
-                    if (ch === '\n' || ch === '\r' || ch === '\u200B' || ch === '\uFEFF') {
+                    if (ch === '\n' || ch === '\r' || ch === '\u200B' || ch === '\u2060' || ch === '\uFEFF') {
                         continue;
                     }
                     try {
@@ -4181,7 +4181,7 @@ export class TableManager {
     _isPlaceholderOnlyCellNode(node) {
         if (!node) return true;
         if (node.nodeType === Node.TEXT_NODE) {
-            const text = (node.textContent || '').replace(/[\u200B\u00A0]/g, '');
+            const text = (node.textContent || '').replace(/[\u200B\u2060\u00A0]/g, '');
             return text.trim() === '';
         }
         if (node.nodeType !== Node.ELEMENT_NODE) {
@@ -4228,7 +4228,7 @@ export class TableManager {
 
         const children = Array.from(node.childNodes || []);
         if (!children.length) {
-            const text = (node.textContent || '').replace(/[\u200B\u00A0]/g, '');
+            const text = (node.textContent || '').replace(/[\u200B\u2060\u00A0]/g, '');
             return text.trim() === '';
         }
         return children.every((child) => this._isPlaceholderOnlyCellNode(child));

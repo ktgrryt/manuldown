@@ -366,7 +366,7 @@ export class SearchManager {
         for (const node of textNodes) {
             const raw = node.textContent;
             for (let i = 0; i < raw.length; i++) {
-                if (raw[i] !== '\u200B') {
+                if (raw[i] !== '\u200B' && raw[i] !== '\u2060') {
                     originalPositions.push({ node, offset: i });
                     cleanText += raw[i];
                 }

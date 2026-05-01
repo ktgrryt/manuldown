@@ -14,7 +14,7 @@ export class MarkdownConverter {
     }
 
     isIgnorableText(text) {
-        return (text || '').replace(/[\u200B\u00A0]/g, '').trim() === '';
+        return (text || '').replace(/[\u200B\u2060\u00A0]/g, '').trim() === '';
     }
 
     trimBoundaryNodes(nodes, { trimLeadingBreak = false, trimTrailingBreak = false } = {}) {
@@ -235,7 +235,7 @@ export class MarkdownConverter {
         let cursorOffset = null;
         const isMeaningfulTextNode = (node) => {
             if (!node || node.nodeType !== 3) return false;
-            const text = (node.textContent || '').replace(/[\u200B\u00A0]/g, '');
+            const text = (node.textContent || '').replace(/[\u200B\u2060\u00A0]/g, '');
             return text.trim() !== '';
         };
         const findDirectTextNode = (element) => {
@@ -302,8 +302,8 @@ export class MarkdownConverter {
         if (this.applySingleCharacterEscapeAtCursor(textNode, cursorOffset, selection, notifyCallback)) {
             return true;
         }
-        const normalizedText = rawText.replace(/[\u200B\u00A0]/g, '');
-        const normalizedCursorOffset = rawText.slice(0, cursorOffset).replace(/[\u200B\u00A0]/g, '').length;
+        const normalizedText = rawText.replace(/[\u200B\u2060\u00A0]/g, '');
+        const normalizedCursorOffset = rawText.slice(0, cursorOffset).replace(/[\u200B\u2060\u00A0]/g, '').length;
         const isInTableCell = !!(
             this.domUtils.getParentElement(textNode, 'TD') ||
             this.domUtils.getParentElement(textNode, 'TH')
@@ -508,8 +508,7 @@ export class MarkdownConverter {
             code.textContent = codeText;
             fragment.appendChild(code);
 
-            // カーソル移動用の見えないスペースを追加
-            const spacer = document.createTextNode('\u200B');
+            const spacer = document.createTextNode('');
             fragment.appendChild(spacer);
 
             if (afterText) {
@@ -520,9 +519,8 @@ export class MarkdownConverter {
             const parentNode = textNode.parentNode;
             parentNode.replaceChild(fragment, textNode);
 
-            // code要素の直後のスペースにカーソルを設定
             const newRange = document.createRange();
-            newRange.setStart(spacer, 1);
+            newRange.setStart(spacer, 0);
             newRange.collapse(true);
             selection.removeAllRanges();
             selection.addRange(newRange);
@@ -588,7 +586,7 @@ export class MarkdownConverter {
                     checkbox.setAttribute('checked', '');
                 }
                 li.appendChild(checkbox);
-                textContentNode = document.createTextNode(listText === '' ? '\u200B' : listText);
+                textContentNode = document.createTextNode(listText === '' ? '' : listText);
                 li.appendChild(textContentNode);
             } else if (content) {
                 li.textContent = content;

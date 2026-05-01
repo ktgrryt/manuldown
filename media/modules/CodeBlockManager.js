@@ -227,7 +227,7 @@ export class CodeBlockManager {
         if (!codeBlock) {
             return '';
         }
-        return (codeBlock.textContent || '').replace(/\u200B/g, '');
+        return (codeBlock.textContent || '').replace(/[\u200B\u2060]/g, '');
     }
 
     _ensureMermaidPreview(pre) {

@@ -35,7 +35,7 @@ export class ListManager {
                 directText += child.textContent || '';
             }
         }
-        return directText.replace(/[\u00A0\u200B\uFEFF]/g, '').trim() !== '';
+        return directText.replace(/[\u00A0\u200B\u2060\uFEFF]/g, '').trim() !== '';
     }
 
     _markIndentWrapper(listItem) {
@@ -319,7 +319,7 @@ export class ListManager {
                     directTextContent += child.textContent;
                 }
             }
-            const isEmpty = directTextContent.replace(/[\u00A0\u200B]/g, '').trim() === '';
+            const isEmpty = directTextContent.replace(/[\u00A0\u200B\u2060]/g, '').trim() === '';
             
             // 現在のリストアイテムの後続の兄弟要素を保存
             const followingSiblings = [];
@@ -442,12 +442,12 @@ export class ListManager {
                     let hasDirectText = false;
                     for (let child of grandParentItem.childNodes) {
                         if (child.nodeType === Node.TEXT_NODE &&
-                            child.textContent.replace(/[\u00A0\u200B]/g, '').trim() !== '') {
+                            child.textContent.replace(/[\u00A0\u200B\u2060]/g, '').trim() !== '') {
                             hasDirectText = true;
                             break;
                         } else if (child.nodeType === Node.ELEMENT_NODE &&
                                    child.tagName !== 'UL' && child.tagName !== 'OL' &&
-                                   child.textContent.replace(/[\u00A0\u200B]/g, '').trim() !== '') {
+                                   child.textContent.replace(/[\u00A0\u200B\u2060]/g, '').trim() !== '') {
                             // 他の要素（strong, em, codeなど）にテキストがある場合
                             hasDirectText = true;
                             break;
@@ -498,7 +498,7 @@ export class ListManager {
                     // チェックボックス直後にカーソルアンカーを確保
                     const nextNode = checkbox.nextSibling;
                     if (!nextNode || nextNode.nodeType !== Node.TEXT_NODE) {
-                        const anchorNode = document.createTextNode('\u200B');
+                        const anchorNode = document.createTextNode('');
                         if (nextNode) {
                             listItem.insertBefore(anchorNode, nextNode);
                         } else {
@@ -507,9 +507,9 @@ export class ListManager {
                     } else {
                         const text = nextNode.textContent || '';
                         if (/^[ \u00A0]/.test(text)) {
-                            nextNode.textContent = text.slice(1) || '\u200B';
+                            nextNode.textContent = text.slice(1) || '';
                         } else if (text === '') {
-                            nextNode.textContent = '\u200B';
+                            nextNode.textContent = '';
                         }
                     }
                 } else {
@@ -608,7 +608,7 @@ export class ListManager {
         if (!selection) return;
 
         // リストアイテムが空または空白のみかチェック
-        const normalizedText = (listItem.textContent || '').replace(/[\u00A0\u200B]/g, '').trim();
+        const normalizedText = (listItem.textContent || '').replace(/[\u00A0\u200B\u2060]/g, '').trim();
         const isEmpty = normalizedText === '';
         
         if (isEmpty) {

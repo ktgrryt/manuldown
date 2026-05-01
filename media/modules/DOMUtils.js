@@ -157,7 +157,7 @@ export class DOMUtils {
         // Preserve visual line breaks as literal "<br>" text inside the Markdown table cell.
         const tableCells = clone.querySelectorAll('td, th');
         tableCells.forEach(cell => {
-            const hasText = (cell.textContent || '').replace(/[\u200B\u00A0]/g, '').trim() !== '';
+            const hasText = (cell.textContent || '').replace(/[\u200B\u2060\u00A0]/g, '').trim() !== '';
             const hasProblematicStructure =
                 !!cell.querySelector('br') ||
                 !!cell.querySelector(':scope > div, :scope > p') ||
@@ -189,7 +189,7 @@ export class DOMUtils {
 
                 const normalizedLines = ((lineProbe.textContent || '') + '')
                     .replace(/\r\n?/g, '\n')
-                    .replace(/[\u200B]/g, '')
+                    .replace(/[\u200B\u2060]/g, '')
                     .replace(/\u00A0/g, ' ')
                     .split('\n')
                     .map(line => line.replace(/[ \t\f\v]+/g, ' ').trim());
@@ -226,14 +226,14 @@ export class DOMUtils {
             if (anchor.querySelector('img')) {
                 return;
             }
-            const text = (anchor.textContent || '').replace(/[\u200B\uFEFF\u00A0\s]/g, '');
+            const text = (anchor.textContent || '').replace(/[\u200B\u2060\uFEFF\u00A0\s]/g, '');
             if (text !== '') {
                 return;
             }
             const hasMeaningfulChild = Array.from(anchor.childNodes || []).some(child => {
                 if (!child) return false;
                 if (child.nodeType === Node.TEXT_NODE) {
-                    return (child.textContent || '').replace(/[\u200B\uFEFF\u00A0\s]/g, '') !== '';
+                    return (child.textContent || '').replace(/[\u200B\u2060\uFEFF\u00A0\s]/g, '') !== '';
                 }
                 if (child.nodeType !== Node.ELEMENT_NODE) return false;
                 return child.tagName !== 'BR';
@@ -251,7 +251,7 @@ export class DOMUtils {
             const hasMeaningfulInlineSibling = (node) => {
                 if (!node) return false;
                 if (node.nodeType === Node.TEXT_NODE) {
-                    const text = (node.textContent || '').replace(/[\u200B\uFEFF]/g, '');
+                    const text = (node.textContent || '').replace(/[\u200B\u2060\uFEFF]/g, '');
                     return text.trim() !== '';
                 }
                 if (node.nodeType !== Node.ELEMENT_NODE) return false;
@@ -267,7 +267,7 @@ export class DOMUtils {
                 const raw = textNode.textContent || '';
                 if (raw === '') return false;
                 if (/[\r\n\t\f\v]/.test(raw)) return false;
-                if (raw.replace(/[\u200B\uFEFF]/g, '') === '') return false;
+                if (raw.replace(/[\u200B\u2060\uFEFF]/g, '') === '') return false;
                 return hasMeaningfulInlineSibling(textNode.previousSibling) &&
                     hasMeaningfulInlineSibling(textNode.nextSibling);
             };
@@ -317,7 +317,7 @@ export class DOMUtils {
 
         // カーソル配置用のゼロ幅スペースを削除
         let html = clone.innerHTML;
-        html = html.replace(/[\u200B\uFEFF]/g, '');
+        html = html.replace(/[\u200B\u2060\uFEFF]/g, '');
 
         return html;
     }
@@ -378,7 +378,7 @@ export class DOMUtils {
                     const tempRange = document.createRange();
                     tempRange.selectNodeContents(codeElement);
                     tempRange.setEnd(range.startContainer, range.startOffset);
-                    activeOffset = tempRange.toString().replace(/[\u200B\uFEFF]/g, '').length;
+                    activeOffset = tempRange.toString().replace(/[\u200B\u2060\uFEFF]/g, '').length;
                 } catch (e) {
                     activeCode = null;
                     activeOffset = null;
@@ -392,30 +392,30 @@ export class DOMUtils {
 
             const prevSibling = code.previousSibling;
             if (prevSibling && prevSibling.nodeType === Node.TEXT_NODE &&
-                prevSibling.textContent.replace(/[\u200B\uFEFF]/g, '') === '') {
+                prevSibling.textContent.replace(/[\u200B\u2060\uFEFF]/g, '') === '') {
                 prevSibling.remove();
             }
 
             const nextSibling = code.nextSibling;
             if (nextSibling && nextSibling.nodeType === Node.TEXT_NODE &&
-                nextSibling.textContent.replace(/[\u200B\uFEFF]/g, '') === '') {
+                nextSibling.textContent.replace(/[\u200B\u2060\uFEFF]/g, '') === '') {
                 nextSibling.remove();
             }
 
             const rawText = code.textContent || '';
-            const normalized = rawText.replace(/[\u200B\uFEFF]/g, '');
+            const normalized = rawText.replace(/[\u200B\u2060\uFEFF]/g, '');
 
             if (normalized === '') {
                 // 内容が空の場合
                 if (code.getAttribute('data-is-new') === 'true') {
                     // 新規作成されたばかりの場合は保持する（カーソル配置用）
-                    if (rawText !== '\u200B' || code.childNodes.length !== 1) {
-                        code.textContent = '\u200B';
+                    if (rawText !== '' || code.childNodes.length !== 1) {
+                        code.textContent = '';
                     }
                 } else {
                     // 空で新規作成でない場合は削除
                     // テキストノードとして空文字を挿入してカーソル位置を保持できるようにする
-                    const emptyText = document.createTextNode('\u200B');
+                    const emptyText = document.createTextNode('');
                     code.replaceWith(emptyText);
 
                     // 削除されたcodeがあった場所を記録（カーソル復元用）
@@ -423,7 +423,7 @@ export class DOMUtils {
                         const range = selection.getRangeAt(0);
                         if (code.contains(range.startContainer)) {
                             const newRange = document.createRange();
-                            newRange.setStart(emptyText, 1);
+                            newRange.setStart(emptyText, 0);
                             newRange.collapse(true);
                             selection.removeAllRanges();
                             selection.addRange(newRange);
@@ -455,7 +455,7 @@ export class DOMUtils {
             const textNode = activeCode.firstChild;
             if (textNode && textNode.nodeType === Node.TEXT_NODE && textNode.isConnected) {
                 const rawText = textNode.textContent || '';
-                const normalizedLength = rawText.replace(/[\u200B\uFEFF]/g, '').length;
+                const normalizedLength = rawText.replace(/[\u200B\u2060\uFEFF]/g, '').length;
                 let targetOffset = normalizedLength === 0 ? rawText.length : Math.min(activeOffset, normalizedLength);
                 const newRange = document.createRange();
                 newRange.setStart(textNode, targetOffset);

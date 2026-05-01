@@ -1281,7 +1281,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     .replace(/<br\s*\/?>/gi, '')
                     .replace(/&nbsp;|&#160;/gi, '')
                     .replace(/<[^>]*>/g, '')
-                    .replace(/[\u00A0\u200B\uFEFF\s]/g, '')
+                    .replace(/[\u00A0\u200B\u2060\uFEFF\s]/g, '')
                     .trim();
                 return stripped === '';
             };
@@ -1293,7 +1293,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             html = this.convertWebviewUrisToRelativePaths(html, document);
 
             // Remove zero-width markers used for caret placement
-            html = html.replace(/[\u200B\uFEFF]/g, '');
+            html = html.replace(/[\u200B\u2060\uFEFF]/g, '');
 
             // Restore markdown hard break for image lines that were split into
             // separate paragraphs for stable caret navigation in the webview.
@@ -1334,7 +1334,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 const visibleText = content
                     .replace(/<br\s*\/?>/gi, '')
                     .replace(/&nbsp;|&#160;/gi, '')
-                    .replace(/[\u00A0\u200B\uFEFF]/g, '')
+                    .replace(/[\u00A0\u200B\u2060\uFEFF]/g, '')
                     .replace(/<[^>]*>/g, '')
                     .trim();
 

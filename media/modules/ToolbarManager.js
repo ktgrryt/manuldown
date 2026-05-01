@@ -518,7 +518,7 @@ export class ToolbarManager {
         const firstDirectTextNode = this._getFirstDirectTextNode(listItem);
         if (!firstDirectTextNode) return 0;
         const text = firstDirectTextNode.textContent || '';
-        const normalized = text.replace(/^[ \u00A0\u200B]/, '');
+        const normalized = text.replace(/^[ \u00A0\u200B\u2060]/, '');
         if (normalized === '') {
             firstDirectTextNode.remove();
             return text.length > 0 ? -1 : 0;
@@ -856,7 +856,7 @@ export class ToolbarManager {
         const isPlaceholderOnlyNode = (node) => {
             if (!node) return true;
             if (node.nodeType === Node.TEXT_NODE) {
-                const text = (node.textContent || '').replace(/[\u200B\u00A0]/g, '');
+                const text = (node.textContent || '').replace(/[\u200B\u2060\u00A0]/g, '');
                 return text.trim() === '';
             }
             if (node.nodeType !== Node.ELEMENT_NODE) {
@@ -879,7 +879,7 @@ export class ToolbarManager {
             }
             const children = Array.from(node.childNodes || []);
             if (!children.length) {
-                const text = (node.textContent || '').replace(/[\u200B\u00A0]/g, '');
+                const text = (node.textContent || '').replace(/[\u200B\u2060\u00A0]/g, '');
                 return text.trim() === '';
             }
             return children.every((child) => isPlaceholderOnlyNode(child));
@@ -965,7 +965,7 @@ export class ToolbarManager {
             if (!textNode) return 0;
             const text = textNode.textContent || '';
             let offset = 0;
-            while (offset < text.length && text[offset] === '\u200B') {
+            while (offset < text.length && (text[offset] === '\u200B' || text[offset] === '\u2060')) {
                 offset++;
             }
             return offset;
@@ -994,9 +994,9 @@ export class ToolbarManager {
                 const text = firstContentNode.textContent || '';
                 if (/^[ \u00A0]/.test(text)) {
                     // Remove markdown separator space kept by parser.
-                    firstContentNode.textContent = text.slice(1) || '\u200B';
+                    firstContentNode.textContent = text.slice(1) || '';
                 } else if (text === '') {
-                    firstContentNode.textContent = '\u200B';
+                    firstContentNode.textContent = '';
                 }
                 return;
             }
@@ -1007,13 +1007,13 @@ export class ToolbarManager {
                 firstContentNode.nodeType === Node.ELEMENT_NODE &&
                 firstContentNode.tagName === 'BR'
             ) {
-                const anchorNode = document.createTextNode('\u200B');
+                const anchorNode = document.createTextNode('');
                 firstContentNode.replaceWith(anchorNode);
                 return;
             }
 
             if (!getFirstDirectTextNodeAfterCheckbox(li)) {
-                const anchorNode = document.createTextNode('\u200B');
+                const anchorNode = document.createTextNode('');
                 if (firstContentNode) {
                     li.insertBefore(anchorNode, firstContentNode);
                 } else if (firstSublist) {

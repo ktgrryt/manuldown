@@ -533,6 +533,63 @@ import { SearchManager } from './modules/SearchManager.js';
         return container;
     }
 
+    function stripEditorControlCharacters(root = editor, options = {}) {
+        if (!root) return false;
+        const controlCharPattern = /[\u200B\u2060\uFEFF]/g;
+        const selection = options.preserveSelection === false ? null : window.getSelection();
+        const range = selection && selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
+        const startInfo = range ? { node: range.startContainer, offset: range.startOffset } : null;
+        const endInfo = range ? { node: range.endContainer, offset: range.endOffset } : null;
+
+        const adjustedOffset = (text, offset) => {
+            const safeOffset = Math.max(0, Math.min(offset, text.length));
+            const removedBeforeOffset = (text.slice(0, safeOffset).match(controlCharPattern) || []).length;
+            return Math.max(0, safeOffset - removedBeforeOffset);
+        };
+
+        let changed = false;
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+        const textNodes = [];
+        let node;
+        while (node = walker.nextNode()) {
+            textNodes.push(node);
+        }
+
+        textNodes.forEach((textNode) => {
+            const raw = textNode.textContent || '';
+            if (!controlCharPattern.test(raw)) return;
+            controlCharPattern.lastIndex = 0;
+            if (startInfo && startInfo.node === textNode) {
+                startInfo.offset = adjustedOffset(raw, startInfo.offset);
+            }
+            if (endInfo && endInfo.node === textNode) {
+                endInfo.offset = adjustedOffset(raw, endInfo.offset);
+            }
+            textNode.textContent = raw.replace(controlCharPattern, '');
+            changed = true;
+        });
+
+        if (changed && selection && range && startInfo?.node?.isConnected && endInfo?.node?.isConnected) {
+            try {
+                const nextRange = document.createRange();
+                const startLength = startInfo.node.nodeType === Node.TEXT_NODE
+                    ? (startInfo.node.textContent || '').length
+                    : (startInfo.node.childNodes ? startInfo.node.childNodes.length : 0);
+                const endLength = endInfo.node.nodeType === Node.TEXT_NODE
+                    ? (endInfo.node.textContent || '').length
+                    : (endInfo.node.childNodes ? endInfo.node.childNodes.length : 0);
+                nextRange.setStart(startInfo.node, Math.min(startInfo.offset, startLength));
+                nextRange.setEnd(endInfo.node, Math.min(endInfo.offset, endLength));
+                selection.removeAllRanges();
+                selection.addRange(nextRange);
+            } catch (_error) {
+                // If the browser normalized the selection meanwhile, keep its native selection.
+            }
+        }
+
+        return changed;
+    }
+
     function replaceEditorContentFromHtml(rawHtml) {
         if (!editor) return;
         const sanitizedContainer = createSanitizedContainerFromHtml(rawHtml);
@@ -542,6 +599,7 @@ import { SearchManager } from './modules/SearchManager.js';
         while (sanitizedContainer.firstChild) {
             editor.appendChild(sanitizedContainer.firstChild);
         }
+        stripEditorControlCharacters(editor, { preserveSelection: false });
     }
 
     function reapplyImageSecurityPolicy(root = editor) {
@@ -576,7 +634,7 @@ import { SearchManager } from './modules/SearchManager.js';
     }
 
     function isIgnorableEditorTextValue(value) {
-        return (value || '').replace(/[\u200B\uFEFF\u00A0]/g, '').trim() === '';
+        return (value || '').replace(/[\u200B\u2060\uFEFF\u00A0]/g, '').trim() === '';
     }
 
     function isRenderableEditorNode(node) {
@@ -691,7 +749,7 @@ import { SearchManager } from './modules/SearchManager.js';
                 hasMeaningfulContentForSelectionBoundary(node)
             );
         } catch (_e) {
-            const text = (range.toString() || '').replace(/[\u200B\uFEFF\u00A0]/g, '').trim();
+            const text = (range.toString() || '').replace(/[\u200B\u2060\uFEFF\u00A0]/g, '').trim();
             return text !== '';
         }
     }
@@ -725,7 +783,7 @@ import { SearchManager } from './modules/SearchManager.js';
 
     function isEmptyBlockquoteShell(blockquote) {
         if (!blockquote || blockquote.tagName !== 'BLOCKQUOTE') return false;
-        const normalizedText = (blockquote.textContent || '').replace(/[\u200B\u00A0\uFEFF]/g, '').trim();
+        const normalizedText = (blockquote.textContent || '').replace(/[\u200B\u2060\u00A0\uFEFF]/g, '').trim();
         if (normalizedText !== '') return false;
         const hasStructuralContent = !!blockquote.querySelector('img, hr, table, pre, ul, ol, input');
         if (hasStructuralContent) return false;
@@ -920,7 +978,7 @@ import { SearchManager } from './modules/SearchManager.js';
     }
 
     function hasDirectTextContent(listItem) {
-        return getDirectTextContent(listItem).replace(/[\u00A0\u200B\uFEFF]/g, '').trim() !== '';
+        return getDirectTextContent(listItem).replace(/[\u00A0\u200B\u2060\uFEFF]/g, '').trim() !== '';
     }
 
     function getNestedListContainerForListItem(listItem) {
@@ -1087,7 +1145,7 @@ import { SearchManager } from './modules/SearchManager.js';
 
         const textNodes = getDirectTextNodesForListItem(listItem);
         const directText = textNodes.map(node => node.textContent || '').join('');
-        if (directText.replace(/[\u00A0\u200B\uFEFF]/g, '').trim() === '') {
+        if (directText.replace(/[\u00A0\u200B\u2060\uFEFF]/g, '').trim() === '') {
             return false;
         }
 
@@ -1116,7 +1174,7 @@ import { SearchManager } from './modules/SearchManager.js';
         }
 
         const remainingText = directText.slice(0, deleteStart) + directText.slice(deleteEnd);
-        if (remainingText.replace(/[\u00A0\u200B\uFEFF]/g, '').trim() !== '') {
+        if (remainingText.replace(/[\u00A0\u200B\u2060\uFEFF]/g, '').trim() !== '') {
             return false;
         }
 
@@ -1448,7 +1506,7 @@ import { SearchManager } from './modules/SearchManager.js';
         if (!listItem) return null;
         if (hasCheckboxAtStart(listItem)) return null;
         if (!isRangeInListItemDirectContent(range, listItem)) return null;
-        const directText = getDirectTextContent(listItem).replace(/[\u00A0\u200B]/g, '').trim();
+        const directText = getDirectTextContent(listItem).replace(/[\u00A0\u200B\u2060]/g, '').trim();
         if (directText !== '') return null;
         return listItem;
     }
@@ -1465,7 +1523,7 @@ import { SearchManager } from './modules/SearchManager.js';
         const text = firstTextNode.textContent || '';
         let firstNonPlaceholder = null;
         for (let i = 0; i < text.length; i++) {
-            if (!/[\u00A0\u200B]/.test(text[i])) {
+            if (!/[\u00A0\u200B\u2060]/.test(text[i])) {
                 firstNonPlaceholder = i;
                 break;
             }
@@ -1494,7 +1552,7 @@ import { SearchManager } from './modules/SearchManager.js';
 
         const isWhitespaceText = (node) =>
             node && node.nodeType === Node.TEXT_NODE &&
-            (node.textContent || '').replace(/[\u00A0\u200B]/g, '').trim() === '';
+            (node.textContent || '').replace(/[\u00A0\u200B\u2060]/g, '').trim() === '';
 
         const findFirstMeaningfulDescendant = (element) => {
             if (!element || element.nodeType !== Node.ELEMENT_NODE) return null;
@@ -1503,7 +1561,7 @@ import { SearchManager } from './modules/SearchManager.js';
             while (node) {
                 if (node !== element) {
                     if (node.nodeType === Node.TEXT_NODE) {
-                        const cleaned = (node.textContent || '').replace(/[\u00A0\u200B]/g, '');
+                        const cleaned = (node.textContent || '').replace(/[\u00A0\u200B\u2060]/g, '');
                         if (cleaned.trim() !== '') return node;
                     } else if (node.nodeType === Node.ELEMENT_NODE) {
                         if (node.tagName === 'BR') {
@@ -1986,7 +2044,7 @@ import { SearchManager } from './modules/SearchManager.js';
     function normalizeClipboardPlainText(text) {
         return String(text || '')
             .replace(/\r\n?/g, '\n')
-            .replace(/[\u200B\uFEFF]/g, '');
+            .replace(/[\u200B\u2060\uFEFF]/g, '');
     }
 
     function extractInternalHtmlFromMarkedClipboardHtml(rawHtml) {
@@ -2307,12 +2365,12 @@ import { SearchManager } from './modules/SearchManager.js';
         const textNode = getFirstDirectTextNodeAfterCheckbox(li);
         if (!textNode) return 0;
         const text = textNode.textContent || '';
-        const visibleText = text.replace(/[\u200B\uFEFF\u00A0]/g, '');
+        const visibleText = text.replace(/[\u200B\u2060\uFEFF\u00A0]/g, '');
         if (visibleText === '') {
             return 0;
         }
         let offset = 0;
-        while (offset < text.length && text[offset] === '\u200B') {
+        while (offset < text.length && (text[offset] === '\u200B' || text[offset] === '\u2060')) {
             offset++;
         }
         return offset;
@@ -2326,7 +2384,7 @@ import { SearchManager } from './modules/SearchManager.js';
         const isPlaceholderOnlyListNode = (node) => {
             if (!node) return true;
             if (node.nodeType === Node.TEXT_NODE) {
-                return (node.textContent || '').replace(/[\u200B\u00A0]/g, '').trim() === '';
+                return (node.textContent || '').replace(/[\u200B\u2060\u00A0]/g, '').trim() === '';
             }
             if (node.nodeType !== Node.ELEMENT_NODE) {
                 return true;
@@ -2339,7 +2397,7 @@ import { SearchManager } from './modules/SearchManager.js';
             }
             const children = Array.from(node.childNodes || []);
             if (!children.length) {
-                return (node.textContent || '').replace(/[\u200B\u00A0]/g, '').trim() === '';
+                return (node.textContent || '').replace(/[\u200B\u2060\u00A0]/g, '').trim() === '';
             }
             return children.every((child) => isPlaceholderOnlyListNode(child));
         };
@@ -2365,10 +2423,10 @@ import { SearchManager } from './modules/SearchManager.js';
             if (/^[ \u00A0]/.test(text)) {
                 // Markdown parser keeps a separator space after checkbox marker.
                 // Keep DOM text clean so caret-at-start behaves like plain text.
-                firstContentNode.textContent = text.slice(1) || '\u200B';
+                firstContentNode.textContent = text.slice(1) || '';
             } else if (text === '') {
                 // Keep an invisible anchor so caret starts on the text side of checkbox.
-                firstContentNode.textContent = '\u200B';
+                firstContentNode.textContent = '';
             }
             return;
         }
@@ -2389,13 +2447,13 @@ import { SearchManager } from './modules/SearchManager.js';
         if (firstContentNode &&
             firstContentNode.nodeType === Node.ELEMENT_NODE &&
             firstContentNode.tagName === 'BR') {
-            const anchorNode = document.createTextNode('\u200B');
+            const anchorNode = document.createTextNode('');
             firstContentNode.replaceWith(anchorNode);
             return;
         }
 
         if (!getFirstDirectTextNodeAfterCheckbox(li)) {
-            const anchorNode = document.createTextNode('\u200B');
+            const anchorNode = document.createTextNode('');
             if (firstContentNode) {
                 li.insertBefore(anchorNode, firstContentNode);
             } else if (firstSublist) {
@@ -2441,7 +2499,7 @@ import { SearchManager } from './modules/SearchManager.js';
                 }
 
                 if (child.nodeType === Node.TEXT_NODE) {
-                    const cleaned = (child.textContent || '').replace(/[\u00A0\u200B]/g, '').trim();
+                    const cleaned = (child.textContent || '').replace(/[\u00A0\u200B\u2060]/g, '').trim();
                     if (cleaned === '') {
                         continue;
                     }
@@ -2575,7 +2633,7 @@ import { SearchManager } from './modules/SearchManager.js';
             }
             if (inSublist) continue;
 
-            const cleaned = (node.textContent || '').replace(/[\u200B\u00A0]/g, '');
+            const cleaned = (node.textContent || '').replace(/[\u200B\u2060\u00A0]/g, '');
             if (cleaned.trim() === '') continue;
             lastMeaningfulTextNode = node;
         }
@@ -2646,7 +2704,7 @@ import { SearchManager } from './modules/SearchManager.js';
         let directTextNodes = getDirectTextNodes(listItem);
 
         if (directTextNodes.length === 0) {
-            const anchorNode = document.createTextNode(hasCheckboxAtStart(listItem) ? '\u200B' : '');
+            const anchorNode = document.createTextNode('');
             const firstSublist = Array.from(listItem.children || []).find(
                 child => child.tagName === 'UL' || child.tagName === 'OL'
             );
@@ -2750,7 +2808,7 @@ import { SearchManager } from './modules/SearchManager.js';
         if (element.tagName === 'BLOCKQUOTE') {
             const firstParagraph = element.querySelector(':scope > p');
             if (firstParagraph) {
-                const firstParagraphText = (firstParagraph.textContent || '').replace(/[\u200B\u00A0]/g, '').trim();
+                const firstParagraphText = (firstParagraph.textContent || '').replace(/[\u200B\u2060\u00A0]/g, '').trim();
                 const firstParagraphHasBr = !!firstParagraph.querySelector('br');
                 if (firstParagraphText === '' || firstParagraphHasBr) {
                     // Keep caret on the first (possibly empty) quote line instead of
@@ -3347,7 +3405,7 @@ import { SearchManager } from './modules/SearchManager.js';
                     const node = nodes[index];
                     if (!node) break;
                     if (node.nodeType === Node.TEXT_NODE) {
-                        const cleaned = (node.textContent || '').replace(/[\u200B\u00A0]/g, '').trim();
+                        const cleaned = (node.textContent || '').replace(/[\u200B\u2060\u00A0]/g, '').trim();
                         if (cleaned === '') {
                             index++;
                             continue;
@@ -3365,14 +3423,14 @@ import { SearchManager } from './modules/SearchManager.js';
                 range.startContainer.parentElement === listContainer &&
                 !listItem.contains(range.startContainer)) {
                 const beforeText = (range.startContainer.textContent || '').slice(0, range.startOffset)
-                    .replace(/[\u200B\u00A0]/g, '').trim();
+                    .replace(/[\u200B\u2060\u00A0]/g, '').trim();
                 if (beforeText === '') {
                     let next = range.startContainer;
                     while (next) {
                         next = next.nextSibling;
                         if (!next) break;
                         if (next.nodeType === Node.TEXT_NODE) {
-                            const cleaned = (next.textContent || '').replace(/[\u200B\u00A0]/g, '').trim();
+                            const cleaned = (next.textContent || '').replace(/[\u200B\u2060\u00A0]/g, '').trim();
                             if (cleaned === '') continue;
                             break;
                         }
@@ -3389,7 +3447,7 @@ import { SearchManager } from './modules/SearchManager.js';
             const beforeRange = document.createRange();
             beforeRange.selectNodeContents(listItem);
             beforeRange.setEnd(range.startContainer, range.startOffset);
-            const beforeText = (beforeRange.toString() || '').replace(/[\u200B\u00A0]/g, '');
+            const beforeText = (beforeRange.toString() || '').replace(/[\u200B\u2060\u00A0]/g, '');
             return beforeText.trim() === '';
         } catch (e) {
             return false;
@@ -3499,7 +3557,7 @@ import { SearchManager } from './modules/SearchManager.js';
         }
 
         const directText = getDirectTextContent(currentListItem)
-            .replace(/[\u00A0\u200B\uFEFF]/g, '')
+            .replace(/[\u00A0\u200B\u2060\uFEFF]/g, '')
             .trim();
         if (directText !== '') {
             return false;
@@ -3966,7 +4024,7 @@ import { SearchManager } from './modules/SearchManager.js';
         const isPlaceholderOnlyNode = (node) => {
             if (!node) return true;
             if (node.nodeType === Node.TEXT_NODE) {
-                return (node.textContent || '').replace(/[\u200B\u00A0]/g, '').trim() === '';
+                return (node.textContent || '').replace(/[\u200B\u2060\u00A0]/g, '').trim() === '';
             }
             if (node.nodeType !== Node.ELEMENT_NODE) {
                 return true;
@@ -3986,7 +4044,7 @@ import { SearchManager } from './modules/SearchManager.js';
             }
             const children = Array.from(node.childNodes || []);
             if (!children.length) {
-                return (node.textContent || '').replace(/[\u200B\u00A0]/g, '').trim() === '';
+                return (node.textContent || '').replace(/[\u200B\u2060\u00A0]/g, '').trim() === '';
             }
             return children.every((child) => isPlaceholderOnlyNode(child));
         };
@@ -4041,7 +4099,7 @@ import { SearchManager } from './modules/SearchManager.js';
                         const firstDirectTextNode = getFirstDirectTextNode(currentBlock) || domUtils.getFirstTextNode(currentBlock);
                         if (firstDirectTextNode && firstDirectTextNode.nodeType === Node.TEXT_NODE) {
                             const text = firstDirectTextNode.textContent || '';
-                            const normalized = text.replace(/^[ \u00A0\u200B]/, '');
+                            const normalized = text.replace(/^[ \u00A0\u200B\u2060]/, '');
                             if (normalized === '') {
                                 firstDirectTextNode.remove();
                                 if (text.length > 0) {
@@ -4184,7 +4242,7 @@ import { SearchManager } from './modules/SearchManager.js';
                             const minOffset = getCheckboxTextMinOffset(currentBlock);
                             newRange.setStart(targetNode, minOffset);
                         } else {
-                            const fallbackAnchor = document.createTextNode('\u200B');
+                            const fallbackAnchor = document.createTextNode('');
                             const firstSublist = Array.from(currentBlock.children || []).find(
                                 child => child.tagName === 'UL' || child.tagName === 'OL'
                             );
@@ -4292,7 +4350,7 @@ import { SearchManager } from './modules/SearchManager.js';
                 const minOffset = getCheckboxTextMinOffset(li);
                 newRange.setStart(targetNode, minOffset);
             } else {
-                const fallbackAnchor = document.createTextNode('\u200B');
+                const fallbackAnchor = document.createTextNode('');
                 const firstSublist = Array.from(li.children || []).find(
                     child => child.tagName === 'UL' || child.tagName === 'OL'
                 );
@@ -4901,7 +4959,7 @@ import { SearchManager } from './modules/SearchManager.js';
 
             // Check if list item only contains nested lists (no text content)
             const directText = getDirectTextContent(li);
-            const directTextWithoutPlaceholders = directText.replace(/[\u00A0\u200B]/g, '');
+            const directTextWithoutPlaceholders = directText.replace(/[\u00A0\u200B\u2060]/g, '');
             const hasTextContent = directTextWithoutPlaceholders.trim() !== '';
             const hasNestedList = hasNestedListChild(li);
             let isPreservedEmpty = li.getAttribute('data-preserve-empty') === 'true';
@@ -4911,7 +4969,7 @@ import { SearchManager } from './modules/SearchManager.js';
             const removeDirectPlaceholderText = () => {
                 Array.from(li.childNodes || []).forEach(child => {
                     if (child.nodeType !== Node.TEXT_NODE) return;
-                    const withoutPlaceholders = (child.textContent || '').replace(/[\u00A0\u200B\uFEFF]/g, '');
+                    const withoutPlaceholders = (child.textContent || '').replace(/[\u00A0\u200B\u2060\uFEFF]/g, '');
                     if (withoutPlaceholders.trim() === '') {
                         child.remove();
                     }
@@ -4955,7 +5013,7 @@ import { SearchManager } from './modules/SearchManager.js';
                     if (inSublist) return;
 
                     if (textNode.textContent.includes('\u00A0')) {
-                        const cleaned = textNode.textContent.replace(/[\u00A0\u200B]/g, '');
+                        const cleaned = textNode.textContent.replace(/[\u00A0\u200B\u2060]/g, '');
                         if (cleaned === '') {
                             textNode.remove();
                         } else {
@@ -5016,7 +5074,7 @@ import { SearchManager } from './modules/SearchManager.js';
         if (!listItem || !listItem.isConnected) return false;
 
         const directText = getDirectTextContent(listItem);
-        const directTextWithoutPlaceholders = directText.replace(/[\u00A0\u200B]/g, '');
+        const directTextWithoutPlaceholders = directText.replace(/[\u00A0\u200B\u2060]/g, '');
         const hasTextContent = directTextWithoutPlaceholders.trim() !== '';
         const hasNestedList = hasNestedListChild(listItem);
 
@@ -5032,7 +5090,7 @@ import { SearchManager } from './modules/SearchManager.js';
             }
             if (child.nodeType === Node.TEXT_NODE) {
                 const text = child.textContent || '';
-                const withoutPlaceholders = text.replace(/[\u00A0\u200B]/g, '');
+                const withoutPlaceholders = text.replace(/[\u00A0\u200B\u2060]/g, '');
                 if (withoutPlaceholders.trim() === '' && !text.includes('\u00A0')) {
                     child.remove();
                 }
@@ -5182,7 +5240,7 @@ import { SearchManager } from './modules/SearchManager.js';
             }
 
             const directTextAfterDelete = getDirectTextContent(listItem)
-                .replace(/[\u00A0\u200B\uFEFF]/g, '')
+                .replace(/[\u00A0\u200B\u2060\uFEFF]/g, '')
                 .trim();
             if (directTextAfterDelete !== '') return;
 
@@ -5467,7 +5525,7 @@ import { SearchManager } from './modules/SearchManager.js';
         let next = node ? node.nextSibling : null;
         while (next) {
             if (next.nodeType === Node.TEXT_NODE) {
-                const text = (next.textContent || '').replace(/[\u200B\u00A0]/g, '');
+                const text = (next.textContent || '').replace(/[\u200B\u2060\u00A0]/g, '');
                 if (text.trim() !== '') {
                     return next;
                 }
@@ -5551,7 +5609,7 @@ import { SearchManager } from './modules/SearchManager.js';
             const tailRange = document.createRange();
             tailRange.setStart(range.startContainer, range.startOffset);
             tailRange.setEnd(strikeElement, strikeElement.childNodes.length);
-            const remaining = tailRange.toString().replace(/[\u200B\s]/g, '');
+            const remaining = tailRange.toString().replace(/[\u200B\u2060\s]/g, '');
             return remaining === '';
         } catch (e) {
             return false;
@@ -5560,7 +5618,7 @@ import { SearchManager } from './modules/SearchManager.js';
 
     function isEmptyInlineStrike(strikeElement) {
         if (!strikeElement) return false;
-        const text = (strikeElement.textContent || '').replace(/[\u200B\s\u00A0]/g, '');
+        const text = (strikeElement.textContent || '').replace(/[\u200B\u2060\s\u00A0]/g, '');
         if (text !== '') return false;
         // Allow <br> only; any other element means it's not empty
         for (const child of strikeElement.childNodes) {
@@ -5582,7 +5640,7 @@ import { SearchManager } from './modules/SearchManager.js';
         const parent = strikeElement.parentNode;
         if (!parent) return false;
         const hasBr = !!strikeElement.querySelector('br');
-        const replacement = hasBr ? document.createElement('br') : document.createTextNode('\u200B');
+        const replacement = hasBr ? document.createElement('br') : document.createTextNode('');
         parent.replaceChild(replacement, strikeElement);
 
         const newRange = document.createRange();
@@ -5609,7 +5667,7 @@ import { SearchManager } from './modules/SearchManager.js';
             if (!parent) return;
 
             const hasBr = !!strikeElement.querySelector('br');
-            const replacement = hasBr ? document.createElement('br') : document.createTextNode('\u200B');
+            const replacement = hasBr ? document.createElement('br') : document.createTextNode('');
             const shouldRestore = activeRange && strikeElement.contains(activeRange.startContainer);
 
             parent.replaceChild(replacement, strikeElement);
@@ -5836,7 +5894,7 @@ import { SearchManager } from './modules/SearchManager.js';
         if (container === lastMeaningfulTextNode) {
             // 末尾または末尾付近（残りがZWSPや空白のみ）にいるかチェック
             const remainingText = lastMeaningfulTextNode.textContent.slice(offset);
-            const cleanRemaining = remainingText.replace(/[\u200B\s]/g, '');
+            const cleanRemaining = remainingText.replace(/[\u200B\u2060\s]/g, '');
             if (cleanRemaining === '') {
                 return true;
             }
@@ -5911,7 +5969,7 @@ import { SearchManager } from './modules/SearchManager.js';
             while (sibling) {
                 if (sibling.nodeType === Node.TEXT_NODE) {
                     const raw = sibling.textContent || '';
-                    const cleaned = raw.replace(/[\u200B\uFEFF\u00A0]/g, '');
+                    const cleaned = raw.replace(/[\u200B\u2060\uFEFF\u00A0]/g, '');
                     if (cleaned.trim() === '') {
                         // Treat whitespace text nodes as an intentional visual gap only when
                         // they contain two or more line breaks. A single '\n' commonly comes
@@ -6049,7 +6107,7 @@ import { SearchManager } from './modules/SearchManager.js';
             if (!node || node.nodeType !== Node.TEXT_NODE) {
                 return false;
             }
-            return (node.textContent || '').replace(/[\u200B\uFEFF]/g, '') === '';
+            return (node.textContent || '').replace(/[\u200B\u2060\uFEFF]/g, '') === '';
         };
         const getOutsideLeftInlineCode = (targetRange) => {
             if (!targetRange || !targetRange.collapsed) {
@@ -6068,7 +6126,11 @@ import { SearchManager } from './modules/SearchManager.js';
                 const text = targetContainer.textContent || '';
                 let trailingBoundaryStart = text.length;
                 while (trailingBoundaryStart > 0 &&
-                    (text[trailingBoundaryStart - 1] === '\u200B' || text[trailingBoundaryStart - 1] === '\uFEFF')) {
+                    (
+                        text[trailingBoundaryStart - 1] === '\u200B' ||
+                        text[trailingBoundaryStart - 1] === '\u2060' ||
+                        text[trailingBoundaryStart - 1] === '\uFEFF'
+                    )) {
                     trailingBoundaryStart--;
                 }
                 return targetOffset >= trailingBoundaryStart ? nextSibling : null;
@@ -6098,7 +6160,7 @@ import { SearchManager } from './modules/SearchManager.js';
                 const tempRange = document.createRange();
                 tempRange.selectNodeContents(block);
                 tempRange.setEnd(targetRange.startContainer, targetRange.startOffset);
-                const beforeText = (tempRange.toString() || '').replace(/[\u200B\uFEFF\u00A0]/g, '').trim();
+                const beforeText = (tempRange.toString() || '').replace(/[\u200B\u2060\uFEFF\u00A0]/g, '').trim();
                 return beforeText === '';
             } catch (e) {
                 return false;
@@ -6136,7 +6198,11 @@ import { SearchManager } from './modules/SearchManager.js';
             let currentOffset = offset;
             let deletedZWSP = false;
 
-            while (currentOffset > 0 && currentNode.textContent[currentOffset - 1] === '\u200B') {
+            while (currentOffset > 0 &&
+                (
+                    currentNode.textContent[currentOffset - 1] === '\u200B' ||
+                    currentNode.textContent[currentOffset - 1] === '\u2060'
+                )) {
                 currentOffset--;
                 deletedZWSP = true;
             }
@@ -6299,7 +6365,7 @@ import { SearchManager } from './modules/SearchManager.js';
                         const firstDirectTextNode = getFirstDirectTextNode(listItem) || domUtils.getFirstTextNode(listItem);
                         if (firstDirectTextNode && firstDirectTextNode.nodeType === Node.TEXT_NODE) {
                             const text = firstDirectTextNode.textContent || '';
-                            const normalized = text.replace(/^[ \u00A0\u200B]/, '');
+                            const normalized = text.replace(/^[ \u00A0\u200B\u2060]/, '');
                             if (normalized === '') {
                                 firstDirectTextNode.remove();
                             } else if (normalized !== text) {
@@ -6529,7 +6595,7 @@ import { SearchManager } from './modules/SearchManager.js';
                                 firstNode = domUtils.getFirstTextNode(trailingListItem);
                             }
                             if (!firstNode) {
-                                const anchor = document.createTextNode(isCheckboxTarget ? '\u200B' : '');
+                                const anchor = document.createTextNode('');
                                 trailingListItem.appendChild(anchor);
                                 firstNode = anchor;
                             }
@@ -6642,7 +6708,7 @@ import { SearchManager } from './modules/SearchManager.js';
 
         if (preBlock && codeBlock && range.collapsed) {
             const codeText = cursorManager.getCodeBlockText(codeBlock);
-            const normalizedCodeText = codeText.replace(/[\u200B\uFEFF]/g, '');
+            const normalizedCodeText = codeText.replace(/[\u200B\u2060\uFEFF]/g, '');
             const isEmptyCodeBlock = normalizedCodeText.trim() === '';
 
             // 空のコードブロックはBackspace/Ctrl+Hでブロックごと削除
@@ -6667,7 +6733,7 @@ import { SearchManager } from './modules/SearchManager.js';
                 if (canDeleteChar) {
                     const nextLineText = lineText.slice(0, deleteIndex) + lineText.slice(deleteIndex + 1);
                     const lineBecomesWhitespaceOnly =
-                        nextLineText.replace(/\u200B/g, '').trim() === '';
+                        nextLineText.replace(/[\u200B\u2060]/g, '').trim() === '';
                     if (lineBecomesWhitespaceOnly) {
                         let newText = codeText.slice(0, safeOffset - 1) + codeText.slice(safeOffset);
                         if (!newText.endsWith('\n')) {
@@ -6759,7 +6825,7 @@ import { SearchManager } from './modules/SearchManager.js';
                         const remainingText =
                             directText.slice(0, cursorOffsetInDirect - 1) + directText.slice(cursorOffsetInDirect);
                         const isLastVisibleCharDeleted =
-                            remainingText.replace(/\u200B/g, '').trim() === '';
+                            remainingText.replace(/[\u200B\u2060]/g, '').trim() === '';
 
                         if (isLastVisibleCharDeleted) {
                             restoreInfo = {
@@ -6798,7 +6864,7 @@ import { SearchManager } from './modules/SearchManager.js';
             const hasMeaningfulInlineSibling = (node) => {
                 if (!node) return false;
                 if (node.nodeType === Node.TEXT_NODE) {
-                    const text = (node.textContent || '').replace(/[\u200B\uFEFF]/g, '');
+                    const text = (node.textContent || '').replace(/[\u200B\u2060\uFEFF]/g, '');
                     return text.trim() !== '';
                 }
                 if (node.nodeType !== Node.ELEMENT_NODE) return false;
@@ -6814,7 +6880,7 @@ import { SearchManager } from './modules/SearchManager.js';
                 const raw = textNode.textContent || '';
                 if (raw === '') return false;
                 if (/[\r\n\t\f\v]/.test(raw)) return false;
-                if (raw.replace(/[\u200B\uFEFF]/g, '') === '') return false;
+                if (raw.replace(/[\u200B\u2060\uFEFF]/g, '') === '') return false;
                 return hasMeaningfulInlineSibling(textNode.previousSibling) &&
                     hasMeaningfulInlineSibling(textNode.nextSibling);
             };
@@ -7040,7 +7106,7 @@ import { SearchManager } from './modules/SearchManager.js';
         }
 
         const rawText = textNode.textContent || '';
-        const normalizedText = rawText.replace(/\u200B/g, '');
+        const normalizedText = rawText.replace(/[\u200B\u2060]/g, '');
         const fenceMatch = normalizedText.match(/^\s*```\s*([A-Za-z0-9_-]+)?\s*$/);
         if (!fenceMatch) {
             return false;
@@ -7064,7 +7130,7 @@ import { SearchManager } from './modules/SearchManager.js';
             return false;
         }
 
-        const normalizedOffset = rawText.slice(0, cursorOffset).replace(/\u200B/g, '').length;
+        const normalizedOffset = rawText.slice(0, cursorOffset).replace(/[\u200B\u2060]/g, '').length;
         if (normalizedOffset !== normalizedText.length) {
             return false;
         }
@@ -7232,7 +7298,7 @@ import { SearchManager } from './modules/SearchManager.js';
         stateManager.saveState();
 
         // Check if the list item is empty (ignore caret placeholders)
-        const directTextForEnter = getDirectTextContent(activeListItem).replace(/[\u00A0\u200B]/g, '').trim();
+        const directTextForEnter = getDirectTextContent(activeListItem).replace(/[\u00A0\u200B\u2060]/g, '').trim();
         const isEmpty = directTextForEnter === '';
         const isCheckboxItem = hasCheckbox(activeListItem);
 
@@ -7361,7 +7427,7 @@ import { SearchManager } from './modules/SearchManager.js';
                             : domUtils.getFirstTextNode(targetItem);
 
                         if (!targetTextNode) {
-                            const anchorNode = document.createTextNode(targetIsCheckbox ? '\u200B' : '');
+                            const anchorNode = document.createTextNode('');
                             const firstSublist = Array.from(targetItem.children).find(
                                 child => child.tagName === 'UL' || child.tagName === 'OL'
                             );
@@ -7472,7 +7538,8 @@ import { SearchManager } from './modules/SearchManager.js';
                         newListItem.appendChild(createCheckboxElement());
                         newListItem.setAttribute('data-preserve-empty', 'true');
                     }
-                    const textNode = document.createTextNode('\u200B');
+                    // Keep an empty list item measurable so caret reveal works at the viewport bottom.
+                    const textNode = document.createTextNode('\u00A0');
                     newListItem.appendChild(textNode);
 
                     // Insert the new list item after the current item in the parent list
@@ -7517,7 +7584,7 @@ import { SearchManager } from './modules/SearchManager.js';
                     const firstDirectTextNode = getFirstDirectTextNode(activeListItem) || domUtils.getFirstTextNode(activeListItem);
                     if (firstDirectTextNode && firstDirectTextNode.nodeType === Node.TEXT_NODE) {
                         const text = firstDirectTextNode.textContent || '';
-                        const normalized = text.replace(/^[ \u00A0\u200B]/, '');
+                        const normalized = text.replace(/^[ \u00A0\u200B\u2060]/, '');
                         if (normalized === '') {
                             firstDirectTextNode.remove();
                         } else if (normalized !== text) {
@@ -7607,7 +7674,7 @@ import { SearchManager } from './modules/SearchManager.js';
                             n.remove();
                         }
                     });
-                    const textNode = document.createTextNode('\u200B');
+                    const textNode = document.createTextNode('');
                     newListItem.appendChild(textNode);
                     if (isCheckboxItem) {
                         newListItem.setAttribute('data-preserve-empty', 'true');
@@ -7676,7 +7743,7 @@ import { SearchManager } from './modules/SearchManager.js';
                         beforeRange.selectNodeContents(heading);
                         beforeRange.setEnd(range.startContainer, range.startOffset);
                         const beforeText = (beforeRange.toString() || '')
-                            .replace(/[\u200B\uFEFF\u00A0]/g, '')
+                            .replace(/[\u200B\u2060\uFEFF\u00A0]/g, '')
                             .trim();
                         isAtHeadingStart = beforeText === '';
                     } catch (err) {
@@ -7718,7 +7785,7 @@ import { SearchManager } from './modules/SearchManager.js';
                 if (!node || node.nodeType !== Node.TEXT_NODE) {
                     return false;
                 }
-                return (node.textContent || '').replace(/[\u200B\uFEFF]/g, '') === '';
+                return (node.textContent || '').replace(/[\u200B\u2060\uFEFF]/g, '') === '';
             };
             const getInlineCodeAtOutsideLeftBoundary = (targetRange) => {
                 if (!targetRange || !targetRange.collapsed) {
@@ -7737,7 +7804,11 @@ import { SearchManager } from './modules/SearchManager.js';
                     const text = targetContainer.textContent || '';
                     let trailingBoundaryStart = text.length;
                     while (trailingBoundaryStart > 0 &&
-                        (text[trailingBoundaryStart - 1] === '\u200B' || text[trailingBoundaryStart - 1] === '\uFEFF')) {
+                        (
+                            text[trailingBoundaryStart - 1] === '\u200B' ||
+                            text[trailingBoundaryStart - 1] === '\u2060' ||
+                            text[trailingBoundaryStart - 1] === '\uFEFF'
+                        )) {
                         trailingBoundaryStart--;
                     }
                     return targetOffset >= trailingBoundaryStart ? nextSibling : null;
@@ -8110,7 +8181,7 @@ import { SearchManager } from './modules/SearchManager.js';
 
     function isEffectivelyEmptyBlock(block) {
         if (!block) return false;
-        const text = (block.textContent || '').replace(/[\u200B\u00A0]/g, '').trim();
+        const text = (block.textContent || '').replace(/[\u200B\u2060\u00A0]/g, '').trim();
         if (text !== '') return false;
         const hasMeaningfulElement = Array.from(block.childNodes).some(node => {
             if (node.nodeType !== Node.ELEMENT_NODE) return false;
@@ -8127,7 +8198,7 @@ import { SearchManager } from './modules/SearchManager.js';
                 el.tagName === 'BLOCKQUOTE') {
                 return true;
             }
-            const elementText = (el.textContent || '').replace(/[\u200B\u00A0]/g, '').trim();
+            const elementText = (el.textContent || '').replace(/[\u200B\u2060\u00A0]/g, '').trim();
             if (elementText !== '') return true;
             if (typeof el.querySelector === 'function') {
                 return !!el.querySelector('img,hr,table,ul,ol,input,pre,blockquote');
@@ -8188,7 +8259,7 @@ import { SearchManager } from './modules/SearchManager.js';
             const tempRange = document.createRange();
             tempRange.selectNodeContents(block);
             tempRange.setEnd(range.startContainer, range.startOffset);
-            const beforeText = tempRange.toString().replace(/\u200B/g, '');
+            const beforeText = tempRange.toString().replace(/[\u200B\u2060]/g, '');
             return beforeText.length === 0;
         } catch (e) {
             return false;
@@ -8280,7 +8351,7 @@ import { SearchManager } from './modules/SearchManager.js';
     function isCtrlKTargetBlockquoteEmpty(blockquote) {
         if (!blockquote) return false;
 
-        const normalizedText = (blockquote.textContent || '').replace(/[\u200B\u00A0\uFEFF]/g, '').trim();
+        const normalizedText = (blockquote.textContent || '').replace(/[\u200B\u2060\u00A0\uFEFF]/g, '').trim();
         if (normalizedText !== '') {
             return false;
         }
@@ -9091,7 +9162,7 @@ import { SearchManager } from './modules/SearchManager.js';
                 newRange.setStart(lastNode, lastNode.textContent.length);
             } else {
                 if (prevElement.tagName === 'P') {
-                    const hasText = (prevElement.textContent || '').replace(/[\u200B\u00A0]/g, '').trim() !== '';
+                    const hasText = (prevElement.textContent || '').replace(/[\u200B\u2060\u00A0]/g, '').trim() !== '';
                     const hasBr = !!prevElement.querySelector('br');
                     if (!hasText && !hasBr) {
                         prevElement.appendChild(document.createElement('br'));
@@ -9185,7 +9256,7 @@ import { SearchManager } from './modules/SearchManager.js';
             const offset = getCodeBlockCursorOffset(codeBlock, range);
             if (offset !== null) {
                 const { lines, currentLineIndex } = cursorManager.getCodeBlockLineInfo(textForOffset, offset);
-                const isWhitespaceOnly = (value) => value.replace(/[\u200B\u00A0\s]/g, '') === '';
+                const isWhitespaceOnly = (value) => value.replace(/[\u200B\u2060\u00A0\s]/g, '') === '';
                 let lastNonWhitespaceLineIndex = -1;
                 for (let i = lines.length - 1; i >= 0; i--) {
                     if (!isWhitespaceOnly(lines[i])) {
@@ -9207,7 +9278,7 @@ import { SearchManager } from './modules/SearchManager.js';
             }
             const fullText = (codeBlock.innerText !== undefined ? codeBlock.innerText : codeBlock.textContent) || '';
             const lines = fullText.split('\n');
-            const isWhitespaceOnly = (value) => value.replace(/[\u200B\u00A0\s]/g, '') === '';
+            const isWhitespaceOnly = (value) => value.replace(/[\u200B\u2060\u00A0\s]/g, '') === '';
             while (lines.length > 0 && isWhitespaceOnly(lines[lines.length - 1])) {
                 lines.pop();
             }
@@ -9249,7 +9320,7 @@ import { SearchManager } from './modules/SearchManager.js';
         if (!node || node.nodeType !== Node.TEXT_NODE || node.parentElement !== editor) {
             return false;
         }
-        const text = (node.textContent || '').replace(/[\u200B\u00A0\uFEFF]/g, '');
+        const text = (node.textContent || '').replace(/[\u200B\u2060\u00A0\uFEFF]/g, '');
         return text.trim() === '';
     }
 
@@ -9279,7 +9350,7 @@ import { SearchManager } from './modules/SearchManager.js';
                         if (!textNode) {
                             const checkbox = firstLi.querySelector(':scope > input[type="checkbox"]');
                             if (checkbox) {
-                                const anchorNode = document.createTextNode('\u200B');
+                                const anchorNode = document.createTextNode('');
                                 const firstSublist = Array.from(firstLi.children).find(
                                     child => child.tagName === 'UL' || child.tagName === 'OL'
                                 );
@@ -9306,7 +9377,7 @@ import { SearchManager } from './modules/SearchManager.js';
                         if (firstTextNodeInLi) {
                             const text = firstTextNodeInLi.textContent || '';
                             let startOffset = 0;
-                            while (startOffset < text.length && /[\u200B\uFEFF]/.test(text[startOffset])) {
+                            while (startOffset < text.length && /[\u200B\u2060\uFEFF]/.test(text[startOffset])) {
                                 startOffset++;
                             }
                             range.setStart(firstTextNodeInLi, startOffset);
@@ -9321,7 +9392,7 @@ import { SearchManager } from './modules/SearchManager.js';
             if (firstTextNode) {
                 const text = firstTextNode.textContent || '';
                 let startOffset = 0;
-                while (startOffset < text.length && /[\u200B\uFEFF]/.test(text[startOffset])) {
+                while (startOffset < text.length && /[\u200B\u2060\uFEFF]/.test(text[startOffset])) {
                     startOffset++;
                 }
                 range.setStart(firstTextNode, startOffset);
@@ -9420,10 +9491,10 @@ import { SearchManager } from './modules/SearchManager.js';
         const raw = String(value);
         const hasPlaceholderSignal =
             /&ZeroWidthSpace;/i.test(raw) ||
-            /[\u200B\uFEFF]/.test(raw);
+            /[\u200B\u2060\uFEFF]/.test(raw);
         const normalized = raw
             .replace(/&ZeroWidthSpace;/gi, '')
-            .replace(/[\u200B\u00A0\uFEFF]/g, '')
+            .replace(/[\u200B\u2060\u00A0\uFEFF]/g, '')
             .trim();
         if (hasPlaceholderSignal && normalized.replace(/["']/g, '').trim() === '') {
             return false;
@@ -9579,7 +9650,7 @@ import { SearchManager } from './modules/SearchManager.js';
                 return node;
             }
             if (node.nodeType === Node.TEXT_NODE) {
-                const normalized = (node.textContent || '').replace(/[\u200B\uFEFF\u00A0\s]/g, '');
+                const normalized = (node.textContent || '').replace(/[\u200B\u2060\uFEFF\u00A0\s]/g, '');
                 if (normalized !== '') {
                     return null;
                 }
@@ -9634,7 +9705,7 @@ import { SearchManager } from './modules/SearchManager.js';
             const text = textNode.textContent || '';
             const textIndex = Array.prototype.indexOf.call(nodes, textNode);
             if (textIndex === -1) return false;
-            const normalized = text.replace(/[\u200B\uFEFF\u00A0\s]/g, '');
+            const normalized = text.replace(/[\u200B\u2060\uFEFF\u00A0\s]/g, '');
             if (normalized !== '') return false;
 
             const nextElement = getNearestTopLevelElementFromIndex(nodes, textIndex + 1, 1);
@@ -10189,10 +10260,10 @@ import { SearchManager } from './modules/SearchManager.js';
 
         if (nextSibling && nextSibling.nodeType === Node.TEXT_NODE) {
             const rawText = nextSibling.textContent || '';
-            const isBoundaryOnlyText = rawText === '' || rawText.replace(/[\u200B\uFEFF]/g, '') === '';
+            const isBoundaryOnlyText = rawText === '' || rawText.replace(/[\u200B\u2060\uFEFF]/g, '') === '';
             if (isBoundaryOnlyText) {
                 if (createPlaceholder && rawText.length === 0) {
-                    nextSibling.textContent = '\u200B';
+                    nextSibling.textContent = '';
                 }
                 targetContainer = nextSibling;
                 targetOffset = (nextSibling.textContent || '').length;
@@ -10202,7 +10273,7 @@ import { SearchManager } from './modules/SearchManager.js';
                 targetOffset = 0;
             }
         } else if (!nextSibling && createPlaceholder) {
-            const spacer = document.createTextNode('\u200B');
+            const spacer = document.createTextNode('');
             parent.appendChild(spacer);
             targetContainer = spacer;
             targetOffset = (spacer.textContent || '').length;
@@ -10321,7 +10392,7 @@ import { SearchManager } from './modules/SearchManager.js';
         }
         const { create = false } = options;
         const useZwspAnchor = shouldUseZwspImageRightTextAnchor(image);
-        const preferredAnchorText = useZwspAnchor ? '\u200B' : '';
+        const preferredAnchorText = '';
         const caretAnchor = getImageCaretAnchorNode(image) || image;
         if (!caretAnchor || !caretAnchor.parentNode) {
             return null;
@@ -10333,10 +10404,10 @@ import { SearchManager } from './modules/SearchManager.js';
             const compact = raw.replace(/[\u00A0\s]/g, '');
             const hasPlaceholderSignal =
                 /&ZeroWidthSpace;/i.test(compact) ||
-                /[\u200B\uFEFF]/.test(compact);
+                /[\u200B\u2060\uFEFF]/.test(compact);
             const normalized = compact
                 .replace(/&ZeroWidthSpace;/gi, '')
-                .replace(/[\u200B\uFEFF]/g, '');
+                .replace(/[\u200B\u2060\uFEFF]/g, '');
             const boundaryOnly =
                 normalized === '' ||
                 (hasPlaceholderSignal && normalized.replace(/["']/g, '') === '');
@@ -10868,7 +10939,7 @@ import { SearchManager } from './modules/SearchManager.js';
 
         const text = cursorManager.getCodeBlockText(codeBlock);
         const { lines, lineStartOffsets } = cursorManager.getCodeBlockLineInfo(text, text.length);
-        const isWhitespaceOnly = (value) => value.replace(/[\u200B\u00A0\s]/g, '') === '';
+        const isWhitespaceOnly = (value) => value.replace(/[\u200B\u2060\u00A0\s]/g, '') === '';
         let targetLineIndex = -1;
         for (let i = lines.length - 1; i >= 0; i--) {
             if (!isWhitespaceOnly(lines[i])) {
@@ -10915,7 +10986,7 @@ import { SearchManager } from './modules/SearchManager.js';
             const beforeRange = document.createRange();
             beforeRange.selectNodeContents(currentBlock);
             beforeRange.setEnd(range.startContainer, range.startOffset);
-            const beforeText = (beforeRange.toString() || '').replace(/\u200B/g, '');
+            const beforeText = (beforeRange.toString() || '').replace(/[\u200B\u2060]/g, '');
             const lastNewline = beforeText.lastIndexOf('\n');
             targetColumn = Math.max(0, beforeText.length - (lastNewline + 1));
         } catch (e) {
@@ -10924,7 +10995,7 @@ import { SearchManager } from './modules/SearchManager.js';
 
         const text = cursorManager.getCodeBlockText(codeBlock);
         const { lines, lineStartOffsets } = cursorManager.getCodeBlockLineInfo(text, text.length);
-        const isWhitespaceOnly = (value) => value.replace(/[\u200B\u00A0\s]/g, '') === '';
+        const isWhitespaceOnly = (value) => value.replace(/[\u200B\u2060\u00A0\s]/g, '') === '';
         let targetLineIndex = -1;
         for (let i = lines.length - 1; i >= 0; i--) {
             if (!isWhitespaceOnly(lines[i])) {
@@ -10968,7 +11039,7 @@ import { SearchManager } from './modules/SearchManager.js';
 
         const text = cursorManager.getCodeBlockText(codeBlock);
         const { lines, lineStartOffsets } = cursorManager.getCodeBlockLineInfo(text, text.length);
-        const isWhitespaceOnly = (value) => value.replace(/[\u200B\u00A0\s]/g, '') === '';
+        const isWhitespaceOnly = (value) => value.replace(/[\u200B\u2060\u00A0\s]/g, '') === '';
         let targetLineIndex = -1;
         for (let i = lines.length - 1; i >= 0; i--) {
             if (!isWhitespaceOnly(lines[i])) {
@@ -11071,7 +11142,7 @@ import { SearchManager } from './modules/SearchManager.js';
         if (!codeBlock) return false;
 
         const text = cursorManager.getCodeBlockText(codeBlock);
-        const normalized = text.replace(/[\u200B\u00A0\s]/g, '');
+        const normalized = text.replace(/[\u200B\u2060\u00A0\s]/g, '');
         if (normalized !== '') {
             if (!allowNonEmpty && !force) return false;
             if (!force) {
@@ -11080,7 +11151,7 @@ import { SearchManager } from './modules/SearchManager.js';
                 const cursorOffset = getCodeBlockCursorOffset(codeBlock, range);
                 if (cursorOffset === null) return false;
                 const trailing = text.slice(cursorOffset);
-                const normalizedTrailing = trailing.replace(/[\u200B\u00A0\s]/g, '');
+                const normalizedTrailing = trailing.replace(/[\u200B\u2060\u00A0\s]/g, '');
                 if (normalizedTrailing !== '') return false;
             }
         }
@@ -11100,7 +11171,7 @@ import { SearchManager } from './modules/SearchManager.js';
         if (nextNode && nextNode.nodeType === Node.TEXT_NODE) {
             const text = nextNode.textContent || '';
             let startOffset = 0;
-            while (startOffset < text.length && /[\u200B\u00A0\s]/.test(text[startOffset])) {
+            while (startOffset < text.length && /[\u200B\u2060\u00A0\s]/.test(text[startOffset])) {
                 startOffset++;
             }
             const newRange = document.createRange();
@@ -11118,7 +11189,7 @@ import { SearchManager } from './modules/SearchManager.js';
             if (firstNode) {
                 newRange.setStart(firstNode, 0);
             } else if (nextElement.tagName === 'P') {
-                const hasText = (nextElement.textContent || '').replace(/[\u200B\u00A0]/g, '').trim() !== '';
+                const hasText = (nextElement.textContent || '').replace(/[\u200B\u2060\u00A0]/g, '').trim() !== '';
                 const hasBr = !!nextElement.querySelector('br');
                 if (!hasText && !hasBr) {
                     nextElement.appendChild(document.createElement('br'));
@@ -11136,7 +11207,7 @@ import { SearchManager } from './modules/SearchManager.js';
         }
 
         const newParagraph = document.createElement('p');
-        const zwsp = document.createTextNode('\u200B');
+        const zwsp = document.createTextNode('');
         newParagraph.appendChild(zwsp);
         let insertionAnchor = preBlock;
         while (insertionAnchor.parentElement && insertionAnchor.parentElement !== editor) {
@@ -11200,7 +11271,7 @@ import { SearchManager } from './modules/SearchManager.js';
             }
             if (cursorOffset !== null) {
                 const { lines, currentLineIndex } = cursorManager.getCodeBlockLineInfo(text, cursorOffset);
-                const isWhitespaceOnly = (value) => value.replace(/[\u200B\u00A0\s]/g, '') === '';
+                const isWhitespaceOnly = (value) => value.replace(/[\u200B\u2060\u00A0\s]/g, '') === '';
                 let lastNonWhitespaceLineIndex = -1;
                 for (let i = lines.length - 1; i >= 0; i--) {
                     if (!isWhitespaceOnly(lines[i])) {
@@ -11208,7 +11279,7 @@ import { SearchManager } from './modules/SearchManager.js';
                         break;
                     }
                 }
-                if ((trailingText !== null && trailingText.replace(/[\u200B\u00A0\s]/g, '') === '') ||
+                if ((trailingText !== null && trailingText.replace(/[\u200B\u2060\u00A0\s]/g, '') === '') ||
                     lastNonWhitespaceLineIndex === -1 || currentLineIndex >= lastNonWhitespaceLineIndex ||
                     isCaretOnLastVisualLine(range, preBlock)) {
                     return exitEmptyCodeBlockDownFromPre(preBlock, selection, true, true);
@@ -11260,7 +11331,7 @@ import { SearchManager } from './modules/SearchManager.js';
         }
 
         if (trailingText !== null) {
-            if (trailingText.replace(/[\u200B\u00A0\s]/g, '') !== '') {
+            if (trailingText.replace(/[\u200B\u2060\u00A0\s]/g, '') !== '') {
                 return false;
             }
         } else if (!isCaretOnLastVisualLine(range, preBlock) && !isCaretNearBlockBottom(range, preBlock)) {
@@ -11338,7 +11409,7 @@ import { SearchManager } from './modules/SearchManager.js';
         if (cursorOffset !== null) {
             const { lines, lineStartOffsets, currentLineIndex, column } =
                 cursorManager.getCodeBlockLineInfo(text, cursorOffset);
-            const isWhitespaceOnly = (value) => value.replace(/[\u200B\u00A0\s]/g, '') === '';
+            const isWhitespaceOnly = (value) => value.replace(/[\u200B\u2060\u00A0\s]/g, '') === '';
             let lastNonWhitespaceLineIndex = -1;
             for (let i = lines.length - 1; i >= 0; i--) {
                 if (!isWhitespaceOnly(lines[i])) {
@@ -11411,7 +11482,7 @@ import { SearchManager } from './modules/SearchManager.js';
         if (!inCode) return null;
 
         const text = cursorManager.getCodeBlockText(codeBlock);
-        const normalizedText = text.replace(/[\u200B\u00A0\s]/g, '');
+        const normalizedText = text.replace(/[\u200B\u2060\u00A0\s]/g, '');
         if (normalizedText === '') {
             if (selectCodeBlockLanguageLabel(preBlock)) {
                 return { handled: true, moved: true };
@@ -11469,7 +11540,7 @@ import { SearchManager } from './modules/SearchManager.js';
         if (!inCode) return null;
 
         const text = cursorManager.getCodeBlockText(codeBlock);
-        const normalizedText = text.replace(/[\u200B\u00A0\s]/g, '');
+        const normalizedText = text.replace(/[\u200B\u2060\u00A0\s]/g, '');
         if (normalizedText === '') {
             if (selectCodeBlockLanguageLabel(preBlock)) {
                 return { handled: true, moved: true };
@@ -11490,7 +11561,7 @@ import { SearchManager } from './modules/SearchManager.js';
         const lineStartOffset = lineStartOffsets[lineIndex] || 0;
         const beforeCursor = lineText.slice(0, safeColumn);
         const atLineStart = cursorOffset <= lineStartOffset ||
-            beforeCursor.replace(/[\u200B\u00A0]/g, '') === '';
+            beforeCursor.replace(/[\u200B\u2060\u00A0]/g, '') === '';
         if (!atLineStart) return null;
 
         if (selectCodeBlockLanguageLabel(preBlock)) {
@@ -11587,7 +11658,7 @@ import { SearchManager } from './modules/SearchManager.js';
         let prev = node.previousSibling;
         while (prev) {
             if (prev.nodeType === Node.TEXT_NODE) {
-                const text = (prev.textContent || '').replace(/[\u200B\uFEFF\u00A0]/g, '');
+                const text = (prev.textContent || '').replace(/[\u200B\u2060\uFEFF\u00A0]/g, '');
                 if (text.trim() !== '') {
                     return prev;
                 }
@@ -11612,7 +11683,7 @@ import { SearchManager } from './modules/SearchManager.js';
             const beforeRange = document.createRange();
             beforeRange.selectNodeContents(topLevelNode);
             beforeRange.setEnd(range.startContainer, range.startOffset);
-            const beforeText = (beforeRange.toString() || '').replace(/[\u200B\uFEFF]/g, '');
+            const beforeText = (beforeRange.toString() || '').replace(/[\u200B\u2060\uFEFF]/g, '');
             return !beforeText.includes('\n');
         } catch (e) {
             return false;
@@ -11627,12 +11698,12 @@ import { SearchManager } from './modules/SearchManager.js';
             const beforeRange = document.createRange();
             beforeRange.selectNodeContents(topLevelNode);
             beforeRange.setEnd(range.startContainer, range.startOffset);
-            const beforeText = (beforeRange.toString() || '').replace(/[\u200B\uFEFF]/g, '');
+            const beforeText = (beforeRange.toString() || '').replace(/[\u200B\u2060\uFEFF]/g, '');
             if (beforeText !== '') {
                 return false;
             }
 
-            const headText = (topLevelNode.textContent || '').replace(/[\u200B\uFEFF]/g, '');
+            const headText = (topLevelNode.textContent || '').replace(/[\u200B\u2060\uFEFF]/g, '');
             return /^\\[`*_{}\[\]()#+.!|>~-]/.test(headText);
         } catch (e) {
             return false;
@@ -11651,7 +11722,7 @@ import { SearchManager } from './modules/SearchManager.js';
         const isBoundaryOnlyTextNode = (node) =>
             !!node &&
             node.nodeType === Node.TEXT_NODE &&
-            (node.textContent || '').replace(/[\u200B\uFEFF]/g, '') === '';
+            (node.textContent || '').replace(/[\u200B\u2060\uFEFF]/g, '') === '';
         const resolveInlineCodeCandidate = (node, direction) => {
             let current = node;
             while (current && isBoundaryOnlyTextNode(current)) {
@@ -11663,8 +11734,8 @@ import { SearchManager } from './modules/SearchManager.js';
         if (container.nodeType === Node.TEXT_NODE) {
             const text = container.textContent || '';
             const safeOffset = Math.max(0, Math.min(range.startOffset, text.length));
-            const prefix = text.slice(0, safeOffset).replace(/[\u200B\uFEFF]/g, '');
-            const suffix = text.slice(safeOffset).replace(/[\u200B\uFEFF]/g, '');
+            const prefix = text.slice(0, safeOffset).replace(/[\u200B\u2060\uFEFF]/g, '');
+            const suffix = text.slice(safeOffset).replace(/[\u200B\u2060\uFEFF]/g, '');
             if (suffix === '' && resolveInlineCodeCandidate(container.nextSibling, 'next')) {
                 return true;
             }
@@ -12273,7 +12344,7 @@ import { SearchManager } from './modules/SearchManager.js';
                                     trailingText = null;
                                 }
                                 if (trailingText !== null) {
-                                    if (trailingText.replace(/[\u200B\u00A0\s]/g, '') === '') {
+                                    if (trailingText.replace(/[\u200B\u2060\u00A0\s]/g, '') === '') {
                                         shouldExit = true;
                                     }
                                 }
@@ -12282,7 +12353,7 @@ import { SearchManager } from './modules/SearchManager.js';
                                         shouldExit = isCaretNearBlockBottom(range, preBlock);
                                     } else {
                                         const { lines, currentLineIndex } = cursorManager.getCodeBlockLineInfo(text, cursorOffset);
-                                        const isWhitespaceOnly = (value) => value.replace(/[\u200B\u00A0\s]/g, '') === '';
+                                        const isWhitespaceOnly = (value) => value.replace(/[\u200B\u2060\u00A0\s]/g, '') === '';
                                         let lastNonWhitespaceLineIndex = -1;
                                         for (let i = lines.length - 1; i >= 0; i--) {
                                             if (!isWhitespaceOnly(lines[i])) {
@@ -12399,7 +12470,7 @@ import { SearchManager } from './modules/SearchManager.js';
                             shouldExit = true;
                         } else {
                             const { lines, currentLineIndex } = cursorManager.getCodeBlockLineInfo(text, cursorOffset);
-                            const isWhitespaceOnly = (value) => value.replace(/[\u200B\u00A0\s]/g, '') === '';
+                            const isWhitespaceOnly = (value) => value.replace(/[\u200B\u2060\u00A0\s]/g, '') === '';
                             let lastNonWhitespaceLineIndex = -1;
                             for (let i = lines.length - 1; i >= 0; i--) {
                                 if (!isWhitespaceOnly(lines[i])) {
@@ -12832,7 +12903,7 @@ import { SearchManager } from './modules/SearchManager.js';
             const tempRange = document.createRange();
             tempRange.selectNodeContents(codeElement);
             tempRange.setEnd(afterRange.startContainer, afterRange.startOffset);
-            const logicalOffset = (tempRange.toString() || '').replace(/[\u200B\uFEFF]/g, '').length;
+            const logicalOffset = (tempRange.toString() || '').replace(/[\u200B\u2060\uFEFF]/g, '').length;
             atInlineCodeStart = logicalOffset <= 0;
         } catch (e) {
             try {
@@ -12885,7 +12956,7 @@ import { SearchManager } from './modules/SearchManager.js';
                 return false;
             }
             const raw = node.textContent || '';
-            return raw === '' || raw.replace(/[\u200B\uFEFF]/g, '') === '';
+            return raw === '' || raw.replace(/[\u200B\u2060\uFEFF]/g, '') === '';
         };
 
         const container = range.startContainer;
@@ -13129,7 +13200,7 @@ import { SearchManager } from './modules/SearchManager.js';
             const prefixRange = document.createRange();
             prefixRange.selectNodeContents(block);
             prefixRange.setEnd(range.startContainer, range.startOffset);
-            const beforeText = prefixRange.toString().replace(/[\u200B\uFEFF\u00A0\s]/g, '');
+            const beforeText = prefixRange.toString().replace(/[\u200B\u2060\uFEFF\u00A0\s]/g, '');
             return beforeText.length === 0;
         } catch (e) {
             return false;
@@ -13141,7 +13212,7 @@ import { SearchManager } from './modules/SearchManager.js';
         const hasMeaningfulChild = Array.from(block.childNodes || []).some((child) => {
             if (!child) return false;
             if (child.nodeType === Node.TEXT_NODE) {
-                return (child.textContent || '').replace(/[\u200B\uFEFF\u00A0]/g, '').trim() !== '';
+                return (child.textContent || '').replace(/[\u200B\u2060\uFEFF\u00A0]/g, '').trim() !== '';
             }
             if (child.nodeType !== Node.ELEMENT_NODE) return false;
             if (child.tagName === 'BR') return true;
@@ -13158,13 +13229,13 @@ import { SearchManager } from './modules/SearchManager.js';
         if (!anchor || anchor.tagName !== 'A') return false;
         if (anchor.querySelector && anchor.querySelector('img')) return false;
 
-        const text = (anchor.textContent || '').replace(/[\u200B\uFEFF\u00A0\s]/g, '');
+        const text = (anchor.textContent || '').replace(/[\u200B\u2060\uFEFF\u00A0\s]/g, '');
         if (text !== '') return false;
 
         const hasMeaningfulChild = Array.from(anchor.childNodes || []).some((child) => {
             if (!child) return false;
             if (child.nodeType === Node.TEXT_NODE) {
-                return (child.textContent || '').replace(/[\u200B\uFEFF\u00A0\s]/g, '') !== '';
+                return (child.textContent || '').replace(/[\u200B\u2060\uFEFF\u00A0\s]/g, '') !== '';
             }
             if (child.nodeType !== Node.ELEMENT_NODE) return false;
             return child.tagName !== 'BR';
@@ -13262,7 +13333,7 @@ import { SearchManager } from './modules/SearchManager.js';
             return false;
         }
         const text = nextSibling.textContent || '';
-        const boundaryOnlyText = text === '' || text.replace(/[\u200B\uFEFF]/g, '') === '';
+        const boundaryOnlyText = text === '' || text.replace(/[\u200B\u2060\uFEFF]/g, '') === '';
         if (!boundaryOnlyText) {
             return false;
         }
@@ -13500,7 +13571,7 @@ import { SearchManager } from './modules/SearchManager.js';
 
         const selectedText = (range.toString() || '')
             .replace(/&ZeroWidthSpace;/gi, '')
-            .replace(/[\u200B\uFEFF\u00A0]/g, '')
+            .replace(/[\u200B\u2060\uFEFF\u00A0]/g, '')
             .trim();
         if (selectedText !== '') {
             return null;
@@ -13553,7 +13624,7 @@ import { SearchManager } from './modules/SearchManager.js';
                 const prefixRange = document.createRange();
                 prefixRange.selectNodeContents(block);
                 prefixRange.setEnd(targetRange.startContainer, targetRange.startOffset);
-                const beforeText = prefixRange.toString().replace(/[\u200B\uFEFF\u00A0\s]/g, '');
+                const beforeText = prefixRange.toString().replace(/[\u200B\u2060\uFEFF\u00A0\s]/g, '');
                 return beforeText.length === 0;
             } catch (e) {
                 return false;
@@ -13679,7 +13750,7 @@ import { SearchManager } from './modules/SearchManager.js';
             const lineTextRange = document.createRange();
             lineTextRange.setStart(lineStartRange.startContainer, lineStartRange.startOffset);
             lineTextRange.setEnd(lineEndRange.startContainer, lineEndRange.startOffset);
-            const lineText = (lineTextRange.toString() || '').replace(/[\u200B\uFEFF\u00A0\s]/g, '');
+            const lineText = (lineTextRange.toString() || '').replace(/[\u200B\u2060\uFEFF\u00A0\s]/g, '');
             return lineText.length === 0;
         } catch (e) {
             applySelectionRange(selection, originalRange);
@@ -13753,7 +13824,7 @@ import { SearchManager } from './modules/SearchManager.js';
                 const code = pre.querySelector('code');
                 if (code) {
                     const codeText = cursorManager.getCodeBlockText(code);
-                    emacsKillBuffer = codeText.replace(/[\u200B\uFEFF]/g, '');
+                    emacsKillBuffer = codeText.replace(/[\u200B\u2060\uFEFF]/g, '');
                 } else {
                     emacsKillBuffer = '\n';
                 }
@@ -13895,7 +13966,7 @@ import { SearchManager } from './modules/SearchManager.js';
                     }
                     const ctrlKEndBoundary = getCtrlKBlockEndBoundary(range, startBlock);
                     blockEndRange.setEnd(ctrlKEndBoundary.container, ctrlKEndBoundary.offset);
-                    const blockEndText = blockEndRange.toString().replace(/[\u200B\uFEFF\u00A0\s]/g, '');
+                    const blockEndText = blockEndRange.toString().replace(/[\u200B\u2060\uFEFF\u00A0\s]/g, '');
                     if (blockEndText.length === 0) {
                         const isRemovableEmptyLineBlock =
                             startBlock.parentElement === editor &&
@@ -14114,9 +14185,9 @@ import { SearchManager } from './modules/SearchManager.js';
                             if (firstNode) {
                                 caretRange.setStart(firstNode, 0);
                             } else {
-                                const anchor = document.createTextNode('\u200B');
+                                const anchor = document.createTextNode('');
                                 startBlock.insertBefore(anchor, startBlock.firstChild || null);
-                                caretRange.setStart(anchor, 1);
+                                caretRange.setStart(anchor, 0);
                             }
                         }
                     }
@@ -14193,7 +14264,7 @@ import { SearchManager } from './modules/SearchManager.js';
         // コードブロック内で削除後に空になった場合、改行を保持してカーソルを先頭に配置
         if (killPreBlock && killCodeBlock) {
             const remainingText = cursorManager.getCodeBlockText(killCodeBlock);
-            const normalizedRemaining = remainingText.replace(/[\u200B\uFEFF]/g, '');
+            const normalizedRemaining = remainingText.replace(/[\u200B\u2060\uFEFF]/g, '');
             if (normalizedRemaining.trim() === '') {
                 killCodeBlock.textContent = '\n';
                 cursorManager.setCodeBlockCursorOffset(killCodeBlock, selection, 0);
@@ -14967,8 +15038,8 @@ import { SearchManager } from './modules/SearchManager.js';
             const tempRange = document.createRange();
             tempRange.selectNodeContents(codeElement);
             tempRange.setEnd(range.startContainer, range.startOffset);
-            const offset = tempRange.toString().replace(/[\u200B\uFEFF]/g, '').length;
-            const total = (codeElement.textContent || '').replace(/[\u200B\uFEFF]/g, '').length;
+            const offset = tempRange.toString().replace(/[\u200B\u2060\uFEFF]/g, '').length;
+            const total = (codeElement.textContent || '').replace(/[\u200B\u2060\uFEFF]/g, '').length;
             atInlineCodeEnd = offset >= total;
         } catch (e) {
             atInlineCodeEnd = false;
@@ -14994,7 +15065,7 @@ import { SearchManager } from './modules/SearchManager.js';
                     atInlineCodeEnd = true;
                 } else {
                     // Safari/WebView can report one-char-short offset when a leading
-                    // ZWSP marker exists. Do not apply this tolerance to FEFF markers,
+                    // ZWSP marker exists. Do not apply this tolerance to word-joiner markers,
                     // otherwise right-arrow may skip inline-code inside-right.
                     const threshold = text[0] === '\u200B'
                         ? Math.max(0, text.length - 1)
@@ -15019,12 +15090,12 @@ import { SearchManager } from './modules/SearchManager.js';
         let placeholder = null;
         if (immediateNext && immediateNext.nodeType === Node.TEXT_NODE) {
             const text = immediateNext.textContent || '';
-            if (text.replace(/[\u200B\uFEFF]/g, '') === '') {
+            if (text.replace(/[\u200B\u2060\uFEFF]/g, '') === '') {
                 placeholder = immediateNext;
             }
         }
         if (!placeholder) {
-            placeholder = document.createTextNode('\u200B');
+            placeholder = document.createTextNode('');
             if (immediateNext) {
                 parent.insertBefore(placeholder, immediateNext);
             } else {
@@ -15906,6 +15977,9 @@ import { SearchManager } from './modules/SearchManager.js';
 
         // IME composition
         editor.addEventListener('compositionstart', (e) => {
+            if (!isUpdating) {
+                stripEditorControlCharacters(editor);
+            }
             isComposing = true;
             lastCompositionEndTs = 0;
             tableManager.handleEdgeCompositionStart();
@@ -15920,6 +15994,7 @@ import { SearchManager } from './modules/SearchManager.js';
             }
             if (!isUpdating) {
                 setTimeout(() => {
+                    stripEditorControlCharacters(editor);
                     const converted = markdownConverter.convertMarkdownSyntax(notifyChange);
                     if (!converted) {
                         notifyChange();
@@ -16023,7 +16098,7 @@ import { SearchManager } from './modules/SearchManager.js';
                             Array.from(emptyListItem.childNodes).forEach(child => {
                                 if (child.nodeType !== Node.TEXT_NODE) return;
                                 const text = child.textContent || '';
-                                const cleaned = text.replace(/[\u00A0\u200B]/g, '');
+                                const cleaned = text.replace(/[\u00A0\u200B\u2060]/g, '');
                                 if (cleaned.trim() === '') {
                                     child.remove();
                                 } else if (cleaned !== text) {
@@ -16090,6 +16165,9 @@ import { SearchManager } from './modules/SearchManager.js';
                 if (tableManager._compositionBlockedEdge) {
                     tableManager._compositionBlockedEdge.textContent = '\u00A0';
                     return;
+                }
+                if (!isComposing && !e.isComposing) {
+                    stripEditorControlCharacters(editor);
                 }
                 stateManager.saveStateDebounced();
                 const isDeleteInput = typeof e.inputType === 'string' && e.inputType.startsWith('delete');
@@ -16206,7 +16284,7 @@ import { SearchManager } from './modules/SearchManager.js';
 
                 if (caretFixListItem && caretFixListItem.isConnected) {
                     const directText = getDirectTextContent(caretFixListItem);
-                    const directTextWithoutPlaceholders = directText.replace(/[\u00A0\u200B]/g, '');
+                    const directTextWithoutPlaceholders = directText.replace(/[\u00A0\u200B\u2060]/g, '');
                     if (directTextWithoutPlaceholders.trim() !== '') {
                         const lastDirectTextNode =
                             getLastMeaningfulDirectTextNode(caretFixListItem) ||
@@ -16218,7 +16296,7 @@ import { SearchManager } from './modules/SearchManager.js';
                                     const range = document.createRange();
                                     const text = lastDirectTextNode.textContent || '';
                                     let offset = text.length;
-                                    while (offset > 0 && /[\u200B\u00A0]/.test(text[offset - 1])) {
+                                    while (offset > 0 && /[\u200B\u2060\u00A0]/.test(text[offset - 1])) {
                                         offset--;
                                     }
                                     range.setStart(lastDirectTextNode, offset);
@@ -17164,7 +17242,7 @@ import { SearchManager } from './modules/SearchManager.js';
             }
 
             const meaningfulText = (container.textContent || '')
-                .replace(/[\u200B\u00A0]/g, '')
+                .replace(/[\u200B\u2060\u00A0]/g, '')
                 .trim();
             if (meaningfulText !== '') {
                 return null;
@@ -17402,7 +17480,7 @@ import { SearchManager } from './modules/SearchManager.js';
                 }
             });
 
-            const hasMeaningfulText = (cell.textContent || '').replace(/[\u200B\u00A0]/g, '').trim() !== '';
+            const hasMeaningfulText = (cell.textContent || '').replace(/[\u200B\u2060\u00A0]/g, '').trim() !== '';
             const hasBreak = !!cell.querySelector('br');
             if (!hasMeaningfulText && !hasBreak) {
                 cell.appendChild(document.createElement('br'));
@@ -17882,7 +17960,7 @@ import { SearchManager } from './modules/SearchManager.js';
                     }
                     li.appendChild(checkbox);
                     if (item.text === '') {
-                        li.appendChild(document.createTextNode('\u200B'));
+                        li.appendChild(document.createTextNode(''));
                     } else {
                         appendInlineMarkdownText(li, item.text);
                     }
@@ -18194,7 +18272,7 @@ import { SearchManager } from './modules/SearchManager.js';
                             }
                             li.appendChild(checkbox);
                             if (item.text === '') {
-                                li.appendChild(document.createTextNode('\u200B'));
+                                li.appendChild(document.createTextNode(''));
                             } else {
                                 const inlineConverted = appendInlineMarkdownText(li, item.text);
                                 if (inlineConverted) {
@@ -18808,7 +18886,7 @@ import { SearchManager } from './modules/SearchManager.js';
                 if (Number.isFinite(markerThreshold) && x < markerThreshold) {
                     let targetTextNode = firstTextAfterCheckbox;
                     if (!targetTextNode) {
-                        const anchorNode = document.createTextNode('\u200B');
+                        const anchorNode = document.createTextNode('');
                         const firstSublist = Array.from(listItem.children).find(
                             child => child.tagName === 'UL' || child.tagName === 'OL'
                         );
@@ -19887,7 +19965,7 @@ import { SearchManager } from './modules/SearchManager.js';
                 if (!textNode) {
                     const checkbox = li.querySelector(':scope > input[type="checkbox"]');
                     if (!checkbox) return false;
-                    const anchorNode = document.createTextNode('\u200B');
+                    const anchorNode = document.createTextNode('');
                     const firstSublist = Array.from(li.children).find(
                         child => child.tagName === 'UL' || child.tagName === 'OL'
                     );
@@ -20176,7 +20254,7 @@ import { SearchManager } from './modules/SearchManager.js';
                         if (!block || block === editor) {
                             return false;
                         }
-                        const meaningfulText = (block.textContent || '').replace(/[\u200B\u00A0]/g, '').trim();
+                        const meaningfulText = (block.textContent || '').replace(/[\u200B\u2060\u00A0]/g, '').trim();
                         return meaningfulText.length > 0;
                     })();
 

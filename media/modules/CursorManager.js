@@ -75,8 +75,8 @@ export class CursorManager {
             const tempRange = document.createRange();
             tempRange.selectNodeContents(codeElement);
             tempRange.setEnd(range.startContainer, range.startOffset);
-            const offset = tempRange.toString().replace(/[\u200B\uFEFF]/g, '').length;
-            const total = (codeElement.textContent || '').replace(/[\u200B\uFEFF]/g, '').length;
+            const offset = tempRange.toString().replace(/[\u200B\u2060\uFEFF]/g, '').length;
+            const total = (codeElement.textContent || '').replace(/[\u200B\u2060\uFEFF]/g, '').length;
             return { offset, total };
         } catch (e) {
             return null;
@@ -88,7 +88,7 @@ export class CursorManager {
             return null;
         }
         for (let i = 0; i < text.length; i++) {
-            if (text[i] !== '\u200B' && text[i] !== '\uFEFF') {
+            if (text[i] !== '\u200B' && text[i] !== '\u2060' && text[i] !== '\uFEFF') {
                 return i;
             }
         }
@@ -100,7 +100,7 @@ export class CursorManager {
             return null;
         }
         for (let i = text.length - 1; i >= 0; i--) {
-            if (text[i] !== '\u200B' && text[i] !== '\uFEFF') {
+            if (text[i] !== '\u200B' && text[i] !== '\u2060' && text[i] !== '\uFEFF') {
                 return i;
             }
         }
@@ -108,7 +108,7 @@ export class CursorManager {
     }
 
     _isInlineBoundaryChar(char) {
-        return char === '\u200B' || char === '\uFEFF';
+        return char === '\u200B' || char === '\u2060' || char === '\uFEFF';
     }
 
     _getImageCaretAnchorNode(image) {
@@ -138,7 +138,7 @@ export class CursorManager {
 
         const { create = false } = options;
         const useZwspAnchor = this._shouldUseZwspImageRightEdgeTextAnchor(image);
-        const preferredAnchorText = useZwspAnchor ? '\u200B' : '';
+        const preferredAnchorText = '';
         const caretAnchor = this._getImageCaretAnchorNode(image) || image;
         if (!caretAnchor || !caretAnchor.parentNode) {
             return null;
@@ -150,10 +150,10 @@ export class CursorManager {
             const compact = raw.replace(/[\u00A0\s]/g, '');
             const hasPlaceholderSignal =
                 /&ZeroWidthSpace;/i.test(compact) ||
-                /[\u200B\uFEFF]/.test(compact);
+                /[\u200B\u2060\uFEFF]/.test(compact);
             const normalized = compact
                 .replace(/&ZeroWidthSpace;/gi, '')
-                .replace(/[\u200B\uFEFF]/g, '');
+                .replace(/[\u200B\u2060\uFEFF]/g, '');
             const boundaryOnly =
                 normalized === '' ||
                 (hasPlaceholderSignal && normalized.replace(/["']/g, '') === '');
@@ -222,10 +222,10 @@ export class CursorManager {
         const rawText = node.textContent || '';
         const hasPlaceholderSignal =
             /&ZeroWidthSpace;/i.test(rawText) ||
-            /[\u200B\uFEFF]/.test(rawText);
+            /[\u200B\u2060\uFEFF]/.test(rawText);
         const text = rawText
             .replace(/&ZeroWidthSpace;/gi, '')
-            .replace(/[\u200B\u00A0\uFEFF]/g, '');
+            .replace(/[\u200B\u2060\u00A0\uFEFF]/g, '');
         if (hasPlaceholderSignal && text.replace(/["'\s]/g, '') === '') {
             return true;
         }
@@ -280,7 +280,7 @@ export class CursorManager {
         }
         const rawText = node.textContent || '';
         // Accept both legacy ZWSP placeholders and empty-text anchors.
-        if (rawText !== '' && rawText.replace(/[\u200B\uFEFF]/g, '') !== '') {
+        if (rawText !== '' && rawText.replace(/[\u200B\u2060\uFEFF]/g, '') !== '') {
             return false;
         }
 
@@ -479,7 +479,7 @@ export class CursorManager {
             }
 
             if (!directTextNode) {
-                const anchorNode = document.createTextNode('\u200B');
+                const anchorNode = document.createTextNode('');
                 const nestedListNode = nestedListIndex >= 0 ? childNodes[nestedListIndex] : null;
                 if (nestedListNode) {
                     listItem.insertBefore(anchorNode, nestedListNode);
@@ -490,7 +490,7 @@ export class CursorManager {
                 }
                 directTextNode = anchorNode;
             } else if ((directTextNode.textContent || '') === '') {
-                directTextNode.textContent = '\u200B';
+                directTextNode.textContent = '';
             }
 
             if (directTextNode) {
@@ -598,7 +598,7 @@ export class CursorManager {
             if (!child) continue;
             if (child.nodeType === Node.TEXT_NODE) {
                 const raw = child.textContent || '';
-                if (raw.replace(/[\u200B\uFEFF\u00A0\s]/g, '') === '') {
+                if (raw.replace(/[\u200B\u2060\uFEFF\u00A0\s]/g, '') === '') {
                     continue;
                 }
                 return null;
@@ -647,11 +647,11 @@ export class CursorManager {
             anchor = prevSibling;
             // Keep an explicit non-rendering anchor so WebView does not normalize
             // outside-left directly into inline-code start.
-            if ((anchor.textContent || '') !== '\uFEFF') {
-                anchor.textContent = '\uFEFF';
+            if ((anchor.textContent || '') !== '') {
+                anchor.textContent = '';
             }
         } else {
-            anchor = document.createTextNode('\uFEFF');
+            anchor = document.createTextNode('');
             parent.insertBefore(anchor, code);
         }
         const range = document.createRange();
@@ -677,7 +677,7 @@ export class CursorManager {
             if (!child) continue;
             if (child.nodeType === Node.TEXT_NODE) {
                 const raw = child.textContent || '';
-                if (raw.replace(/[\u200B\uFEFF\u00A0\s]/g, '') === '') {
+                if (raw.replace(/[\u200B\u2060\uFEFF\u00A0\s]/g, '') === '') {
                     continue;
                 }
                 return null;
@@ -709,7 +709,7 @@ export class CursorManager {
         }
         const parent = code.parentElement;
         const hasOnlyCaretPlaceholders = (text) => {
-            return (text || '').replace(/[\u200B\uFEFF\u00A0\s]/g, '') === '';
+            return (text || '').replace(/[\u200B\u2060\uFEFF\u00A0\s]/g, '') === '';
         };
 
         let anchor = null;
@@ -719,10 +719,10 @@ export class CursorManager {
             hasOnlyCaretPlaceholders(nextSibling.textContent)) {
             anchor = nextSibling;
             if ((anchor.textContent || '').length === 0) {
-                anchor.textContent = '\u200B';
+                anchor.textContent = '';
             }
         } else {
-            anchor = document.createTextNode('\u200B');
+            anchor = document.createTextNode('');
             if (nextSibling) {
                 parent.insertBefore(anchor, nextSibling);
             } else {
@@ -1411,7 +1411,7 @@ export class CursorManager {
         try {
             selectedText = (range.toString() || '')
                 .replace(/&ZeroWidthSpace;/gi, '')
-                .replace(/[\u200B\uFEFF\u00A0]/g, '')
+                .replace(/[\u200B\u2060\uFEFF\u00A0]/g, '')
                 .trim();
         } catch (e) {
             selectedText = '';
@@ -1495,23 +1495,18 @@ export class CursorManager {
             return false;
         }
 
-        // Keep a FEFF marker at the start and place the caret after it.
-        // This makes inside-left visually distinct from outside-left across WebView engines.
         let firstTextNode = this.domUtils.getFirstTextNode(code);
         if (!firstTextNode) {
-            firstTextNode = document.createTextNode('\uFEFF');
+            firstTextNode = document.createTextNode('');
             code.insertBefore(firstTextNode, code.firstChild || null);
         } else {
             const raw = firstTextNode.textContent || '';
-            if (!raw.startsWith('\uFEFF')) {
-                firstTextNode.textContent = `\uFEFF${raw}`;
-            } else {
-                firstTextNode.textContent = raw.replace(/^\uFEFF+/, '\uFEFF');
-            }
+            const content = raw.replace(/^[\u2060\uFEFF]+/, '');
+            firstTextNode.textContent = content;
         }
 
         const range = document.createRange();
-        range.setStart(firstTextNode, 1);
+        range.setStart(firstTextNode, 0);
         range.collapse(true);
         selection.removeAllRanges();
         selection.addRange(range);
@@ -1548,7 +1543,7 @@ export class CursorManager {
                 nextSibling.nextSibling === code
             ) ? nextSibling : null;
             if (container.nextSibling === code) {
-                // If the caret is inside trailing boundary chars (ZWSP/FEFF) just before code,
+                // If the caret is inside trailing boundary chars (ZWSP/WJ/FEFF) just before code,
                 // treat it as outside-left so the pending step can enter inside-left reliably.
                 let trailingBoundaryStart = text.length;
                 while (trailingBoundaryStart > 0 &&
@@ -1770,10 +1765,10 @@ export class CursorManager {
                 const compact = raw.replace(/[\u00A0\s]/g, '');
                 const hasPlaceholderSignal =
                     /&ZeroWidthSpace;/i.test(compact) ||
-                    /[\u200B\uFEFF]/.test(compact);
+                    /[\u200B\u2060\uFEFF]/.test(compact);
                 const normalized = compact
                     .replace(/&ZeroWidthSpace;/gi, '')
-                    .replace(/[\u200B\uFEFF]/g, '');
+                    .replace(/[\u200B\u2060\uFEFF]/g, '');
                 const boundaryOnly =
                     normalized === '' ||
                     (hasPlaceholderSignal && normalized.replace(/["']/g, '') === '');
@@ -1866,7 +1861,7 @@ export class CursorManager {
         }
 
         while (candidate && candidate.nodeType === Node.TEXT_NODE &&
-            (candidate.textContent || '').replace(/[\u200B\uFEFF]/g, '') === '') {
+            (candidate.textContent || '').replace(/[\u200B\u2060\uFEFF]/g, '') === '') {
             candidate = direction === 'forward' ? candidate.nextSibling : candidate.previousSibling;
         }
 
@@ -1954,7 +1949,7 @@ export class CursorManager {
                 return true;
             }
             // Safari/WebView can report one-char-short offset when a leading ZWSP exists.
-            // Do not apply this tolerance to FEFF-based inline-code markers, otherwise
+            // Do not apply this tolerance to word-joiner inline-code markers, otherwise
             // the caret can skip the inside-right edge of inline code.
             const threshold = text[0] === '\u200B'
                 ? Math.max(0, text.length - 1)
@@ -2329,11 +2324,11 @@ export class CursorManager {
         // fullRectやlastNodeが不正確になるのを防ぐ）
         const contentTextNodes = textNodes.filter((node, i) => {
             if (i === 0) return true; // 最初のノードは常に保持
-            const text = (node.textContent || '').replace(/[\u200B\uFEFF\u00A0]/g, '').trim();
+            const text = (node.textContent || '').replace(/[\u200B\u2060\uFEFF\u00A0]/g, '').trim();
             if (text !== '') return true;
             // 空白ノードの後に非空白ノードがあるか確認
             for (let j = i + 1; j < textNodes.length; j++) {
-                const laterText = (textNodes[j].textContent || '').replace(/[\u200B\uFEFF\u00A0]/g, '').trim();
+                const laterText = (textNodes[j].textContent || '').replace(/[\u200B\u2060\uFEFF\u00A0]/g, '').trim();
                 if (laterText !== '') return true;
             }
             return false;
@@ -3215,7 +3210,7 @@ export class CursorManager {
                             return best;
                         }
                         const ch = text[i];
-                        if (ch === '\n' || ch === '\r' || ch === '\u200B' || ch === '\uFEFF') {
+                        if (ch === '\n' || ch === '\r' || ch === '\u200B' || ch === '\u2060' || ch === '\uFEFF') {
                             continue;
                         }
                         if (skipWhitespace && /\s/.test(ch)) {
@@ -3625,7 +3620,7 @@ export class CursorManager {
         {
             const isEffectivelyEmptyBlock = (block) => {
                 if (!block) return false;
-                const text = (block.textContent || '').replace(/[\u200B\uFEFF\u00A0]/g, '').trim();
+                const text = (block.textContent || '').replace(/[\u200B\u2060\uFEFF\u00A0]/g, '').trim();
                 if (text !== '') return false;
                 const meaningfulChild = Array.from(block.childNodes).some(node => {
                     if (node.nodeType === Node.ELEMENT_NODE) {
@@ -3878,7 +3873,7 @@ export class CursorManager {
         if (currentListItem && range.collapsed) {
             const directTextForEmpty = this._getFirstDirectTextNode(currentListItem);
             const hasRealText = directTextForEmpty &&
-                (directTextForEmpty.textContent || '').replace(/[\u200B\uFEFF\u00A0]/g, '').trim() !== '';
+                (directTextForEmpty.textContent || '').replace(/[\u200B\u2060\uFEFF\u00A0]/g, '').trim() !== '';
             if (!hasRealText) {
                 const prevListItem = this._getAdjacentListItem(currentListItem, 'prev');
                 if (prevListItem) {
@@ -3982,7 +3977,7 @@ export class CursorManager {
                             return best;
                         }
                         const ch = text[i];
-                        if (ch === '\n' || ch === '\r' || ch === '\u200B' || ch === '\uFEFF') {
+                        if (ch === '\n' || ch === '\r' || ch === '\u200B' || ch === '\u2060' || ch === '\uFEFF') {
                             continue;
                         }
                         if (skipWhitespace && /\s/.test(ch)) {
@@ -4629,7 +4624,7 @@ export class CursorManager {
         };
         const isEffectivelyEmptyBlock = (block) => {
             if (!block) return false;
-            const text = (block.textContent || '').replace(/[\u200B\uFEFF\u00A0]/g, '').trim();
+            const text = (block.textContent || '').replace(/[\u200B\u2060\uFEFF\u00A0]/g, '').trim();
             if (text !== '') return false;
             const meaningfulChild = Array.from(block.childNodes).some(node => {
                 if (node.nodeType === Node.ELEMENT_NODE) {
@@ -4909,7 +4904,7 @@ export class CursorManager {
                         directText += child.textContent || '';
                     }
                 }
-                const cleaned = directText.replace(/[\u200B\uFEFF\u00A0]/g, '').trim();
+                const cleaned = directText.replace(/[\u200B\u2060\uFEFF\u00A0]/g, '').trim();
                 if (cleaned === '') {
                     originIsEmptyWithNested = true;
                 }
@@ -5065,7 +5060,7 @@ export class CursorManager {
                 if (firstNode) {
                     newRange.setStart(firstNode, 0);
                 } else if (nextElement.tagName === 'P') {
-                    const hasText = (nextElement.textContent || '').replace(/[\u200B\uFEFF\u00A0]/g, '').trim() !== '';
+                    const hasText = (nextElement.textContent || '').replace(/[\u200B\u2060\uFEFF\u00A0]/g, '').trim() !== '';
                     const hasBr = !!nextElement.querySelector('br');
                     if (!hasText && !hasBr) {
                         nextElement.appendChild(document.createElement('br'));
@@ -5083,7 +5078,7 @@ export class CursorManager {
 
             // 新しい段落を作成（ZWSPでカーソル位置を確保）
             const newP = document.createElement('p');
-            const zwsp = document.createTextNode('\u200B');
+            const zwsp = document.createTextNode('');
             newP.appendChild(zwsp);
 
             if (preBlock.nextSibling) {
@@ -5117,7 +5112,7 @@ export class CursorManager {
 
             const isCodeBlockEffectivelyEmpty = () => {
                 const text = this.getCodeBlockText(codeBlock);
-                return text.replace(/[\u200B\uFEFF\u00A0\s]/g, '') === '';
+                return text.replace(/[\u200B\u2060\uFEFF\u00A0\s]/g, '') === '';
             };
 
             // Empty code block: always exit down on ArrowDown
@@ -5139,7 +5134,7 @@ export class CursorManager {
 
             const text = this.getCodeBlockText(codeBlock);
             const cursorOffset = this.getCodeBlockCursorOffset(codeBlock, range);
-            const normalizedText = text.replace(/[\u200B\uFEFF\u00A0]/g, '').replace(/\n/g, '');
+            const normalizedText = text.replace(/[\u200B\u2060\uFEFF\u00A0]/g, '').replace(/\n/g, '');
             if (cursorOffset !== null && normalizedText === '') {
                 exitCodeBlockDown();
                 return;
@@ -5153,7 +5148,7 @@ export class CursorManager {
             if (cursorOffset !== null) {
                 const { lines, lineStartOffsets, currentLineIndex, column } =
                     this.getCodeBlockLineInfo(text, cursorOffset);
-                const isWhitespaceOnly = (value) => value.replace(/[\u200B\uFEFF\u00A0\s]/g, '') === '';
+                const isWhitespaceOnly = (value) => value.replace(/[\u200B\u2060\uFEFF\u00A0\s]/g, '') === '';
                 let lastNonWhitespaceLineIndex = -1;
                 for (let i = lines.length - 1; i >= 0; i--) {
                     if (!isWhitespaceOnly(lines[i])) {
@@ -5213,7 +5208,7 @@ export class CursorManager {
                 newRange.setStart(firstNode, 0);
             } else {
                 if (block.tagName === 'P') {
-                    const hasText = (block.textContent || '').replace(/[\u200B\uFEFF\u00A0]/g, '').trim() !== '';
+                    const hasText = (block.textContent || '').replace(/[\u200B\u2060\uFEFF\u00A0]/g, '').trim() !== '';
                     const hasBr = !!block.querySelector('br');
                     if (!hasText && !hasBr) {
                         block.appendChild(document.createElement('br'));
@@ -5235,7 +5230,7 @@ export class CursorManager {
             while (sibling) {
                 if (sibling.nodeType === Node.TEXT_NODE) {
                     const text = sibling.textContent || '';
-                    const cleaned = text.replace(/[\u200B\uFEFF\u00A0]/g, '');
+                    const cleaned = text.replace(/[\u200B\u2060\uFEFF\u00A0]/g, '');
                     if (cleaned.trim() === '') {
                         sibling = sibling.nextSibling;
                         continue;
@@ -5443,7 +5438,7 @@ export class CursorManager {
         if (originListItem && range.collapsed) {
             const directTextForEmpty = this._getFirstDirectTextNode(originListItem);
             const hasRealText = directTextForEmpty &&
-                (directTextForEmpty.textContent || '').replace(/[\u200B\uFEFF\u00A0]/g, '').trim() !== '';
+                (directTextForEmpty.textContent || '').replace(/[\u200B\u2060\uFEFF\u00A0]/g, '').trim() !== '';
             if (!hasRealText) {
                 const emptyRect = this._getCaretRect(range);
                 const emptyX = emptyRect ? (emptyRect.left || emptyRect.x || 0) : 0;
@@ -5536,7 +5531,7 @@ export class CursorManager {
                             return best;
                         }
                         const ch = text[i];
-                        if (ch === '\n' || ch === '\r' || ch === '\u200B' || ch === '\uFEFF') {
+                        if (ch === '\n' || ch === '\r' || ch === '\u200B' || ch === '\u2060' || ch === '\uFEFF') {
                             continue;
                         }
                         if (skipWhitespace && /\s/.test(ch)) {
@@ -5620,7 +5615,7 @@ export class CursorManager {
                 const beforeRange = document.createRange();
                 beforeRange.selectNodeContents(listItem);
                 beforeRange.setEnd(startContainer, startOffset);
-                const beforeText = (beforeRange.toString() || '').replace(/[\u200B\uFEFF\u00A0]/g, '');
+                const beforeText = (beforeRange.toString() || '').replace(/[\u200B\u2060\uFEFF\u00A0]/g, '');
                 return beforeText.trim() === '';
             } catch (e) {
                 return false;
@@ -6104,7 +6099,7 @@ export class CursorManager {
                                 return best;
                             }
                             const ch = text[i];
-                            if (ch === '\n' || ch === '\r' || ch === '\u200B' || ch === '\uFEFF') {
+                            if (ch === '\n' || ch === '\r' || ch === '\u200B' || ch === '\u2060' || ch === '\uFEFF') {
                                 continue;
                             }
                             if (skipWhitespace && /\s/.test(ch)) {
@@ -6874,7 +6869,7 @@ export class CursorManager {
         };
         const isEffectivelyEmptyBlock = (block) => {
             if (!block) return false;
-            const text = (block.textContent || '').replace(/[\u200B\uFEFF\u00A0]/g, '').trim();
+            const text = (block.textContent || '').replace(/[\u200B\u2060\uFEFF\u00A0]/g, '').trim();
             if (text !== '') return false;
             const meaningfulChild = Array.from(block.childNodes).some(child => {
                 if (child.nodeType === Node.ELEMENT_NODE) {
@@ -6951,7 +6946,7 @@ export class CursorManager {
                 targetRange.setStart(firstNode, firstOffset !== null ? firstOffset : 0);
             } else {
                 if (block.tagName === 'P') {
-                    const hasText = (block.textContent || '').replace(/[\u200B\uFEFF\u00A0]/g, '').trim() !== '';
+                    const hasText = (block.textContent || '').replace(/[\u200B\u2060\uFEFF\u00A0]/g, '').trim() !== '';
                     const hasBr = !!block.querySelector('br');
                     if (!hasText && !hasBr) {
                         block.appendChild(document.createElement('br'));
@@ -7126,7 +7121,7 @@ export class CursorManager {
                 }
                 let hasRealContentBefore = false;
                 if (prevSibling && prevSibling.nodeType === Node.TEXT_NODE) {
-                    hasRealContentBefore = (prevSibling.textContent || '').replace(/[\u200B\uFEFF]/g, '') !== '';
+                    hasRealContentBefore = (prevSibling.textContent || '').replace(/[\u200B\u2060\uFEFF]/g, '') !== '';
                 } else if (prevSibling &&
                     prevSibling.nodeType === Node.ELEMENT_NODE &&
                     !this._isNavigationExcludedElement(prevSibling) &&
@@ -7134,7 +7129,7 @@ export class CursorManager {
                     const lastTextNode = this._getLastNavigableTextNode(prevSibling);
                     hasRealContentBefore = !!(
                         lastTextNode &&
-                        (lastTextNode.textContent || '').replace(/[\u200B\uFEFF]/g, '') !== ''
+                        (lastTextNode.textContent || '').replace(/[\u200B\u2060\uFEFF]/g, '') !== ''
                     );
                 }
                 if (hasRealContentBefore) {
@@ -7344,12 +7339,12 @@ export class CursorManager {
                 let placeholder = null;
                 if (immediateNext && immediateNext.nodeType === Node.TEXT_NODE) {
                     const text = immediateNext.textContent || '';
-                    if (text.replace(/[\u200B\uFEFF]/g, '') === '') {
+                    if (text.replace(/[\u200B\u2060\uFEFF]/g, '') === '') {
                         placeholder = immediateNext;
                     }
                 }
                 if (!placeholder) {
-                    placeholder = document.createTextNode('\u200B');
+                    placeholder = document.createTextNode('');
                     if (immediateNext) {
                         parent.insertBefore(placeholder, immediateNext);
                     } else {
@@ -7373,7 +7368,7 @@ export class CursorManager {
             const codePre = codeParent ? this.domUtils.getParentElement(codeParent, 'PRE') : null;
             const inInlineCode = !!(codeParent && !codePre);
             const currentText = currentNode.textContent || '';
-            const zwspOnly = currentText.replace(/[\u200B\uFEFF]/g, '') === '';
+            const zwspOnly = currentText.replace(/[\u200B\u2060\uFEFF]/g, '') === '';
 
             // Outside-left boundary placeholder -> move inside-left in one step.
             if (!inInlineCode &&
@@ -7814,7 +7809,7 @@ export class CursorManager {
         };
         const isEffectivelyEmptyBlock = (block) => {
             if (!block) return false;
-            const text = (block.textContent || '').replace(/[\u200B\uFEFF\u00A0]/g, '').trim();
+            const text = (block.textContent || '').replace(/[\u200B\u2060\uFEFF\u00A0]/g, '').trim();
             if (text !== '') return false;
             const meaningfulChild = Array.from(block.childNodes).some(child => {
                 if (child.nodeType === Node.ELEMENT_NODE) {
@@ -7896,7 +7891,7 @@ export class CursorManager {
                 targetRange.setStart(lastNode, lastNode.textContent.length);
             } else {
                 if (block.tagName === 'P') {
-                    const hasText = (block.textContent || '').replace(/[\u200B\uFEFF\u00A0]/g, '').trim() !== '';
+                    const hasText = (block.textContent || '').replace(/[\u200B\u2060\uFEFF\u00A0]/g, '').trim() !== '';
                     const hasBr = !!block.querySelector('br');
                     if (!hasText && !hasBr) {
                         block.appendChild(document.createElement('br'));
@@ -7984,7 +7979,7 @@ export class CursorManager {
                 placeholder.nodeType === Node.TEXT_NODE &&
                 this._isInlineCodeBoundaryPlaceholder(placeholder) &&
                 placeholder.previousSibling === inlineCodeElement)) {
-                placeholder = document.createTextNode('\u200B');
+                placeholder = document.createTextNode('');
                 parent.insertBefore(placeholder, textNode);
             }
 
@@ -8117,7 +8112,7 @@ export class CursorManager {
                     isAtListStart = true;
                 } else if (node === currentListItem) {
                     // 空のリストアイテムではoffset 1（<br>の後）もリスト先頭として扱う
-                    const liText = (currentListItem.textContent || '').replace(/[\u200B\uFEFF\u00A0]/g, '').trim();
+                    const liText = (currentListItem.textContent || '').replace(/[\u200B\u2060\uFEFF\u00A0]/g, '').trim();
                     if (liText === '') {
                         isAtListStart = true;
                     }
@@ -8135,7 +8130,7 @@ export class CursorManager {
                     if (parentList && (parentList.tagName === 'UL' || parentList.tagName === 'OL')) {
                         const parentLi = this.domUtils.getParentElement(parentList, 'LI');
                         if (parentLi === prevListItem) {
-                            const currentText = (currentListItem.textContent || '').replace(/[\u200B\uFEFF\u00A0]/g, '').trim();
+                            const currentText = (currentListItem.textContent || '').replace(/[\u200B\u2060\uFEFF\u00A0]/g, '').trim();
                             if (currentText === '') {
                                 if (this._placeCursorAfterTrailingInlineCode(prevListItem, selection)) {
                                     return true;
@@ -8194,7 +8189,7 @@ export class CursorManager {
             if (childAtOffset && (childAtOffset.tagName === 'UL' || childAtOffset.tagName === 'OL')) {
                 const firstLi = childAtOffset.querySelector(':scope > li:first-child');
                 if (firstLi) {
-                    const liText = (firstLi.textContent || '').replace(/[\u200B\uFEFF\u00A0]/g, '').trim();
+                    const liText = (firstLi.textContent || '').replace(/[\u200B\u2060\uFEFF\u00A0]/g, '').trim();
                     if (liText === '') {
                         return true;
                     }
@@ -8209,7 +8204,7 @@ export class CursorManager {
             const codePre = codeParent ? this.domUtils.getParentElement(codeParent, 'PRE') : null;
             const inInlineCode = !!(codeParent && !codePre);
             const currentText = currentNode.textContent || '';
-            const zwspOnly = currentText.replace(/[\u200B\uFEFF]/g, '') === '';
+            const zwspOnly = currentText.replace(/[\u200B\u2060\uFEFF]/g, '') === '';
             const nextSibling = currentNode.nextSibling;
             const nextIsInlineCode = !!(nextSibling &&
                 nextSibling.nodeType === Node.ELEMENT_NODE &&
@@ -8390,7 +8385,7 @@ export class CursorManager {
             }
 
             // Move exactly one visible character backward. Any boundary chars
-            // (ZWSP/FEFF) should be consumed in the same keypress.
+            // (ZWSP/WJ/FEFF) should be consumed in the same keypress.
             let previousVisibleIndex = currentOffset - 1;
             while (previousVisibleIndex >= 0 &&
                 this._isInlineBoundaryChar(currentNode.textContent[previousVisibleIndex])) {
