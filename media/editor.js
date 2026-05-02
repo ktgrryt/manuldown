@@ -8240,6 +8240,9 @@ import { SearchManager } from './modules/SearchManager.js';
         }
         const prevElement = getPreviousElementSibling(block);
         if (!prevElement) return false;
+        if (prevElement.tagName === 'PRE' && moveCursorToCodeBlockLastContentLineEnd(prevElement, selection)) {
+            return true;
+        }
         const newRange = document.createRange();
         const lastNode = domUtils.getLastTextNode(prevElement);
         if (lastNode) {
@@ -8251,6 +8254,53 @@ import { SearchManager } from './modules/SearchManager.js';
         selection.removeAllRanges();
         selection.addRange(newRange);
         return true;
+    }
+
+    function moveCursorToCodeBlockLastContentLineEnd(pre, selection) {
+        if (!pre || pre.tagName !== 'PRE' || !selection) return false;
+        const code = pre.querySelector('code');
+        if (!code) return false;
+
+        const text = cursorManager.getCodeBlockText(code);
+        const { lines, lineStartOffsets } = cursorManager.getCodeBlockLineInfo(text, text.length);
+        const isWhitespaceOnly = (value) => value.replace(/[\u200B\u2060\uFEFF\u00A0\s]/g, '') === '';
+        let targetLineIndex = -1;
+        for (let i = lines.length - 1; i >= 0; i--) {
+            if (!isWhitespaceOnly(lines[i])) {
+                targetLineIndex = i;
+                break;
+            }
+        }
+        if (targetLineIndex < 0) {
+            targetLineIndex = Math.max(0, lines.length - 1);
+        }
+
+        const lineText = lines[targetLineIndex] || '';
+        const lineStart = lineStartOffsets[targetLineIndex] || 0;
+        if (cursorManager.setCodeBlockCursorOffset(code, selection, lineStart + lineText.length)) {
+            setCodeBlockLanguageNavSelection(null);
+            return true;
+        }
+        return false;
+    }
+
+    function getNextCodeBlockAfterOnlyEmptyBlocks(node) {
+        let current = node;
+        while (current) {
+            const nextNode = getNextNavigableNodeAfter(current);
+            if (!nextNode || nextNode.nodeType !== Node.ELEMENT_NODE) {
+                return null;
+            }
+            if (nextNode.tagName === 'PRE' && nextNode.querySelector('code')) {
+                return nextNode;
+            }
+            if (/^(P|DIV)$/.test(nextNode.tagName) && isEffectivelyEmptyBlock(nextNode)) {
+                current = nextNode;
+                continue;
+            }
+            return null;
+        }
+        return null;
     }
 
     function isAtBlockStartForRange(range, block) {
@@ -9050,6 +9100,13 @@ import { SearchManager } from './modules/SearchManager.js';
         const selection = window.getSelection();
         if (!selection) return false;
         const range = document.createRange();
+        if (typeof editor.focus === 'function') {
+            try {
+                editor.focus({ preventScroll: true });
+            } catch (_focusError) {
+                editor.focus();
+            }
+        }
         range.selectNode(label);
         selection.removeAllRanges();
         selection.addRange(range);
@@ -9065,6 +9122,8 @@ import { SearchManager } from './modules/SearchManager.js';
         const selection = window.getSelection();
         if (!selection) return false;
         if (cursorManager.setCodeBlockCursorOffset(code, selection, 0)) {
+            setCodeBlockLanguageNavSelection(null);
+            editor.focus();
             return true;
         }
         const firstNode = domUtils.getFirstTextNode(code);
@@ -9078,6 +9137,7 @@ import { SearchManager } from './modules/SearchManager.js';
         selection.removeAllRanges();
         selection.addRange(range);
         setCodeBlockLanguageNavSelection(null);
+        editor.focus();
         return true;
     }
 
@@ -9098,6 +9158,11 @@ import { SearchManager } from './modules/SearchManager.js';
         }
 
         if (prevElement) {
+            if (prevElement.tagName === 'PRE' && moveCursorToCodeBlockLastContentLineEnd(prevElement, selection)) {
+                editor.focus();
+                return true;
+            }
+
             const newRange = document.createRange();
             const firstNode = domUtils.getFirstTextNode(prevElement);
             if (firstNode) {
@@ -9145,15 +9210,8 @@ import { SearchManager } from './modules/SearchManager.js';
         }
 
         if (prevElement) {
-            if (prevElement.tagName === 'PRE') {
-                const code = prevElement.querySelector('code');
-                if (code) {
-                    const text = cursorManager.getCodeBlockText(code);
-                    if (cursorManager.setCodeBlockCursorOffset(code, selection, text.length)) {
-                        setCodeBlockLanguageNavSelection(null);
-                        return true;
-                    }
-                }
+            if (prevElement.tagName === 'PRE' && moveCursorToCodeBlockLastContentLineEnd(prevElement, selection)) {
+                return true;
             }
 
             const newRange = document.createRange();
@@ -10939,7 +10997,7 @@ import { SearchManager } from './modules/SearchManager.js';
 
         const text = cursorManager.getCodeBlockText(codeBlock);
         const { lines, lineStartOffsets } = cursorManager.getCodeBlockLineInfo(text, text.length);
-        const isWhitespaceOnly = (value) => value.replace(/[\u200B\u2060\u00A0\s]/g, '') === '';
+        const isWhitespaceOnly = (value) => value.replace(/[\u200B\u2060\uFEFF\u00A0\s]/g, '') === '';
         let targetLineIndex = -1;
         for (let i = lines.length - 1; i >= 0; i--) {
             if (!isWhitespaceOnly(lines[i])) {
@@ -10995,7 +11053,7 @@ import { SearchManager } from './modules/SearchManager.js';
 
         const text = cursorManager.getCodeBlockText(codeBlock);
         const { lines, lineStartOffsets } = cursorManager.getCodeBlockLineInfo(text, text.length);
-        const isWhitespaceOnly = (value) => value.replace(/[\u200B\u2060\u00A0\s]/g, '') === '';
+        const isWhitespaceOnly = (value) => value.replace(/[\u200B\u2060\uFEFF\u00A0\s]/g, '') === '';
         let targetLineIndex = -1;
         for (let i = lines.length - 1; i >= 0; i--) {
             if (!isWhitespaceOnly(lines[i])) {
@@ -11156,6 +11214,11 @@ import { SearchManager } from './modules/SearchManager.js';
             }
         }
 
+        const nextCodeBlock = getNextCodeBlockAfterOnlyEmptyBlocks(preBlock);
+        if (nextCodeBlock) {
+            return selectCodeBlockLanguageLabel(nextCodeBlock);
+        }
+
         const nextNode = getNextNavigableNodeAfter(preBlock);
         if (nextNode && nextNode.nodeType === Node.ELEMENT_NODE && nextNode.tagName === 'HR') {
             const newRange = document.createRange();
@@ -11228,6 +11291,57 @@ import { SearchManager } from './modules/SearchManager.js';
         return true;
     }
 
+    function getCodeBlockNavigationContext(range) {
+        if (!range) return null;
+        let codeBlock = domUtils.getParentElement(range.startContainer, 'CODE') ||
+            domUtils.getParentElement(range.endContainer, 'CODE');
+        let preBlock = codeBlock ? domUtils.getParentElement(codeBlock, 'PRE') : null;
+
+        if (!preBlock) {
+            preBlock = domUtils.getParentElement(range.startContainer, 'PRE') ||
+                domUtils.getParentElement(range.endContainer, 'PRE');
+            codeBlock = preBlock ? preBlock.querySelector('code') : null;
+        }
+
+        if (!preBlock || !codeBlock) return null;
+        const inPre = preBlock.contains(range.startContainer) ||
+            preBlock.contains(range.endContainer) ||
+            range.startContainer === preBlock ||
+            range.endContainer === preBlock;
+        if (!inPre) return null;
+        return { preBlock, codeBlock };
+    }
+
+    function exitCodeBlockDownByLogicalLine(range, selection) {
+        if (!range || !selection || !selection.isCollapsed || getSelectedCodeBlockLanguageLabel()) return false;
+        const context = getCodeBlockNavigationContext(range);
+        if (!context) return false;
+        const { preBlock, codeBlock } = context;
+
+        const text = cursorManager.getCodeBlockText(codeBlock);
+        const cursorOffset = getCodeBlockCursorOffset(codeBlock, range);
+        const isWhitespaceOnly = (value) => value.replace(/[\u200B\u2060\uFEFF\u00A0\s]/g, '') === '';
+        const { lines, currentLineIndex } = cursorManager.getCodeBlockLineInfo(
+            text,
+            cursorOffset !== null ? cursorOffset : text.length
+        );
+
+        let lastNonWhitespaceLineIndex = -1;
+        for (let i = lines.length - 1; i >= 0; i--) {
+            if (!isWhitespaceOnly(lines[i])) {
+                lastNonWhitespaceLineIndex = i;
+                break;
+            }
+        }
+
+        if (lastNonWhitespaceLineIndex === -1 ||
+            lastNonWhitespaceLineIndex <= 0 ||
+            currentLineIndex >= lastNonWhitespaceLineIndex) {
+            return exitEmptyCodeBlockDownFromPre(preBlock, selection, true, true);
+        }
+        return false;
+    }
+
     function exitEmptyCodeBlockDownIfNeeded() {
         const selection = window.getSelection();
         if (!selection || selection.rangeCount === 0) return false;
@@ -11280,7 +11394,9 @@ import { SearchManager } from './modules/SearchManager.js';
                     }
                 }
                 if ((trailingText !== null && trailingText.replace(/[\u200B\u2060\u00A0\s]/g, '') === '') ||
-                    lastNonWhitespaceLineIndex === -1 || currentLineIndex >= lastNonWhitespaceLineIndex ||
+                    lastNonWhitespaceLineIndex === -1 ||
+                    lastNonWhitespaceLineIndex <= 0 ||
+                    currentLineIndex >= lastNonWhitespaceLineIndex ||
                     isCaretOnLastVisualLine(range, preBlock)) {
                     return exitEmptyCodeBlockDownFromPre(preBlock, selection, true, true);
                 }
@@ -11418,7 +11534,9 @@ import { SearchManager } from './modules/SearchManager.js';
                 }
             }
 
-            if (lastNonWhitespaceLineIndex === -1 || currentLineIndex >= lastNonWhitespaceLineIndex) {
+            if (lastNonWhitespaceLineIndex === -1 ||
+                lastNonWhitespaceLineIndex <= 0 ||
+                currentLineIndex >= lastNonWhitespaceLineIndex) {
                 const exited = exitEmptyCodeBlockDownFromPre(preBlock, selection, true, true);
                 if (exited) scheduleEnsureExitFromPre(preBlock);
                 return exited ? { handled: true, exited: true } : null;
@@ -11985,6 +12103,17 @@ import { SearchManager } from './modules/SearchManager.js';
                 const selection = window.getSelection();
                 if (selection && selection.rangeCount > 0) {
                     const range = selection.getRangeAt(0);
+                    if (exitCodeBlockDownByLogicalLine(range, selection)) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        return true;
+                    }
+                }
+            }
+            {
+                const selection = window.getSelection();
+                if (selection && selection.rangeCount > 0) {
+                    const range = selection.getRangeAt(0);
                     if (range.collapsed &&
                         range.startContainer &&
                         range.startContainer.nodeType === Node.ELEMENT_NODE &&
@@ -12361,7 +12490,9 @@ import { SearchManager } from './modules/SearchManager.js';
                                                 break;
                                             }
                                         }
-                                        if (lastNonWhitespaceLineIndex === -1 || currentLineIndex >= lastNonWhitespaceLineIndex) {
+                                        if (lastNonWhitespaceLineIndex === -1 ||
+                                            lastNonWhitespaceLineIndex <= 0 ||
+                                            currentLineIndex >= lastNonWhitespaceLineIndex) {
                                             shouldExit = true;
                                         }
                                     }
@@ -12478,7 +12609,9 @@ import { SearchManager } from './modules/SearchManager.js';
                                     break;
                                 }
                             }
-                            if (lastNonWhitespaceLineIndex === -1 || currentLineIndex >= lastNonWhitespaceLineIndex) {
+                            if (lastNonWhitespaceLineIndex === -1 ||
+                                lastNonWhitespaceLineIndex <= 0 ||
+                                currentLineIndex >= lastNonWhitespaceLineIndex) {
                                 shouldExit = true;
                             }
                         }
@@ -17024,6 +17157,185 @@ import { SearchManager } from './modules/SearchManager.js';
             selection.addRange(newRange);
         };
 
+        const hasVisibleLinkText = (text) => {
+            return String(text || '').replace(/[\u200B\u2060\uFEFF\u00A0\s]/g, '') !== '';
+        };
+
+        const normalizeLinkText = (text) => {
+            return String(text || '')
+                .replace(/[\u200B\u2060\uFEFF]/g, '')
+                .replace(/\u00A0/g, ' ')
+                .replace(/\s+/g, ' ')
+                .trim();
+        };
+
+        const getLinkTextForPasteSelection = (selection, fallbackText) => {
+            const selectedText = selection ? (selection.toString() || '') : '';
+            if (hasVisibleLinkText(selectedText)) {
+                return selectedText;
+            }
+            return fallbackText || '';
+        };
+
+        const createDirectPasteLink = (linkTarget, text) => {
+            if (!linkTarget || !linkTarget.href) return null;
+            const link = document.createElement('a');
+            link.href = linkTarget.href;
+            link.textContent = hasVisibleLinkText(text) ? text : (linkTarget.text || linkTarget.href);
+            return link;
+        };
+
+        const getSingleListItemSelectedAtListBoundary = (range) => {
+            if (!range || range.collapsed || range.startContainer !== range.endContainer) {
+                return null;
+            }
+            const container = range.startContainer;
+            if (!container ||
+                container.nodeType !== Node.ELEMENT_NODE ||
+                (container.tagName !== 'UL' && container.tagName !== 'OL')) {
+                return null;
+            }
+
+            const selectedNodes = Array.from(container.childNodes || [])
+                .slice(range.startOffset, range.endOffset);
+            const selectedListItems = selectedNodes.filter(
+                node => node && node.nodeType === Node.ELEMENT_NODE && node.tagName === 'LI'
+            );
+            const hasOtherContent = selectedNodes.some((node) => {
+                if (!node || selectedListItems.includes(node)) return false;
+                if (node.nodeType === Node.TEXT_NODE) {
+                    return (node.textContent || '').replace(/[\u200B\u2060\uFEFF\u00A0\s]/g, '') !== '';
+                }
+                return node.nodeType === Node.ELEMENT_NODE;
+            });
+
+            return !hasOtherContent && selectedListItems.length === 1 ? selectedListItems[0] : null;
+        };
+
+        const getCollapsedListBoundaryInsertionTarget = (range) => {
+            if (!range || !range.collapsed) return null;
+            const container = range.startContainer;
+            if (!container ||
+                container.nodeType !== Node.ELEMENT_NODE ||
+                (container.tagName !== 'UL' && container.tagName !== 'OL')) {
+                return null;
+            }
+
+            const nodes = Array.from(container.childNodes || []);
+            const nextNode = nodes[range.startOffset] || null;
+            if (nextNode && nextNode.nodeType === Node.ELEMENT_NODE && nextNode.tagName === 'LI') {
+                return { listItem: nextNode, position: 'start' };
+            }
+
+            const previousNode = nodes[range.startOffset - 1] || null;
+            if (previousNode && previousNode.nodeType === Node.ELEMENT_NODE && previousNode.tagName === 'LI') {
+                return { listItem: previousNode, position: 'end' };
+            }
+
+            return null;
+        };
+
+        const getFirstDirectNestedList = (listItem) => {
+            if (!listItem) return null;
+            return Array.from(listItem.childNodes || []).find(
+                child => child && child.nodeType === Node.ELEMENT_NODE && (child.tagName === 'UL' || child.tagName === 'OL')
+            ) || null;
+        };
+
+        const removeIgnorableDirectListItemPlaceholders = (listItem) => {
+            if (!listItem || hasDirectTextContent(listItem)) return;
+            const checkbox = getCheckboxInListItemDirectContent(listItem);
+            Array.from(listItem.childNodes || []).forEach((child) => {
+                if (child === checkbox) return;
+                if (child.nodeType === Node.ELEMENT_NODE && (child.tagName === 'UL' || child.tagName === 'OL')) return;
+                if (child.nodeType === Node.TEXT_NODE &&
+                    (child.textContent || '').replace(/[\u200B\u2060\uFEFF\u00A0\s]/g, '') === '') {
+                    child.remove();
+                    return;
+                }
+                if (child.nodeType === Node.ELEMENT_NODE && child.tagName === 'BR') {
+                    child.remove();
+                }
+            });
+        };
+
+        const clearListItemDirectContentForPaste = (listItem) => {
+            if (!listItem) return;
+            const checkbox = getCheckboxInListItemDirectContent(listItem);
+            Array.from(listItem.childNodes || []).forEach((child) => {
+                if (child === checkbox) return;
+                if (child.nodeType === Node.ELEMENT_NODE && (child.tagName === 'UL' || child.tagName === 'OL')) return;
+                child.remove();
+            });
+            listItem.removeAttribute('data-preserve-empty');
+            listItem.removeAttribute('data-mdw-indent-wrapper');
+            listItem.classList.remove('nested-list-only');
+        };
+
+        const replaceListItemDirectContentWithInlineFragment = (listItem, fragment, selection) => {
+            if (!listItem || !fragment || !fragment.childNodes || fragment.childNodes.length === 0) return false;
+            const lastInsertedNode = fragment.lastChild;
+            clearListItemDirectContentForPaste(listItem);
+            listItem.insertBefore(fragment, getFirstDirectNestedList(listItem));
+            setCaretAfterNode(selection, lastInsertedNode);
+            return true;
+        };
+
+        const replaceListItemDirectContentWithLink = (listItem, link, selection) => {
+            if (!listItem || !link) return false;
+            const fragment = document.createDocumentFragment();
+            fragment.appendChild(link);
+            return replaceListItemDirectContentWithInlineFragment(listItem, fragment, selection);
+        };
+
+        const replaceListBoundarySelectionWithInlineFragment = (range, selection, fragment) => {
+            const listItem = getSingleListItemSelectedAtListBoundary(range);
+            if (!listItem) return false;
+            return replaceListItemDirectContentWithInlineFragment(listItem, fragment, selection);
+        };
+
+        const insertInlineFragmentAtCollapsedListBoundary = (range, selection, fragment) => {
+            const target = getCollapsedListBoundaryInsertionTarget(range);
+            if (!target || !target.listItem || !fragment || !fragment.childNodes || fragment.childNodes.length === 0) {
+                return false;
+            }
+
+            const { listItem, position } = target;
+            const lastInsertedNode = fragment.lastChild;
+            removeIgnorableDirectListItemPlaceholders(listItem);
+            listItem.removeAttribute('data-preserve-empty');
+            listItem.removeAttribute('data-mdw-indent-wrapper');
+            listItem.classList.remove('nested-list-only');
+
+            const firstNestedList = getFirstDirectNestedList(listItem);
+            if (position === 'start') {
+                const checkbox = getCheckboxInListItemDirectContent(listItem);
+                const reference = checkbox ? checkbox.nextSibling : (listItem.firstChild || firstNestedList);
+                listItem.insertBefore(fragment, reference || firstNestedList || null);
+            } else {
+                listItem.insertBefore(fragment, firstNestedList || null);
+            }
+            setCaretAfterNode(selection, lastInsertedNode);
+            return true;
+        };
+
+        const insertLinkAtCollapsedListBoundary = (range, selection, link) => {
+            if (!link) return false;
+            const fragment = document.createDocumentFragment();
+            fragment.appendChild(link);
+            return insertInlineFragmentAtCollapsedListBoundary(range, selection, fragment);
+        };
+
+        const replaceListBoundarySelectionWithDirectLink = (range, selection, linkTarget) => {
+            const listItem = getSingleListItemSelectedAtListBoundary(range);
+            if (!listItem) return false;
+
+            const fallbackText = normalizeLinkText(getDirectTextContent(listItem)) || linkTarget.text || linkTarget.href;
+            const linkText = getLinkTextForPasteSelection(selection, fallbackText);
+            const link = createDirectPasteLink(linkTarget, normalizeLinkText(linkText) || fallbackText);
+            return replaceListItemDirectContentWithLink(listItem, link, selection);
+        };
+
         const setCaretToImageRightEdge = (selection, image) => {
             if (!selection || !image || image.tagName !== 'IMG' || !editor.contains(image)) {
                 return false;
@@ -17125,6 +17437,46 @@ import { SearchManager } from './modules/SearchManager.js';
             });
             container.querySelectorAll('[data-exclude-from-markdown="true"]').forEach((node) => node.remove());
 
+            const convertInlineMarkdownTextNodesInContainer = (rootNode) => {
+                if (!rootNode) return;
+
+                const walker = document.createTreeWalker(
+                    rootNode,
+                    NodeFilter.SHOW_TEXT,
+                    {
+                        acceptNode: (node) => {
+                            const text = node && node.textContent ? node.textContent : '';
+                            if (text.indexOf('](') === -1 && text.indexOf('![') === -1 && text.indexOf('`') === -1) {
+                                return NodeFilter.FILTER_SKIP;
+                            }
+                            const parent = node.parentElement;
+                            if (!parent) {
+                                return NodeFilter.FILTER_SKIP;
+                            }
+                            if (parent.closest && parent.closest('a, code, pre')) {
+                                return NodeFilter.FILTER_SKIP;
+                            }
+                            return NodeFilter.FILTER_ACCEPT;
+                        }
+                    }
+                );
+
+                const textNodes = [];
+                let currentNode = walker.nextNode();
+                while (currentNode) {
+                    textNodes.push(currentNode);
+                    currentNode = walker.nextNode();
+                }
+
+                textNodes.forEach((textNode) => {
+                    if (!textNode || !textNode.parentNode) return;
+                    const fragment = document.createDocumentFragment();
+                    const converted = appendInlineMarkdownText(fragment, textNode.textContent || '');
+                    if (!converted) return;
+                    textNode.parentNode.replaceChild(fragment, textNode);
+                });
+            };
+
             const autoLinkUrlTextNodesInContainer = (rootNode) => {
                 if (!rootNode) return;
 
@@ -17178,6 +17530,7 @@ import { SearchManager } from './modules/SearchManager.js';
                 });
             };
 
+            convertInlineMarkdownTextNodesInContainer(container);
             autoLinkUrlTextNodesInContainer(container);
             const nodes = Array.from(container.childNodes || []);
             if (nodes.length === 0) {
@@ -17193,6 +17546,20 @@ import { SearchManager } from './modules/SearchManager.js';
 
             stateManager.saveState();
             const hasTopLevelBlock = nodes.some((node) => node.nodeType === Node.ELEMENT_NODE && isBlockElement(node));
+            if (!hasTopLevelBlock &&
+                (
+                    replaceListBoundarySelectionWithInlineFragment(range, selection, fragment) ||
+                    insertInlineFragmentAtCollapsedListBoundary(range, selection, fragment)
+                )) {
+                normalizeCheckboxListItems();
+                domUtils.ensureInlineCodeSpaces();
+                domUtils.cleanupGhostStyles();
+                tableManager.wrapTables();
+                applyImageRenderSizes();
+                updateListItemClasses();
+                notifyChange();
+                return true;
+            }
             if (hasTopLevelBlock) {
                 tableManager._insertNodeAsBlock(range, fragment);
                 if (lastInsertedNode && lastInsertedNode.isConnected) {
@@ -17288,6 +17655,13 @@ import { SearchManager } from './modules/SearchManager.js';
             }
 
             stateManager.saveState();
+            if (
+                replaceListBoundarySelectionWithInlineFragment(range, selection, fragment) ||
+                insertInlineFragmentAtCollapsedListBoundary(range, selection, fragment)
+            ) {
+                notifyChange();
+                return true;
+            }
             if (!range.collapsed) {
                 range.deleteContents();
             }
@@ -17346,6 +17720,19 @@ import { SearchManager } from './modules/SearchManager.js';
             });
 
             stateManager.saveState();
+            if (
+                replaceListBoundarySelectionWithInlineFragment(range, selection, fragment) ||
+                insertInlineFragmentAtCollapsedListBoundary(range, selection, fragment)
+            ) {
+                normalizeCheckboxListItems();
+                domUtils.ensureInlineCodeSpaces();
+                domUtils.cleanupGhostStyles();
+                tableManager.wrapTables();
+                applyImageRenderSizes();
+                updateListItemClasses();
+                notifyChange();
+                return true;
+            }
             if (!range.collapsed) {
                 range.deleteContents();
             }
@@ -18521,13 +18908,18 @@ import { SearchManager } from './modules/SearchManager.js';
                 if (selection && !selection.isCollapsed && directLinkTarget) {
                     e.preventDefault();
 
-                    const selectedText = selection.toString();
                     const range = selection.getRangeAt(0);
+                    if (replaceListBoundarySelectionWithDirectLink(range, selection, directLinkTarget)) {
+                        stateManager.saveStateDebounced();
+                        notifyChange();
+                        return;
+                    }
+
+                    const selectedText = getLinkTextForPasteSelection(selection, directLinkTarget.text);
 
                     // リンク要素を作成
-                    const link = document.createElement('a');
-                    link.href = directLinkTarget.href;
-                    link.textContent = selectedText;
+                    const link = createDirectPasteLink(directLinkTarget, selectedText);
+                    if (!link) return;
 
                     // 選択範囲をリンクで置換
                     range.deleteContents();
@@ -18553,19 +18945,16 @@ import { SearchManager } from './modules/SearchManager.js';
                     if (!codeElement) {
                         e.preventDefault();
 
-                        const link = document.createElement('a');
-                        link.href = directLinkTarget.href;
-                        link.textContent = directLinkTarget.text;
+                        const link = createDirectPasteLink(directLinkTarget, directLinkTarget.text);
+                        if (!link) return;
 
-                        range.deleteContents();
-                        range.insertNode(link);
+                        if (!insertLinkAtCollapsedListBoundary(range, selection, link)) {
+                            range.deleteContents();
+                            range.insertNode(link);
+                        }
 
                         // カーソルをリンクの後ろに移動
-                        const newRange = document.createRange();
-                        newRange.setStartAfter(link);
-                        newRange.collapse(true);
-                        selection.removeAllRanges();
-                        selection.addRange(newRange);
+                        setCaretAfterNode(selection, link);
 
                         stateManager.saveStateDebounced();
                         notifyChange();

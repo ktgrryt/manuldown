@@ -1269,6 +1269,26 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     }
 
+    private restoreEscapedMarkdownLinks(markdown: string): string {
+        const lines = markdown.split('\n');
+        let inCodeBlock = false;
+
+        return lines.map((line) => {
+            if (line.trim().startsWith('```')) {
+                inCodeBlock = !inCodeBlock;
+                return line;
+            }
+            if (inCodeBlock) {
+                return line;
+            }
+
+            return line.replace(
+                /\\\[([^\]\n]+)\\\]\(((?:https?:\/\/|mailto:|file:)[^\s)]+)\)/g,
+                (_match, label: string, href: string) => `[${label}](${href})`
+            );
+        }).join('\n');
+    }
+
     private htmlToMarkdown(html: string, document: vscode.TextDocument): string {
         // Use Turndown for reliable HTML to Markdown conversion
         try {
@@ -1477,6 +1497,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
 
 
             let markdown = this.turndownService.turndown(html);
+            markdown = this.restoreEscapedMarkdownLinks(markdown);
 
             // Post-process the markdown to fix indentation and spacing
             // 0. Replace EMPTYLINE placeholder with an empty line.

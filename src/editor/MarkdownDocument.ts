@@ -369,7 +369,7 @@ export class MarkdownDocument {
             for (let depth = parentDepth + 1; depth < sourceDepth; depth++) {
                 const wrapperIndentText = ' '.repeat(depth * parserNestedIndent);
                 const wrapperPrefix = `${blockquotePrefix}${wrapperIndentText}${marker}${spacing}`;
-                output.push(`${wrapperPrefix}<!--MDW-INDENT-WRAPPER-->${lineEnding}`);
+                output.push(`${wrapperPrefix}<span data-mdw-indent-wrapper-marker="true"></span>${lineEnding}`);
             }
 
             const parserIndent = sourceDepth > 0
@@ -377,7 +377,7 @@ export class MarkdownDocument {
                 : Math.min(sourceIndent, 3);
             const parserIndentText = ' '.repeat(Math.max(0, parserIndent));
             const markerPrefix = `${blockquotePrefix}${parserIndentText}${marker}${spacing}${taskPrefix}`;
-            output.push(`${markerPrefix}<!--MDW-LIST-INDENT:${sourceIndent}-->${rest}${lineEnding}`);
+            output.push(`${markerPrefix}<span data-mdw-list-indent-marker="${sourceIndent}"></span>${rest}${lineEnding}`);
             stack.push({ sourceIndent, depth: sourceDepth });
             activeListStacks.set(stackKey, stack);
         }
@@ -388,6 +388,14 @@ export class MarkdownDocument {
     private applyListItemSourceIndentMarkers(html: string): string {
         return html
             .replace(
+                /<li\b([^>]*)>((?:\s|<input\b[^>]*>\s*)*)<span\b[^>]*data-mdw-indent-wrapper-marker=(["'])true\2[^>]*>\s*<\/span>/gi,
+                (_match, attrs, prefix) => `<li${attrs} data-mdw-indent-wrapper="true" class="nested-list-only">${prefix}`
+            )
+            .replace(
+                /<li\b([^>]*)>((?:\s|<input\b[^>]*>\s*)*)<span\b[^>]*data-mdw-list-indent-marker=(["'])(\d+)\2[^>]*>\s*<\/span>/gi,
+                (_match, attrs, prefix, _quote, indent) => `<li${attrs} data-mdw-source-indent="${indent}">${prefix}`
+            )
+            .replace(
                 /<li\b([^>]*)>((?:\s|<input\b[^>]*>\s*)*)<!--MDW-INDENT-WRAPPER-->/gi,
                 (_match, attrs, prefix) => `<li${attrs} data-mdw-indent-wrapper="true" class="nested-list-only">${prefix}`
             )
@@ -396,7 +404,9 @@ export class MarkdownDocument {
                 (_match, attrs, prefix, indent) => `<li${attrs} data-mdw-source-indent="${indent}">${prefix}`
             )
             .replace(/<!--MDW-INDENT-WRAPPER-->/g, '')
-            .replace(/<!--MDW-LIST-INDENT:\d+-->/g, '');
+            .replace(/<!--MDW-LIST-INDENT:\d+-->/g, '')
+            .replace(/<span\b[^>]*data-mdw-indent-wrapper-marker=(["'])true\1[^>]*>\s*<\/span>/gi, '')
+            .replace(/<span\b[^>]*data-mdw-list-indent-marker=(["'])\d+\1[^>]*>\s*<\/span>/gi, '');
     }
 
     private normalizeIgnoredLineWhitespace(markdown: string): string {

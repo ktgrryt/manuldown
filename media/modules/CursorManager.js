@@ -565,6 +565,13 @@ export class CursorManager {
         }
         label.classList.add('nav-selected');
         const range = document.createRange();
+        if (this.editor && typeof this.editor.focus === 'function') {
+            try {
+                this.editor.focus({ preventScroll: true });
+            } catch (_focusError) {
+                this.editor.focus();
+            }
+        }
         range.selectNode(label);
         selection.removeAllRanges();
         selection.addRange(range);
@@ -3018,6 +3025,34 @@ export class CursorManager {
         return false;
     }
 
+    _placeCursorAtCodeBlockLastContentLineEnd(preBlock, selection) {
+        if (!preBlock || preBlock.tagName !== 'PRE' || !selection) {
+            return false;
+        }
+        const codeBlock = preBlock.querySelector('code');
+        if (!codeBlock) {
+            return false;
+        }
+
+        const text = this.getCodeBlockText(codeBlock);
+        const { lines, lineStartOffsets } = this.getCodeBlockLineInfo(text, text.length);
+        const isWhitespaceOnly = (value) => value.replace(/[\u200B\u2060\uFEFF\u00A0\s]/g, '') === '';
+        let targetLineIndex = -1;
+        for (let i = lines.length - 1; i >= 0; i--) {
+            if (!isWhitespaceOnly(lines[i])) {
+                targetLineIndex = i;
+                break;
+            }
+        }
+        if (targetLineIndex < 0) {
+            targetLineIndex = Math.max(0, lines.length - 1);
+        }
+
+        const lineText = lines[targetLineIndex] || '';
+        const lineStart = lineStartOffsets[targetLineIndex] || 0;
+        return this.setCodeBlockCursorOffset(codeBlock, selection, lineStart + lineText.length);
+    }
+
     /**
      * カーソルを上に1行移動
      * @param {Function} notifyCallback - 変更を通知するコールバック
@@ -3283,6 +3318,10 @@ export class CursorManager {
 
                     // 前の要素がある場合、そこにカーソルを移動
                     if (prevElement && prevElement.nodeType === 1) {
+                        if (prevElement.tagName === 'PRE' &&
+                            this._placeCursorAtCodeBlockLastContentLineEnd(prevElement, selection)) {
+                            return;
+                        }
                         const newRange = document.createRange();
                         const lastNode = this.domUtils.getLastTextNode(prevElement);
                         if (lastNode) {
@@ -5037,8 +5076,32 @@ export class CursorManager {
             }
         }
 
+        const getNextCodeBlockAfterOnlyEmptyBlocks = (element) => {
+            let current = element;
+            while (current) {
+                const nextElement = this._getNextNavigableElementInDocument(current);
+                if (!nextElement || nextElement.nodeType !== Node.ELEMENT_NODE) {
+                    return null;
+                }
+                if (nextElement.tagName === 'PRE' && nextElement.querySelector('code')) {
+                    return nextElement;
+                }
+                if (/^(P|DIV)$/.test(nextElement.tagName) && isEffectivelyEmptyBlock(nextElement)) {
+                    current = nextElement;
+                    continue;
+                }
+                return null;
+            }
+            return null;
+        };
+
         const exitCodeBlockDown = () => {
             if (!preBlock) return false;
+            const nextCodeBlock = getNextCodeBlockAfterOnlyEmptyBlocks(preBlock);
+            if (nextCodeBlock && this._selectCodeBlockLanguageLabel(nextCodeBlock, selection)) {
+                return true;
+            }
+
             const nextElement = this._getNextNavigableElementInDocument(preBlock);
 
             // 水平線の場合は水平線全体を選択
@@ -5156,7 +5219,9 @@ export class CursorManager {
                         break;
                     }
                 }
-                if (lastNonWhitespaceLineIndex === -1 || currentLineIndex >= lastNonWhitespaceLineIndex) {
+                if (lastNonWhitespaceLineIndex === -1 ||
+                    lastNonWhitespaceLineIndex <= 0 ||
+                    currentLineIndex >= lastNonWhitespaceLineIndex) {
                     exitCodeBlockDown();
                     return;
                 }
