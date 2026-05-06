@@ -330,7 +330,12 @@ export class MarkdownConverter {
 
             const parent = textNode.parentElement;
             if (parent && parent !== this.editor) {
-                parent.replaceWith(heading);
+                const splitInserted = this.splitParagraphAndInsertBlock(textNode, heading);
+                if (splitInserted) {
+                    // inserted as sibling blocks around the original paragraph
+                } else {
+                    parent.replaceWith(heading);
+                }
             } else {
                 textNode.parentNode.replaceChild(heading, textNode);
             }
