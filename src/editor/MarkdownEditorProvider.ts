@@ -2293,19 +2293,63 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             vscode.Uri.joinPath(this.context.extensionUri, 'node_modules', 'prismjs', 'prism.js')
         );
 
-        // Load common language components directly
-        const prismPythonUri = webview.asWebviewUri(
-            vscode.Uri.joinPath(this.context.extensionUri, 'node_modules', 'prismjs', 'components', 'prism-python.min.js')
-        );
-        const prismTypescriptUri = webview.asWebviewUri(
-            vscode.Uri.joinPath(this.context.extensionUri, 'node_modules', 'prismjs', 'components', 'prism-typescript.min.js')
-        );
-        const prismJsonUri = webview.asWebviewUri(
-            vscode.Uri.joinPath(this.context.extensionUri, 'node_modules', 'prismjs', 'components', 'prism-json.min.js')
-        );
-        const prismBashUri = webview.asWebviewUri(
-            vscode.Uri.joinPath(this.context.extensionUri, 'node_modules', 'prismjs', 'components', 'prism-bash.min.js')
-        );
+        // Load the Prism grammars exposed in the code-block language picker.
+        // Keep dependency order: shared helpers first, then languages that extend them.
+        const prismComponentNames = [
+            'markup-templating',
+            'c',
+            'cpp',
+            'csharp',
+            'python',
+            'typescript',
+            'java',
+            'php',
+            'ruby',
+            'go',
+            'rust',
+            'swift',
+            'kotlin',
+            'scala',
+            'scss',
+            'sass',
+            'less',
+            'json',
+            'yaml',
+            'toml',
+            'markdown',
+            'latex',
+            'sql',
+            'graphql',
+            'bash',
+            'powershell',
+            'docker',
+            'makefile',
+            'r',
+            'matlab',
+            'julia',
+            'perl',
+            'lua',
+            'haskell',
+            'elixir',
+            'erlang',
+            'clojure',
+            'scheme',
+            'lisp',
+            'dart',
+            'objectivec',
+        ];
+        const prismComponentScriptTags = prismComponentNames.map((componentName) => {
+            const componentUri = webview.asWebviewUri(
+                vscode.Uri.joinPath(
+                    this.context.extensionUri,
+                    'node_modules',
+                    'prismjs',
+                    'components',
+                    `prism-${componentName}.min.js`
+                )
+            );
+            return `    <script nonce="${nonce}" src="${componentUri}"></script>`;
+        }).join('\n');
         const mermaidUri = webview.asWebviewUri(
             vscode.Uri.joinPath(this.context.extensionUri, 'node_modules', 'mermaid', 'dist', 'mermaid.min.js')
         );
@@ -2371,10 +2415,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     </div>
     <script nonce="${nonce}">window.__manulDownSettings = ${settingsJson};</script>
     <script nonce="${nonce}" src="${prismJsUri}"></script>
-    <script nonce="${nonce}" src="${prismPythonUri}"></script>
-    <script nonce="${nonce}" src="${prismTypescriptUri}"></script>
-    <script nonce="${nonce}" src="${prismJsonUri}"></script>
-    <script nonce="${nonce}" src="${prismBashUri}"></script>
+${prismComponentScriptTags}
     <script nonce="${nonce}" src="${mermaidUri}"></script>
     <script type="module" nonce="${nonce}" src="${scriptUri}"></script>
 </body>

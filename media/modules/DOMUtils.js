@@ -471,6 +471,15 @@ export class DOMUtils {
      */
     cleanupGhostStyles() {
         let cleaned = false;
+        const isSyntaxHighlightToken = (element) => {
+            return (
+                element &&
+                element.tagName === 'SPAN' &&
+                element.classList &&
+                element.classList.contains('token') &&
+                !!element.closest('pre code')
+            );
+        };
 
         // Pasting from rich text editors can leave visual styles in the live
         // contenteditable DOM even when the saved Markdown cannot represent them.
@@ -483,6 +492,10 @@ export class DOMUtils {
         });
 
         this.editor.querySelectorAll('font, span').forEach(element => {
+            if (isSyntaxHighlightToken(element)) {
+                return;
+            }
+
             const parent = element.parentNode;
             if (!parent) return;
 
