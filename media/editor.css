@@ -691,6 +691,7 @@ body[data-list-dash-style="true"] #editor ul ul ul {
 
 #editor .md-table-insert-line {
     position: absolute;
+    display: none;
     background-color: var(--vscode-focusBorder, #0e639c);
     box-shadow: 0 0 0 1px var(--vscode-focusBorder, #0e639c);
     opacity: 0.9;

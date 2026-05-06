@@ -1473,23 +1473,25 @@ export class TableManager {
 
     _createInsertLines() {
         const vLine = document.createElement('div');
-        vLine.className = 'md-table-insert-line vertical';
-        vLine.setAttribute('data-exclude-from-markdown', 'true');
-        vLine.setAttribute('contenteditable', 'false');
-        vLine.setAttribute('aria-hidden', 'true');
-        vLine.style.display = 'none';
+        this._normalizeInsertLineElement(vLine, 'vertical');
 
         const hLine = document.createElement('div');
-        hLine.className = 'md-table-insert-line horizontal';
-        hLine.setAttribute('data-exclude-from-markdown', 'true');
-        hLine.setAttribute('contenteditable', 'false');
-        hLine.setAttribute('aria-hidden', 'true');
-        hLine.style.display = 'none';
+        this._normalizeInsertLineElement(hLine, 'horizontal');
 
         this.editor.appendChild(vLine);
         this.editor.appendChild(hLine);
         this.insertLineVertical = vLine;
         this.insertLineHorizontal = hLine;
+    }
+
+    _normalizeInsertLineElement(line, orientation) {
+        line.className = `md-table-insert-line ${orientation}`;
+        line.setAttribute('data-exclude-from-markdown', 'true');
+        line.setAttribute('contenteditable', 'false');
+        line.setAttribute('aria-hidden', 'true');
+        if (!line.style.display) {
+            line.style.display = 'none';
+        }
     }
 
     ensureInsertLines() {
@@ -1499,7 +1501,11 @@ export class TableManager {
         const hasUnexpectedLine = allLines.some(line =>
             line !== this.insertLineVertical && line !== this.insertLineHorizontal
         );
-        if (hasVertical && hasHorizontal && !hasUnexpectedLine) return;
+        if (hasVertical && hasHorizontal && !hasUnexpectedLine) {
+            this._normalizeInsertLineElement(this.insertLineVertical, 'vertical');
+            this._normalizeInsertLineElement(this.insertLineHorizontal, 'horizontal');
+            return;
+        }
 
         allLines.forEach(line => line.remove());
         this.insertLineVertical = null;
