@@ -3036,21 +3036,152 @@ export class CursorManager {
 
         const text = this.getCodeBlockText(codeBlock);
         const { lines, lineStartOffsets } = this.getCodeBlockLineInfo(text, text.length);
-        const isWhitespaceOnly = (value) => value.replace(/[\u200B\u2060\uFEFF\u00A0\s]/g, '') === '';
-        let targetLineIndex = -1;
-        for (let i = lines.length - 1; i >= 0; i--) {
-            if (!isWhitespaceOnly(lines[i])) {
-                targetLineIndex = i;
-                break;
-            }
-        }
-        if (targetLineIndex < 0) {
-            targetLineIndex = Math.max(0, lines.length - 1);
-        }
+        const targetLineIndex = this._getCodeBlockLastNavigableLineIndex(lines, text);
 
         const lineText = lines[targetLineIndex] || '';
         const lineStart = lineStartOffsets[targetLineIndex] || 0;
         return this.setCodeBlockCursorOffset(codeBlock, selection, lineStart + lineText.length);
+    }
+
+    _isEffectivelyEmptyBlock(block) {
+        if (!block || block.nodeType !== Node.ELEMENT_NODE) {
+            return false;
+        }
+        const text = (block.textContent || '').replace(/[\u200B\u2060\uFEFF\u00A0]/g, '').trim();
+        if (text !== '') {
+            return false;
+        }
+        return !Array.from(block.childNodes || []).some((node) => {
+            if (node.nodeType !== Node.ELEMENT_NODE) {
+                return false;
+            }
+            if (node.tagName === 'BR') {
+                return false;
+            }
+            if (this._isNavigationExcludedElement(node)) {
+                return false;
+            }
+            return true;
+        });
+    }
+
+    _placeCursorInEmptyParagraph(paragraph, selection) {
+        if (!paragraph || paragraph.tagName !== 'P' || !selection || !this._isEffectivelyEmptyBlock(paragraph)) {
+            return false;
+        }
+
+        paragraph.textContent = '\u200B';
+        const anchor = paragraph.firstChild;
+        if (!anchor || anchor.nodeType !== Node.TEXT_NODE) {
+            return false;
+        }
+
+        const newRange = document.createRange();
+        newRange.setStart(anchor, anchor.textContent.length);
+        newRange.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(newRange);
+        return true;
+    }
+
+    _isCodeNavigationWhitespace(value) {
+        return (value || '').replace(/[\u200B\u2060\uFEFF\u00A0\s]/g, '') === '';
+    }
+
+    _getCodeBlockLastNavigableLineIndex(lines, text = '') {
+        let lastIndex = Math.max(0, (lines || []).length - 1);
+        if (typeof text === 'string' && text.endsWith('\n') && lastIndex > 0) {
+            lastIndex -= 1;
+        }
+        return lastIndex;
+    }
+
+    _getFollowingEmptyParagraphAfterCodeBlock(preBlock) {
+        const nextElement = this._getNextNavigableElementInDocument(preBlock);
+        if (!nextElement || nextElement.nodeType !== Node.ELEMENT_NODE || nextElement.tagName !== 'P') {
+            return null;
+        }
+        return this._isEffectivelyEmptyBlock(nextElement) ? nextElement : null;
+    }
+
+    _isCaretNearBlockBottom(range, block) {
+        if (!range || !block || !block.getBoundingClientRect) {
+            return false;
+        }
+        const rect = this._getCaretRect(range);
+        if (!rect) {
+            return false;
+        }
+        const currentY = rect.bottom || (rect.y + rect.height) || 0;
+        const blockRect = block.getBoundingClientRect();
+        return currentY + 20 >= blockRect.bottom || (blockRect.bottom - currentY) < 40;
+    }
+
+    _isCaretOnLastVisualLine(range, block) {
+        if (!range || !block || !block.getBoundingClientRect) {
+            return false;
+        }
+        const rect = this._getCaretRect(range);
+        if (!rect) {
+            return false;
+        }
+        const blockRect = block.getBoundingClientRect();
+        const lineHeight = rect.height || 16;
+        return blockRect.bottom - rect.bottom <= lineHeight;
+    }
+
+    _getTrailingCodeBlockTextFromRange(codeBlock, range) {
+        try {
+            const tailRange = document.createRange();
+            tailRange.selectNodeContents(codeBlock);
+            tailRange.setStart(range.endContainer, range.endOffset);
+            return tailRange.toString();
+        } catch (_error) {
+            return null;
+        }
+    }
+
+    _isCodeBlockDownExitPosition(codeBlock, preBlock, range) {
+        if (!codeBlock || !preBlock || !range) {
+            return false;
+        }
+        const inPre = preBlock.contains(range.startContainer) ||
+            preBlock.contains(range.endContainer) ||
+            range.startContainer === preBlock ||
+            range.endContainer === preBlock;
+        if (!inPre) {
+            return false;
+        }
+
+        const inCode = codeBlock.contains(range.startContainer) ||
+            codeBlock.contains(range.endContainer) ||
+            range.startContainer === codeBlock ||
+            range.endContainer === codeBlock;
+        if (!inCode) {
+            return true;
+        }
+
+        const text = this.getCodeBlockText(codeBlock);
+        const cursorOffset = this.getCodeBlockCursorOffset(codeBlock, range);
+        if (cursorOffset !== null) {
+            const { lines, currentLineIndex } = this.getCodeBlockLineInfo(text, cursorOffset);
+            if (this._isCodeNavigationWhitespace(text)) {
+                return true;
+            }
+            return currentLineIndex >= this._getCodeBlockLastNavigableLineIndex(lines, text);
+        }
+
+        const trailingText = this._getTrailingCodeBlockTextFromRange(codeBlock, range);
+        if (trailingText !== null &&
+            this._isCodeNavigationWhitespace(trailingText) &&
+            this._isCaretOnLastVisualLine(range, preBlock)) {
+            return true;
+        }
+
+        if (this._isCaretOnLastVisualLine(range, preBlock)) {
+            return true;
+        }
+        return cursorOffset === null && this._isCaretNearBlockBottom(range, preBlock);
     }
 
     /**
@@ -5118,6 +5249,9 @@ export class CursorManager {
                 if (nextElement.tagName === 'PRE' && this._selectCodeBlockLanguageLabel(nextElement, selection)) {
                     return true;
                 }
+                if (nextElement.tagName === 'P' && this._placeCursorInEmptyParagraph(nextElement, selection)) {
+                    return true;
+                }
                 const newRange = document.createRange();
                 const firstNode = this.domUtils.getFirstTextNode(nextElement);
                 if (firstNode) {
@@ -5139,10 +5273,8 @@ export class CursorManager {
                 return true;
             }
 
-            // 新しい段落を作成（ZWSPでカーソル位置を確保）
+            // 新しい段落を作成
             const newP = document.createElement('p');
-            const zwsp = document.createTextNode('');
-            newP.appendChild(zwsp);
 
             if (preBlock.nextSibling) {
                 preBlock.parentElement.insertBefore(newP, preBlock.nextSibling);
@@ -5150,17 +5282,20 @@ export class CursorManager {
                 preBlock.parentElement.appendChild(newP);
             }
 
-            const newRange = document.createRange();
-            newRange.setStart(zwsp, zwsp.textContent.length);
-            newRange.collapse(true);
-            selection.removeAllRanges();
-            selection.addRange(newRange);
+            this._placeCursorInEmptyParagraph(newP, selection);
 
             if (notifyCallback) notifyCallback();
             return true;
         };
 
         if (preBlock && codeBlock) {
+            const followingEmptyParagraph = this._getFollowingEmptyParagraphAfterCodeBlock(preBlock);
+            if (followingEmptyParagraph &&
+                this._isCodeBlockDownExitPosition(codeBlock, preBlock, range) &&
+                this._placeCursorInEmptyParagraph(followingEmptyParagraph, selection)) {
+                return;
+            }
+
             const nextElementAfterCode = this._getNextNavigableElementInDocument(preBlock);
             if (!nextElementAfterCode) {
                 const caretRect = this._getCaretRect(range);
@@ -5211,32 +5346,14 @@ export class CursorManager {
             if (cursorOffset !== null) {
                 const { lines, lineStartOffsets, currentLineIndex, column } =
                     this.getCodeBlockLineInfo(text, cursorOffset);
-                const isWhitespaceOnly = (value) => value.replace(/[\u200B\u2060\uFEFF\u00A0\s]/g, '') === '';
-                let lastNonWhitespaceLineIndex = -1;
-                for (let i = lines.length - 1; i >= 0; i--) {
-                    if (!isWhitespaceOnly(lines[i])) {
-                        lastNonWhitespaceLineIndex = i;
-                        break;
-                    }
-                }
-                if (lastNonWhitespaceLineIndex === -1 ||
-                    lastNonWhitespaceLineIndex <= 0 ||
-                    currentLineIndex >= lastNonWhitespaceLineIndex) {
+                const lastLineIndex = this._getCodeBlockLastNavigableLineIndex(lines, text);
+                if (this._isCodeNavigationWhitespace(text) ||
+                    currentLineIndex >= lastLineIndex) {
                     exitCodeBlockDown();
                     return;
                 }
 
-                const trailingNewlines = this._getTrailingNewlineCount(text);
-                let lastLineIndex = lines.length - 1;
-                if (trailingNewlines >= 2) {
-                    lastLineIndex = Math.max(0, lines.length - 2);
-                }
-                if (currentLineIndex >= lastLineIndex) {
-                    exitCodeBlockDown();
-                    return;
-                }
-
-                const targetLineIndex = currentLineIndex + 1;
+                const targetLineIndex = Math.min(currentLineIndex + 1, lastLineIndex);
                 const targetOffset = lineStartOffsets[targetLineIndex] +
                     Math.min(column, lines[targetLineIndex].length);
                 if (this.setCodeBlockCursorOffset(codeBlock, selection, targetOffset)) {

@@ -123,6 +123,11 @@ export class ToolbarManager {
             return;
         }
 
+        if (command === 'codeblock' && this.isSelectionInCodeBlockContext()) {
+            this.updateToolbarState();
+            return;
+        }
+
         if (command === 'table' && this.onInsertTable) {
             this.onInsertTable();
             return;
@@ -206,6 +211,7 @@ export class ToolbarManager {
         const inTableCellContext = this.isSelectionInTableCellContext();
         const inHeadingContext = this.isSelectionInHeadingContext();
         const inListContext = this.isSelectionInListContext();
+        const inCodeBlockContext = this.isSelectionInCodeBlockContext();
         const activeHeadingCommand = this.getActiveHeadingCommand();
 
         this.commandButtons.forEach((button, command) => {
@@ -220,11 +226,13 @@ export class ToolbarManager {
                 !!activeHeadingCommand &&
                 activeHeadingCommand === command;
             const disabledByList = this.listRestrictedCommands.has(command) && inListContext;
+            const disabledCodeBlockInCodeBlock = command === 'codeblock' && inCodeBlockContext;
             const isDisabled =
                 disabledByTable ||
                 disabledBoldInHeading ||
                 disabledSameHeadingLevel ||
-                disabledByList;
+                disabledByList ||
+                disabledCodeBlockInCodeBlock;
             button.disabled = isDisabled;
             button.classList.toggle('is-disabled', isDisabled);
             button.classList.toggle('is-current-heading', isCurrentHeadingLevel);
@@ -350,6 +358,27 @@ export class ToolbarManager {
                 continue;
             }
             if (this._getClosestListForNode(range.startContainer) || this._getClosestListForNode(range.endContainer)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    isSelectionInCodeBlockContext() {
+        const selection = window.getSelection();
+        if (!selection || selection.rangeCount === 0) {
+            return false;
+        }
+
+        for (let i = 0; i < selection.rangeCount; i++) {
+            const range = selection.getRangeAt(i);
+            if (!this.editor.contains(range.startContainer) && !this.editor.contains(range.endContainer)) {
+                continue;
+            }
+            if (this._isNodeInCodeBlock(range.startContainer) ||
+                this._isNodeInCodeBlock(range.endContainer) ||
+                this._rangeTouchesCodeBlock(range)) {
                 return true;
             }
         }
@@ -711,6 +740,25 @@ export class ToolbarManager {
         }
 
         return false;
+    }
+
+    _rangeTouchesCodeBlock(range) {
+        if (!range) return false;
+
+        const boundaryNodes = [range.commonAncestorContainer];
+        const collectBoundaryChild = (container, offset) => {
+            if (!container || container.nodeType !== Node.ELEMENT_NODE) return;
+            const children = container.childNodes || [];
+            const direct = children[offset] || children[offset - 1];
+            if (direct) {
+                boundaryNodes.push(direct);
+            }
+        };
+
+        collectBoundaryChild(range.startContainer, range.startOffset);
+        collectBoundaryChild(range.endContainer, range.endOffset);
+
+        return boundaryNodes.some((node) => this._isNodeInCodeBlock(node));
     }
 
     _isNodeInTable(node) {

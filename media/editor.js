@@ -7307,16 +7307,25 @@ import { SearchManager } from './modules/SearchManager.js';
         e.preventDefault();
         stateManager.saveState();
 
-        const insertOffset = Math.min(startOffset, endOffset);
-        const deleteEndOffset = Math.max(startOffset, endOffset);
-        const insertText = deleteEndOffset === codeText.length ? '\n\n' : '\n';
-        let newText = codeText.slice(0, insertOffset) + insertText + codeText.slice(deleteEndOffset);
+        const visibleEndOffset = codeText.endsWith('\n')
+            ? Math.max(0, codeText.length - 1)
+            : codeText.length;
+        let insertOffset = Math.min(startOffset, endOffset);
+        let deleteEndOffset = Math.max(startOffset, endOffset);
+        if (range.collapsed && insertOffset >= visibleEndOffset) {
+            insertOffset = visibleEndOffset;
+            deleteEndOffset = visibleEndOffset;
+        }
+        let newText = codeText.slice(0, insertOffset) + '\n' + codeText.slice(deleteEndOffset);
         if (newText === '') {
             newText = '\n';
         }
+        const targetOffset = Math.min(insertOffset + 1, newText.length);
+        if (targetOffset >= newText.length) {
+            newText += '\n';
+        }
         codeBlock.textContent = newText;
 
-        const targetOffset = Math.min(insertOffset + 1, newText.length);
         cursorManager.setCodeBlockCursorOffset(codeBlock, selection, targetOffset);
 
         if (codeBlock.className.match(/language-\w+/)) {
@@ -8264,7 +8273,7 @@ import { SearchManager } from './modules/SearchManager.js';
 
     function isEffectivelyEmptyBlock(block) {
         if (!block) return false;
-        const text = (block.textContent || '').replace(/[\u200B\u2060\u00A0]/g, '').trim();
+        const text = (block.textContent || '').replace(/[\u200B\u2060\uFEFF\u00A0]/g, '').trim();
         if (text !== '') return false;
         const hasMeaningfulElement = Array.from(block.childNodes).some(node => {
             if (node.nodeType !== Node.ELEMENT_NODE) return false;
@@ -8281,7 +8290,7 @@ import { SearchManager } from './modules/SearchManager.js';
                 el.tagName === 'BLOCKQUOTE') {
                 return true;
             }
-            const elementText = (el.textContent || '').replace(/[\u200B\u2060\u00A0]/g, '').trim();
+            const elementText = (el.textContent || '').replace(/[\u200B\u2060\uFEFF\u00A0]/g, '').trim();
             if (elementText !== '') return true;
             if (typeof el.querySelector === 'function') {
                 return !!el.querySelector('img,hr,table,ul,ol,input,pre,blockquote');
@@ -8289,6 +8298,25 @@ import { SearchManager } from './modules/SearchManager.js';
             return false;
         });
         return !hasMeaningfulElement;
+    }
+
+    function placeCaretInEmptyParagraph(paragraph, selection) {
+        if (!paragraph || paragraph.tagName !== 'P' || !selection || !isEffectivelyEmptyBlock(paragraph)) {
+            return false;
+        }
+
+        paragraph.textContent = '\u200B';
+        const anchor = paragraph.firstChild;
+        if (!anchor || anchor.nodeType !== Node.TEXT_NODE) {
+            return false;
+        }
+
+        const newRange = document.createRange();
+        newRange.setStart(anchor, anchor.textContent.length);
+        newRange.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(newRange);
+        return true;
     }
 
     function handleEmptyLineAboveCodeBlockNav(range, selection, direction) {
@@ -8346,17 +8374,7 @@ import { SearchManager } from './modules/SearchManager.js';
 
         const text = cursorManager.getCodeBlockText(code);
         const { lines, lineStartOffsets } = cursorManager.getCodeBlockLineInfo(text, text.length);
-        const isWhitespaceOnly = (value) => value.replace(/[\u200B\u2060\uFEFF\u00A0\s]/g, '') === '';
-        let targetLineIndex = -1;
-        for (let i = lines.length - 1; i >= 0; i--) {
-            if (!isWhitespaceOnly(lines[i])) {
-                targetLineIndex = i;
-                break;
-            }
-        }
-        if (targetLineIndex < 0) {
-            targetLineIndex = Math.max(0, lines.length - 1);
-        }
+        const targetLineIndex = getCodeBlockLastNavigableLineIndex(lines, text);
 
         const lineText = lines[targetLineIndex] || '';
         const lineStart = lineStartOffsets[targetLineIndex] || 0;
@@ -9397,16 +9415,9 @@ import { SearchManager } from './modules/SearchManager.js';
             const offset = getCodeBlockCursorOffset(codeBlock, range);
             if (offset !== null) {
                 const { lines, currentLineIndex } = cursorManager.getCodeBlockLineInfo(textForOffset, offset);
-                const isWhitespaceOnly = (value) => value.replace(/[\u200B\u2060\u00A0\s]/g, '') === '';
-                let lastNonWhitespaceLineIndex = -1;
-                for (let i = lines.length - 1; i >= 0; i--) {
-                    if (!isWhitespaceOnly(lines[i])) {
-                        lastNonWhitespaceLineIndex = i;
-                        break;
-                    }
-                }
-                const totalLines = Math.max(0, lastNonWhitespaceLineIndex + 1);
-                const clampedIndex = Math.min(currentLineIndex, Math.max(0, totalLines - 1));
+                const lastLineIndex = getCodeBlockLastNavigableLineIndex(lines, textForOffset);
+                const totalLines = lastLineIndex + 1;
+                const clampedIndex = Math.min(currentLineIndex, lastLineIndex);
                 return { currentLineIndex: clampedIndex, totalLines, hasLineBelow: clampedIndex < totalLines - 1 };
             }
             const isInCode = (node) => node === codeBlock || (node && codeBlock.contains(node));
@@ -9419,11 +9430,8 @@ import { SearchManager } from './modules/SearchManager.js';
             }
             const fullText = (codeBlock.innerText !== undefined ? codeBlock.innerText : codeBlock.textContent) || '';
             const lines = fullText.split('\n');
-            const isWhitespaceOnly = (value) => value.replace(/[\u200B\u2060\u00A0\s]/g, '') === '';
-            while (lines.length > 0 && isWhitespaceOnly(lines[lines.length - 1])) {
-                lines.pop();
-            }
-            const totalLines = lines.length;
+            const lastLineIndex = getCodeBlockLastNavigableLineIndex(lines, fullText);
+            const totalLines = lastLineIndex + 1;
             const beforeRange = document.createRange();
             beforeRange.selectNodeContents(codeBlock);
             beforeRange.setEnd(effectiveRange.startContainer, effectiveRange.startOffset);
@@ -9432,8 +9440,8 @@ import { SearchManager } from './modules/SearchManager.js';
             if (totalLines <= 0) {
                 return { currentLineIndex: 0, totalLines: 0, hasLineBelow: false };
             }
-            if (currentLineIndex >= totalLines) {
-                currentLineIndex = totalLines - 1;
+            if (currentLineIndex > lastLineIndex) {
+                currentLineIndex = lastLineIndex;
             }
             return { currentLineIndex, totalLines, hasLineBelow: currentLineIndex < totalLines - 1 };
         } catch (e) {
@@ -11080,17 +11088,7 @@ import { SearchManager } from './modules/SearchManager.js';
 
         const text = cursorManager.getCodeBlockText(codeBlock);
         const { lines, lineStartOffsets } = cursorManager.getCodeBlockLineInfo(text, text.length);
-        const isWhitespaceOnly = (value) => value.replace(/[\u200B\u2060\uFEFF\u00A0\s]/g, '') === '';
-        let targetLineIndex = -1;
-        for (let i = lines.length - 1; i >= 0; i--) {
-            if (!isWhitespaceOnly(lines[i])) {
-                targetLineIndex = i;
-                break;
-            }
-        }
-        if (targetLineIndex < 0) {
-            targetLineIndex = Math.max(0, lines.length - 1);
-        }
+        const targetLineIndex = getCodeBlockLastNavigableLineIndex(lines, text);
         const lineText = lines[targetLineIndex] || '';
         const lineStart = lineStartOffsets[targetLineIndex] || 0;
         const targetOffset = lineStart + lineText.length;
@@ -11136,17 +11134,7 @@ import { SearchManager } from './modules/SearchManager.js';
 
         const text = cursorManager.getCodeBlockText(codeBlock);
         const { lines, lineStartOffsets } = cursorManager.getCodeBlockLineInfo(text, text.length);
-        const isWhitespaceOnly = (value) => value.replace(/[\u200B\u2060\uFEFF\u00A0\s]/g, '') === '';
-        let targetLineIndex = -1;
-        for (let i = lines.length - 1; i >= 0; i--) {
-            if (!isWhitespaceOnly(lines[i])) {
-                targetLineIndex = i;
-                break;
-            }
-        }
-        if (targetLineIndex < 0) {
-            targetLineIndex = Math.max(0, lines.length - 1);
-        }
+        const targetLineIndex = getCodeBlockLastNavigableLineIndex(lines, text);
         const lineText = lines[targetLineIndex] || '';
         const lineStart = lineStartOffsets[targetLineIndex] || 0;
         const column = Number.isInteger(targetColumn)
@@ -11180,17 +11168,7 @@ import { SearchManager } from './modules/SearchManager.js';
 
         const text = cursorManager.getCodeBlockText(codeBlock);
         const { lines, lineStartOffsets } = cursorManager.getCodeBlockLineInfo(text, text.length);
-        const isWhitespaceOnly = (value) => value.replace(/[\u200B\u2060\u00A0\s]/g, '') === '';
-        let targetLineIndex = -1;
-        for (let i = lines.length - 1; i >= 0; i--) {
-            if (!isWhitespaceOnly(lines[i])) {
-                targetLineIndex = i;
-                break;
-            }
-        }
-        if (targetLineIndex < 0) {
-            targetLineIndex = Math.max(0, lines.length - 1);
-        }
+        const targetLineIndex = getCodeBlockLastNavigableLineIndex(lines, text);
         const lineText = lines[targetLineIndex] || '';
         const lineStart = lineStartOffsets[targetLineIndex] || 0;
         const targetOffset = lineStart + lineText.length;
@@ -11330,6 +11308,12 @@ import { SearchManager } from './modules/SearchManager.js';
         }
         if (nextNode) {
             const nextElement = nextNode;
+            if (nextElement.nodeType === Node.ELEMENT_NODE &&
+                nextElement.tagName === 'P' &&
+                placeCaretInEmptyParagraph(nextElement, selection)) {
+                editor.focus();
+                return true;
+            }
             const newRange = document.createRange();
             const firstNode = getPreferredFirstTextNodeForElement(nextElement);
             if (firstNode) {
@@ -11353,8 +11337,6 @@ import { SearchManager } from './modules/SearchManager.js';
         }
 
         const newParagraph = document.createElement('p');
-        const zwsp = document.createTextNode('');
-        newParagraph.appendChild(zwsp);
         let insertionAnchor = preBlock;
         while (insertionAnchor.parentElement && insertionAnchor.parentElement !== editor) {
             insertionAnchor = insertionAnchor.parentElement;
@@ -11364,11 +11346,7 @@ import { SearchManager } from './modules/SearchManager.js';
         } else {
             insertionAnchor.parentElement.appendChild(newParagraph);
         }
-        const newRange = document.createRange();
-        newRange.setStart(zwsp, zwsp.textContent.length);
-        newRange.collapse(true);
-        selection.removeAllRanges();
-        selection.addRange(newRange);
+        placeCaretInEmptyParagraph(newParagraph, selection);
         editor.focus();
         notifyChange();
         return true;
@@ -11395,6 +11373,91 @@ import { SearchManager } from './modules/SearchManager.js';
         return { preBlock, codeBlock };
     }
 
+    function isCodeNavigationWhitespace(value) {
+        return (value || '').replace(/[\u200B\u2060\uFEFF\u00A0\s]/g, '') === '';
+    }
+
+    function getCodeBlockLastNavigableLineIndex(lines, text = '') {
+        let lastIndex = Math.max(0, (lines || []).length - 1);
+        if (typeof text === 'string' && text.endsWith('\n') && lastIndex > 0) {
+            lastIndex -= 1;
+        }
+        return lastIndex;
+    }
+
+    function getFollowingEmptyParagraphAfterCodeBlock(preBlock) {
+        const nextNode = getNextNavigableNodeAfter(preBlock);
+        if (!nextNode || nextNode.nodeType !== Node.ELEMENT_NODE || nextNode.tagName !== 'P') {
+            return null;
+        }
+        return isEffectivelyEmptyBlock(nextNode) ? nextNode : null;
+    }
+
+    function getTrailingCodeBlockTextFromRange(codeBlock, range) {
+        try {
+            const tailRange = document.createRange();
+            tailRange.selectNodeContents(codeBlock);
+            tailRange.setStart(range.endContainer, range.endOffset);
+            return tailRange.toString();
+        } catch (_error) {
+            return null;
+        }
+    }
+
+    function isCodeBlockDownExitPosition(range, preBlock, codeBlock) {
+        if (!range || !preBlock || !codeBlock) return false;
+        const inPre = preBlock.contains(range.startContainer) ||
+            preBlock.contains(range.endContainer) ||
+            range.startContainer === preBlock ||
+            range.endContainer === preBlock;
+        if (!inPre) return false;
+
+        const inCode = codeBlock.contains(range.startContainer) ||
+            codeBlock.contains(range.endContainer) ||
+            range.startContainer === codeBlock ||
+            range.endContainer === codeBlock;
+        if (!inCode) return true;
+
+        const text = cursorManager.getCodeBlockText(codeBlock);
+        const cursorOffset = getCodeBlockCursorOffset(codeBlock, range);
+        if (cursorOffset !== null) {
+            const { lines, currentLineIndex } = cursorManager.getCodeBlockLineInfo(text, cursorOffset);
+            if (isCodeNavigationWhitespace(text)) return true;
+            return currentLineIndex >= getCodeBlockLastNavigableLineIndex(lines, text);
+        }
+
+        const trailingText = getTrailingCodeBlockTextFromRange(codeBlock, range);
+        if (trailingText !== null &&
+            isCodeNavigationWhitespace(trailingText) &&
+            isCaretOnLastVisualLine(range, preBlock)) {
+            return true;
+        }
+
+        if (isCaretOnLastVisualLine(range, preBlock)) {
+            return true;
+        }
+        return cursorOffset === null && isCaretNearBlockBottom(range, preBlock);
+    }
+
+    function moveCodeBlockDownToFollowingEmptyParagraph(range, selection) {
+        if (!range || !selection || !selection.isCollapsed || getSelectedCodeBlockLanguageLabel()) {
+            return false;
+        }
+        const context = getCodeBlockNavigationContext(range);
+        if (!context) return false;
+
+        const { preBlock, codeBlock } = context;
+        const targetParagraph = getFollowingEmptyParagraphAfterCodeBlock(preBlock);
+        if (!targetParagraph || !isCodeBlockDownExitPosition(range, preBlock, codeBlock)) {
+            return false;
+        }
+        if (!placeCaretInEmptyParagraph(targetParagraph, selection)) {
+            return false;
+        }
+        editor.focus();
+        return true;
+    }
+
     function exitCodeBlockDownByLogicalLine(range, selection) {
         if (!range || !selection || !selection.isCollapsed || getSelectedCodeBlockLanguageLabel()) return false;
         const context = getCodeBlockNavigationContext(range);
@@ -11403,23 +11466,13 @@ import { SearchManager } from './modules/SearchManager.js';
 
         const text = cursorManager.getCodeBlockText(codeBlock);
         const cursorOffset = getCodeBlockCursorOffset(codeBlock, range);
-        const isWhitespaceOnly = (value) => value.replace(/[\u200B\u2060\uFEFF\u00A0\s]/g, '') === '';
         const { lines, currentLineIndex } = cursorManager.getCodeBlockLineInfo(
             text,
             cursorOffset !== null ? cursorOffset : text.length
         );
 
-        let lastNonWhitespaceLineIndex = -1;
-        for (let i = lines.length - 1; i >= 0; i--) {
-            if (!isWhitespaceOnly(lines[i])) {
-                lastNonWhitespaceLineIndex = i;
-                break;
-            }
-        }
-
-        if (lastNonWhitespaceLineIndex === -1 ||
-            lastNonWhitespaceLineIndex <= 0 ||
-            currentLineIndex >= lastNonWhitespaceLineIndex) {
+        if (isCodeNavigationWhitespace(text) ||
+            currentLineIndex >= getCodeBlockLastNavigableLineIndex(lines, text)) {
             return exitEmptyCodeBlockDownFromPre(preBlock, selection, true, true);
         }
         return false;
@@ -11450,7 +11503,7 @@ import { SearchManager } from './modules/SearchManager.js';
         }
         if (!preBlock) return false;
 
-        if (exitEmptyCodeBlockDownFromPre(preBlock, selection, true)) {
+        if (exitEmptyCodeBlockDownFromPre(preBlock, selection, false)) {
             return true;
         }
         const codeBlock = preBlock.querySelector('code');
@@ -11468,18 +11521,11 @@ import { SearchManager } from './modules/SearchManager.js';
             }
             if (cursorOffset !== null) {
                 const { lines, currentLineIndex } = cursorManager.getCodeBlockLineInfo(text, cursorOffset);
-                const isWhitespaceOnly = (value) => value.replace(/[\u200B\u2060\u00A0\s]/g, '') === '';
-                let lastNonWhitespaceLineIndex = -1;
-                for (let i = lines.length - 1; i >= 0; i--) {
-                    if (!isWhitespaceOnly(lines[i])) {
-                        lastNonWhitespaceLineIndex = i;
-                        break;
-                    }
-                }
-                if ((trailingText !== null && trailingText.replace(/[\u200B\u2060\u00A0\s]/g, '') === '') ||
-                    lastNonWhitespaceLineIndex === -1 ||
-                    lastNonWhitespaceLineIndex <= 0 ||
-                    currentLineIndex >= lastNonWhitespaceLineIndex ||
+                if (isCodeNavigationWhitespace(text) ||
+                    currentLineIndex >= getCodeBlockLastNavigableLineIndex(lines, text) ||
+                    (trailingText !== null &&
+                        trailingText.replace(/[\u200B\u2060\u00A0\s]/g, '') === '' &&
+                        isCaretOnLastVisualLine(range, preBlock)) ||
                     isCaretOnLastVisualLine(range, preBlock)) {
                     return exitEmptyCodeBlockDownFromPre(preBlock, selection, true, true);
                 }
@@ -11527,6 +11573,15 @@ import { SearchManager } from './modules/SearchManager.js';
             trailingText = tailRange.toString();
         } catch (e) {
             trailingText = null;
+        }
+
+        const text = cursorManager.getCodeBlockText(codeBlock);
+        const cursorOffset = getCodeBlockCursorOffset(codeBlock, range);
+        if (cursorOffset !== null && !isCodeNavigationWhitespace(text)) {
+            const { lines, currentLineIndex } = cursorManager.getCodeBlockLineInfo(text, cursorOffset);
+            if (currentLineIndex < getCodeBlockLastNavigableLineIndex(lines, text)) {
+                return false;
+            }
         }
 
         if (trailingText !== null) {
@@ -11608,24 +11663,16 @@ import { SearchManager } from './modules/SearchManager.js';
         if (cursorOffset !== null) {
             const { lines, lineStartOffsets, currentLineIndex, column } =
                 cursorManager.getCodeBlockLineInfo(text, cursorOffset);
-            const isWhitespaceOnly = (value) => value.replace(/[\u200B\u2060\u00A0\s]/g, '') === '';
-            let lastNonWhitespaceLineIndex = -1;
-            for (let i = lines.length - 1; i >= 0; i--) {
-                if (!isWhitespaceOnly(lines[i])) {
-                    lastNonWhitespaceLineIndex = i;
-                    break;
-                }
-            }
+            const lastLineIndex = getCodeBlockLastNavigableLineIndex(lines, text);
 
-            if (lastNonWhitespaceLineIndex === -1 ||
-                lastNonWhitespaceLineIndex <= 0 ||
-                currentLineIndex >= lastNonWhitespaceLineIndex) {
+            if (isCodeNavigationWhitespace(text) ||
+                currentLineIndex >= lastLineIndex) {
                 const exited = exitEmptyCodeBlockDownFromPre(preBlock, selection, true, true);
                 if (exited) scheduleEnsureExitFromPre(preBlock);
                 return exited ? { handled: true, exited: true } : null;
             }
 
-            const targetLineIndex = Math.min(currentLineIndex + 1, lines.length - 1);
+            const targetLineIndex = Math.min(currentLineIndex + 1, lastLineIndex);
             const targetLineStart = lineStartOffsets[targetLineIndex];
             if (typeof targetLineStart === 'number') {
                 const targetOffset = targetLineStart +
@@ -12186,6 +12233,11 @@ import { SearchManager } from './modules/SearchManager.js';
                 const selection = window.getSelection();
                 if (selection && selection.rangeCount > 0) {
                     const range = selection.getRangeAt(0);
+                    if (moveCodeBlockDownToFollowingEmptyParagraph(range, selection)) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        return true;
+                    }
                     if (exitCodeBlockDownByLogicalLine(range, selection)) {
                         e.preventDefault();
                         e.stopPropagation();
@@ -12505,11 +12557,16 @@ import { SearchManager } from './modules/SearchManager.js';
                         if (hasBelow === true) {
                             codeBlockHasLineBelow = true;
                         } else if (hasBelow === false) {
-                            e.preventDefault();
-                            if (exitEmptyCodeBlockDownFromPre(preBlock, selection, true, true)) {
-                                notifyChange();
-                                setTimeout(() => correctCheckboxCursorPosition(), 0);
-                                return true;
+                            const lineInfo = getCodeBlockLineInfoFromRange(range, codeBlock);
+                            if (lineInfo && lineInfo.hasLineBelow) {
+                                codeBlockHasLineBelow = true;
+                            } else {
+                                e.preventDefault();
+                                if (exitEmptyCodeBlockDownFromPre(preBlock, selection, true, true)) {
+                                    notifyChange();
+                                    setTimeout(() => correctCheckboxCursorPosition(), 0);
+                                    return true;
+                                }
                             }
                         }
                     }
@@ -12530,7 +12587,7 @@ import { SearchManager } from './modules/SearchManager.js';
                     }
                 }
             }
-            // If we're inside a code block and at the last meaningful line, exit below.
+            // If we're inside a code block and at its last navigable line, exit below.
             {
                 if (!codeBlockHasLineBelow) {
                     const selection = window.getSelection();
@@ -12555,30 +12612,18 @@ import { SearchManager } from './modules/SearchManager.js';
                                 } catch (e) {
                                     trailingText = null;
                                 }
-                                if (trailingText !== null) {
-                                    if (trailingText.replace(/[\u200B\u2060\u00A0\s]/g, '') === '') {
-                                        shouldExit = true;
-                                    }
+                                if (cursorOffset === null) {
+                                    shouldExit = isCaretNearBlockBottom(range, preBlock);
+                                } else {
+                                    const { lines, currentLineIndex } = cursorManager.getCodeBlockLineInfo(text, cursorOffset);
+                                    shouldExit = isCodeNavigationWhitespace(text) ||
+                                        currentLineIndex >= getCodeBlockLastNavigableLineIndex(lines, text);
                                 }
-                                if (!shouldExit) {
-                                    if (cursorOffset === null) {
-                                        shouldExit = isCaretNearBlockBottom(range, preBlock);
-                                    } else {
-                                        const { lines, currentLineIndex } = cursorManager.getCodeBlockLineInfo(text, cursorOffset);
-                                        const isWhitespaceOnly = (value) => value.replace(/[\u200B\u2060\u00A0\s]/g, '') === '';
-                                        let lastNonWhitespaceLineIndex = -1;
-                                        for (let i = lines.length - 1; i >= 0; i--) {
-                                            if (!isWhitespaceOnly(lines[i])) {
-                                                lastNonWhitespaceLineIndex = i;
-                                                break;
-                                            }
-                                        }
-                                        if (lastNonWhitespaceLineIndex === -1 ||
-                                            lastNonWhitespaceLineIndex <= 0 ||
-                                            currentLineIndex >= lastNonWhitespaceLineIndex) {
-                                            shouldExit = true;
-                                        }
-                                    }
+                                if (!shouldExit &&
+                                    trailingText !== null &&
+                                    trailingText.replace(/[\u200B\u2060\u00A0\s]/g, '') === '' &&
+                                    isCaretOnLastVisualLine(range, preBlock)) {
+                                    shouldExit = true;
                                 }
                                 if (!shouldExit && isCaretOnLastVisualLine(range, preBlock)) {
                                     shouldExit = true;
@@ -12684,19 +12729,8 @@ import { SearchManager } from './modules/SearchManager.js';
                             shouldExit = true;
                         } else {
                             const { lines, currentLineIndex } = cursorManager.getCodeBlockLineInfo(text, cursorOffset);
-                            const isWhitespaceOnly = (value) => value.replace(/[\u200B\u2060\u00A0\s]/g, '') === '';
-                            let lastNonWhitespaceLineIndex = -1;
-                            for (let i = lines.length - 1; i >= 0; i--) {
-                                if (!isWhitespaceOnly(lines[i])) {
-                                    lastNonWhitespaceLineIndex = i;
-                                    break;
-                                }
-                            }
-                            if (lastNonWhitespaceLineIndex === -1 ||
-                                lastNonWhitespaceLineIndex <= 0 ||
-                                currentLineIndex >= lastNonWhitespaceLineIndex) {
-                                shouldExit = true;
-                            }
+                            shouldExit = isCodeNavigationWhitespace(text) ||
+                                currentLineIndex >= getCodeBlockLastNavigableLineIndex(lines, text);
                         }
                         if (!shouldExit && isCaretOnLastVisualLine(rangeAfter, preBlock)) {
                             shouldExit = true;
