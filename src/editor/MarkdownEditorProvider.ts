@@ -2384,7 +2384,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             return `    <script nonce="${nonce}" src="${componentUri}"></script>`;
         }).join('\n');
         const mermaidUri = webview.asWebviewUri(
-            vscode.Uri.joinPath(this.context.extensionUri, 'node_modules', 'mermaid', 'dist', 'mermaid.min.js')
+            vscode.Uri.joinPath(this.context.extensionUri, 'media', 'vendor', 'mermaid.bundle.js')
         );
 
         return `<!DOCTYPE html>
