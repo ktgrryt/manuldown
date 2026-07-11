@@ -1358,11 +1358,12 @@ export class TableManager {
         const selection = window.getSelection();
         if (!selection || !selection.rangeCount) return false;
 
-        const range = selection.getRangeAt(0);
-        const cell = this._getCellFromTarget(range.startContainer);
         const hasSelection = this.hasCellSelection();
 
-        if (!cell && !hasSelection) return false;
+        // Matrix paste is only for the explicit table-cell selection mode.
+        // A caret or native text selection inside a cell must use the editor's
+        // regular paste path so text is inserted or replaces the selected text.
+        if (!hasSelection) return false;
 
         const text = e.clipboardData ? e.clipboardData.getData('text/plain') : '';
         let matrix = null;
@@ -1377,7 +1378,7 @@ export class TableManager {
         e.preventDefault();
         this.stateManager.saveState();
 
-        const startCell = hasSelection ? this._getTopLeftSelectedCell() : cell;
+        const startCell = this._getTopLeftSelectedCell();
         if (!startCell) return false;
 
         this._applyMatrix(startCell, matrix);
