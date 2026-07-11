@@ -2782,6 +2782,11 @@ export class CursorManager {
             }
             let text = '';
             node.childNodes.forEach(child => {
+                const isLineContainer = child.nodeType === Node.ELEMENT_NODE &&
+                    (child.tagName === 'DIV' || child.tagName === 'P');
+                if (isLineContainer && text !== '' && !text.endsWith('\n')) {
+                    text += '\n';
+                }
                 text += serializeNode(child);
             });
             if ((tagName === 'DIV' || tagName === 'P') && !text.endsWith('\n')) {
@@ -2802,9 +2807,17 @@ export class CursorManager {
                 } else if (node.nodeType === Node.ELEMENT_NODE) {
                     const children = Array.from(node.childNodes);
                     const limit = Math.min(startOffset, children.length);
+                    let serializedChildren = '';
                     for (let i = 0; i < limit; i++) {
-                        offset += serializeNode(children[i]).length;
+                        const child = children[i];
+                        const isLineContainer = child.nodeType === Node.ELEMENT_NODE &&
+                            (child.tagName === 'DIV' || child.tagName === 'P');
+                        if (isLineContainer && serializedChildren !== '' && !serializedChildren.endsWith('\n')) {
+                            serializedChildren += '\n';
+                        }
+                        serializedChildren += serializeNode(child);
                     }
+                    offset += serializedChildren.length;
                 }
                 found = true;
                 return;
@@ -2823,11 +2836,19 @@ export class CursorManager {
             }
 
             const children = Array.from(node.childNodes);
+            let serializedChildren = '';
             for (const child of children) {
+                const isLineContainer = child.nodeType === Node.ELEMENT_NODE &&
+                    (child.tagName === 'DIV' || child.tagName === 'P');
+                if (isLineContainer && serializedChildren !== '' && !serializedChildren.endsWith('\n')) {
+                    offset += 1;
+                    serializedChildren += '\n';
+                }
                 walk(child);
                 if (found) {
                     return;
                 }
+                serializedChildren += serializeNode(child);
             }
 
             if (node.tagName === 'DIV' || node.tagName === 'P') {
@@ -2875,6 +2896,10 @@ export class CursorManager {
     }
 
     getCodeBlockText(codeBlock) {
+        if (this.domUtils && typeof this.domUtils.getCodeBlockText === 'function') {
+            return this.domUtils.getCodeBlockText(codeBlock);
+        }
+
         const serializeNode = (node) => {
             if (node.nodeType === Node.TEXT_NODE) {
                 return node.textContent || '';
@@ -2888,6 +2913,11 @@ export class CursorManager {
             }
             let text = '';
             node.childNodes.forEach(child => {
+                const isLineContainer = child.nodeType === Node.ELEMENT_NODE &&
+                    (child.tagName === 'DIV' || child.tagName === 'P');
+                if (isLineContainer && text !== '' && !text.endsWith('\n')) {
+                    text += '\n';
+                }
                 text += serializeNode(child);
             });
             if ((tagName === 'DIV' || tagName === 'P') && !text.endsWith('\n')) {
@@ -2930,6 +2960,31 @@ export class CursorManager {
         const safeOffset = Math.max(0, offset);
         let currentOffset = 0;
         let placed = false;
+
+        const serializeNode = (node) => {
+            if (node.nodeType === Node.TEXT_NODE) {
+                return node.textContent || '';
+            }
+            if (node.nodeType !== Node.ELEMENT_NODE) {
+                return '';
+            }
+            if (node.tagName === 'BR') {
+                return '\n';
+            }
+            let text = '';
+            node.childNodes.forEach(child => {
+                const isLineContainer = child.nodeType === Node.ELEMENT_NODE &&
+                    (child.tagName === 'DIV' || child.tagName === 'P');
+                if (isLineContainer && text !== '' && !text.endsWith('\n')) {
+                    text += '\n';
+                }
+                text += serializeNode(child);
+            });
+            if ((node.tagName === 'DIV' || node.tagName === 'P') && !text.endsWith('\n')) {
+                text += '\n';
+            }
+            return text;
+        };
 
         const placeRange = (range) => {
             selection.removeAllRanges();
@@ -2974,11 +3029,26 @@ export class CursorManager {
             }
 
             const children = Array.from(node.childNodes);
+            let serializedChildren = '';
             for (const child of children) {
+                const isLineContainer = child.nodeType === Node.ELEMENT_NODE &&
+                    (child.tagName === 'DIV' || child.tagName === 'P');
+                if (isLineContainer && serializedChildren !== '' && !serializedChildren.endsWith('\n')) {
+                    if (currentOffset + 1 >= safeOffset) {
+                        const newRange = document.createRange();
+                        newRange.setStartBefore(child);
+                        newRange.collapse(true);
+                        placeRange(newRange);
+                        return;
+                    }
+                    currentOffset += 1;
+                    serializedChildren += '\n';
+                }
                 walk(child);
                 if (placed) {
                     return;
                 }
+                serializedChildren += serializeNode(child);
             }
 
             if (node.tagName === 'DIV' || node.tagName === 'P') {

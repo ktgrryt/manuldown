@@ -227,7 +227,39 @@ export class CodeBlockManager {
         if (!codeBlock) {
             return '';
         }
-        return (codeBlock.textContent || '').replace(/[\u200B\u2060]/g, '');
+        return this._getCodeBlockText(codeBlock).replace(/[\u200B\u2060]/g, '');
+    }
+
+    _getCodeBlockText(codeBlock) {
+        if (!codeBlock) {
+            return '';
+        }
+        if (this.cursorManager && typeof this.cursorManager.getCodeBlockText === 'function') {
+            return this.cursorManager.getCodeBlockText(codeBlock);
+        }
+
+        const serializeNode = (node) => {
+            if (!node) return '';
+            if (node.nodeType === Node.TEXT_NODE) return node.textContent || '';
+            if (node.nodeType !== Node.ELEMENT_NODE) return '';
+            if (node.tagName === 'BR') return '\n';
+
+            let text = '';
+            Array.from(node.childNodes || []).forEach((child) => {
+                const isLineContainer = child.nodeType === Node.ELEMENT_NODE &&
+                    (child.tagName === 'DIV' || child.tagName === 'P');
+                if (isLineContainer && text !== '' && !text.endsWith('\n')) {
+                    text += '\n';
+                }
+                text += serializeNode(child);
+            });
+            if ((node.tagName === 'DIV' || node.tagName === 'P') && !text.endsWith('\n')) {
+                text += '\n';
+            }
+            return text;
+        };
+
+        return serializeNode(codeBlock);
     }
 
     _ensureMermaidPreview(pre) {
@@ -897,7 +929,7 @@ export class CodeBlockManager {
                 }
                 
                 // プレーンテキストの内容を取得
-                const code = block.textContent;
+                const code = this._getCodeBlockText(block);
                 const trailingNewlines = this._getTrailingNewlineCount(code);
                 
                 try {
@@ -978,7 +1010,7 @@ export class CodeBlockManager {
         }
         
         // プレーンテキストの内容を取得
-        const code = codeBlock.textContent;
+        const code = this._getCodeBlockText(codeBlock);
         const trailingNewlines = this._getTrailingNewlineCount(code);
         
         // Prismを使用してコードをトークン化
@@ -1469,7 +1501,7 @@ export class CodeBlockManager {
 
             try {
                 setCopyButtonLabel('Copying...');
-                await this._writeTextToClipboard(code.textContent || '');
+                await this._writeTextToClipboard(this._getCodeBlockText(code));
                 setCopyButtonLabel('Copied!', 2000);
             } catch (error) {
                 console.error('Failed to copy:', error);
@@ -1539,7 +1571,9 @@ export class CodeBlockManager {
         
         // コードブロックを再ハイライト
         if (typeof Prism !== 'undefined' && newLang && newLang !== 'plaintext' && !isMermaid) {
-            const trailingNewlines = this._getTrailingNewlineCount(code.textContent);
+            const codeText = this._getCodeBlockText(code);
+            const trailingNewlines = this._getTrailingNewlineCount(codeText);
+            code.textContent = codeText;
             Prism.highlightElement(code);
             this._ensureTrailingNewlines(code, trailingNewlines);
         }

@@ -590,6 +590,49 @@ import { SearchManager } from './modules/SearchManager.js';
         return changed;
     }
 
+    function stripListPlaceholderCharactersFromTextNode(textNode) {
+        if (!textNode || textNode.nodeType !== Node.TEXT_NODE) return false;
+
+        const raw = textNode.textContent || '';
+        const cleaned = raw.replace(/[\u00A0\u200B\u2060]/g, '');
+        if (cleaned === raw) return false;
+
+        // Reassigning textContent resets Chromium's caret to the beginning of the
+        // text node. Empty list items contain an NBSP placeholder, so the first
+        // IME result used to become "\u00A0動物" and cleaning that placeholder
+        // moved the caret in front of the converted text. Preserve offsets while
+        // removing the placeholder after composition has finished.
+        const selection = window.getSelection();
+        const range = selection && selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
+        const selectionIsInTextNode = !!(
+            range &&
+            range.startContainer === textNode &&
+            range.endContainer === textNode
+        );
+        const adjustOffset = (offset) =>
+            raw.slice(0, Math.max(0, Math.min(offset, raw.length)))
+                .replace(/[\u00A0\u200B\u2060]/g, '')
+                .length;
+        const startOffset = selectionIsInTextNode ? adjustOffset(range.startOffset) : 0;
+        const endOffset = selectionIsInTextNode ? adjustOffset(range.endOffset) : 0;
+
+        textNode.textContent = cleaned;
+
+        if (selectionIsInTextNode && textNode.isConnected) {
+            try {
+                const nextRange = document.createRange();
+                nextRange.setStart(textNode, Math.min(startOffset, cleaned.length));
+                nextRange.setEnd(textNode, Math.min(endOffset, cleaned.length));
+                selection.removeAllRanges();
+                selection.addRange(nextRange);
+            } catch (_error) {
+                // Keep the cleaned text if the browser changed the selection meanwhile.
+            }
+        }
+
+        return true;
+    }
+
     function replaceEditorContentFromHtml(rawHtml) {
         if (!editor) return;
         const sanitizedContainer = createSanitizedContainerFromHtml(rawHtml);
@@ -5100,7 +5143,7 @@ import { SearchManager } from './modules/SearchManager.js';
                         if (cleaned === '') {
                             textNode.remove();
                         } else {
-                            textNode.textContent = cleaned;
+                            stripListPlaceholderCharactersFromTextNode(textNode);
                         }
                     }
                 });
@@ -16227,9 +16270,6 @@ import { SearchManager } from './modules/SearchManager.js';
 
         // IME composition
         editor.addEventListener('compositionstart', (e) => {
-            if (!isUpdating) {
-                stripEditorControlCharacters(editor);
-            }
             isComposing = true;
             lastCompositionEndTs = 0;
             tableManager.handleEdgeCompositionStart();
@@ -16244,7 +16284,11 @@ import { SearchManager } from './modules/SearchManager.js';
             }
             if (!isUpdating) {
                 setTimeout(() => {
+                    // Do not touch the DOM if a new composition started before this
+                    // deferred cleanup got a chance to run.
+                    if (isComposing || isUpdating) return;
                     stripEditorControlCharacters(editor);
+                    stateManager.saveStateDebounced();
                     const converted = markdownConverter.convertMarkdownSyntax(notifyChange);
                     if (!converted) {
                         notifyChange();
@@ -16278,6 +16322,13 @@ import { SearchManager } from './modules/SearchManager.js';
             }
 
             if (tableManager.handleEdgeBeforeInput(e)) {
+                return;
+            }
+
+            // The composition range belongs to the browser until compositionend.
+            // Even harmless-looking cleanup can commit it or relocate its caret.
+            if (isComposing || e.isComposing || e.inputType === 'insertCompositionText') {
+                pendingEmptyListItemInsert = null;
                 return;
             }
 
@@ -16416,9 +16467,18 @@ import { SearchManager } from './modules/SearchManager.js';
                     tableManager._compositionBlockedEdge.textContent = '\u00A0';
                     return;
                 }
-                if (!isComposing && !e.isComposing) {
-                    stripEditorControlCharacters(editor);
+
+                // Never normalize list DOM, remove placeholders, or notify the host
+                // while the browser owns an IME composition range. In particular,
+                // assigning textContent on the first text node of an empty LI commits
+                // the first roman character and moves the caret in front of it.
+                if (isComposing || e.isComposing || e.inputType === 'insertCompositionText') {
+                    pendingEmptyListItemInsert = null;
+                    hideSlashCommandMenu();
+                    return;
                 }
+
+                stripEditorControlCharacters(editor);
                 stateManager.saveStateDebounced();
                 const isDeleteInput = typeof e.inputType === 'string' && e.inputType.startsWith('delete');
                 const shouldImmediateDeleteNotify = isDeleteInput;
@@ -16483,12 +16543,6 @@ import { SearchManager } from './modules/SearchManager.js';
                     normalizeListRenderingAfterStructureChange();
                 } else {
                     updateListItemClasses();
-                }
-
-                if (isComposing || e.isComposing) {
-                    hideSlashCommandMenu();
-                    notifyChange();
-                    return;
                 }
 
                 if (e.inputType === 'insertText' || e.inputType === 'insertLineBreak' || e.inputType === 'insertFromPaste') {

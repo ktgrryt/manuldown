@@ -113,6 +113,44 @@ export class DOMUtils {
     }
 
     /**
+     * contenteditable がコード内に生成する BR/DIV/P を改行として直列化する。
+     * textContent だけではこれらの視覚的な改行が失われる。
+     * @param {Node} codeBlock
+     * @returns {string}
+     */
+    getCodeBlockText(codeBlock) {
+        const serializeNode = (node) => {
+            if (!node) return '';
+            if (node.nodeType === Node.TEXT_NODE) {
+                return node.textContent || '';
+            }
+            if (node.nodeType !== Node.ELEMENT_NODE) {
+                return '';
+            }
+            if (node.tagName === 'BR') {
+                return '\n';
+            }
+
+            let text = '';
+            Array.from(node.childNodes || []).forEach((child) => {
+                const isLineContainer = child.nodeType === Node.ELEMENT_NODE &&
+                    (child.tagName === 'DIV' || child.tagName === 'P');
+                if (isLineContainer && text !== '' && !text.endsWith('\n')) {
+                    text += '\n';
+                }
+                text += serializeNode(child);
+            });
+
+            if ((node.tagName === 'DIV' || node.tagName === 'P') && !text.endsWith('\n')) {
+                text += '\n';
+            }
+            return text;
+        };
+
+        return serializeNode(codeBlock);
+    }
+
+    /**
      * HTMLから不要な要素を除去してクリーンアップ
      * @returns {string} クリーンアップされたHTML
      */
@@ -141,6 +179,14 @@ export class DOMUtils {
         const excludedElements = clone.querySelectorAll('[data-exclude-from-markdown="true"]');
         excludedElements.forEach(element => {
             element.remove();
+        });
+
+        // Chromium may represent Enter/Shift+Enter in contenteditable code blocks
+        // as BR/DIV/P elements. Convert those visual boundaries to real line feeds
+        // on the clone before sending HTML to the extension host.
+        const codeBlocks = clone.querySelectorAll('pre code');
+        codeBlocks.forEach(codeBlock => {
+            codeBlock.textContent = this.getCodeBlockText(codeBlock);
         });
 
         // テーブル選択用のクラスを削除

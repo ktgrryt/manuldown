@@ -359,8 +359,41 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 const matches = className.match(/(?:^|\s)language-([^\s]+)/);
                 const language = matches ? matches[1] : '';
 
-                // Get the text content directly from the code node
-                const code = codeNode.textContent || '';
+                // contenteditable may encode visual newlines as BR/DIV/P. Reading
+                // textContent directly would concatenate those lines.
+                const serializeCodeNode = (currentNode: any): string => {
+                    if (!currentNode) {
+                        return '';
+                    }
+                    if (currentNode.nodeType === 3) {
+                        return currentNode.textContent || '';
+                    }
+                    if (currentNode.nodeType !== 1) {
+                        return '';
+                    }
+                    const tagName = String(currentNode.tagName || currentNode.nodeName || '').toUpperCase();
+                    if (tagName === 'BR') {
+                        return '\n';
+                    }
+
+                    let text = '';
+                    const children = Array.prototype.slice.call(currentNode.childNodes || []);
+                    for (const child of children) {
+                        const childTagName = child && child.nodeType === 1
+                            ? String(child.tagName || child.nodeName || '').toUpperCase()
+                            : '';
+                        const isLineContainer = childTagName === 'DIV' || childTagName === 'P';
+                        if (isLineContainer && text !== '' && !text.endsWith('\n')) {
+                            text += '\n';
+                        }
+                        text += serializeCodeNode(child);
+                    }
+                    if ((tagName === 'DIV' || tagName === 'P') && !text.endsWith('\n')) {
+                        text += '\n';
+                    }
+                    return text;
+                };
+                const code = serializeCodeNode(codeNode);
 
                 // Preserve the code as-is, but ensure proper formatting
                 let codeContent = code;
