@@ -533,6 +533,41 @@ import { SearchManager } from './modules/SearchManager.js';
         return container;
     }
 
+    function normalizeLoadedEditorBoundaryWhitespace(container) {
+        if (!container) return;
+
+        // marked formats its output with line feeds between top-level blocks. If
+        // those formatting nodes reach contenteditable, Chromium can place the
+        // caret in them even though they have no visible representation.
+        Array.from(container.childNodes || []).forEach((node) => {
+            if (
+                node.nodeType === Node.TEXT_NODE &&
+                /^[\t\r\n ]*$/.test(node.textContent || '')
+            ) {
+                node.remove();
+            }
+        });
+
+        // A Markdown file may end in two spaces (the hard-break marker without a
+        // following line). marked keeps those spaces as an invisible text suffix.
+        // Remove only the terminal ASCII whitespace on load; whitespace inside
+        // code is document content and must remain untouched.
+        const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+        let lastTextNode = null;
+        let textNode;
+        while (textNode = walker.nextNode()) {
+            lastTextNode = textNode;
+        }
+
+        if (lastTextNode && !lastTextNode.parentElement?.closest('pre, code')) {
+            const raw = lastTextNode.textContent || '';
+            const normalized = raw.replace(/[\t ]+$/, '');
+            if (normalized !== raw) {
+                lastTextNode.textContent = normalized;
+            }
+        }
+    }
+
     function stripEditorControlCharacters(root = editor, options = {}) {
         if (!root) return false;
         const controlCharPattern = /[\u200B\u2060\uFEFF]/g;
@@ -636,6 +671,7 @@ import { SearchManager } from './modules/SearchManager.js';
     function replaceEditorContentFromHtml(rawHtml) {
         if (!editor) return;
         const sanitizedContainer = createSanitizedContainerFromHtml(rawHtml);
+        normalizeLoadedEditorBoundaryWhitespace(sanitizedContainer);
         while (editor.firstChild) {
             editor.removeChild(editor.firstChild);
         }
@@ -14283,6 +14319,16 @@ import { SearchManager } from './modules/SearchManager.js';
 
                             const prevElement = getPreviousElementSibling(startBlock);
                             const nextElement = getNextElementSibling(startBlock);
+                            const nextListItemForCaretAfterMerge = !!(
+                                prevElement &&
+                                nextElement &&
+                                (nextElement.tagName === 'UL' || nextElement.tagName === 'OL') &&
+                                prevElement.tagName === nextElement.tagName
+                            )
+                                ? Array.from(nextElement.children || []).find(
+                                    (child) => child && child.tagName === 'LI'
+                                )
+                                : null;
                             let wrapper = null;
                             const nextIsRawTable = !!(nextElement && nextElement.tagName === 'TABLE');
                             if (nextElement) {
@@ -14355,6 +14401,13 @@ import { SearchManager } from './modules/SearchManager.js';
                             pendingCtrlKDeleteSync = false;
                             suppressNextNativeCtrlKDelete = true;
                             notifyChangeImmediate();
+                            // notifyChangeImmediate merges adjacent lists. Moving the next
+                            // list's LI nodes can relocate a live Selection to the old list
+                            // boundary, so restore the caret after that merge has finished.
+                            if (nextListItemForCaretAfterMerge &&
+                                editor.contains(nextListItemForCaretAfterMerge)) {
+                                placeCursorAtListItemStart(nextListItemForCaretAfterMerge);
+                            }
                             setTimeout(() => {
                                 suppressNextNativeCtrlKDelete = false;
                             }, 0);
