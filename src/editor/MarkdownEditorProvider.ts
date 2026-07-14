@@ -559,8 +559,6 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             localResourceRoots: this.getWebviewLocalResourceRoots(document),
         };
 
-        // Set webview HTML content
-        webviewPanel.webview.html = this.getHtmlForWebview(webviewPanel.webview, document);
         this.keepEditorTabOpenOnExplorerClick(wasExplicit);
 
         const documentKey = document.uri.toString();
@@ -1147,6 +1145,11 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 }
             }
         );
+
+        // Start loading the Webview only after its inbound message handler is
+        // registered. Cached assets can otherwise post `ready` before the
+        // extension host is listening, leaving the initial loader in place.
+        webviewPanel.webview.html = this.getHtmlForWebview(webviewPanel.webview, document);
 
         // Handle document changes (external edits)
         const changeDocumentSubscription = vscode.workspace.onDidChangeTextDocument((e) => {
@@ -3362,14 +3365,24 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         const tocEnabledAttr = settings.tocEnabled ? 'true' : 'false';
         const themeModeAttr = settings.editorThemeMode;
 
-        // Add timestamp to force cache refresh
-        const timestamp = Date.now();
+        // Keep assets cacheable between editor opens while still invalidating
+        // them when a new extension version is installed.
+        const packageVersion = this.context.extension?.packageJSON?.version;
+        const versionCacheKey =
+            typeof packageVersion === 'string' && packageVersion.length > 0
+                ? packageVersion
+                : 'development';
+        const assetVersion = encodeURIComponent(
+            this.context.extensionMode === vscode.ExtensionMode.Development
+                ? `${versionCacheKey}-${Date.now()}`
+                : versionCacheKey
+        );
         const scriptUri = webview.asWebviewUri(
             vscode.Uri.joinPath(this.context.extensionUri, 'media', 'editor.js')
-        ).toString() + `?t=${timestamp}`;
+        ).toString() + `?v=${assetVersion}`;
         const styleUri = webview.asWebviewUri(
             vscode.Uri.joinPath(this.context.extensionUri, 'media', 'editor.css')
-        ).toString() + `?t=${timestamp}`;
+        ).toString() + `?v=${assetVersion}`;
 
         // Prism.js for syntax highlighting
         const prismCssUri = webview.asWebviewUri(
@@ -3446,12 +3459,118 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src 'none'; frame-src 'none'; object-src 'none'; media-src 'none'; worker-src 'none'; child-src 'none'; form-action 'none'; base-uri 'none'; style-src ${webview.cspSource} 'unsafe-inline'; style-src-attr 'unsafe-inline'; script-src 'nonce-${nonce}'; script-src-elem 'nonce-${nonce}'; script-src-attr 'none'; img-src ${webview.cspSource} https: data:;">
-    <link href="${styleUri}" rel="stylesheet">
+    <style nonce="${nonce}">
+        html,
+        body {
+            width: 100%;
+            height: 100%;
+        }
+
+        body {
+            margin: 0;
+            overflow: hidden;
+            background: var(--vscode-editor-background, #1e1e1e);
+            color: var(--vscode-editor-foreground, #d4d4d4);
+        }
+
+        body[data-theme-mode="light"] {
+            --manuldown-loading-background: #ffffff;
+            --manuldown-loading-foreground: #57606a;
+            --manuldown-loading-track: #d0d7de;
+            --manuldown-loading-accent: #0969da;
+        }
+
+        body[data-theme-mode="dark"] {
+            --manuldown-loading-background: #1e1e1e;
+            --manuldown-loading-foreground: #9da4ad;
+            --manuldown-loading-track: #454545;
+            --manuldown-loading-accent: #007fd4;
+        }
+
+        body[data-editor-state="loading"] > [data-editor-content],
+        body[data-editor-state="style-error"] > [data-editor-content] {
+            visibility: hidden !important;
+        }
+
+        #editor-loading {
+            position: fixed;
+            inset: 0;
+            z-index: 2147483647;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+            box-sizing: border-box;
+            background: var(
+                --manuldown-loading-background,
+                var(--vscode-editor-background, #1e1e1e)
+            );
+            color: var(
+                --manuldown-loading-foreground,
+                var(--vscode-descriptionForeground, #a0a0a0)
+            );
+            font-family: var(
+                --vscode-font-family,
+                -apple-system,
+                BlinkMacSystemFont,
+                'Segoe UI',
+                sans-serif
+            );
+            font-size: 13px;
+        }
+
+        .editor-loading-label {
+            max-width: min(360px, calc(100vw - 40px));
+            text-align: center;
+        }
+
+        .editor-loading-spinner {
+            width: 24px;
+            height: 24px;
+            box-sizing: border-box;
+            border: 2px solid var(
+                --manuldown-loading-track,
+                var(--vscode-editorWidget-border, #555555)
+            );
+            border-top-color: var(
+                --manuldown-loading-accent,
+                var(--vscode-progressBar-background, #0e70c0)
+            );
+            border-radius: 50%;
+            animation: manuldown-loading-spin 0.8s linear infinite;
+        }
+
+        body[data-editor-state="ready"] > #editor-loading {
+            display: none;
+        }
+
+        body[data-editor-state="style-error"] .editor-loading-spinner {
+            display: none;
+        }
+
+        @keyframes manuldown-loading-spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            .editor-loading-spinner {
+                animation: none;
+            }
+        }
+    </style>
+    <link id="manuldown-editor-styles" href="${styleUri}" rel="stylesheet">
     <link href="${prismCssUri}" rel="stylesheet">
     <title>ManulDown</title>
 </head>
-<body data-toolbar-visible="${toolbarVisibleAttr}" data-toc-enabled="${tocEnabledAttr}" data-theme-mode="${themeModeAttr}">
-    <div class="toolbar">
+<body data-toolbar-visible="${toolbarVisibleAttr}" data-toc-enabled="${tocEnabledAttr}" data-theme-mode="${themeModeAttr}" data-editor-state="loading">
+    <div id="editor-loading" role="status" aria-live="polite" aria-atomic="true">
+        <div class="editor-loading-spinner" aria-hidden="true"></div>
+        <div class="editor-loading-label">Loading ManulDown&hellip;</div>
+    </div>
+    <div class="toolbar" data-editor-content inert aria-hidden="true" aria-busy="true">
         <button class="toolbar-btn" data-command="bold" title="Bold (Ctrl+B)">
             <strong>B</strong>
         </button>
@@ -3486,7 +3605,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             Table
         </button>
     </div>
-    <div class="editor-container">
+    <div class="editor-container" data-editor-content inert aria-hidden="true" aria-busy="true">
         <div id="editor" contenteditable="true" spellcheck="false"></div>
         <div id="editor-scrollbar-indicator" aria-hidden="true">
             <div id="editor-scrollbar-thumb"></div>

@@ -21688,6 +21688,44 @@ import {
         scheduleEditorOverflowStateUpdate();
     }
 
+    let initialEditorRevealScheduled = false;
+
+    function revealEditorAfterInitialLoad() {
+        if (initialEditorRevealScheduled) return;
+        initialEditorRevealScheduled = true;
+
+        requestAnimationFrame(() => {
+            const editorStylesheet = document.getElementById('manuldown-editor-styles');
+            const loadingIndicator = document.getElementById('editor-loading');
+            if (!editorStylesheet || !editorStylesheet.sheet) {
+                document.body.dataset.editorState = 'style-error';
+                document.querySelectorAll('[data-editor-content]').forEach((element) => {
+                    element.setAttribute('aria-busy', 'false');
+                });
+                if (loadingIndicator) {
+                    const errorMessage = 'ManulDown could not load the editor styles. Reopen the editor to try again.';
+                    loadingIndicator.setAttribute('role', 'alert');
+                    loadingIndicator.setAttribute('aria-live', 'assertive');
+                    const loadingLabel = loadingIndicator.querySelector('.editor-loading-label');
+                    if (loadingLabel) {
+                        loadingLabel.textContent = errorMessage;
+                    }
+                }
+                return;
+            }
+
+            if (loadingIndicator) {
+                loadingIndicator.setAttribute('aria-hidden', 'true');
+            }
+            document.body.dataset.editorState = 'ready';
+            document.querySelectorAll('[data-editor-content]').forEach((element) => {
+                element.removeAttribute('inert');
+                element.removeAttribute('aria-hidden');
+                element.setAttribute('aria-busy', 'false');
+            });
+        });
+    }
+
     // 初期化
     function init() {
         toolbarManager.setup();
@@ -21738,12 +21776,14 @@ import {
                         tableManager.wrapTables();
                         applyImageRenderSizes();
                         updateListItemClasses();
+                        tocManager.update();
+                        codeBlockManager.highlightCodeBlocks();
+                        scheduleEditorOverflowStateUpdate();
                     } catch (error) {
-                        console.error('Error in saveState:', error);
+                        console.error('Error while finishing editor initialization:', error);
+                    } finally {
+                        revealEditorAfterInitialLoad();
                     }
-                    tocManager.update();
-                    codeBlockManager.highlightCodeBlocks();
-                    scheduleEditorOverflowStateUpdate();
                 }, 100);
                 break;
             case 'loadError':
@@ -21758,6 +21798,7 @@ import {
                     isUpdating = false;
                 }
                 scheduleEditorOverflowStateUpdate();
+                revealEditorAfterInitialLoad();
                 break;
             case 'updateApplied':
                 if (Number.isFinite(message.revision)) {
