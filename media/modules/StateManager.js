@@ -5,14 +5,96 @@
  */
 
 export class StateManager {
-    constructor(editor, vscodeApi) {
+    constructor(editor, vscodeApi, options = {}) {
         this.editor = editor;
         this.vscodeApi = vscodeApi;
         this.undoStack = [];
         this.redoStack = [];
-        this.maxHistorySize = 100;
+        this.maxHistorySize = Number.isSafeInteger(options.maxHistorySize) && options.maxHistorySize > 0
+            ? options.maxHistorySize
+            : 100;
+        this.maxHistoryBytes = Number.isSafeInteger(options.maxHistoryBytes) && options.maxHistoryBytes > 0
+            ? options.maxHistoryBytes
+            : 32 * 1024 * 1024;
+        this.undoHistoryBytes = 0;
+        this.redoHistoryBytes = 0;
         this.isRestoringState = false;
         this.saveStateTimeout = null;
+    }
+
+    estimateSelectionBytes(selection) {
+        if (!selection) return 0;
+        try {
+            return JSON.stringify(selection).length * 2;
+        } catch {
+            return 0;
+        }
+    }
+
+    createState() {
+        const html = this.editor.innerHTML;
+        const selection = this.saveSelection();
+        return {
+            html,
+            selection,
+            byteSize: (html.length * 2) + this.estimateSelectionBytes(selection)
+        };
+    }
+
+    getStateByteSize(state) {
+        if (!state) return 0;
+        if (Number.isSafeInteger(state.byteSize) && state.byteSize >= 0) {
+            return state.byteSize;
+        }
+        return (String(state.html || '').length * 2) + this.estimateSelectionBytes(state.selection);
+    }
+
+    clearRedoHistory() {
+        this.redoStack = [];
+        this.redoHistoryBytes = 0;
+    }
+
+    trimHistory() {
+        while (
+            (
+                this.undoStack.length + this.redoStack.length > this.maxHistorySize ||
+                this.undoHistoryBytes + this.redoHistoryBytes > this.maxHistoryBytes
+            )
+        ) {
+            if (this.undoStack.length > 1) {
+                const removedState = this.undoStack.shift();
+                this.undoHistoryBytes -= this.getStateByteSize(removedState);
+                continue;
+            }
+            if (this.redoStack.length > 0) {
+                const removedState = this.redoStack.shift();
+                this.redoHistoryBytes -= this.getStateByteSize(removedState);
+                continue;
+            }
+            break;
+        }
+        this.undoHistoryBytes = Math.max(0, this.undoHistoryBytes);
+        this.redoHistoryBytes = Math.max(0, this.redoHistoryBytes);
+    }
+
+    pushUndoState(state, { clearRedo = true, deduplicate = true } = {}) {
+        const latestState = this.undoStack[this.undoStack.length - 1];
+        if (deduplicate && latestState && latestState.html === state.html) {
+            this.undoHistoryBytes -= this.getStateByteSize(latestState);
+            latestState.selection = state.selection;
+            latestState.byteSize = state.byteSize;
+            this.undoHistoryBytes += this.getStateByteSize(latestState);
+            this.trimHistory();
+            return false;
+        }
+
+        if (clearRedo) {
+            this.clearRedoHistory();
+        }
+        this.undoStack.push(state);
+        this.undoHistoryBytes += this.getStateByteSize(state);
+        this.trimHistory();
+        return true;
     }
 
     /**
@@ -146,20 +228,7 @@ export class StateManager {
             this.saveStateTimeout = null;
         }
         
-        const state = {
-            html: this.editor.innerHTML,
-            selection: this.saveSelection()
-        };
-        
-        this.undoStack.push(state);
-        
-        // スタックサイズを制限
-        if (this.undoStack.length > this.maxHistorySize) {
-            this.undoStack.shift();
-        }
-        
-        // 新しいアクションが実行されたらRedoスタックをクリア
-        this.redoStack = [];
+        this.pushUndoState(this.createState());
     }
 
     /**
@@ -195,19 +264,7 @@ export class StateManager {
             this.saveStateTimeout = null;
             
             // 現在の状態を保存（保留中の保存を実行）
-            const pendingState = {
-                html: this.editor.innerHTML,
-                selection: this.saveSelection()
-            };
-            this.undoStack.push(pendingState);
-            
-            // スタックサイズを制限
-            if (this.undoStack.length > this.maxHistorySize) {
-                this.undoStack.shift();
-            }
-            
-            // Redoスタックをクリア（新しい状態が保存されたため）
-            this.redoStack = [];
+            this.pushUndoState(this.createState());
             
         }
         
@@ -220,7 +277,9 @@ export class StateManager {
         
         // 現在の状態（undoStackの最後）をRedoスタックに移動
         const currentState = this.undoStack.pop();
+        this.undoHistoryBytes -= this.getStateByteSize(currentState);
         this.redoStack.push(currentState);
+        this.redoHistoryBytes += this.getStateByteSize(currentState);
         
         // Undoスタックから前の状態を復元
         const state = this.undoStack[this.undoStack.length - 1];
@@ -254,25 +313,23 @@ export class StateManager {
             this.vscodeApi.postMessage({ type: 'undoRedo' });
         }
         
-        // 保留中の保存があればキャンセル（Redoは保存しない）
+        // 保留中の入力があれば先に履歴へ保存する。内容が変わっていれば
+        // Redo履歴がクリアされるため、未保存の入力を上書きしない。
         if (this.saveStateTimeout) {
             clearTimeout(this.saveStateTimeout);
             this.saveStateTimeout = null;
+            this.pushUndoState(this.createState());
         }
         
         if (this.redoStack.length === 0) return;
         
         this.isRestoringState = true;
         
-        // 現在の状態をUndoスタックに保存
-        const currentState = {
-            html: this.editor.innerHTML,
-            selection: this.saveSelection()
-        };
-        this.undoStack.push(currentState);
-        
         // Redoスタックから状態を復元
         const state = this.redoStack.pop();
+        this.redoHistoryBytes -= this.getStateByteSize(state);
+        this.undoStack.push(state);
+        this.undoHistoryBytes += this.getStateByteSize(state);
         const scrollTop = this.editor.scrollTop;
         this.editor.innerHTML = state.html;
         this.restoreSelection(state.selection);
@@ -311,6 +368,8 @@ export class StateManager {
         }
         this.undoStack = [];
         this.redoStack = [];
+        this.undoHistoryBytes = 0;
+        this.redoHistoryBytes = 0;
     }
 }
 

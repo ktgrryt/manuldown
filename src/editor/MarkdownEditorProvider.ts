@@ -22,6 +22,13 @@ type MarkdownListLineInfo = {
     isEmpty: boolean;
 };
 
+class ImageImportError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = 'ImageImportError';
+    }
+}
+
 export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     private static readonly viewType = 'manulDown.editor';
     private static readonly builtInSlashCommandIds = new Set(['table', 'quote', 'code', 'checkbox']);
@@ -30,6 +37,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     private static readonly maxCustomSlashCommands = 200;
     private static readonly maxCustomSlashTemplateBytes = 128 * 1024;
     private static readonly customSlashCommandCacheTtlMs = 2000;
+    private static readonly maxImportedImageBytes = 20 * 1024 * 1024;
+    private static readonly remoteImageTimeoutMs = 15_000;
     private static readonly defaultTocPanelWidthPx = 150;
     private static readonly minTocPanelWidthPx = 0;
     private static readonly maxTocPanelWidthPx = 480;
@@ -39,6 +48,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     private lastActivePanel: vscode.WebviewPanel | null = null;
     private customSlashCommandCache: { loadedAt: number; items: CustomSlashCommandTemplate[] } | null = null;
     private tocPanelWidthPx = MarkdownEditorProvider.defaultTocPanelWidthPx;
+    private currentEmptyListItemMarker: string | null = null;
     public explicitlyRequested = false;
 
     constructor(private readonly context: vscode.ExtensionContext) {
@@ -89,12 +99,47 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         this.turndownService.addRule('lineBreak', {
             filter: 'br',
             replacement: function (_content: string, node: any) {
+                const hasEncodedPrefix = !!(
+                    node &&
+                    typeof node.hasAttribute === 'function' &&
+                    node.hasAttribute('data-mdw-break-prefix')
+                );
+                if (hasEncodedPrefix) {
+                    const encodedPrefix = node.getAttribute('data-mdw-break-prefix');
+                    if (typeof encodedPrefix === 'string' && /^(?:[0-9a-f]{2})*$/i.test(encodedPrefix)) {
+                        return `${Buffer.from(encodedPrefix, 'hex').toString('utf8')}\n`;
+                    }
+                }
                 const isSoftBreak = !!(
                     node &&
                     typeof node.getAttribute === 'function' &&
                     node.getAttribute('data-mdw-soft-break') === 'true'
                 );
                 return isSoftBreak ? '\n' : '  \n';
+            }
+        });
+
+        this.turndownService.addRule('setextHeading', {
+            filter: function (node: any) {
+                return !!(
+                    node &&
+                    (node.nodeName === 'H1' || node.nodeName === 'H2') &&
+                    typeof node.getAttribute === 'function' &&
+                    node.getAttribute('data-mdw-heading-style') === 'setext'
+                );
+            },
+            replacement: function (content: string, node: any) {
+                const level = node.nodeName === 'H1' ? 1 : 2;
+                const marker = level === 1 ? '=' : '-';
+                const requestedLength = Number(node.getAttribute('data-mdw-heading-marker-length'));
+                const markerLength = Number.isSafeInteger(requestedLength) && requestedLength > 0
+                    ? requestedLength
+                    : 3;
+                const normalizedContent = content.trim();
+                if (!normalizedContent || normalizedContent.includes('\n')) {
+                    return `\n\n${'#'.repeat(level)} ${normalizedContent}\n\n`;
+                }
+                return `\n\n${normalizedContent}\n${marker.repeat(markerLength)}\n\n`;
             }
         });
 
@@ -286,7 +331,10 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     }
 
                     // Return marker with special placeholder, then the nested content
-                    return prefix + 'EMPTYLISTITEM\n' + content + (node.nextSibling && !/\n$/.test(content) ? '\n' : '');
+                    if (!provider.currentEmptyListItemMarker) {
+                        throw new Error('Empty list item marker is not initialized');
+                    }
+                    return prefix + provider.currentEmptyListItemMarker + '\n' + content + (node.nextSibling && !/\n$/.test(content) ? '\n' : '');
                 } else if (isEmptyWithNestedList) {
                     // Empty list item with nested list (not preserved): <li><ul><li>b</li></ul></li>
                     // Output only the nested content without the parent marker
@@ -456,7 +504,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     private serializeTableCellForMarkdown(node: any, convertedContent: string): string {
         const rawText = String(node?.textContent || '').replace(/\r\n?/g, '\n');
         const splitByBreakTokens = rawText
-            .split(/<br\s*\/?>/gi)
+            .split(/<br\b[^>]*>/gi)
             .flatMap((part) => part.split('\n'));
         const lines = splitByBreakTokens
             .map((line) => line.replace(/[ \t\f\v]+/g, ' ').trim());
@@ -519,6 +567,23 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
 
         // Create document manager
         const markdownDocument = new MarkdownDocument(document, webviewPanel.webview);
+        let documentRenderErrorShown = false;
+        const renderDocumentHtml = (): string | null => {
+            try {
+                const html = markdownDocument.toHtml();
+                documentRenderErrorShown = false;
+                return html;
+            } catch (error) {
+                console.error('[markdown render] Failed to render document:', error);
+                if (!documentRenderErrorShown) {
+                    documentRenderErrorShown = true;
+                    void vscode.window.showErrorMessage(
+                        'ManulDown could not render this Markdown document. The document was not changed.'
+                    );
+                }
+                return null;
+            }
+        };
 
         // Track document text, not just change-event timing. VS Code can emit
         // onDidChangeTextDocument when only the dirty state changes, and an edit
@@ -528,7 +593,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         let lastAppliedWebviewText: string | null = lastObservedDocumentText;
         const activeWebviewUpdateTexts = new Set<string>();
         let pendingWebviewUpdate: { html: string; revision: number } | null = null;
-        let processingWebviewUpdate = false;
+        let webviewUpdateFlushPromise: Promise<boolean> | null = null;
         let externalChangeSequence = 0;
         let unresolvedExternalChangeId = 0;
         let externalConflictPromptActive = false;
@@ -537,9 +602,13 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             if (unresolvedExternalChangeId === 0) {
                 return;
             }
+            const content = renderDocumentHtml();
+            if (content === null) {
+                return;
+            }
             void webviewPanel.webview.postMessage({
                 type: force ? 'refresh' : 'update',
-                content: markdownDocument.toHtml(),
+                content,
                 external: true,
                 force,
                 changeId: unresolvedExternalChangeId,
@@ -590,57 +659,76 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             }
         };
 
-        const flushPendingWebviewUpdate = async (): Promise<void> => {
-            if (processingWebviewUpdate) {
-                return;
+        const flushPendingWebviewUpdate = (): Promise<boolean> => {
+            if (webviewUpdateFlushPromise) {
+                return webviewUpdateFlushPromise;
             }
 
-            processingWebviewUpdate = true;
+            let operationSucceeded = true;
+            const operation = (async (): Promise<boolean> => {
+                try {
+                    while (pendingWebviewUpdate !== null && unresolvedExternalChangeId === 0) {
+                        const updateToApply = pendingWebviewUpdate;
+                        pendingWebviewUpdate = null;
+                        const markdown = this.htmlToMarkdown(updateToApply.html, document);
+                        activeWebviewUpdateTexts.add(markdown);
+                        let applied = false;
+                        try {
+                            applied = await this.updateTextDocument(document, markdown);
+                        } finally {
+                            activeWebviewUpdateTexts.delete(markdown);
+                        }
+                        const appliedTextIsCurrent = applied && document.getText() === markdown;
+                        if (appliedTextIsCurrent) {
+                            lastObservedDocumentText = markdown;
+                            lastAppliedWebviewText = markdown;
+                            void webviewPanel.webview.postMessage({
+                                type: 'updateApplied',
+                                revision: updateToApply.revision,
+                            });
+                        } else if (!applied) {
+                            operationSucceeded = false;
+                            void webviewPanel.webview.postMessage({ type: 'retryPendingUpdate' });
+                        }
 
-            try {
-                while (pendingWebviewUpdate !== null && unresolvedExternalChangeId === 0) {
-                    const updateToApply = pendingWebviewUpdate;
-                    pendingWebviewUpdate = null;
-                    const markdown = this.htmlToMarkdown(updateToApply.html, document);
-                    activeWebviewUpdateTexts.add(markdown);
-                    let applied = false;
-                    try {
-                        applied = await this.updateTextDocument(document, markdown);
-                    } finally {
-                        activeWebviewUpdateTexts.delete(markdown);
+                        // applyEdit normally emits the document-change event while
+                        // the expected-text marker is active. If another writer races that edit,
+                        // detect the final text mismatch explicitly instead of
+                        // suppressing the external change with our own event.
+                        if (applied && !appliedTextIsCurrent) {
+                            operationSucceeded = false;
+                            if (unresolvedExternalChangeId === 0) {
+                                unresolvedExternalChangeId = ++externalChangeSequence;
+                                postExternalDocumentUpdate();
+                            }
+                        }
                     }
-                    const appliedTextIsCurrent = applied && document.getText() === markdown;
-                    if (appliedTextIsCurrent) {
-                        lastObservedDocumentText = markdown;
-                        lastAppliedWebviewText = markdown;
-                        void webviewPanel.webview.postMessage({
-                            type: 'updateApplied',
-                            revision: updateToApply.revision,
-                        });
-                    } else if (!applied) {
-                        void webviewPanel.webview.postMessage({ type: 'retryPendingUpdate' });
-                    }
+                    return operationSucceeded &&
+                        pendingWebviewUpdate === null &&
+                        unresolvedExternalChangeId === 0;
+                } catch (error) {
+                    console.error('[webview update] Failed to apply editor update:', error);
+                    void vscode.window.showErrorMessage(
+                        'ManulDown could not convert the edit to Markdown. The document was not changed.'
+                    );
+                    return false;
+                }
+            })();
 
-                    // applyEdit normally emits the document-change event while
-                    // the expected-text marker is active. If another writer races that edit,
-                    // detect the final text mismatch explicitly instead of
-                    // suppressing the external change with our own event.
-                    if (applied && !appliedTextIsCurrent) {
-                        unresolvedExternalChangeId = ++externalChangeSequence;
-                        postExternalDocumentUpdate();
+            webviewUpdateFlushPromise = operation;
+            void operation.then(
+                () => {
+                    if (webviewUpdateFlushPromise === operation) {
+                        webviewUpdateFlushPromise = null;
+                    }
+                },
+                () => {
+                    if (webviewUpdateFlushPromise === operation) {
+                        webviewUpdateFlushPromise = null;
                     }
                 }
-            } catch (error) {
-                console.error('[webview update] Failed to apply editor update:', error);
-            } finally {
-                processingWebviewUpdate = false;
-
-                if (pendingWebviewUpdate !== null && unresolvedExternalChangeId === 0) {
-                    void flushPendingWebviewUpdate();
-                    return;
-                }
-
-            }
+            );
+            return operation;
         };
 
         // Handle messages from the webview
@@ -662,6 +750,26 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                         };
                         void flushPendingWebviewUpdate();
                         break;
+                    case 'saveDocument':
+                        if (unresolvedExternalChangeId !== 0) {
+                            postExternalDocumentUpdate();
+                            break;
+                        }
+                        pendingWebviewUpdate = {
+                            html: typeof message.content === 'string' ? message.content : '',
+                            revision: Number.isFinite(message.revision)
+                                ? Math.max(0, Math.floor(message.revision))
+                                : 0,
+                        };
+                        if (await flushPendingWebviewUpdate()) {
+                            const saved = await document.save();
+                            if (!saved) {
+                                void vscode.window.showErrorMessage(
+                                    'ManulDown synchronized the edit, but VS Code could not save the Markdown file.'
+                                );
+                            }
+                        }
+                        break;
                     case 'externalUpdateApplied':
                         if (
                             Number.isFinite(message.changeId) &&
@@ -677,11 +785,15 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                         break;
                     case 'ready':
                         // Send initial content to webview
-                        const initialHtml = markdownDocument.toHtml();
-                        webviewPanel.webview.postMessage({
-                            type: 'init',
-                            content: initialHtml,
-                        });
+                        const initialHtml = renderDocumentHtml();
+                        if (initialHtml === null) {
+                            webviewPanel.webview.postMessage({ type: 'loadError' });
+                        } else {
+                            webviewPanel.webview.postMessage({
+                                type: 'init',
+                                content: initialHtml,
+                            });
+                        }
                         await this.postCustomSlashCommands(webviewPanel.webview);
                         break;
                     case 'requestCustomSlashCommands':
@@ -718,6 +830,11 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                                     ? message.source
                                     : 'unknown'
                             }
+                        );
+                        break;
+                    case 'imageImportTooLarge':
+                        void vscode.window.showErrorMessage(
+                            this.getImageTooLargeMessage()
                         );
                         break;
                     case 'resolveImageSrc':
@@ -1216,33 +1333,106 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         return markers ? markers.length : 0;
     }
 
-    private detectListIndentSize(markdown: string): number | null {
-        const lines = markdown.split(/\r?\n/);
+    private getFencedCodeLineMask(lines: string[]): boolean[] {
+        const fencedLines = new Array<boolean>(lines.length).fill(false);
         let activeFenceChar: '`' | '~' | null = null;
         let activeFenceLength = 0;
-        const indentDeltaCandidates: number[] = [];
-        const positiveIndentSamples: number[] = [];
-        const previousIndentByBlockquoteDepth = new Map<number, number>();
 
-        for (const line of lines) {
-            const fenceMatch = line.match(/^ {0,3}(`{3,}|~{3,})/);
-            if (fenceMatch) {
-                const fenceToken = fenceMatch[1];
-                const fenceChar = fenceToken[0] as '`' | '~';
-                const fenceLength = fenceToken.length;
-                if (activeFenceChar === null) {
-                    activeFenceChar = fenceChar;
-                    activeFenceLength = fenceLength;
-                } else if (activeFenceChar === fenceChar && fenceLength >= activeFenceLength) {
+        for (let index = 0; index < lines.length; index++) {
+            const rawLine = lines[index].endsWith('\r')
+                ? lines[index].slice(0, -1)
+                : lines[index];
+            const line = this.stripLeadingBlockquotePrefix(rawLine);
+
+            if (activeFenceChar !== null) {
+                fencedLines[index] = true;
+                const closingMatch = line.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
+                if (!closingMatch) {
+                    continue;
+                }
+
+                const closingToken = closingMatch[1];
+                if (
+                    closingToken[0] === activeFenceChar &&
+                    closingToken.length >= activeFenceLength
+                ) {
                     activeFenceChar = null;
                     activeFenceLength = 0;
                 }
                 continue;
             }
 
-            if (activeFenceChar !== null) {
+            const openingMatch = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+            if (!openingMatch) {
                 continue;
             }
+
+            const openingToken = openingMatch[1];
+            const openingChar = openingToken[0] as '`' | '~';
+            const infoString = openingMatch[2] || '';
+            if (openingChar === '`' && infoString.includes('`')) {
+                continue;
+            }
+
+            fencedLines[index] = true;
+            activeFenceChar = openingChar;
+            activeFenceLength = openingToken.length;
+        }
+
+        return fencedLines;
+    }
+
+    private protectFencedMarkdown(markdown: string): {
+        markdown: string;
+        restore: (value: string) => string;
+    } {
+        const lines = markdown.split('\n');
+        const fencedLines = this.getFencedCodeLineMask(lines);
+        const protectedBlocks: Array<{ token: string; content: string }> = [];
+        const output: string[] = [];
+        const tokenPrefix = this.createPlaceholderNamespace(markdown, 'PROTECTED_FENCE');
+
+        for (let index = 0; index < lines.length;) {
+            if (!fencedLines[index]) {
+                output.push(lines[index]);
+                index++;
+                continue;
+            }
+
+            const blockLines: string[] = [];
+            while (index < lines.length && fencedLines[index]) {
+                blockLines.push(lines[index]);
+                index++;
+            }
+            const token = `${tokenPrefix}${protectedBlocks.length}_END`;
+            protectedBlocks.push({ token, content: blockLines.join('\n') });
+            output.push(token);
+        }
+
+        return {
+            markdown: output.join('\n'),
+            restore: (value: string): string => {
+                let restored = value;
+                for (const block of protectedBlocks) {
+                    restored = restored.split(block.token).join(block.content);
+                }
+                return restored;
+            },
+        };
+    }
+
+    private detectListIndentSize(markdown: string): number | null {
+        const lines = markdown.split(/\r?\n/);
+        const fencedLines = this.getFencedCodeLineMask(lines);
+        const indentDeltaCandidates: number[] = [];
+        const positiveIndentSamples: number[] = [];
+        const previousIndentByBlockquoteDepth = new Map<number, number>();
+
+        for (let index = 0; index < lines.length; index++) {
+            if (fencedLines[index]) {
+                continue;
+            }
+            const line = lines[index];
 
             const lineWithoutBlockquotePrefix = this.stripLeadingBlockquotePrefix(line);
             const listMatch = lineWithoutBlockquotePrefix.match(/^([ \t]*)(?:[*+-]|\d+[.)])\s+/);
@@ -1287,28 +1477,13 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
 
     private detectUnorderedListMarker(markdown: string): UnorderedListMarker | null {
         const lines = markdown.split(/\r?\n/);
-        let activeFenceChar: '`' | '~' | null = null;
-        let activeFenceLength = 0;
+        const fencedLines = this.getFencedCodeLineMask(lines);
 
-        for (const line of lines) {
-            const fenceMatch = line.match(/^ {0,3}(`{3,}|~{3,})/);
-            if (fenceMatch) {
-                const fenceToken = fenceMatch[1];
-                const fenceChar = fenceToken[0] as '`' | '~';
-                const fenceLength = fenceToken.length;
-                if (activeFenceChar === null) {
-                    activeFenceChar = fenceChar;
-                    activeFenceLength = fenceLength;
-                } else if (activeFenceChar === fenceChar && fenceLength >= activeFenceLength) {
-                    activeFenceChar = null;
-                    activeFenceLength = 0;
-                }
+        for (let index = 0; index < lines.length; index++) {
+            if (fencedLines[index]) {
                 continue;
             }
-
-            if (activeFenceChar !== null) {
-                continue;
-            }
+            const line = lines[index];
 
             // Ignore thematic breaks like "***" or "- - -".
             const trimmed = line.trim();
@@ -1340,31 +1515,15 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
 
     private getMarkdownListLineInfos(markdown: string): MarkdownListLineInfo[] {
         const lines = markdown.split(/\r?\n/);
+        const fencedLines = this.getFencedCodeLineMask(lines);
         const items: MarkdownListLineInfo[] = [];
-        let activeFenceChar: '`' | '~' | null = null;
-        let activeFenceLength = 0;
 
         for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+            if (fencedLines[lineIndex]) {
+                continue;
+            }
             const line = lines[lineIndex];
             const lineWithoutBlockquotePrefix = this.stripLeadingBlockquotePrefix(line);
-            const fenceMatch = lineWithoutBlockquotePrefix.match(/^ {0,3}(`{3,}|~{3,})/);
-            if (fenceMatch) {
-                const fenceToken = fenceMatch[1];
-                const fenceChar = fenceToken[0] as '`' | '~';
-                const fenceLength = fenceToken.length;
-                if (activeFenceChar === null) {
-                    activeFenceChar = fenceChar;
-                    activeFenceLength = fenceLength;
-                } else if (activeFenceChar === fenceChar && fenceLength >= activeFenceLength) {
-                    activeFenceChar = null;
-                    activeFenceLength = 0;
-                }
-                continue;
-            }
-
-            if (activeFenceChar !== null) {
-                continue;
-            }
 
             const trimmed = lineWithoutBlockquotePrefix.trim();
             if (/^([*-])(?:\s*\1){2,}\s*$/.test(trimmed)) {
@@ -1467,16 +1626,23 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     }
 
+    private createPlaceholderNamespace(content: string, purpose: string): string {
+        const normalizedPurpose = purpose.replace(/[^A-Za-z0-9]/g, '');
+        for (let attempt = 0; attempt < 100; attempt++) {
+            const namespace = `MDW${normalizedPurpose}${getNonce()}`;
+            if (!content.includes(namespace)) {
+                return namespace;
+            }
+        }
+        throw new Error(`Could not create a unique ${purpose} placeholder namespace`);
+    }
+
     private restoreEscapedMarkdownLinks(markdown: string): string {
         const lines = markdown.split('\n');
-        let inCodeBlock = false;
+        const fencedLines = this.getFencedCodeLineMask(lines);
 
-        return lines.map((line) => {
-            if (line.trim().startsWith('```')) {
-                inCodeBlock = !inCodeBlock;
-                return line;
-            }
-            if (inCodeBlock) {
+        return lines.map((line, index) => {
+            if (fencedLines[index]) {
                 return line;
             }
 
@@ -1489,19 +1655,34 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
 
     private htmlToMarkdown(html: string, document: vscode.TextDocument): string {
         // Use Turndown for reliable HTML to Markdown conversion
+        const placeholderNamespace = this.createPlaceholderNamespace(html, 'CONVERSION');
+        const emptyLineMarker = `${placeholderNamespace}EMPTYLINE`;
+        const emptyListItemMarker = `${placeholderNamespace}EMPTYLISTITEM`;
+        const imageHardBreakTailMarker = `${placeholderNamespace}IMAGEHARDBREAKEND`;
+        const emptyCodeMarkerPrefix = `${placeholderNamespace}EMPTYCODE`;
+        const emptyCodeMarkerSuffix = 'END';
+        const previousEmptyListItemMarker = this.currentEmptyListItemMarker;
+        this.currentEmptyListItemMarker = emptyListItemMarker;
         try {
             const unorderedListMarker = this.getPreferredUnorderedListMarker(document);
             const escapedUnorderedListMarker = this.escapeRegExp(unorderedListMarker);
             const listIndent = this.getPreferredListIndent(document);
-            const imageHardBreakTailMarker = 'MDWIMAGEHARDBREAKENDMARKER';
             const isEffectivelyEmptyHtmlSegment = (value: string): boolean => {
                 const stripped = String(value || '')
-                    .replace(/<br\s*\/?>/gi, '')
+                    .replace(/<br\b[^>]*>/gi, '')
                     .replace(/&nbsp;|&#160;/gi, '')
                     .replace(/<[^>]*>/g, '')
                     .replace(/[\u00A0\u200B\u2060\uFEFF\s]/g, '')
                     .trim();
                 return stripped === '';
+            };
+            const getImageHardBreakHtml = (attributes: string): string => {
+                const encodedPrefixMatch = String(attributes || '').match(
+                    /\bdata-mdw-image-hardbreak-prefix\s*=\s*(["'])((?:[0-9a-f]{2})*)\1/i
+                );
+                return encodedPrefixMatch
+                    ? `<br data-mdw-break-prefix="${encodedPrefixMatch[2]}">`
+                    : '<br>';
             };
             this.currentListIndent = listIndent;
             (this.turndownService as any).options.bulletListMarker = unorderedListMarker;
@@ -1517,28 +1698,30 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             // separate paragraphs for stable caret navigation in the webview.
             html = html.replace(
                 /<p\b([^>]*)data-mdw-image-hardbreak\s*=\s*(["'])true\2([^>]*)>\s*([\s\S]*?)\s*<\/p>\s*<p\b[^>]*>\s*([\s\S]*?)\s*<\/p>/gi,
-                (match, _before, _quote, _after, imageSegment, trailingSegment) => {
+                (match, before, _quote, after, imageSegment, trailingSegment) => {
                     const normalizedImage = (imageSegment || '').trim();
                     const normalizedTrailing = (trailingSegment || '').trim();
                     if (!normalizedImage || !/<img\b/i.test(normalizedImage)) {
                         return match;
                     }
+                    const hardBreakHtml = getImageHardBreakHtml(`${before || ''} ${after || ''}`);
                     if (isEffectivelyEmptyHtmlSegment(normalizedTrailing)) {
-                        return `<p>${normalizedImage}<br>${imageHardBreakTailMarker}</p>`;
+                        return `<p>${normalizedImage}${hardBreakHtml}${imageHardBreakTailMarker}</p>`;
                     }
-                    return `<p>${normalizedImage}<br>${normalizedTrailing}</p>`;
+                    return `<p>${normalizedImage}${hardBreakHtml}${normalizedTrailing}</p>`;
                 }
             );
             // Preserve standalone image hard-break lines (e.g. "![...](...)  ")
             // through Turndown by attaching a temporary marker after <br>.
             html = html.replace(
                 /<p\b([^>]*)data-mdw-image-hardbreak\s*=\s*(["'])true\2([^>]*)>\s*([\s\S]*?)\s*<\/p>/gi,
-                (match, _before, _quote, _after, imageSegment) => {
+                (match, before, _quote, after, imageSegment) => {
                     const normalizedImage = (imageSegment || '').trim();
                     if (!normalizedImage || !/<img\b/i.test(normalizedImage)) {
                         return match;
                     }
-                    return `<p>${normalizedImage}<br>${imageHardBreakTailMarker}</p>`;
+                    const hardBreakHtml = getImageHardBreakHtml(`${before || ''} ${after || ''}`);
+                    return `<p>${normalizedImage}${hardBreakHtml}${imageHardBreakTailMarker}</p>`;
                 }
             );
 
@@ -1550,7 +1733,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 }
 
                 const visibleText = content
-                    .replace(/<br\s*\/?>/gi, '')
+                    .replace(/<br\b[^>]*>/gi, '')
                     .replace(/&nbsp;|&#160;/gi, '')
                     .replace(/[\u00A0\u200B\u2060\uFEFF]/g, '')
                     .replace(/<[^>]*>/g, '')
@@ -1586,7 +1769,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             // custom rules run. Preserve only those boundary characters in
             // temporary attributes while leaving encoded HTML content to its parser.
             const fencedCodeBlocks: string[] = [];
-            const fencedCodePlaceholderPrefix = `MDW_FENCED_CODE_${getNonce()}_`;
+            const fencedCodePlaceholderPrefix = this.createPlaceholderNamespace(html, 'FENCED_CODE');
             html = html.replace(/<pre\b[^>]*>\s*<code\b[^>]*>[\s\S]*?<\/code>\s*<\/pre>/gi, (match) => {
                 const placeholder = `${fencedCodePlaceholderPrefix}${fencedCodeBlocks.length}_PLACEHOLDER`;
                 fencedCodeBlocks.push(match);
@@ -1640,7 +1823,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     const language = languageMatch ? languageMatch[1] : '';
                     const markerLanguage = language || 'NOLANG';
                     // Add a special marker that Turndown will preserve
-                    return `<pre><code${codeAttrs}>EMPTYCODE_${markerLanguage}_EMPTYCODE</code></pre>`;
+                    return `<pre><code${codeAttrs}>${emptyCodeMarkerPrefix}${markerLanguage}${emptyCodeMarkerSuffix}</code></pre>`;
                 });
 
             // Fix malformed list HTML
@@ -1705,17 +1888,20 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             html = html.replace(/(<\/ul>|<\/ol>)\s*\1+/gi, '$1');
 
             // Remove placeholder <br> in empty table cells to avoid broken GFM table output
-            html = html.replace(/<(td|th)([^>]*)>\s*(?:<br\s*\/?>|\u00A0|&nbsp;|\s)*<\/\1>/gi, '<$1$2></$1>');
+            html = html.replace(/<(td|th)([^>]*)>\s*(?:<br\b[^>]*>|\u00A0|&nbsp;|\s)*<\/\1>/gi, '<$1$2></$1>');
 
             // Pre-process HTML to handle empty paragraphs and list items with <br>
-            // Replace empty paragraphs (<p><br></p>, <p></p>, and attribute variants) with EMPTYLINE marker.
-            html = html.replace(/<p\b[^>]*>(?:\s|&nbsp;|\u00A0)*(?:<br>|<br\s*\/>)?(?:\s|&nbsp;|\u00A0)*<\/p>/gi, '<p>EMPTYLINE</p>');
+            // Replace empty paragraphs with a conversion-specific marker.
+            html = html.replace(
+                /<p\b[^>]*>(?:\s|&nbsp;|\u00A0)*(?:<br\b[^>]*>)?(?:\s|&nbsp;|\u00A0)*<\/p>/gi,
+                `<p>${emptyLineMarker}</p>`
+            );
 
             // Don't remove empty list items - they may have nested lists
             // Instead, ensure empty list items have proper content for Turndown
 
             // Replace <li><br></li> with <li>&nbsp;</li> to preserve empty items
-            html = html.replace(/<li>(<br>|<br\s*\/>)\s*<\/li>/gi, '<li>&nbsp;</li>');
+            html = html.replace(/<li>(<br\b[^>]*>)\s*<\/li>/gi, '<li>&nbsp;</li>');
 
             // Replace completely empty <li></li> with <li>&nbsp;</li> to preserve empty items
             // This must be done BEFORE handling nested lists
@@ -1725,27 +1911,48 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             // The custom listItem rule will detect empty list items with nested lists
 
             // Handle <li><br><ul>...</ul></li> - remove <br> before nested list
-            html = html.replace(/<li>(<br>|<br\s*\/>)\s*(<ul>|<ol>)/gi, '<li>$2');
+            html = html.replace(/<li>(<br\b[^>]*>)\s*(<ul>|<ol>)/gi, '<li>$2');
 
 
             let markdown = this.turndownService.turndown(html);
             markdown = this.restoreEscapedMarkdownLinks(markdown);
 
+            // Resolve the temporary empty-code marker before protecting fenced
+            // blocks from the remaining document-level post-processing.
+            const emptyCodeMarkerPattern = `${this.escapeRegExp(emptyCodeMarkerPrefix)}([A-Za-z0-9_-]+)${this.escapeRegExp(emptyCodeMarkerSuffix)}`;
+            markdown = markdown.replace(new RegExp(`\`\`\`([^\\n]*)\\n${emptyCodeMarkerPattern}\\n\`\`\``, 'g'), (_match, _lang1, lang2) => {
+                const language = lang2 === 'NOLANG' ? '' : lang2;
+                return '```' + language + '\n\n```';
+            });
+            markdown = markdown.replace(new RegExp(emptyCodeMarkerPattern, 'g'), (_match, lang) => {
+                const language = lang === 'NOLANG' ? '' : lang;
+                return '```' + language + '\n\n```';
+            });
+
+            // From this point onward, transformations target document structure
+            // such as lists and blank paragraphs. Keep every fenced block opaque
+            // so code content can never be mistaken for that structure.
+            const protectedFencedMarkdown = this.protectFencedMarkdown(markdown);
+            markdown = protectedFencedMarkdown.markdown;
+
             // Post-process the markdown to fix indentation and spacing
-            // 0. Replace EMPTYLINE placeholder with an empty line.
+            // 0. Replace the conversion-specific empty-line marker with an empty line.
             // NOTE:
             // Turndown emits paragraph separators around block placeholders:
-            //   A\n\nEMPTYLINE\n\nB
-            // Replacing EMPTYLINE with "" keeps the line slot and becomes:
+            //   A\n\n<marker>\n\nB
+            // Replacing <marker> with "" keeps the line slot and becomes:
             //   A\n\n\n\nB
             // which adds one extra blank line on every round-trip.
             //
             // For non-blockquote placeholders, remove the marker line itself.
-            // For blockquote placeholders like "> EMPTYLINE", keep a bare ">"
+            // For blockquote placeholders, keep a bare ">"
             // to preserve an empty quoted line.
             const linesWithEmptyLineMarkers = markdown.split('\n');
+            const emptyLinePattern = new RegExp(
+                `^(\\s*(?:>\\s*)*)${this.escapeRegExp(emptyLineMarker)}\\s*$`
+            );
             for (let i = 0; i < linesWithEmptyLineMarkers.length; i++) {
-                const emptyLineMatch = linesWithEmptyLineMarkers[i].match(/^(\s*(?:>\s*)*)EMPTYLINE\s*$/);
+                const emptyLineMatch = linesWithEmptyLineMarkers[i].match(emptyLinePattern);
                 if (!emptyLineMatch) {
                     continue;
                 }
@@ -1762,23 +1969,12 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
 
             // Remove temporary marker line while keeping preceding hard-break spaces.
             // Example:
-            //   ![img](path)  \nMDWIMAGEHARDBREAKENDMARKER
+            //   ![img](path)  \n<image-hard-break marker>
             // -> ![img](path)
             markdown = markdown.replace(
-                new RegExp(`(^|\\n)(?:\\s*>\\s*)?${imageHardBreakTailMarker}\\s*(?=\\n|$)`, 'g'),
+                new RegExp(`(^|\\n)(?:\\s*>\\s*)?${this.escapeRegExp(imageHardBreakTailMarker)}\\s*(?=\\n|$)`, 'g'),
                 '$1'
             );
-
-            // 0.5. Replace EMPTYCODE placeholder with actual empty code blocks
-            markdown = markdown.replace(/```([^\n]*)\nEMPTYCODE_([A-Za-z0-9_-]+)_EMPTYCODE\n```/g, (match, lang1, lang2) => {
-                const language = lang2 === 'NOLANG' ? '' : lang2;
-                return '```' + language + '\n\n```';
-            });
-            // Also handle case where Turndown doesn't preserve the language in the fence
-            markdown = markdown.replace(/EMPTYCODE_([A-Za-z0-9_-]+)_EMPTYCODE/g, (match, lang) => {
-                const language = lang === 'NOLANG' ? '' : lang;
-                return '```' + language + '\n\n```';
-            });
 
             // 1. Fix list marker spacing: "<marker>   " -> "<marker> "
             markdown = markdown.replace(
@@ -1788,14 +1984,10 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
 
             // 1.5. Ensure bare task markers become list items ("[ ]" -> "<marker> [ ]")
             const taskLines = markdown.split('\n');
-            let inTaskCodeBlock = false;
+            const taskFencedLines = this.getFencedCodeLineMask(taskLines);
             for (let i = 0; i < taskLines.length; i++) {
                 const line = taskLines[i];
-                if (line.trim().startsWith('```')) {
-                    inTaskCodeBlock = !inTaskCodeBlock;
-                    continue;
-                }
-                if (inTaskCodeBlock) {
+                if (taskFencedLines[i]) {
                     continue;
                 }
                 taskLines[i] = line.replace(
@@ -1821,9 +2013,12 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             }
             markdown = taskLines.join('\n');
 
-            // 2. Replace EMPTYLISTITEM placeholder and remove following whitespace-only lines
-            // Convert EMPTYLISTITEM to &nbsp; so nested empty items don't get parsed as headings
-            markdown = markdown.replace(/EMPTYLISTITEM/g, '&nbsp;');
+            // 2. Replace the empty-list marker and remove following whitespace-only lines.
+            // Convert it to &nbsp; so nested empty items don't get parsed as headings.
+            markdown = markdown.replace(
+                new RegExp(this.escapeRegExp(emptyListItemMarker), 'g'),
+                '&nbsp;'
+            );
 
             // Then, remove whitespace-only lines that appear after empty list items
             const linesForEmptyItemCleanup = markdown.split('\n');
@@ -1870,21 +2065,13 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             const lines = markdown.split('\n');
             const processedLines: string[] = [];
             const unorderedListItemPattern = new RegExp(`^\\s*${escapedUnorderedListMarker}\\s+`);
-
-            // Track if we're inside a code block
-            let inCodeBlock = false;
-
+            const fencedLines = this.getFencedCodeLineMask(lines);
 
             for (let i = 0; i < lines.length; i++) {
                 const line = lines[i];
 
-                // Check if we're entering or exiting a code block
-                if (line.trim().startsWith('```')) {
-                    inCodeBlock = !inCodeBlock;
-                }
-
                 // Skip empty lines between list items only (but not in code blocks)
-                if (!inCodeBlock && line.trim() === '' && i > 0 && i < lines.length - 1) {
+                if (!fencedLines[i] && line.trim() === '' && i > 0 && i < lines.length - 1) {
                     const prevLine = lines[i - 1];
                     const nextLine = lines[i + 1];
                     // Check if both surrounding lines are list items (with any indentation)
@@ -1906,11 +2093,129 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             if (!markdown.endsWith('\n')) {
                 markdown += '\n';
             }
-            return markdown;
+            return protectedFencedMarkdown.restore(markdown);
         } catch (error) {
             console.error('Error converting HTML to Markdown:', error);
-            // Fallback to simple text extraction
-            return html.replace(/<[^>]*>/g, '').trim();
+            throw error;
+        } finally {
+            this.currentEmptyListItemMarker = previousEmptyListItemMarker;
+        }
+    }
+
+    private getImageTooLargeMessage(): string {
+        const maxMiB = MarkdownEditorProvider.maxImportedImageBytes / (1024 * 1024);
+        return `Image is too large. Maximum size is ${maxMiB} MiB.`;
+    }
+
+    private assertImportedImageSize(byteLength: number): void {
+        if (!Number.isSafeInteger(byteLength) || byteLength <= 0) {
+            throw new ImageImportError('The image is empty or invalid.');
+        }
+        if (byteLength > MarkdownEditorProvider.maxImportedImageBytes) {
+            throw new ImageImportError(this.getImageTooLargeMessage());
+        }
+    }
+
+    private normalizeImportedImageMimeType(mimeType: string): string {
+        const normalized = String(mimeType || '')
+            .split(';')[0]
+            .trim()
+            .toLowerCase();
+        if (!/^image\/[a-z0-9][a-z0-9.+-]*$/.test(normalized)) {
+            throw new ImageImportError('The selected data is not an image.');
+        }
+        return normalized;
+    }
+
+    private getImportedImageExtension(mimeType: string): string {
+        const knownExtensions = new Map<string, string>([
+            ['image/jpeg', 'jpg'],
+            ['image/jpg', 'jpg'],
+            ['image/png', 'png'],
+            ['image/gif', 'gif'],
+            ['image/bmp', 'bmp'],
+            ['image/webp', 'webp'],
+            ['image/svg+xml', 'svg'],
+            ['image/avif', 'avif'],
+            ['image/x-icon', 'ico'],
+            ['image/heic', 'heic'],
+            ['image/heif', 'heif'],
+            ['image/tiff', 'tiff']
+        ]);
+        const knownExtension = knownExtensions.get(mimeType);
+        if (knownExtension) {
+            return knownExtension;
+        }
+        const subtype = mimeType.slice('image/'.length).replace(/\+.*$/, '');
+        return /^[a-z0-9]{1,10}$/.test(subtype) ? subtype : 'img';
+    }
+
+    private async saveImageBytes(
+        bytes: Uint8Array,
+        mimeType: string,
+        document: vscode.TextDocument,
+        webview: vscode.Webview,
+        options: { insert?: boolean; showNotification?: boolean; altText?: string } = {}
+    ): Promise<void> {
+        this.assertImportedImageSize(bytes.byteLength);
+        const normalizedMimeType = this.normalizeImportedImageMimeType(mimeType);
+        const extension = this.getImportedImageExtension(normalizedMimeType);
+        const documentFileName = this.getDocumentFileName(document);
+
+        const documentDir = this.getDocumentDirectoryUri(document);
+        const imagesDir = vscode.Uri.joinPath(documentDir, 'images');
+        const documentImagesDir = vscode.Uri.joinPath(imagesDir, documentFileName);
+
+        try {
+            await vscode.workspace.fs.stat(imagesDir);
+        } catch {
+            await vscode.workspace.fs.createDirectory(imagesDir);
+        }
+
+        try {
+            await vscode.workspace.fs.stat(documentImagesDir);
+        } catch {
+            await vscode.workspace.fs.createDirectory(documentImagesDir);
+        }
+
+        let filename = `${documentFileName}.${extension}`;
+        let imageUri = vscode.Uri.joinPath(documentImagesDir, filename);
+
+        try {
+            await vscode.workspace.fs.stat(imageUri);
+            let counter = 1;
+            let fileExists = true;
+            while (fileExists) {
+                counter++;
+                filename = `${documentFileName}-${counter}.${extension}`;
+                imageUri = vscode.Uri.joinPath(documentImagesDir, filename);
+                try {
+                    await vscode.workspace.fs.stat(imageUri);
+                } catch {
+                    fileExists = false;
+                }
+            }
+        } catch {
+            // The base filename is available.
+        }
+
+        await vscode.workspace.fs.writeFile(imageUri, bytes);
+
+        const relativePath = `images/${documentFileName}/${filename}`;
+        const altText = typeof options.altText === 'string' && options.altText !== ''
+            ? options.altText
+            : 'image';
+
+        if (options.insert !== false) {
+            void webview.postMessage({
+                type: 'insertImage',
+                markdown: `![${this.escapeMarkdownImageAltText(altText)}](${relativePath})`,
+                src: webview.asWebviewUri(imageUri).toString(),
+                alt: altText
+            });
+            void webview.postMessage({ type: 'requestSync' });
+        } else if (options.showNotification) {
+            void vscode.window.showInformationMessage(`Image saved: ${relativePath}`);
         }
     }
 
@@ -1920,121 +2225,61 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         document: vscode.TextDocument,
         webview: vscode.Webview,
         options: { insert?: boolean; showNotification?: boolean; altText?: string } = {}
-    ): Promise<void> {
+    ): Promise<boolean> {
         try {
-            // Extract data from data URL (supports both base64 and URL-encoded data).
+            if (typeof dataUrl !== 'string') {
+                throw new ImageImportError('Invalid image data URL.');
+            }
             const commaIndex = dataUrl.indexOf(',');
-            if (commaIndex === -1) {
-                throw new Error('Invalid data URL');
+            if (commaIndex <= 5 || commaIndex > 1024) {
+                throw new ImageImportError('Invalid image data URL.');
             }
 
-            const header = dataUrl.substring(0, commaIndex);
-            const dataPart = dataUrl.substring(commaIndex + 1);
-            const isBase64 = /;base64/i.test(header);
+            const header = dataUrl.slice(0, commaIndex);
+            const dataPart = dataUrl.slice(commaIndex + 1);
             const headerMatch = header.match(/^data:([^;]+)/i);
             const headerMimeType = headerMatch ? headerMatch[1] : '';
+            const normalizedMimeType = this.normalizeImportedImageMimeType(headerMimeType || mimeType);
+            const isBase64 = /;base64(?:;|$)/i.test(header);
 
             let buffer: Buffer;
             if (isBase64) {
-                buffer = Buffer.from(dataPart, 'base64');
+                const maxEncodedLength = Math.ceil(
+                    MarkdownEditorProvider.maxImportedImageBytes / 3
+                ) * 4 + 4;
+                if (dataPart.length > maxEncodedLength) {
+                    throw new ImageImportError(this.getImageTooLargeMessage());
+                }
+                const normalizedBase64 = dataPart.replace(/\s/g, '');
+                const paddingLength = normalizedBase64.endsWith('==')
+                    ? 2
+                    : (normalizedBase64.endsWith('=') ? 1 : 0);
+                const estimatedBytes = Math.floor(normalizedBase64.length * 3 / 4) - paddingLength;
+                this.assertImportedImageSize(estimatedBytes);
+                buffer = Buffer.from(normalizedBase64, 'base64');
             } else {
-                let decoded = dataPart;
+                if (dataPart.length > MarkdownEditorProvider.maxImportedImageBytes * 3) {
+                    throw new ImageImportError(this.getImageTooLargeMessage());
+                }
+                let decoded: string;
                 try {
                     decoded = decodeURIComponent(dataPart);
                 } catch {
-                    // Fall back to raw data if decode fails.
+                    throw new ImageImportError('Invalid image data URL.');
                 }
                 buffer = Buffer.from(decoded, 'utf8');
             }
 
-            // Use the clipboard MIME type to choose the file extension.
-            const normalizedMimeType = (mimeType || headerMimeType || '').toLowerCase();
-            let extension = 'png';
-
-            if (normalizedMimeType === 'image/jpeg' || normalizedMimeType === 'image/jpg') {
-                extension = 'jpg';
-            } else if (normalizedMimeType) {
-                const rawExtension = normalizedMimeType.split('/')[1];
-                if (rawExtension) {
-                    extension = rawExtension.replace(/\+.*$/, '');
-                }
-            }
-
-            const documentFileName = this.getDocumentFileName(document);
-
-            // Create images directory structure: images/{documentFileName}/
-            const documentDir = this.getDocumentDirectoryUri(document);
-            const imagesDir = vscode.Uri.joinPath(documentDir, 'images');
-            const documentImagesDir = vscode.Uri.joinPath(imagesDir, documentFileName);
-
-            // Create directories if they don't exist
-            try {
-                await vscode.workspace.fs.stat(imagesDir);
-            } catch {
-                await vscode.workspace.fs.createDirectory(imagesDir);
-            }
-
-            try {
-                await vscode.workspace.fs.stat(documentImagesDir);
-            } catch {
-                await vscode.workspace.fs.createDirectory(documentImagesDir);
-            }
-
-            // Find next available filename with sequential numbering
-            let filename: string;
-            let imageUri: vscode.Uri;
-            let counter = 1;
-
-            // Try base filename first
-            filename = `${documentFileName}.${extension}`;
-            imageUri = vscode.Uri.joinPath(documentImagesDir, filename);
-
-            try {
-                await vscode.workspace.fs.stat(imageUri);
-                // File exists, try with counter
-                let fileExists = true;
-                while (fileExists) {
-                    counter++;
-                    filename = `${documentFileName}-${counter}.${extension}`;
-                    imageUri = vscode.Uri.joinPath(documentImagesDir, filename);
-                    try {
-                        await vscode.workspace.fs.stat(imageUri);
-                    } catch {
-                        fileExists = false;
-                    }
-                }
-            } catch {
-                // File doesn't exist, use base filename
-            }
-
-            // Save the image file
-            await vscode.workspace.fs.writeFile(imageUri, buffer);
-
-            // Create relative path for markdown
-            const relativePath = `images/${documentFileName}/${filename}`;
-            const altText = typeof options.altText === 'string' && options.altText !== ''
-                ? options.altText
-                : 'image';
-
-            if (options.insert !== false) {
-                // Send message back to webview to insert the markdown syntax
-                webview.postMessage({
-                    type: 'insertImage',
-                    markdown: `![${this.escapeMarkdownImageAltText(altText)}](${relativePath})`,
-                    src: webview.asWebviewUri(imageUri).toString(),
-                    alt: altText
-                });
-                // Request an explicit sync right after insertion as a safety net.
-                webview.postMessage({
-                    type: 'requestSync'
-                });
-            } else if (options.showNotification) {
-                vscode.window.showInformationMessage(`Image saved: ${relativePath}`);
-            }
-
+            this.assertImportedImageSize(buffer.byteLength);
+            await this.saveImageBytes(buffer, normalizedMimeType, document, webview, options);
+            return true;
         } catch (error) {
             console.error('[saveImageFromDataUrl] Error saving image:', error);
-            vscode.window.showErrorMessage('Failed to save image.');
+            const message = error instanceof ImageImportError
+                ? error.message
+                : 'Failed to save image.';
+            void vscode.window.showErrorMessage(message);
+            return false;
         }
     }
 
@@ -2123,16 +2368,20 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     private async fetchRemoteImage(
         sourceUri: vscode.Uri
     ): Promise<{ bytes: Uint8Array; mimeType: string | null }> {
+        type SimpleBodyReader = {
+            read(): Promise<{ done: boolean; value?: Uint8Array }>;
+            cancel(reason?: unknown): Promise<void>;
+        };
         type SimpleFetchResponse = {
             ok: boolean;
             status: number;
             statusText: string;
             headers: { get(name: string): string | null };
-            arrayBuffer(): Promise<ArrayBuffer>;
+            body?: { getReader(): SimpleBodyReader } | null;
         };
         type SimpleFetch = (
             input: string,
-            init?: { headers?: Record<string, string> }
+            init?: { headers?: Record<string, string>; signal?: AbortSignal }
         ) => Promise<SimpleFetchResponse>;
 
         const fetchFn = (globalThis as unknown as { fetch?: SimpleFetch }).fetch;
@@ -2140,30 +2389,93 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             throw new Error('Fetch API is unavailable.');
         }
 
-        const response = await fetchFn(sourceUri.toString(), {
-            headers: {
-                accept: 'image/*,*/*;q=0.8'
+        const controller = new AbortController();
+        let timedOut = false;
+        const timeout = setTimeout(() => {
+            timedOut = true;
+            controller.abort();
+        }, MarkdownEditorProvider.remoteImageTimeoutMs);
+
+        try {
+            const response = await fetchFn(sourceUri.toString(), {
+                headers: {
+                    accept: 'image/*,*/*;q=0.8'
+                },
+                signal: controller.signal
+            });
+
+            if (!response.ok) {
+                throw new Error(`Request failed: ${response.status} ${response.statusText}`);
             }
-        });
 
-        if (!response.ok) {
-            throw new Error(`Request failed: ${response.status} ${response.statusText}`);
+            const contentTypeHeader = response.headers.get('content-type');
+            const mimeType = contentTypeHeader
+                ? contentTypeHeader.split(';')[0].trim().toLowerCase()
+                : '';
+
+            if (mimeType && !mimeType.startsWith('image/')) {
+                throw new ImageImportError(`The downloaded file is not an image (${mimeType}).`);
+            }
+
+            const contentLengthHeader = response.headers.get('content-length');
+            if (contentLengthHeader && /^\d+$/.test(contentLengthHeader.trim())) {
+                const contentLength = Number(contentLengthHeader);
+                if (contentLength > MarkdownEditorProvider.maxImportedImageBytes) {
+                    controller.abort();
+                    throw new ImageImportError(this.getImageTooLargeMessage());
+                }
+            }
+
+            let bytes: Uint8Array;
+            if (response.body && typeof response.body.getReader === 'function') {
+                const reader = response.body.getReader();
+                const chunks: Uint8Array[] = [];
+                let totalBytes = 0;
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) {
+                        break;
+                    }
+                    if (!value || value.byteLength === 0) {
+                        continue;
+                    }
+                    totalBytes += value.byteLength;
+                    if (totalBytes > MarkdownEditorProvider.maxImportedImageBytes) {
+                        controller.abort();
+                        void reader.cancel('Image exceeds the import size limit.').catch(() => {});
+                        throw new ImageImportError(this.getImageTooLargeMessage());
+                    }
+                    chunks.push(value);
+                }
+
+                bytes = new Uint8Array(totalBytes);
+                let offset = 0;
+                for (const chunk of chunks) {
+                    bytes.set(chunk, offset);
+                    offset += chunk.byteLength;
+                }
+            } else {
+                throw new ImageImportError(
+                    'The remote image response cannot be read with a safe size limit.'
+                );
+            }
+
+            this.assertImportedImageSize(bytes.byteLength);
+            return {
+                bytes,
+                mimeType: mimeType || null
+            };
+        } catch (error) {
+            if (timedOut) {
+                const seconds = MarkdownEditorProvider.remoteImageTimeoutMs / 1000;
+                throw new ImageImportError(
+                    `Remote image download timed out after ${seconds} seconds.`
+                );
+            }
+            throw error;
+        } finally {
+            clearTimeout(timeout);
         }
-
-        const contentTypeHeader = response.headers.get('content-type');
-        const mimeType = contentTypeHeader
-            ? contentTypeHeader.split(';')[0].trim().toLowerCase()
-            : '';
-
-        if (mimeType && !mimeType.startsWith('image/')) {
-            throw new Error(`Dropped URL is not an image: ${mimeType}`);
-        }
-
-        const arrayBuffer = await response.arrayBuffer();
-        return {
-            bytes: new Uint8Array(arrayBuffer),
-            mimeType: mimeType || null
-        };
     }
 
     private async saveImageFromUri(
@@ -2231,15 +2543,16 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     mimeType = remoteImage.mimeType;
                 }
             } else if (sourceUri.scheme === 'file' || !sourceUri.scheme) {
+                const sourceStat = await vscode.workspace.fs.stat(sourceUri);
+                this.assertImportedImageSize(sourceStat.size);
                 bytes = await vscode.workspace.fs.readFile(sourceUri);
+                this.assertImportedImageSize(bytes.byteLength);
             } else {
                 throw new Error(`Unsupported image URI scheme: ${sourceUri.scheme}`);
             }
 
-            const dataUrl = `data:${mimeType};base64,${Buffer.from(bytes).toString('base64')}`;
-
-            await this.saveImageFromDataUrl(
-                dataUrl,
+            await this.saveImageBytes(
+                bytes,
                 mimeType,
                 document,
                 webview,
@@ -2251,7 +2564,10 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             );
         } catch (error) {
             console.error('[saveImageFromUri] Error saving image from URI:', error);
-            vscode.window.showErrorMessage('Failed to save dropped image.');
+            const message = error instanceof ImageImportError
+                ? error.message
+                : 'Failed to save dropped image.';
+            void vscode.window.showErrorMessage(message);
         }
     }
 

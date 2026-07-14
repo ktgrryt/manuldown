@@ -41,6 +41,7 @@ import { SearchManager } from './modules/SearchManager.js';
     let suppressNextNativeCtrlKDelete = false;
     let suppressImageRemovalSync = false;
     let imageRemovalSyncScheduled = false;
+    let editorLoadFailed = false;
 
     const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
     const TOC_PANEL_DEFAULT_WIDTH = 150;
@@ -95,6 +96,7 @@ import { SearchManager } from './modules/SearchManager.js';
     const BLOCKED_REMOTE_IMAGE_PLACEHOLDER_DATA_URL = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(
         '<svg xmlns="http://www.w3.org/2000/svg" width="240" height="48" viewBox="0 0 240 48"><rect width="240" height="48" rx="6" fill="#f3f4f6"/><rect x="0.5" y="0.5" width="239" height="47" rx="5.5" fill="none" stroke="#cbd5e1"/><text x="120" y="29" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" fill="#475569">Remote image blocked</text></svg>'
     )}`;
+    const MAX_IMPORTED_IMAGE_BYTES = 20 * 1024 * 1024;
 
     const NETWORK_BLOCKED_ERROR_MESSAGE = 'External network requests are blocked in ManulDown webview.';
 
@@ -682,6 +684,28 @@ import { SearchManager } from './modules/SearchManager.js';
             editor.appendChild(sanitizedContainer.firstChild);
         }
         stripEditorControlCharacters(editor, { preserveSelection: false });
+    }
+
+    function setEditorLoadFailureState(failed) {
+        editorLoadFailed = failed === true;
+        editor.contentEditable = editorLoadFailed ? 'false' : 'true';
+        if (editorLoadFailed) {
+            editor.setAttribute('aria-readonly', 'true');
+        } else {
+            editor.removeAttribute('aria-readonly');
+        }
+
+        document.querySelectorAll('.toolbar button').forEach((button) => {
+            if (editorLoadFailed) {
+                if (!button.disabled) {
+                    button.dataset.disabledForLoadError = 'true';
+                    button.disabled = true;
+                }
+            } else if (button.dataset.disabledForLoadError === 'true') {
+                delete button.dataset.disabledForLoadError;
+                button.disabled = false;
+            }
+        });
     }
 
     function reapplyImageSecurityPolicy(root = editor) {
@@ -5505,6 +5529,36 @@ import { SearchManager } from './modules/SearchManager.js';
         postUpdate();
         return true;
     }
+
+    function requestDocumentSave() {
+        clearNotifyTimeout();
+        vscode.postMessage({
+            type: 'saveDocument',
+            content: domUtils.getCleanedHTML(),
+            revision: localUpdateRevision
+        });
+    }
+
+    // VS Code may otherwise save the backing TextDocument before a debounced
+    // Webview update arrives. Route the shortcut through the extension host so
+    // the latest HTML is converted and applied before document.save().
+    window.addEventListener('keydown', (event) => {
+        const key = String(event.key || '').toLowerCase();
+        const primaryModifier = isMac ? event.metaKey : event.ctrlKey;
+        if (
+            key !== 's' ||
+            !primaryModifier ||
+            event.altKey ||
+            event.shiftKey ||
+            isUpdating ||
+            editorLoadFailed
+        ) {
+            return;
+        }
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        requestDocumentSave();
+    }, true);
 
     // A delayed update must reach the extension host before Chromium tears down
     // the Webview. This also flushes when a retained Webview is merely hidden,
@@ -17161,6 +17215,10 @@ import { SearchManager } from './modules/SearchManager.js';
 
         const saveImageFileToWorkspace = (file) => {
             if (!file) return;
+            if (Number.isFinite(file.size) && file.size > MAX_IMPORTED_IMAGE_BYTES) {
+                vscode.postMessage({ type: 'imageImportTooLarge' });
+                return;
+            }
 
             const reader = new FileReader();
             reader.onload = (event) => {
@@ -20883,8 +20941,16 @@ import { SearchManager } from './modules/SearchManager.js';
     window.addEventListener('message', event => {
         const message = event.data;
 
+        if (
+            editorLoadFailed &&
+            !['init', 'update', 'refresh', 'loadError', 'settings', 'customSlashCommands'].includes(message.type)
+        ) {
+            return;
+        }
+
         switch (message.type) {
             case 'init':
+                setEditorLoadFailureState(false);
                 temporarilySuppressImageRemovalSync();
                 isUpdating = true;
                 replaceEditorContentFromHtml(message.content);
@@ -20909,6 +20975,19 @@ import { SearchManager } from './modules/SearchManager.js';
                     scheduleEditorOverflowStateUpdate();
                 }, 100);
                 break;
+            case 'loadError':
+                clearNotifyTimeout();
+                temporarilySuppressImageRemovalSync();
+                isUpdating = true;
+                try {
+                    editor.textContent = 'ManulDown could not render this document. The original Markdown was left unchanged.';
+                    setEditorLoadFailureState(true);
+                    stateManager.clearHistory();
+                } finally {
+                    isUpdating = false;
+                }
+                scheduleEditorOverflowStateUpdate();
+                break;
             case 'updateApplied':
                 if (Number.isFinite(message.revision)) {
                     acknowledgedUpdateRevision = Math.max(
@@ -20930,6 +21009,7 @@ import { SearchManager } from './modules/SearchManager.js';
                     break;
                 }
 
+                setEditorLoadFailureState(false);
                 temporarilySuppressImageRemovalSync();
                 isUpdating = true;
                 const scrollTop = editor.scrollTop;
@@ -20962,6 +21042,7 @@ import { SearchManager } from './modules/SearchManager.js';
                 break;
             case 'refresh':
                 clearNotifyTimeout();
+                setEditorLoadFailureState(false);
                 temporarilySuppressImageRemovalSync();
                 isUpdating = true;
                 const scrollTopRefresh = editor.scrollTop;

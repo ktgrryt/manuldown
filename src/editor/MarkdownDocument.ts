@@ -1,12 +1,47 @@
 import * as vscode from 'vscode';
-import { marked } from 'marked';
+import { marked, Tokens } from 'marked';
 import * as path from 'path';
+import { getNonce } from '../utils/getNonce';
+
+marked.use({
+    breaks: true,
+    gfm: true,
+    pedantic: false,
+    extensions: [
+        {
+            name: 'br',
+            renderer(token) {
+                const breakToken = token as Tokens.Br;
+                const prefix = breakToken.raw.endsWith('\n')
+                    ? breakToken.raw.slice(0, -1)
+                    : breakToken.raw;
+                const encodedPrefix = Buffer.from(prefix, 'utf8').toString('hex');
+                const isSoftBreak = !prefix.endsWith('\\') && !/ {2,}$/.test(prefix);
+                const softBreakAttribute = isSoftBreak
+                    ? ' data-mdw-soft-break="true"'
+                    : '';
+                return `<br${softBreakAttribute} data-mdw-break-prefix="${encodedPrefix}">`;
+            }
+        },
+        {
+            name: 'heading',
+            renderer(token) {
+                const headingToken = token as Tokens.Heading;
+                const setextMatch = headingToken.raw.match(/\r?\n {0,3}([=-]+)[ \t]*(?:\r?\n)*$/);
+                const setextAttributes = setextMatch && headingToken.depth <= 2
+                    ? ` data-mdw-heading-style="setext" data-mdw-heading-marker-length="${setextMatch[1].length}"`
+                    : '';
+                const content = this.parser.parseInline(headingToken.tokens);
+                return `<h${headingToken.depth}${setextAttributes}>${content}</h${headingToken.depth}>\n`;
+            }
+        }
+    ]
+});
 
 export class MarkdownDocument {
     private static readonly blanklineMarkerHtml = '<p data-mdw-blankline="true"><br></p>';
     private static readonly imageHardBreakMarkerAttr = 'data-mdw-image-hardbreak="true"';
     private static readonly imageHardBreakPlaceholderHtml = '<p data-mdw-image-hardbreak-placeholder="true"><br></p>';
-    private static readonly blockquoteEmptyLineMarker = 'MDW-BLOCKQUOTE-EMPTYLINE-MARKER';
     private static readonly commonHtmlTagNames = new Set([
         'a', 'abbr', 'address', 'area', 'article', 'aside', 'audio',
         'b', 'bdi', 'bdo', 'blockquote', 'body', 'br', 'button',
@@ -34,29 +69,21 @@ export class MarkdownDocument {
     constructor(
         private readonly document: vscode.TextDocument,
         private readonly webview?: vscode.Webview
-    ) {
-        // Disable Setext headings ("text" + "---"/"===") so a trailing
-        // underline line does not convert the previous paragraph into H1/H2.
-        const tokenizer = new marked.Tokenizer();
-        tokenizer.lheading = () => undefined;
-
-        // Configure marked options
-        marked.setOptions({
-            breaks: true,
-            gfm: true,
-            pedantic: false, // Allow nested lists with proper indentation
-            tokenizer,
-        });
-
-        // Table parsing is enabled via gfm option
-    }
+    ) { }
 
     public toHtml(): string {
         const markdown = this.normalizeIgnoredLineWhitespace(this.document.getText());
         try {
+            const blockquoteEmptyLineMarker = this.createPlaceholderMarker(
+                markdown,
+                'BLOCKQUOTE_EMPTY_LINE'
+            );
             const escapedPlaceholderMarkdown = this.escapePlaceholderAngleBrackets(markdown);
             const explicitBlockquoteMarkdown = this.breakLazyBlockquoteContinuations(escapedPlaceholderMarkdown);
-            const blockquoteBlankPreservedMarkdown = this.preserveEmptyBlockquoteLines(explicitBlockquoteMarkdown);
+            const blockquoteBlankPreservedMarkdown = this.preserveEmptyBlockquoteLines(
+                explicitBlockquoteMarkdown,
+                blockquoteEmptyLineMarker
+            );
             const preprocessedMarkdown = this.preserveExtraBlankLines(blockquoteBlankPreservedMarkdown);
             const sourceIndentAnnotatedMarkdown = this.annotateListItemSourceIndents(preprocessedMarkdown);
             let html = marked.parse(sourceIndentAnnotatedMarkdown) as string;
@@ -75,7 +102,7 @@ export class MarkdownDocument {
 
             // Restore explicit empty quote lines that were preserved with a marker.
             const blockquoteEmptyLineMarkerPattern = new RegExp(
-                `<p>\\s*${MarkdownDocument.blockquoteEmptyLineMarker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*<\\/p>`,
+                `<p>\\s*${blockquoteEmptyLineMarker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*<\\/p>`,
                 'gi'
             );
             html = html.replace(
@@ -86,19 +113,29 @@ export class MarkdownDocument {
             // Treat "image + hard break + text" as separate paragraphs so caret
             // navigation behaves like a blank line exists between them.
             html = html.replace(
-                /<p>\s*((?:<a\b[^>]*>\s*)?<img\b[^>]*>(?:\s*<\/a>)?)\s*<br\s*\/?>\s*([\s\S]*?)\s*<\/p>/gi,
-                (match, imageSegment, trailingContent) => {
+                /<p>\s*((?:<a\b[^>]*>\s*)?<img\b[^>]*>(?:\s*<\/a>)?)\s*<br\b([^>]*)>\s*([\s\S]*?)\s*<\/p>/gi,
+                (match, imageSegment, breakAttributes, trailingContent) => {
+                    if (/\bdata-mdw-soft-break\s*=\s*(["'])true\1/i.test(breakAttributes || '')) {
+                        return match;
+                    }
                     const normalizedImage = (imageSegment || '').trim();
                     const normalizedTrailing = (trailingContent || '').trim();
                     if (!normalizedImage) {
                         return match;
                     }
+                    const encodedPrefixMatch = String(breakAttributes || '').match(
+                        /\bdata-mdw-break-prefix\s*=\s*(["'])((?:[0-9a-f]{2})*)\1/i
+                    );
+                    const imageHardBreakPrefixAttribute = encodedPrefixMatch
+                        ? ` data-mdw-image-hardbreak-prefix="${encodedPrefixMatch[2]}"`
+                        : '';
+                    const imageHardBreakAttributes = `${MarkdownDocument.imageHardBreakMarkerAttr}${imageHardBreakPrefixAttribute}`;
                     if (!normalizedTrailing) {
                         // Keep a blank editable line below an image when the parsed
                         // HTML contains an actual break after the image.
-                        return `<p ${MarkdownDocument.imageHardBreakMarkerAttr}>${normalizedImage}</p>${MarkdownDocument.imageHardBreakPlaceholderHtml}`;
+                        return `<p ${imageHardBreakAttributes}>${normalizedImage}</p>${MarkdownDocument.imageHardBreakPlaceholderHtml}`;
                     }
-                    return `<p ${MarkdownDocument.imageHardBreakMarkerAttr}>${normalizedImage}</p><p>${normalizedTrailing}</p>`;
+                    return `<p ${imageHardBreakAttributes}>${normalizedImage}</p><p>${normalizedTrailing}</p>`;
                 }
             );
 
@@ -165,7 +202,7 @@ export class MarkdownDocument {
             return html;
         } catch (error) {
             console.error('Error parsing markdown:', error);
-            return '<p>Error parsing markdown</p>';
+            throw error;
         }
     }
 
@@ -434,9 +471,7 @@ export class MarkdownDocument {
                 continue;
             }
 
-            const normalizedLine = line.trim() === ''
-                ? ''
-                : line.replace(/[ \t]+$/, '');
+            const normalizedLine = line.trim() === '' ? '' : line;
             output.push(`${normalizedLine}${lineEnding}`);
         }
 
@@ -517,7 +552,7 @@ export class MarkdownDocument {
         return output.join('');
     }
 
-    private preserveEmptyBlockquoteLines(markdown: string): string {
+    private preserveEmptyBlockquoteLines(markdown: string, blockquoteEmptyLineMarker: string): string {
         const segments = markdown.match(/[^\n]*\n|[^\n]+$/g);
         if (!segments || segments.length === 0) {
             return markdown;
@@ -542,7 +577,7 @@ export class MarkdownDocument {
         const emitEmptyBlockquoteMarker = (quotePrefix: string, lineEnding: string): void => {
             const normalizedLineEnding = lineEnding || '\n';
             output.push(`${quotePrefix}${normalizedLineEnding}`);
-            output.push(`${quotePrefix} ${MarkdownDocument.blockquoteEmptyLineMarker}${normalizedLineEnding}`);
+            output.push(`${quotePrefix} ${blockquoteEmptyLineMarker}${normalizedLineEnding}`);
             output.push(`${quotePrefix}${normalizedLineEnding}`);
         };
 
@@ -850,6 +885,16 @@ export class MarkdownDocument {
 
     private stripTrailingCarriageReturn(line: string): string {
         return line.endsWith('\r') ? line.slice(0, -1) : line;
+    }
+
+    private createPlaceholderMarker(content: string, purpose: string): string {
+        for (let attempt = 0; attempt < 100; attempt++) {
+            const marker = `MDW_${purpose}_${getNonce()}`;
+            if (!content.includes(marker)) {
+                return marker;
+            }
+        }
+        throw new Error(`Could not create a unique ${purpose} marker`);
     }
 
     private convertImagePaths(html: string): string {
