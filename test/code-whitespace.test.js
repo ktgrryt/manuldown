@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const Module = require('node:module');
+const fs = require('node:fs');
 const path = require('node:path');
 const { marked } = require('marked');
 
@@ -13,6 +14,9 @@ const vscodeMockState = {
     fileData: new Map(),
     documentChangeListeners: [],
     configurationChangeListeners: [],
+    willSaveDocumentListeners: [],
+    didSaveDocumentListeners: [],
+    executedCommands: [],
 };
 
 function resetVscodeMockState() {
@@ -24,6 +28,9 @@ function resetVscodeMockState() {
     vscodeMockState.fileData.clear();
     vscodeMockState.documentChangeListeners.length = 0;
     vscodeMockState.configurationChangeListeners.length = 0;
+    vscodeMockState.willSaveDocumentListeners.length = 0;
+    vscodeMockState.didSaveDocumentListeners.length = 0;
+    vscodeMockState.executedCommands.length = 0;
 }
 
 function addMockListener(listeners, listener) {
@@ -71,6 +78,15 @@ function loadExtensionModules() {
                 base.authority
             ),
         },
+        Range: class Range {
+            constructor(startLine, startCharacter, endLine, endCharacter) {
+                this.start = { line: startLine, character: startCharacter };
+                this.end = { line: endLine, character: endCharacter };
+            }
+        },
+        TextEdit: {
+            replace: (range, newText) => ({ range, newText }),
+        },
         workspace: {
             getConfiguration: () => ({
                 get: (_key, defaultValue) => defaultValue,
@@ -81,6 +97,14 @@ function loadExtensionModules() {
             ),
             onDidChangeConfiguration: (listener) => addMockListener(
                 vscodeMockState.configurationChangeListeners,
+                listener
+            ),
+            onWillSaveTextDocument: (listener) => addMockListener(
+                vscodeMockState.willSaveDocumentListeners,
+                listener
+            ),
+            onDidSaveTextDocument: (listener) => addMockListener(
+                vscodeMockState.didSaveDocumentListeners,
                 listener
             ),
             fs: {
@@ -118,6 +142,11 @@ function loadExtensionModules() {
                 vscodeMockState.information.push(message);
             },
         },
+        commands: {
+            executeCommand: async (...args) => {
+                vscodeMockState.executedCommands.push(args);
+            },
+        },
     };
 
     Module._load = function (request, parent, isMain) {
@@ -152,17 +181,55 @@ function fireDocumentChange(document) {
     }
 }
 
+function fireDidSaveDocument(document) {
+    for (const listener of [...vscodeMockState.didSaveDocumentListeners]) {
+        listener(document);
+    }
+}
+
+async function fireWillSaveDocument(document) {
+    const pendingEdits = [];
+    const event = {
+        document,
+        waitUntil: (thenable) => {
+            pendingEdits.push(Promise.resolve(thenable));
+        },
+    };
+    for (const listener of [...vscodeMockState.willSaveDocumentListeners]) {
+        listener(event);
+    }
+    const editGroups = await Promise.all(pendingEdits);
+    return editGroups.flat();
+}
+
 function createMutableTextDocument(initialText) {
     let text = initialText;
+    let version = 1;
     const savedTexts = [];
     const document = {
         getText: () => text,
+        get version() {
+            return version;
+        },
+        get lineCount() {
+            return text.split('\n').length;
+        },
+        lineAt: (index) => ({
+            text: text.split('\n')[index] ?? '',
+        }),
         setText: (nextText) => {
             text = nextText;
+            version++;
         },
         save: async () => {
+            const edits = await fireWillSaveDocument(document);
+            for (const edit of edits) {
+                document.setText(edit.newText);
+                fireDocumentChange(document);
+            }
             savedTexts.push(text);
             fireDocumentChange(document);
+            fireDidSaveDocument(document);
             return true;
         },
         uri: createMockUri('/workspace/sync-test.md'),
@@ -336,6 +403,11 @@ test('saving from the Webview waits until its latest edit reaches the document',
             webview.postedMessages.filter((message) => message.type === 'updateApplied'),
             [{ type: 'updateApplied', revision: 3 }]
         );
+        assert.equal(
+            webview.postedMessages.some((message) => message.type === 'prepareSyncSnapshot'),
+            false,
+            'A Webview-initiated save must not perform a redundant snapshot handshake'
+        );
         assert.deepEqual(
             webview.postedMessages.filter((message) => message.external === true),
             []
@@ -343,6 +415,277 @@ test('saving from the Webview waits until its latest edit reaches the document',
     } finally {
         webview.dispose();
     }
+});
+
+test('closing from the Webview waits for the latest snapshot to reach the document', async () => {
+    const { provider, document, webview } = await createEditorSyncHarness();
+    let closedDocumentUri = null;
+    provider.closeResidualCustomTabs = async (uri) => {
+        closedDocumentUri = uri;
+    };
+    let releaseUpdate;
+    const updateMayFinish = new Promise((resolve) => {
+        releaseUpdate = resolve;
+    });
+    provider.updateTextDocument = async (_document, markdown) => {
+        await updateMayFinish;
+        document.setText(markdown);
+        fireDocumentChange(document);
+        return true;
+    };
+
+    try {
+        const closeRequest = webview.sendMessage({
+            type: 'closeEditorTab',
+            content: 'latest before close',
+            revision: 4,
+            requestId: 'close-test',
+        });
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(closedDocumentUri, null);
+
+        releaseUpdate();
+        await closeRequest;
+
+        assert.equal(document.getText(), 'latest before close');
+        assert.equal(closedDocumentUri, document.uri);
+    } finally {
+        webview.dispose();
+    }
+});
+
+test('a stale close request cannot close a replacement editor panel', async () => {
+    const { provider, document, webview } = await createEditorSyncHarness();
+    let closeCalled = false;
+    provider.closeResidualCustomTabs = async () => {
+        closeCalled = true;
+    };
+    let releaseUpdate;
+    const updateMayFinish = new Promise((resolve) => {
+        releaseUpdate = resolve;
+    });
+    provider.updateTextDocument = async (_document, markdown) => {
+        await updateMayFinish;
+        document.setText(markdown);
+        fireDocumentChange(document);
+        return true;
+    };
+
+    const closeRequest = webview.sendMessage({
+        type: 'closeEditorTab',
+        content: 'latest before replacement',
+        revision: 5,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    webview.dispose();
+    releaseUpdate();
+    await closeRequest;
+
+    assert.equal(closeCalled, false);
+});
+
+test('will-save requests and applies the latest Webview snapshot', async () => {
+    const { document, webview } = await createEditorSyncHarness('old text');
+
+    try {
+        const willSave = fireWillSaveDocument(document);
+        await waitFor(
+            () => webview.postedMessages.some((message) => message.type === 'prepareSyncSnapshot'),
+            'The Webview snapshot was not requested before save'
+        );
+        const request = webview.postedMessages.find(
+            (message) => message.type === 'prepareSyncSnapshot'
+        );
+        await webview.sendMessage({
+            type: 'syncSnapshot',
+            requestId: request.requestId,
+            content: 'latest menu save',
+            revision: 5,
+        });
+
+        const edits = await willSave;
+        assert.equal(edits.length, 1);
+        assert.equal(edits[0].newText, 'latest menu save');
+
+        document.setText(edits[0].newText);
+        fireDocumentChange(document);
+        assert.deepEqual(
+            webview.postedMessages.filter(
+                (message) => message.type === 'updateApplied' && message.revision === 5
+            ),
+            [{ type: 'updateApplied', revision: 5 }]
+        );
+        assert.deepEqual(
+            webview.postedMessages.filter((message) => message.external === true),
+            []
+        );
+    } finally {
+        webview.dispose();
+    }
+});
+
+test('will-save snapshot waiting stays below the VS Code listener budget', async () => {
+    const { document, webview } = await createEditorSyncHarness('old text');
+
+    try {
+        const startedAt = Date.now();
+        const edits = await fireWillSaveDocument(document);
+        const elapsedMs = Date.now() - startedAt;
+
+        assert.deepEqual(edits, []);
+        assert.ok(elapsedMs < 1400, `will-save synchronization took ${elapsedMs}ms`);
+        assert.ok(
+            vscodeMockState.errors.some((message) => message.includes('could not synchronize')),
+            'A failed save synchronization must be visible to the user'
+        );
+        assert.ok(
+            webview.postedMessages.some((message) => message.type === 'retryPendingUpdate'),
+            'The normal update path must be retried after a snapshot timeout'
+        );
+    } finally {
+        webview.dispose();
+    }
+});
+
+test('an ignored will-save edit cannot acknowledge a later external change by text alone', async () => {
+    const { document, webview } = await createEditorSyncHarness('old text');
+
+    try {
+        const willSave = fireWillSaveDocument(document);
+        await waitFor(
+            () => webview.postedMessages.some((message) => message.type === 'prepareSyncSnapshot'),
+            'The Webview snapshot was not requested before save'
+        );
+        const request = webview.postedMessages.find(
+            (message) => message.type === 'prepareSyncSnapshot'
+        );
+        await webview.sendMessage({
+            type: 'syncSnapshot',
+            requestId: request.requestId,
+            content: 'same text later supplied externally',
+            revision: 6,
+        });
+        const edits = await willSave;
+        assert.equal(edits.length, 1);
+
+        // Simulate VS Code ignoring the pre-save edit because another writer won
+        // the version race, then saving the unchanged document.
+        fireDidSaveDocument(document);
+        assert.ok(
+            vscodeMockState.errors.some((message) => message.includes('pre-save edit was not applied')),
+            'An ignored pre-save edit must not result in a silent stale save'
+        );
+        document.setText('same text later supplied externally');
+        fireDocumentChange(document);
+
+        assert.equal(
+            webview.postedMessages.some(
+                (message) => message.type === 'updateApplied' && message.revision === 6
+            ),
+            false
+        );
+        assert.equal(
+            webview.postedMessages.filter((message) => message.external === true).length,
+            1
+        );
+    } finally {
+        webview.dispose();
+    }
+});
+
+test('clipboard HTML cannot opt into trusted editor metadata', () => {
+    const editorSource = fs.readFileSync(
+        path.join(__dirname, '..', 'media', 'editor.js'),
+        'utf8'
+    );
+
+    assert.match(
+        editorSource,
+        /const allowInternalMetadata = options\.allowInternalMetadata === true;/
+    );
+    assert.match(
+        editorSource,
+        /!allowInternalMetadata \|\|\s*!\/\^data-\(\?:md-path\|mdw-/
+    );
+    assert.equal(
+        (editorSource.match(/allowInternalMetadata:\s*true/g) || []).length,
+        1,
+        'Only extension-host document loading may enable internal metadata'
+    );
+    assert.match(
+        editorSource,
+        /createSyncSnapshot\(\{ preservePendingUpdate: true \}\)/
+    );
+    assert.match(
+        editorSource,
+        /commitPendingTransientEditorUi = \(\) => saveLinkUrlIfChanged\(\{[\s\S]*?revertInvalid: false/
+    );
+    assert.match(
+        editorSource,
+        /const src = image\.getAttribute\('data-md-path'\) \|\| image\.getAttribute\('src'\)/,
+        'Copied images must expose their Markdown path without trusting pasted HTML metadata'
+    );
+    assert.match(
+        editorSource,
+        /candidate\.html !== html \|\|[\s\S]*?candidate\.plainText !== normalizeClipboardPlainText/,
+        'Image metadata restoration must require an exact recently copied payload'
+    );
+    assert.match(
+        editorSource,
+        /restoreInternalClipboardImagePaths = \([\s\S]*?trustedImages,[\s\S]*?requireTrustedPaths/,
+        'Sanitized internal image HTML must use the authenticated image manifest'
+    );
+    assert.match(
+        editorSource,
+        /convertInlineMarkdownTextNodesInContainer\(container\);[\s\S]*?if \(!restoreInternalClipboardImagePaths\(\s*container,\s*trustedImages,\s*requireTrustedImagePaths\s*\)\)/,
+        'Images created from Markdown text must be authenticated after conversion too'
+    );
+    assert.match(
+        editorSource,
+        /createImageElementFromMarkdown = \([\s\S]*?options\.applySourcePolicy !== false[\s\S]*?allowImages: false,[\s\S]*?containsDeferredMarkdownImage[\s\S]*?return false;/,
+        'Rich HTML Markdown images must fall back before source-policy side effects'
+    );
+    assert.match(
+        editorSource,
+        /requireTrustedImagePaths &&\s*!Array\.isArray\(trustedImages\) &&\s*\/<img\\b\/i\.test\(rawHtml\)[\s\S]*?return false;/,
+        'Unauthenticated internal image HTML must be rejected before sanitization'
+    );
+    assert.match(
+        editorSource,
+        /extractSingleImageFromClipboardHtml = \([\s\S]*?requireTrustedImagePaths &&\s*!Array\.isArray\(trustedImages\) &&\s*\/<img\\b\/i\.test\(rawHtml\)[\s\S]*?return null;[\s\S]*?createSanitizedContainerFromHtml/,
+        'Single-image extraction must reject unauthenticated internal HTML before sanitization'
+    );
+});
+
+test('async image insertion stays bound to its request-scoped editor range', () => {
+    const editorSource = fs.readFileSync(
+        path.join(__dirname, '..', 'media', 'editor.js'),
+        'utf8'
+    );
+
+    assert.match(
+        editorSource,
+        /beginImageInsertionRequest\(\)[\s\S]*?pendingImageInsertionRanges\.set\(requestId,[\s\S]*?range/
+    );
+    assert.match(
+        editorSource,
+        /case 'insertImage':[\s\S]*?takePendingImageInsertion\(requestId\)[\s\S]*?if \(requestId && !pendingInsertion\)[\s\S]*?break;/,
+        'A delayed image response must not use the current caret when its saved range is unavailable'
+    );
+    assert.match(
+        editorSource,
+        /const shouldMoveSelection = !pendingInsertion \|\| rangesHaveSameBoundaries\(/,
+        'A delayed response must not steal the caret after the user moves it'
+    );
+    assert.ok(
+        (editorSource.match(/requestId: beginImageInsertionRequest\(\)/g) || []).length >= 2,
+        'URI paste and drop imports must capture their insertion ranges'
+    );
+    assert.match(
+        editorSource,
+        /type: 'saveImage',[\s\S]*?requestId,/,
+        'FileReader-based image paste must preserve the range captured before reading'
+    );
 });
 
 test('Markdown to HTML preserves leading whitespace in fenced and inline code', () => {
@@ -543,6 +886,136 @@ test('document HTML cannot spoof internal code-whitespace metadata', () => {
     assert.doesNotMatch(markdown, /` {2}value`/);
 });
 
+test('front matter, comments, raw HTML, and reference links survive the first edit', () => {
+    const source = [
+        '---',
+        'title: Demo',
+        '---',
+        '',
+        '# Hello',
+        '',
+        '<!-- keep this comment -->',
+        '',
+        '<details open class="extra" data-user-value="yes">',
+        '<summary>More</summary>',
+        '',
+        'Raw **Markdown-looking** content',
+        '</details>',
+        '',
+        '[OpenAI][openai] and [Docs][docs]',
+        '',
+        '[openai]: https://openai.com "OpenAI"',
+        '[docs]: https://example.com/docs',
+        '',
+    ].join('\n');
+    const document = createTextDocument(source);
+    const html = new MarkdownDocument(document).toHtml();
+    const markdown = new MarkdownEditorProvider({}).htmlToMarkdown(html, document);
+
+    assert.match(html, /data-mdw-opaque-kind="front-matter"/);
+    assert.match(html, /data-mdw-opaque-kind="raw-html-block"/);
+    assert.match(html, /data-mdw-opaque-kind="reference-link"/);
+    assert.match(html, /data-mdw-opaque-kind="reference-definition"/);
+    assert.match(html, /class="mdw-opaque-source" contenteditable="false"/);
+    assert.match(html, /contenteditable="false" data-mdw-opaque-kind="reference-link"/);
+    assert.doesNotMatch(html, /<details\b/);
+    assert.equal(markdown, source);
+});
+
+test('opaque block boundaries round-trip without requiring separating blank lines', () => {
+    const sources = [
+        '---\n---\n\n# Heading\n',
+        '---\n# comment-like YAML value\n---\ntext\n',
+        '<div>\nraw\n</div>\ntext\n',
+        '<!-- keep -->\ntext\n',
+        '[label][id]\n\n[id]: /target\ntext\n',
+    ];
+
+    for (const source of sources) {
+        const document = createTextDocument(source);
+        const html = new MarkdownDocument(document).toHtml();
+        const markdown = new MarkdownEditorProvider({}).htmlToMarkdown(html, document);
+
+        assert.doesNotMatch(html, /MDW_OPAQUE/);
+        assert.match(html, /data-mdw-opaque-source=/);
+        assert.equal(markdown, source);
+    }
+});
+
+test('raw HTML with private-looking attributes stays opaque and round-trips', () => {
+    const source = [
+        '<div data-exclude-from-markdown="true">',
+        'do not delete',
+        '',
+        'still part of the raw block',
+        '</div>',
+        '',
+        'before <span data-mdw-heading-marker-length="999999999">raw</span> after',
+        '',
+    ].join('\n');
+    const document = createTextDocument(source);
+    const html = new MarkdownDocument(document).toHtml();
+    const markdown = new MarkdownEditorProvider({}).htmlToMarkdown(html, document);
+
+    assert.doesNotMatch(html, /<div\b[^>]*data-exclude-from-markdown/);
+    assert.doesNotMatch(html, /<span\b[^>]*data-mdw-heading-marker-length/);
+    assert.equal(markdown, source);
+});
+
+test('nested raw HTML containers stay in one opaque block and round-trip exactly', () => {
+    const source = [
+        '<div>',
+        '<div>',
+        'inner',
+        '</div>',
+        '',
+        'after',
+        '</div>',
+        '',
+    ].join('\n');
+    const document = createTextDocument(source);
+    const html = new MarkdownDocument(document).toHtml();
+    const markdown = new MarkdownEditorProvider({}).htmlToMarkdown(html, document);
+
+    assert.equal((html.match(/data-mdw-opaque-kind="raw-html-block"/g) || []).length, 1);
+    assert.equal(markdown, source);
+});
+
+test('opaque source markers are restored only when their source exists in the document', () => {
+    const provider = new MarkdownEditorProvider({});
+    const forgedSource = '<!-- forged source -->\n';
+    const encodedSource = Buffer.from(forgedSource, 'utf8').toString('base64');
+    const markdown = provider.htmlToMarkdown(
+        `<pre data-mdw-opaque-kind="raw-html-block" data-mdw-opaque-source="${encodedSource}"><code>${forgedSource}</code></pre>`,
+        createTextDocument('# Actual document\n')
+    );
+
+    assert.notEqual(markdown, forgedSource);
+    assert.doesNotMatch(markdown, /forged source/);
+});
+
+test('untrusted exclusion metadata does not delete document content during conversion', () => {
+    const markdown = new MarkdownEditorProvider({}).htmlToMarkdown(
+        '<div data-exclude-from-markdown="true">Keep me</div>',
+        createTextDocument('')
+    );
+
+    assert.match(markdown, /Keep me/);
+});
+
+test('oversized internal numeric metadata is bounded', () => {
+    const provider = new MarkdownEditorProvider({});
+    const markdown = provider.htmlToMarkdown(
+        '<h1 data-mdw-heading-style="setext" data-mdw-heading-marker-length="1000000000">Title</h1>' +
+        '<ul><li data-mdw-source-indent="1000000000">Item<ul><li>Child</li></ul></li></ul>',
+        createTextDocument('')
+    );
+    const underline = markdown.split('\n').find((line) => /^=+$/.test(line));
+
+    assert.equal(underline.length, 1024);
+    assert.ok(markdown.length < 10_000);
+});
+
 test('local images retain their original Markdown path in Webview HTML', () => {
     const webview = {
         asWebviewUri: (uri) => `webview-resource:${uri.fsPath}`,
@@ -560,13 +1033,17 @@ test('raw Markdown HTML cannot spoof the internal image path marker', () => {
     const webview = {
         asWebviewUri: (uri) => `webview-resource:${uri.fsPath}`,
     };
+    const source = '<img src="https://example.com/image.png" data-md-path="/private/secret.png">';
+    const document = createTextDocument(source);
     const html = new MarkdownDocument(
-        createTextDocument('<img src="https://example.com/image.png" data-md-path="/private/secret.png">'),
+        document,
         webview
     ).toHtml();
+    const markdown = new MarkdownEditorProvider({}).htmlToMarkdown(html, document);
 
-    assert.doesNotMatch(html, /data-md-path/);
-    assert.match(html, /src="https:\/\/example\.com\/image\.png"/);
+    assert.doesNotMatch(html, /<img\b/);
+    assert.match(html, /data-mdw-opaque-kind="raw-html-block"/);
+    assert.equal(markdown, source);
 });
 
 test('oversized data URL images are rejected before any file is created', async () => {
@@ -617,7 +1094,7 @@ test('a valid data URL image is saved and inserted normally', async () => {
         'image/png',
         createTextDocument(''),
         webview,
-        { altText: 'diagram' }
+        { altText: 'diagram', requestId: 'image-request-1' }
     );
 
     assert.equal(saved, true);
@@ -625,8 +1102,59 @@ test('a valid data URL image is saved and inserted normally', async () => {
     assert.equal(vscodeMockState.writes.length, 1);
     assert.deepEqual(Array.from(vscodeMockState.writes[0].bytes), [1, 2, 3]);
     assert.equal(webviewMessages[0].type, 'insertImage');
+    assert.equal(webviewMessages[0].requestId, 'image-request-1');
     assert.match(webviewMessages[0].markdown, /^!\[diagram\]\(images\/document\/document\.png\)$/);
     assert.equal(webviewMessages[1].type, 'requestSync');
+});
+
+test('concurrent image saves reserve distinct filenames', async () => {
+    const provider = new MarkdownEditorProvider({});
+    const webviewMessages = [];
+    const webview = {
+        postMessage: async (message) => {
+            webviewMessages.push(message);
+            return true;
+        },
+        asWebviewUri: (uri) => ({ toString: () => `webview-resource:${uri.path}` }),
+    };
+    resetVscodeMockState();
+
+    const firstData = Buffer.from([1, 2, 3]);
+    const secondData = Buffer.from([4, 5, 6]);
+    const [firstSaved, secondSaved] = await Promise.all([
+        provider.saveImageFromDataUrl(
+            `data:image/png;base64,${firstData.toString('base64')}`,
+            'image/png',
+            createTextDocument(''),
+            webview,
+            { requestId: 'concurrent-image-1' }
+        ),
+        provider.saveImageFromDataUrl(
+            `data:image/png;base64,${secondData.toString('base64')}`,
+            'image/png',
+            createTextDocument(''),
+            webview,
+            { requestId: 'concurrent-image-2' }
+        ),
+    ]);
+
+    assert.equal(firstSaved, true);
+    assert.equal(secondSaved, true);
+    assert.equal(vscodeMockState.writes.length, 2);
+    const savedPaths = vscodeMockState.writes.map(({ uri }) => uri.path).sort();
+    assert.deepEqual(savedPaths, [
+        '/workspace/images/document/document-2.png',
+        '/workspace/images/document/document.png',
+    ]);
+    assert.equal(new Set(savedPaths).size, 2);
+
+    const insertMessages = webviewMessages.filter((message) => message.type === 'insertImage');
+    assert.equal(insertMessages.length, 2);
+    assert.deepEqual(
+        new Set(insertMessages.map((message) => message.requestId)),
+        new Set(['concurrent-image-1', 'concurrent-image-2'])
+    );
+    assert.equal(new Set(insertMessages.map((message) => message.markdown)).size, 2);
 });
 
 test('oversized local images are rejected before their contents are read', async () => {

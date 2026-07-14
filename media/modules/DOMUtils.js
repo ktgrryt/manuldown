@@ -151,6 +151,245 @@ export class DOMUtils {
     }
 
     /**
+     * Keep inline formatting while converting contenteditable-only table cell
+     * line containers into literal "<br>" text for Markdown serialization.
+     * @param {HTMLElement} cell
+     */
+    normalizeTableCellForMarkdown(cell) {
+        if (!cell) return;
+
+        const ownerDocument = cell.ownerDocument || document;
+        const hasText = (cell.textContent || '')
+            .replace(/[\u200B\u2060\u00A0]/g, '')
+            .trim() !== '';
+        const hasAtomicContent = !!cell.querySelector('img, input[type="checkbox"]');
+        const hasProblematicStructure =
+            !!cell.querySelector('br') ||
+            Array.from(cell.children || []).some((child) =>
+                child.tagName === 'DIV' || child.tagName === 'P'
+            ) ||
+            !!cell.querySelector('ul, ol');
+
+        if (!hasText && !hasAtomicContent) {
+            const emptyArtifacts = cell.querySelectorAll('br, div, p');
+            emptyArtifacts.forEach(node => node.remove());
+            return;
+        }
+        if (!hasProblematicStructure) return;
+
+        const boundaryTypes = new WeakMap();
+        const boundaryNodes = [];
+        const createBoundary = (type) => {
+            const boundary = ownerDocument.createElement('span');
+            boundaryTypes.set(boundary, type);
+            boundaryNodes.push(boundary);
+            return boundary;
+        };
+        const getElementDepth = (element) => {
+            let depth = 0;
+            let current = element?.parentElement;
+            while (current && current !== cell) {
+                depth++;
+                current = current.parentElement;
+            }
+            return depth;
+        };
+        const unwrapWithBoundaries = (element) => {
+            const parent = element?.parentNode;
+            if (!parent) return;
+
+            parent.insertBefore(createBoundary('structural'), element);
+            while (element.firstChild) {
+                parent.insertBefore(element.firstChild, element);
+            }
+            parent.insertBefore(createBoundary('structural'), element);
+            element.remove();
+        };
+        const collectTokens = (root) => {
+            const tokens = [];
+            const visit = (node) => {
+                Array.from(node?.childNodes || []).forEach((child) => {
+                    if (child.nodeType === 3) { // TEXT_NODE
+                        tokens.push({
+                            kind: 'text',
+                            node: child,
+                            preserveWhitespace: !!child.parentElement?.closest('code, pre'),
+                        });
+                    } else if (child.nodeType === 1) { // ELEMENT_NODE
+                        const boundaryType = boundaryTypes.get(child);
+                        if (boundaryType) {
+                            tokens.push({ kind: 'boundary', node: child, boundaryType });
+                        } else if (child.tagName === 'IMG') {
+                            tokens.push({ kind: 'content', node: child });
+                        } else {
+                            visit(child);
+                        }
+                    }
+                });
+            };
+            visit(root);
+            return tokens;
+        };
+        const hasMeaningfulText = (token) => {
+            const value = token.node.textContent || '';
+            return token.preserveWhitespace ? value !== '' : /[^ \t\f\v]/.test(value);
+        };
+
+        // Preserve task state as ordinary Markdown text before removing list
+        // containers. The surrounding inline nodes remain untouched.
+        const checkboxes = Array.from(cell.querySelectorAll('input[type="checkbox"]'));
+        checkboxes.forEach((checkbox) => {
+            checkbox.replaceWith(ownerDocument.createTextNode(checkbox.checked ? '[x] ' : '[ ] '));
+        });
+
+        // BR is an explicit visual line break and must not be confused with the
+        // structural boundaries introduced while unwrapping DIV/P/LI elements.
+        Array.from(cell.querySelectorAll('br')).forEach((br) => {
+            br.replaceWith(createBoundary('explicit'));
+        });
+
+        const listItems = Array.from(cell.querySelectorAll('li'));
+        listItems.forEach((item) => {
+            item.insertBefore(ownerDocument.createTextNode('- '), item.firstChild);
+        });
+
+        // Process deepest containers first so nested inline formatting and list
+        // content survive when their block wrappers are removed.
+        const lineContainers = [
+            ...Array.from(cell.querySelectorAll('li')),
+            ...Array.from(cell.querySelectorAll('div, p')),
+        ].sort((left, right) => getElementDepth(right) - getElementDepth(left));
+        lineContainers.forEach(unwrapWithBoundaries);
+
+        const listContainers = Array.from(cell.querySelectorAll('ul, ol'))
+            .sort((left, right) => getElementDepth(right) - getElementDepth(left));
+        listContainers.forEach((list) => {
+            const parent = list.parentNode;
+            if (!parent) return;
+            while (list.firstChild) {
+                parent.insertBefore(list.firstChild, list);
+            }
+            list.remove();
+        });
+
+        let tokens = collectTokens(cell);
+        tokens.forEach((token) => {
+            if (token.kind !== 'text') return;
+            const withoutEditorMarkers = (token.node.textContent || '')
+                .replace(/[\u200B\u2060]/g, '');
+            token.node.textContent = token.preserveWhitespace
+                ? withoutEditorMarkers
+                : withoutEditorMarkers
+                    .replace(/\u00A0/g, ' ')
+                    .replace(/[ \t\f\v]+/g, ' ');
+        });
+
+        // Structural boundaries can land in separate text nodes around inline
+        // elements. Normalize them as one logical stream without flattening the
+        // elements that carry formatting.
+        let hasMeaningfulContent = false;
+        let lastBoundary = null;
+        tokens.forEach((token) => {
+            if (token.kind === 'text') {
+                if (hasMeaningfulText(token)) {
+                    hasMeaningfulContent = true;
+                    lastBoundary = null;
+                }
+                return;
+            }
+            if (token.kind === 'content') {
+                hasMeaningfulContent = true;
+                lastBoundary = null;
+                return;
+            }
+
+            if (token.boundaryType === 'structural') {
+                if (!hasMeaningfulContent || lastBoundary) {
+                    token.node.remove();
+                    return;
+                }
+                lastBoundary = token;
+                return;
+            }
+
+            if (lastBoundary?.boundaryType === 'structural') {
+                lastBoundary.node.remove();
+            }
+            lastBoundary = token;
+        });
+
+        // Block wrappers add a trailing structural boundary. Browser placeholder
+        // BRs at the end are trailing boundaries too; neither should be saved as
+        // an extra cell line.
+        tokens = collectTokens(cell);
+        for (let index = tokens.length - 1; index >= 0; index--) {
+            const token = tokens[index];
+            if (token.kind === 'boundary') {
+                token.node.remove();
+                continue;
+            }
+            if (token.kind === 'content') break;
+
+            if (token.preserveWhitespace) {
+                if (hasMeaningfulText(token)) break;
+                continue;
+            }
+            token.node.textContent = (token.node.textContent || '').replace(/[ \t\f\v]+$/, '');
+            if (hasMeaningfulText(token)) break;
+        }
+
+        // Trim horizontal whitespace next to a saved visual boundary while
+        // leaving the inline element tree intact.
+        tokens = collectTokens(cell);
+        let previousTextToken = null;
+        let trimNextText = false;
+        tokens.forEach((token) => {
+            if (token.kind === 'boundary') {
+                if (previousTextToken && !previousTextToken.preserveWhitespace) {
+                    previousTextToken.node.textContent =
+                        (previousTextToken.node.textContent || '')
+                        .replace(/[ \t\f\v]+$/, '');
+                }
+                trimNextText = true;
+                return;
+            }
+            if (token.kind === 'content') {
+                trimNextText = false;
+                return;
+            }
+
+            if (trimNextText) {
+                if (!token.preserveWhitespace) {
+                    token.node.textContent = (token.node.textContent || '')
+                        .replace(/^[ \t\f\v]+/, '');
+                }
+                if (hasMeaningfulText(token)) {
+                    trimNextText = false;
+                }
+            }
+            previousTextToken = token;
+        });
+
+        // The previous implementation trimmed each visual line. Retain that
+        // behavior at the start of the cell without merging inline nodes.
+        tokens = collectTokens(cell);
+        for (const token of tokens) {
+            if (token.kind !== 'text') break;
+            if (!token.preserveWhitespace) {
+                token.node.textContent = (token.node.textContent || '')
+                    .replace(/^[ \t\f\v]+/, '');
+            }
+            if (hasMeaningfulText(token)) break;
+        }
+
+        boundaryNodes.forEach((boundary) => {
+            if (boundary.parentNode) {
+                boundary.replaceWith(ownerDocument.createTextNode('<br>'));
+            }
+        });
+    }
+
+    /**
      * HTMLから不要な要素を除去してクリーンアップ
      * @returns {string} クリーンアップされたHTML
      */
@@ -203,51 +442,7 @@ export class DOMUtils {
         // Preserve visual line breaks as literal "<br>" text inside the Markdown table cell.
         const tableCells = clone.querySelectorAll('td, th');
         tableCells.forEach(cell => {
-            const hasText = (cell.textContent || '').replace(/[\u200B\u2060\u00A0]/g, '').trim() !== '';
-            const hasProblematicStructure =
-                !!cell.querySelector('br') ||
-                !!cell.querySelector(':scope > div, :scope > p') ||
-                !!cell.querySelector('ul, ol');
-
-            if (!hasText) {
-                const emptyArtifacts = cell.querySelectorAll('br, div, p');
-                emptyArtifacts.forEach(node => node.remove());
-                return;
-            }
-
-            if (hasProblematicStructure) {
-                // Convert rendered line boundaries (BR/DIV/P) into line feeds first, then
-                // convert them into literal "<br>" text so Turndown emits
-                // a single Markdown table row with inline breaks (instead of splitting rows).
-                const htmlWithLineFeeds = (cell.innerHTML || '')
-                    .replace(/<br\s*\/?>/gi, '\n')
-                    .replace(/<\/(?:div|p)>/gi, '\n')
-                    .replace(/<(?:div|p)\b[^>]*>/gi, '')
-                    .replace(/<input\b(?=[^>]*\btype\s*=\s*["']?checkbox["']?)[^>]*>/gi, (inputTag) =>
-                        /\bchecked\b/i.test(inputTag) ? '[x] ' : '[ ] '
-                    )
-                    .replace(/<li\b[^>]*>/gi, '\n- ')
-                    .replace(/<\/li>/gi, '')
-                    .replace(/<(?:ul|ol)\b[^>]*>/gi, '')
-                    .replace(/<\/(?:ul|ol)>/gi, '\n');
-                const lineProbe = document.createElement('div');
-                lineProbe.innerHTML = htmlWithLineFeeds;
-
-                const normalizedLines = ((lineProbe.textContent || '') + '')
-                    .replace(/\r\n?/g, '\n')
-                    .replace(/[\u200B\u2060]/g, '')
-                    .replace(/\u00A0/g, ' ')
-                    .split('\n')
-                    .map(line => line.replace(/[ \t\f\v]+/g, ' ').trim());
-
-                // Keep leading empty lines so intentional first-line breaks in a cell survive.
-                while (normalizedLines.length > 0 && normalizedLines[normalizedLines.length - 1] === '') {
-                    normalizedLines.pop();
-                }
-
-                const normalized = normalizedLines.join('<br>');
-                cell.textContent = normalized;
-            }
+            this.normalizeTableCellForMarkdown(cell);
         });
 
         // テーブルラッパーを解除

@@ -9,6 +9,7 @@ import { TableOfContentsManager } from './modules/TableOfContentsManager.js';
 import { ToolbarManager } from './modules/ToolbarManager.js';
 import { TableManager } from './modules/TableManager.js';
 import { SearchManager } from './modules/SearchManager.js';
+import { CompositionUpdateGate } from './modules/CompositionUpdateGate.js';
 
 (function () {
     // @ts-ignore
@@ -42,6 +43,11 @@ import { SearchManager } from './modules/SearchManager.js';
     let suppressImageRemovalSync = false;
     let imageRemovalSyncScheduled = false;
     let editorLoadFailed = false;
+    let syncRequestSequence = 0;
+    let commitPendingTransientEditorUi = () => false;
+    let trustedClipboardPayload = null;
+    let handleHostMessage = () => {};
+    const compositionUpdateGate = new CompositionUpdateGate();
 
     const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
     const TOC_PANEL_DEFAULT_WIDTH = 150;
@@ -55,6 +61,7 @@ import { SearchManager } from './modules/SearchManager.js';
     const INTERNAL_EDITOR_HTML_CLIPBOARD_TYPE = 'application/x-manuldown-editor-html';
     const INTERNAL_EDITOR_HTML_MARKER_START = '<!--manuldown-clipboard-start-->';
     const INTERNAL_EDITOR_HTML_MARKER_END = '<!--manuldown-clipboard-end-->';
+    const TRUSTED_CLIPBOARD_PAYLOAD_MAX_AGE_MS = 5 * 60 * 1000;
     const SOFT_LINE_BREAK_ATTRIBUTE = 'data-mdw-soft-break';
 
     function normalizeTocPanelWidth(value) {
@@ -89,6 +96,13 @@ import { SearchManager } from './modules/SearchManager.js';
     };
     const imageRenderMaxWidthPx = 820;
     let imageResolveRequestSeq = 0;
+    let imageInsertionRequestSeq = 0;
+    const pendingImageInsertionRanges = new Map();
+    const PENDING_IMAGE_INSERTION_MAX_AGE_MS = 5 * 60 * 1000;
+    const MAX_PENDING_IMAGE_INSERTIONS = 64;
+    let imageResizeOverlay = null;
+    let activeResizeImage = null;
+    let imageResizeState = null;
     let overflowStateRaf = null;
     let lastEditorTabSwitchTs = 0;
     let lastEditorTabSwitchDirection = null;
@@ -99,6 +113,83 @@ import { SearchManager } from './modules/SearchManager.js';
     const MAX_IMPORTED_IMAGE_BYTES = 20 * 1024 * 1024;
 
     const NETWORK_BLOCKED_ERROR_MESSAGE = 'External network requests are blocked in ManulDown webview.';
+
+    function isEditorRange(range) {
+        return !!(
+            range &&
+            range.commonAncestorContainer &&
+            editor.contains(range.commonAncestorContainer)
+        );
+    }
+
+    function prunePendingImageInsertionRanges() {
+        const oldestAllowed = Date.now() - PENDING_IMAGE_INSERTION_MAX_AGE_MS;
+        for (const [requestId, pending] of pendingImageInsertionRanges) {
+            if (!pending || pending.createdAt < oldestAllowed || !isEditorRange(pending.range)) {
+                pendingImageInsertionRanges.delete(requestId);
+            }
+        }
+        while (pendingImageInsertionRanges.size >= MAX_PENDING_IMAGE_INSERTIONS) {
+            const oldestRequestId = pendingImageInsertionRanges.keys().next().value;
+            if (!oldestRequestId) break;
+            pendingImageInsertionRanges.delete(oldestRequestId);
+        }
+    }
+
+    function beginImageInsertionRequest() {
+        prunePendingImageInsertionRanges();
+
+        const selection = window.getSelection();
+        let range = null;
+        if (selection && selection.rangeCount > 0) {
+            const selectedRange = selection.getRangeAt(0);
+            if (isEditorRange(selectedRange)) {
+                range = selectedRange.cloneRange();
+            }
+        }
+        if (!range) {
+            range = document.createRange();
+            range.selectNodeContents(editor);
+            range.collapse(false);
+        }
+
+        const requestId = `image-insert-${Date.now()}-${++imageInsertionRequestSeq}`;
+        pendingImageInsertionRanges.set(requestId, {
+            range,
+            createdAt: Date.now()
+        });
+        return requestId;
+    }
+
+    function discardPendingImageInsertion(requestId) {
+        if (typeof requestId !== 'string' || requestId === '') return;
+        pendingImageInsertionRanges.delete(requestId);
+    }
+
+    function takePendingImageInsertion(requestId) {
+        if (typeof requestId !== 'string' || requestId === '') return null;
+        const pending = pendingImageInsertionRanges.get(requestId) || null;
+        pendingImageInsertionRanges.delete(requestId);
+        if (
+            !pending ||
+            Date.now() - pending.createdAt > PENDING_IMAGE_INSERTION_MAX_AGE_MS ||
+            !isEditorRange(pending.range)
+        ) {
+            return null;
+        }
+        return pending;
+    }
+
+    function rangesHaveSameBoundaries(first, second) {
+        return !!(
+            first &&
+            second &&
+            first.startContainer === second.startContainer &&
+            first.startOffset === second.startOffset &&
+            first.endContainer === second.endContainer &&
+            first.endOffset === second.endOffset
+        );
+    }
 
     function tryOverrideGlobalProperty(target, propertyName, replacementValue) {
         if (!target || !propertyName) {
@@ -337,6 +428,31 @@ import { SearchManager } from './modules/SearchManager.js';
         return { kind: 'blocked', original: src };
     }
 
+    function requestImageSrcResolution(image, src) {
+        if (!image || image.tagName !== 'IMG') return;
+        if (!src || typeof src !== 'string') return;
+        const trimmed = src.trim();
+        if (!trimmed) return;
+
+        if (
+            trimmed.startsWith('data:') ||
+            trimmed.startsWith('http://') ||
+            trimmed.startsWith('https://') ||
+            trimmed.includes('vscode-resource') ||
+            trimmed.includes('vscode-webview-resource')
+        ) {
+            return;
+        }
+
+        const requestId = `img-resolve-${Date.now()}-${++imageResolveRequestSeq}`;
+        image.setAttribute('data-image-resolve-id', requestId);
+        vscode.postMessage({
+            type: 'resolveImageSrc',
+            requestId,
+            src: trimmed
+        });
+    }
+
     function applyImageSourcePolicy(image, rawSrc, options = {}) {
         if (!image || image.tagName !== 'IMG') return;
 
@@ -395,6 +511,7 @@ import { SearchManager } from './modules/SearchManager.js';
 
     function sanitizeFragmentForEditor(root, options = {}) {
         const allowLocalImageResolution = options.allowLocalImageResolution !== false;
+        const allowInternalMetadata = options.allowInternalMetadata === true;
         const sanitizeNode = (node) => {
             if (!node) return;
             if (node.nodeType === Node.COMMENT_NODE) {
@@ -470,13 +587,42 @@ import { SearchManager } from './modules/SearchManager.js';
                 }
 
                 if (attrName.startsWith('data-')) {
-                    if (!/^data-(?:md-path|mdw-[a-z0-9-]+|exclude-from-markdown)$/i.test(attrName)) {
+                    if (
+                        !allowInternalMetadata ||
+                        !/^data-(?:md-path|mdw-[a-z0-9-]+|exclude-from-markdown)$/i.test(attrName)
+                    ) {
                         element.removeAttribute(attr.name);
                     }
                     return;
                 }
 
-                if (attrName === 'class' || attrName === 'title' || attrName === 'lang' || attrName === 'dir' || attrName === 'id') {
+                if (attrName === 'class') {
+                    if (!allowInternalMetadata) {
+                        // Clipboard HTML is untrusted even when it carries our
+                        // public marker or custom MIME name. Keep only language
+                        // hints; editor UI classes can otherwise hide or delete
+                        // pasted content during serialization.
+                        const safeClasses = String(attr.value || '')
+                            .split(/\s+/)
+                            .filter((className) => /^language-[a-z0-9_-]+$/i.test(className));
+                        if (safeClasses.length > 0) {
+                            element.setAttribute('class', safeClasses.join(' '));
+                        } else {
+                            element.removeAttribute(attr.name);
+                        }
+                    }
+                    return;
+                }
+
+                if (
+                    allowInternalMetadata &&
+                    attrName === 'contenteditable' &&
+                    String(attr.value).toLowerCase() === 'false'
+                ) {
+                    return;
+                }
+
+                if (attrName === 'title' || attrName === 'lang' || attrName === 'dir' || attrName === 'id') {
                     return;
                 }
 
@@ -675,7 +821,12 @@ import { SearchManager } from './modules/SearchManager.js';
 
     function replaceEditorContentFromHtml(rawHtml) {
         if (!editor) return;
-        const sanitizedContainer = createSanitizedContainerFromHtml(rawHtml);
+        // This HTML was generated by the extension host for the current
+        // document, so its source-preservation and editor metadata is trusted.
+        // Every clipboard path keeps the default (false) policy above.
+        const sanitizedContainer = createSanitizedContainerFromHtml(rawHtml, {
+            allowInternalMetadata: true
+        });
         normalizeLoadedEditorBoundaryWhitespace(sanitizedContainer);
         while (editor.firstChild) {
             editor.removeChild(editor.firstChild);
@@ -730,13 +881,20 @@ import { SearchManager } from './modules/SearchManager.js';
     }
 
     function hideImageResizeOverlaySafely() {
-        if (typeof hideImageResizeOverlay === 'function') {
-            try {
-                hideImageResizeOverlay();
-            } catch (_e) {
-                // noop
-            }
+        try {
+            hideImageResizeOverlay();
+        } catch (_e) {
+            // noop
         }
+    }
+
+    function hideImageResizeOverlay() {
+        if (imageResizeOverlay) {
+            imageResizeOverlay.style.display = 'none';
+        }
+        activeResizeImage = null;
+        imageResizeState = null;
+        document.body.classList.remove('image-resizing');
     }
 
     function isIgnorableEditorTextValue(value) {
@@ -1896,9 +2054,15 @@ import { SearchManager } from './modules/SearchManager.js';
 
     function createMarkdownImageSyntaxFromElement(image) {
         if (!image || image.tagName !== 'IMG') return '';
-        const alt = (image.getAttribute('alt') || '').replace(/]/g, '\\]');
-        const src = image.getAttribute('src') || image.currentSrc || '';
-        return `![${alt}](${src})`;
+        const alt = (image.getAttribute('alt') || '')
+            .replace(/\\/g, '\\\\')
+            .replace(/\[/g, '\\[')
+            .replace(/]/g, '\\]');
+        const src = image.getAttribute('data-md-path') || image.getAttribute('src') || image.currentSrc || '';
+        const target = /[\s()]/.test(src)
+            ? `<${src.replace(/>/g, '%3E')}>`
+            : src.replace(/\)/g, '\\)');
+        return `![${alt}](${target})`;
     }
 
     function selectionContainsImage(selection) {
@@ -2273,7 +2437,37 @@ import { SearchManager } from './modules/SearchManager.js';
             }
         }
 
+        if (payload.html) {
+            const template = document.createElement('template');
+            template.innerHTML = payload.html;
+            const images = Array.from(template.content.querySelectorAll('img')).map((image) => ({
+                alt: image.getAttribute('alt') || '',
+                markdownPath: image.getAttribute('data-md-path') || image.getAttribute('src') || ''
+            }));
+            trustedClipboardPayload = {
+                html: payload.html,
+                plainText,
+                images,
+                createdAt: Date.now()
+            };
+        } else {
+            trustedClipboardPayload = null;
+        }
+
         return plainText;
+    }
+
+    function getTrustedClipboardPayload(html, plainText) {
+        const candidate = trustedClipboardPayload;
+        if (
+            !candidate ||
+            Date.now() - candidate.createdAt > TRUSTED_CLIPBOARD_PAYLOAD_MAX_AGE_MS ||
+            candidate.html !== html ||
+            candidate.plainText !== normalizeClipboardPlainText(plainText || '')
+        ) {
+            return null;
+        }
+        return candidate;
     }
 
     function focusEditorWithoutScroll() {
@@ -5499,12 +5693,33 @@ import { SearchManager } from './modules/SearchManager.js';
         }
     }
 
-    function postUpdate() {
-        const content = domUtils.getCleanedHTML();
+    function createSyncSnapshot(options = {}) {
+        const preservePendingUpdate = options.preservePendingUpdate === true;
+        if (!preservePendingUpdate) {
+            clearNotifyTimeout();
+        }
+
+        // Some controls (currently the link URL popover) keep a draft outside
+        // the contenteditable tree. Commit that draft before serializing so a
+        // save, close, auto-save handshake, or Webview teardown cannot miss it.
+        if (commitPendingTransientEditorUi()) {
+            prepareEditorForNotify();
+            if (preservePendingUpdate && !notifyTimeout) {
+                scheduleUpdate(500);
+            }
+        }
+
+        return {
+            content: domUtils.getCleanedHTML(),
+            revision: localUpdateRevision
+        };
+    }
+
+    function postUpdate(snapshot = createSyncSnapshot()) {
         vscode.postMessage({
             type: 'update',
-            content: content,
-            revision: localUpdateRevision
+            content: snapshot.content,
+            revision: snapshot.revision
         });
     }
 
@@ -5521,21 +5736,38 @@ import { SearchManager } from './modules/SearchManager.js';
     }
 
     function flushPendingUpdate() {
-        if (!notifyTimeout && localUpdateRevision <= acknowledgedUpdateRevision) {
+        const hadScheduledUpdate = !!notifyTimeout;
+        const snapshot = createSyncSnapshot();
+        if (!hadScheduledUpdate && snapshot.revision <= acknowledgedUpdateRevision) {
             return false;
         }
 
-        clearNotifyTimeout();
-        postUpdate();
+        postUpdate(snapshot);
         return true;
     }
 
+    function createSyncRequestId(action) {
+        syncRequestSequence++;
+        return `${action}-${Date.now()}-${syncRequestSequence}`;
+    }
+
     function requestDocumentSave() {
-        clearNotifyTimeout();
+        const snapshot = createSyncSnapshot();
         vscode.postMessage({
             type: 'saveDocument',
-            content: domUtils.getCleanedHTML(),
-            revision: localUpdateRevision
+            requestId: createSyncRequestId('save'),
+            content: snapshot.content,
+            revision: snapshot.revision
+        });
+    }
+
+    function requestEditorClose() {
+        const snapshot = createSyncSnapshot();
+        vscode.postMessage({
+            type: 'closeEditorTab',
+            requestId: createSyncRequestId('close'),
+            content: snapshot.content,
+            revision: snapshot.revision
         });
     }
 
@@ -5565,6 +5797,7 @@ import { SearchManager } from './modules/SearchManager.js';
     // keeping the backing TextDocument current while another tab is active.
     window.addEventListener('pagehide', flushPendingUpdate);
     window.addEventListener('beforeunload', flushPendingUpdate);
+    window.addEventListener('blur', flushPendingUpdate);
     document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'hidden') {
             flushPendingUpdate();
@@ -5603,9 +5836,12 @@ import { SearchManager } from './modules/SearchManager.js';
     }
 
     function notifyChange() {
+        const wasFullySynchronized = localUpdateRevision <= acknowledgedUpdateRevision;
         prepareEditorForNotify();
 
-        scheduleUpdate(500);
+        // The leading update marks the backing TextDocument dirty immediately.
+        // Further edits in the same burst stay coalesced until the host catches up.
+        scheduleUpdate(wasFullySynchronized ? 0 : 500);
     }
 
     function notifyChangeImmediate() {
@@ -10862,6 +11098,30 @@ import { SearchManager } from './modules/SearchManager.js';
         return range;
     }
 
+    function setCaretAfterNode(selection, node) {
+        if (!selection || !node || !node.parentNode) return;
+        const newRange = document.createRange();
+        newRange.setStartAfter(node);
+        newRange.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(newRange);
+    }
+
+    function setCaretToImageRightEdge(selection, image) {
+        if (!selection || !image || image.tagName !== 'IMG' || !editor.contains(image)) {
+            return false;
+        }
+        const range = createAfterImageCaretRange(image, { ensureTextAnchor: true });
+        if (!range) {
+            return false;
+        }
+        selection.removeAllRanges();
+        selection.addRange(range);
+        applyImageCaretEdgeIndicator(image, 'right');
+        syncImageCaretEdgeIndicatorsNow(selection);
+        return true;
+    }
+
     function createBeforeImageCaretRange(image) {
         if (!image || !editor.contains(image)) {
             return null;
@@ -14101,6 +14361,60 @@ import { SearchManager } from './modules/SearchManager.js';
         return true;
     }
 
+    function placeCaretAfterImageRemoval(parentNode, nextSibling, prevSibling) {
+        const selection = window.getSelection();
+        if (!selection || !parentNode) return;
+
+        const range = document.createRange();
+        if (nextSibling && nextSibling.parentNode === parentNode) {
+            if (nextSibling.nodeType === Node.TEXT_NODE) {
+                range.setStart(nextSibling, 0);
+            } else {
+                const firstText = domUtils.getFirstTextNode(nextSibling);
+                if (firstText) {
+                    range.setStart(firstText, 0);
+                } else {
+                    const offset = Array.prototype.indexOf.call(parentNode.childNodes, nextSibling);
+                    range.setStart(parentNode, Math.max(0, offset));
+                }
+            }
+        } else if (prevSibling && prevSibling.parentNode === parentNode) {
+            if (prevSibling.nodeType === Node.TEXT_NODE) {
+                range.setStart(prevSibling, (prevSibling.textContent || '').length);
+            } else {
+                const lastText = domUtils.getLastTextNode(prevSibling);
+                if (lastText) {
+                    range.setStart(lastText, (lastText.textContent || '').length);
+                } else {
+                    const prevOffset = Array.prototype.indexOf.call(parentNode.childNodes, prevSibling);
+                    range.setStart(parentNode, Math.max(0, prevOffset + 1));
+                }
+            }
+        } else if (parentNode === editor) {
+            const paragraph = document.createElement('p');
+            paragraph.appendChild(document.createElement('br'));
+            editor.appendChild(paragraph);
+            range.setStart(paragraph, 0);
+        } else if (parentNode.nodeType === Node.ELEMENT_NODE) {
+            const parentElement = parentNode;
+            if (isEffectivelyEmptyBlock(parentElement) && parentElement.tagName === 'P') {
+                if (!parentElement.querySelector('br')) {
+                    parentElement.appendChild(document.createElement('br'));
+                }
+                range.setStart(parentElement, 0);
+            } else {
+                range.selectNodeContents(parentElement);
+                range.collapse(false);
+            }
+        } else {
+            return;
+        }
+
+        range.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(range);
+    }
+
     function buildCtrlKKillRange(selection, range) {
         if (!selection || !range) return null;
         if (!range.collapsed) {
@@ -16269,7 +16583,7 @@ import { SearchManager } from './modules/SearchManager.js';
         document.addEventListener('keydown', handleMacEditorTabSwitchShortcut, true);
 
         const handleEditorCloseShortcut = (e) => {
-            if (!e || e.defaultPrevented || e.isComposing || isComposing) {
+            if (!e || e.defaultPrevented) {
                 return;
             }
 
@@ -16290,14 +16604,19 @@ import { SearchManager } from './modules/SearchManager.js';
             e.preventDefault();
             e.stopPropagation();
 
+            // Do not let the workbench close the Webview while Chromium still
+            // owns an IME composition range. The user can close after committing
+            // or cancelling the composition.
+            if (e.isComposing || isComposing) {
+                return;
+            }
+
             if (isDuplicate) {
                 return;
             }
 
             lastEditorCloseShortcutTs = now;
-            vscode.postMessage({
-                type: 'closeEditorTab'
-            });
+            requestEditorClose();
         };
         document.addEventListener('keydown', handleEditorCloseShortcut, true);
 
@@ -16499,6 +16818,7 @@ import { SearchManager } from './modules/SearchManager.js';
 
         // IME composition
         editor.addEventListener('compositionstart', (e) => {
+            compositionUpdateGate.begin();
             isComposing = true;
             lastCompositionEndTs = 0;
             tableManager.handleEdgeCompositionStart();
@@ -16508,23 +16828,46 @@ import { SearchManager } from './modules/SearchManager.js';
         editor.addEventListener('compositionend', (e) => {
             isComposing = false;
             lastCompositionEndTs = Date.now();
-            if (tableManager.handleEdgeCompositionEnd()) {
+            const tableEdgeCompositionBlocked = tableManager.handleEdgeCompositionEnd();
+            const finalizationToken = compositionUpdateGate.end({
+                localChange: !tableEdgeCompositionBlocked
+            });
+            const finalizeComposition = () => {
+                const finalize = () => {
+                    if (!compositionUpdateGate.isCurrentFinalization(finalizationToken)) {
+                        return;
+                    }
+                    if (isUpdating) {
+                        setTimeout(finalize, 0);
+                        return;
+                    }
+                    if (compositionUpdateGate.shouldCommitLocalChange(finalizationToken)) {
+                        stripEditorControlCharacters(editor);
+                        stateManager.saveStateDebounced();
+                        const converted = markdownConverter.convertMarkdownSyntax(notifyChange);
+                        if (!converted) {
+                            notifyChange();
+                        }
+                        editor.focus();
+                    }
+
+                    // Advance the local revision before replaying the external
+                    // update. The normal update handler will now surface a real
+                    // conflict instead of replacing the browser-owned IME range.
+                    const pendingExternalMessage = compositionUpdateGate.finish(finalizationToken);
+                    if (pendingExternalMessage) {
+                        handleHostMessage(pendingExternalMessage);
+                    }
+                };
+                setTimeout(finalize, 0);
+            };
+            if (tableEdgeCompositionBlocked) {
+                // Table-edge composition is blocked and creates no local edit,
+                // but a deferred external update still needs to be released.
+                finalizeComposition();
                 return;
             }
-            if (!isUpdating) {
-                setTimeout(() => {
-                    // Do not touch the DOM if a new composition started before this
-                    // deferred cleanup got a chance to run.
-                    if (isComposing || isUpdating) return;
-                    stripEditorControlCharacters(editor);
-                    stateManager.saveStateDebounced();
-                    const converted = markdownConverter.convertMarkdownSyntax(notifyChange);
-                    if (!converted) {
-                        notifyChange();
-                    }
-                    editor.focus();
-                }, 0);
-            }
+            finalizeComposition();
         });
 
         editor.addEventListener('beforeinput', (e) => {
@@ -17220,10 +17563,12 @@ import { SearchManager } from './modules/SearchManager.js';
                 return;
             }
 
+            const requestId = beginImageInsertionRequest();
             const reader = new FileReader();
             reader.onload = (event) => {
                 const dataUrl = event && event.target ? event.target.result : null;
                 if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:')) {
+                    discardPendingImageInsertion(requestId);
                     return;
                 }
 
@@ -17237,10 +17582,13 @@ import { SearchManager } from './modules/SearchManager.js';
 
                 vscode.postMessage({
                     type: 'saveImage',
+                    requestId,
                     dataUrl: dataUrl,
                     mimeType: mimeType || 'image/png'
                 });
             };
+            reader.onerror = () => discardPendingImageInsertion(requestId);
+            reader.onabort = () => discardPendingImageInsertion(requestId);
 
             reader.readAsDataURL(file);
         };
@@ -17259,31 +17607,6 @@ import { SearchManager } from './modules/SearchManager.js';
             const codeElement = domUtils.getParentElement(container, 'CODE');
             const preElement = codeElement ? domUtils.getParentElement(codeElement, 'PRE') : null;
             return !!(codeElement && preElement);
-        };
-
-        const requestImageSrcResolution = (image, src) => {
-            if (!image || image.tagName !== 'IMG') return;
-            if (!src || typeof src !== 'string') return;
-            const trimmed = src.trim();
-            if (!trimmed) return;
-
-            if (
-                trimmed.startsWith('data:') ||
-                trimmed.startsWith('http://') ||
-                trimmed.startsWith('https://') ||
-                trimmed.includes('vscode-resource') ||
-                trimmed.includes('vscode-webview-resource')
-            ) {
-                return;
-            }
-
-            const requestId = `img-resolve-${Date.now()}-${++imageResolveRequestSeq}`;
-            image.setAttribute('data-image-resolve-id', requestId);
-            vscode.postMessage({
-                type: 'resolveImageSrc',
-                requestId,
-                src: trimmed
-            });
         };
 
         const findMarkdownClosingBracket = (source, startIndex) => {
@@ -17311,10 +17634,17 @@ import { SearchManager } from './modules/SearchManager.js';
 
         const findMarkdownClosingParen = (source, startIndex) => {
             let nestedDepth = 0;
+            let inAngleDestination = source[startIndex] === '<';
             for (let i = startIndex; i < source.length; i++) {
                 const current = source[i];
                 if (current === '\\') {
                     i++;
+                    continue;
+                }
+                if (inAngleDestination) {
+                    if (current === '>') {
+                        inAngleDestination = false;
+                    }
                     continue;
                 }
                 if (current === '(') {
@@ -17332,10 +17662,11 @@ import { SearchManager } from './modules/SearchManager.js';
             return -1;
         };
 
-        const createImageElementFromMarkdown = (rawAlt, rawTarget) => {
+        const createImageElementFromMarkdown = (rawAlt, rawTarget, options = {}) => {
             const alt = (rawAlt || '')
                 .replace(/\\\]/g, ']')
-                .replace(/\\\[/g, '[');
+                .replace(/\\\[/g, '[')
+                .replace(/\\\\/g, '\\');
             const target = (rawTarget || '').trim();
             if (!target) return null;
 
@@ -17354,9 +17685,47 @@ import { SearchManager } from './modules/SearchManager.js';
             const image = document.createElement('img');
             image.alt = alt;
             image.setAttribute('data-md-path', src);
-            applyImageSourcePolicy(image, src, { markdownPath: src });
+            if (options.applySourcePolicy !== false) {
+                applyImageSourcePolicy(image, src, { markdownPath: src });
+            }
             applyImageRenderSizeFromAlt(image);
             return image;
+        };
+
+        const restoreInternalClipboardImagePaths = (
+            container,
+            trustedImages,
+            requireTrustedPaths
+        ) => {
+            if (!container) return false;
+            const images = Array.from(container.querySelectorAll('img'));
+            if (images.length === 0) return true;
+            if (!requireTrustedPaths) {
+                return true;
+            }
+            if (!Array.isArray(trustedImages) || trustedImages.length !== images.length) {
+                return false;
+            }
+            for (let index = 0; index < images.length; index++) {
+                const image = images[index];
+                const descriptor = trustedImages[index];
+                if (
+                    !descriptor.markdownPath ||
+                    (image.getAttribute('alt') || '') !== descriptor.alt
+                ) {
+                    return false;
+                }
+            }
+            images.forEach((image, index) => {
+                const descriptor = trustedImages[index];
+                image.setAttribute('data-md-path', descriptor.markdownPath);
+                applyImageSourcePolicy(
+                    image,
+                    descriptor.markdownPath,
+                    { markdownPath: descriptor.markdownPath }
+                );
+            });
+            return true;
         };
 
         const createLinkElementFromMarkdown = (rawText, rawTarget) => {
@@ -17388,8 +17757,12 @@ import { SearchManager } from './modules/SearchManager.js';
             return link;
         };
 
-        const appendInlineMarkdownText = (parentNode, text) => {
+        const appendInlineMarkdownText = (parentNode, text, options = {}) => {
             const source = typeof text === 'string' ? text : '';
+            const allowImages = options.allowImages !== false;
+            const onDeferredImage = typeof options.onDeferredImage === 'function'
+                ? options.onDeferredImage
+                : null;
             if (source === '') {
                 parentNode.appendChild(document.createTextNode(''));
                 return false;
@@ -17425,13 +17798,25 @@ import { SearchManager } from './modules/SearchManager.js';
                         if (hasClosing(closeParen)) {
                             const rawAlt = source.slice(cursor + 2, altEnd);
                             const rawTarget = source.slice(altEnd + 2, closeParen);
-                            const image = createImageElementFromMarkdown(rawAlt, rawTarget);
+                            const image = createImageElementFromMarkdown(
+                                rawAlt,
+                                rawTarget,
+                                { applySourcePolicy: allowImages }
+                            );
                             if (image) {
-                                flushText(cursor);
-                                parentNode.appendChild(image);
-                                converted = true;
+                                if (allowImages) {
+                                    flushText(cursor);
+                                    parentNode.appendChild(image);
+                                    converted = true;
+                                    textStart = closeParen + 1;
+                                } else if (onDeferredImage) {
+                                    // Rich clipboard HTML is not allowed to resolve
+                                    // image paths. Let the plain-text paste path parse
+                                    // this Markdown only after the rich payload is
+                                    // rejected below.
+                                    onDeferredImage();
+                                }
                                 cursor = closeParen + 1;
-                                textStart = cursor;
                                 matched = true;
                             }
                         }
@@ -17550,15 +17935,6 @@ import { SearchManager } from './modules/SearchManager.js';
                 parentNode.appendChild(document.createTextNode(source));
             }
             return converted;
-        };
-
-        const setCaretAfterNode = (selection, node) => {
-            if (!selection || !node || !node.parentNode) return;
-            const newRange = document.createRange();
-            newRange.setStartAfter(node);
-            newRange.collapse(true);
-            selection.removeAllRanges();
-            selection.addRange(newRange);
         };
 
         const hasVisibleLinkText = (text) => {
@@ -17740,21 +18116,6 @@ import { SearchManager } from './modules/SearchManager.js';
             return replaceListItemDirectContentWithLink(listItem, link, selection);
         };
 
-        const setCaretToImageRightEdge = (selection, image) => {
-            if (!selection || !image || image.tagName !== 'IMG' || !editor.contains(image)) {
-                return false;
-            }
-            const range = createAfterImageCaretRange(image, { ensureTextAnchor: true });
-            if (!range) {
-                return false;
-            }
-            selection.removeAllRanges();
-            selection.addRange(range);
-            applyImageCaretEdgeIndicator(image, 'right');
-            syncImageCaretEdgeIndicatorsNow(selection);
-            return true;
-        };
-
         const insertPlainTextPreservingLineBreaks = (text, options = {}) => {
             const selection = window.getSelection();
             if (!selection || !selection.rangeCount) return false;
@@ -17824,8 +18185,21 @@ import { SearchManager } from './modules/SearchManager.js';
             selection.addRange(range);
         };
 
-        const tryInsertInternalHtmlFromClipboard = (rawHtml) => {
+        const tryInsertInternalHtmlFromClipboard = (
+            rawHtml,
+            trustedImages = null,
+            requireTrustedImagePaths = false
+        ) => {
             if (typeof rawHtml !== 'string' || rawHtml.trim() === '') {
+                return false;
+            }
+            if (
+                requireTrustedImagePaths &&
+                !Array.isArray(trustedImages) &&
+                /<img\b/i.test(rawHtml)
+            ) {
+                // Reject forged internal image HTML before sanitization can apply
+                // a source policy or initiate any image request.
                 return false;
             }
 
@@ -17840,9 +18214,17 @@ import { SearchManager } from './modules/SearchManager.js';
                 allowLocalImageResolution: false
             });
             container.querySelectorAll('[data-exclude-from-markdown="true"]').forEach((node) => node.remove());
+            if (!restoreInternalClipboardImagePaths(
+                container,
+                trustedImages,
+                requireTrustedImagePaths
+            )) {
+                return false;
+            }
 
             const convertInlineMarkdownTextNodesInContainer = (rootNode) => {
-                if (!rootNode) return;
+                if (!rootNode) return false;
+                let containsDeferredImage = false;
 
                 const walker = document.createTreeWalker(
                     rootNode,
@@ -17875,10 +18257,20 @@ import { SearchManager } from './modules/SearchManager.js';
                 textNodes.forEach((textNode) => {
                     if (!textNode || !textNode.parentNode) return;
                     const fragment = document.createDocumentFragment();
-                    const converted = appendInlineMarkdownText(fragment, textNode.textContent || '');
+                    const converted = appendInlineMarkdownText(
+                        fragment,
+                        textNode.textContent || '',
+                        {
+                            allowImages: false,
+                            onDeferredImage: () => {
+                                containsDeferredImage = true;
+                            }
+                        }
+                    );
                     if (!converted) return;
                     textNode.parentNode.replaceChild(fragment, textNode);
                 });
+                return containsDeferredImage;
             };
 
             const autoLinkUrlTextNodesInContainer = (rootNode) => {
@@ -17934,7 +18326,24 @@ import { SearchManager } from './modules/SearchManager.js';
                 });
             };
 
-            convertInlineMarkdownTextNodesInContainer(container);
+            const containsDeferredMarkdownImage = convertInlineMarkdownTextNodesInContainer(container);
+            if (containsDeferredMarkdownImage) {
+                // Fall back to the clipboard's plain-text representation. This
+                // prevents both forged internal MIME and external rich HTML from
+                // resolving a local Markdown image path during rich conversion.
+                return false;
+            }
+            // Inline Markdown conversion can create new <img> elements after the
+            // initial clipboard-image check. Revalidate the final image set so an
+            // untrusted internal MIME payload cannot smuggle a local path through
+            // text such as `![alt](../secret.png)`.
+            if (!restoreInternalClipboardImagePaths(
+                container,
+                trustedImages,
+                requireTrustedImagePaths
+            )) {
+                return false;
+            }
             autoLinkUrlTextNodesInContainer(container);
             const nodes = Array.from(container.childNodes || []);
             if (nodes.length === 0) {
@@ -17990,8 +18399,21 @@ import { SearchManager } from './modules/SearchManager.js';
             return true;
         };
 
-        const extractSingleImageFromClipboardHtml = (rawHtml) => {
+        const extractSingleImageFromClipboardHtml = (
+            rawHtml,
+            trustedImages = null,
+            requireTrustedImagePaths = false
+        ) => {
             if (typeof rawHtml !== 'string' || rawHtml.trim() === '') {
+                return null;
+            }
+            if (
+                requireTrustedImagePaths &&
+                !Array.isArray(trustedImages) &&
+                /<img\b/i.test(rawHtml)
+            ) {
+                // Keep forged internal image HTML away from the sanitizer here
+                // as well: sanitizing an allowed remote src can start a request.
                 return null;
             }
 
@@ -17999,6 +18421,13 @@ import { SearchManager } from './modules/SearchManager.js';
                 allowLocalImageResolution: false
             });
             container.querySelectorAll('[data-exclude-from-markdown="true"]').forEach((node) => node.remove());
+            if (!restoreInternalClipboardImagePaths(
+                container,
+                trustedImages,
+                requireTrustedImagePaths
+            )) {
+                return null;
+            }
 
             const disallowed = container.querySelector([
                 'table', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td',
@@ -19263,6 +19692,10 @@ import { SearchManager } from './modules/SearchManager.js';
                 const internalPastedText = clipboardData.getData(INTERNAL_EDITOR_PLAIN_TEXT_CLIPBOARD_TYPE);
                 const externalPastedText = normalizeExternalClipboardPlainText(clipboardData.getData('text/plain'));
                 const pastedText = internalPastedText || externalPastedText;
+                const trustedInternalPayload = internalPastedHtml
+                    ? getTrustedClipboardPayload(internalPastedHtml, pastedText)
+                    : null;
+                const trustedInternalImages = trustedInternalPayload?.images || null;
                 const directLinkTarget = resolveDirectLinkTarget(pastedText);
                 const hasListLikeText = !!(pastedText && pastedTextLooksLikeList(pastedText));
 
@@ -19281,19 +19714,25 @@ import { SearchManager } from './modules/SearchManager.js';
                 if (
                     selection &&
                     richPastedHtml &&
+                    !trustedInternalPayload &&
                     !(
                         hasListLikeText &&
                         internalHtmlIsListlessPlainText(richPastedHtml)
                     )
                 ) {
-                    const copiedImage = extractSingleImageFromClipboardHtml(richPastedHtml);
+                    const copiedImage = extractSingleImageFromClipboardHtml(
+                        richPastedHtml,
+                        trustedInternalImages,
+                        !!internalPastedHtml
+                    );
                     if (copiedImage) {
                         e.preventDefault();
                         vscode.postMessage({
                             type: 'saveImageFromUri',
+                            requestId: beginImageInsertionRequest(),
                             uri: copiedImage.src,
                             altText: copiedImage.altText,
-                            source: internalPastedHtml ? 'internal' : 'paste'
+                            source: trustedInternalPayload ? 'internal' : 'paste'
                         });
                         return;
                     }
@@ -19306,7 +19745,11 @@ import { SearchManager } from './modules/SearchManager.js';
                         hasListLikeText &&
                         internalHtmlIsListlessPlainText(richPastedHtml)
                     ) &&
-                    tryInsertInternalHtmlFromClipboard(richPastedHtml)
+                    tryInsertInternalHtmlFromClipboard(
+                        richPastedHtml,
+                        trustedInternalImages,
+                        !!internalPastedHtml
+                    )
                 ) {
                     e.preventDefault();
                     return;
@@ -19437,14 +19880,11 @@ import { SearchManager } from './modules/SearchManager.js';
             const payload = createClipboardPayloadFromSelection(selection);
             if (!payload) return;
 
-            const selectedImageOnly = !!getSelectedImageNodeFromRange(anchorRange);
             const payloadPlainText = normalizeClipboardPlainText(payload.text || '');
             const fallbackText = normalizeClipboardPlainText(selection.toString());
             const hasImage = selectionContainsImage(selection);
             const hasListStructure = selectionContainsListStructure(selection);
-            const plainText = selectedImageOnly
-                ? ''
-                : (payloadPlainText || fallbackText);
+            const plainText = payloadPlainText || fallbackText;
             const isMultiLineSelection = plainText.includes('\n');
             const hasBlockStructure = typeof payload.html === 'string' &&
                 /<\/(?:p|div|blockquote|pre|h[1-6]|li|ul|ol|table)>\s*</i.test(payload.html);
@@ -19468,7 +19908,7 @@ import { SearchManager } from './modules/SearchManager.js';
             const selectedRange = selection.getRangeAt(0);
             const selectedImageOnly = !!getSelectedImageNodeFromRange(selectedRange);
             const fallbackText = selectedImageOnly ? '' : selection.toString();
-            const plainText = selectedImageOnly ? '' : (payload.text || selection.toString());
+            const plainText = payload.text || selection.toString();
 
             e.preventDefault();
             writeClipboardPayload(e.clipboardData, payload, fallbackText, plainText);
@@ -19986,6 +20426,7 @@ import { SearchManager } from './modules/SearchManager.js';
 
             vscode.postMessage({
                 type: 'saveImageFromUri',
+                requestId: beginImageInsertionRequest(),
                 uri: imageUri,
                 source: 'drop'
             });
@@ -19997,11 +20438,8 @@ import { SearchManager } from './modules/SearchManager.js';
         let linkInputUndoStack = [];
         let linkInputRedoStack = [];
         let linkInputSavedValue = '';
+        let linkInputBaselineValue = '';
         let linkInputDebounceTimer = null;
-        let imageResizeOverlay = null;
-        let activeResizeImage = null;
-        let imageResizeState = null;
-
         function createLinkPopover() {
             const popover = document.createElement('div');
             popover.className = 'link-popover';
@@ -20023,6 +20461,10 @@ import { SearchManager } from './modules/SearchManager.js';
                     linkInputDebounceTimer = null;
                 }, 500);
                 syncLinkPopoverOpenButtonState(input.value);
+                // Mirror each safe draft into the editor model immediately. This
+                // makes the backing TextDocument dirty even when the next action
+                // is clicking the workbench tab close button outside the Webview.
+                syncLinkDraftToEditor();
             });
             document.body.appendChild(popover);
             return popover;
@@ -20050,6 +20492,7 @@ import { SearchManager } from './modules/SearchManager.js';
             linkInputUndoStack = [];
             linkInputRedoStack = [];
             linkInputSavedValue = input.value;
+            linkInputBaselineValue = input.value;
             clearTimeout(linkInputDebounceTimer);
             linkInputDebounceTimer = null;
 
@@ -20078,8 +20521,40 @@ import { SearchManager } from './modules/SearchManager.js';
             return /^(?:https?:\/\/|mailto:)/i.test(safeUrl) || !hasExplicitScheme(safeUrl);
         }
 
-        function saveLinkUrlIfChanged() {
-            if (currentLink && linkPopover) {
+        function restoreLinkHrefToBaseline() {
+            if (!currentLink || !currentLink.isConnected || !editor.contains(currentLink)) {
+                return false;
+            }
+            const currentUrl = currentLink.getAttribute('href') || '';
+            if (currentUrl === linkInputBaselineValue) {
+                return false;
+            }
+            if (linkInputBaselineValue) {
+                currentLink.setAttribute('href', linkInputBaselineValue);
+            } else {
+                currentLink.removeAttribute('href');
+            }
+            stateManager.saveStateDebounced();
+            notifyChange();
+            return true;
+        }
+
+        function syncLinkDraftToEditor() {
+            if (!linkPopover) return false;
+            const input = linkPopover.querySelector('.link-popover-input');
+            if (!input || !isOpenableLinkUrl(input.value.trim())) {
+                // A blocked explicit scheme is often preceded by a sequence that
+                // looked like a relative URL (for example "javascript"). Never
+                // leave that partial prefix as the saved href.
+                return restoreLinkHrefToBaseline();
+            }
+            return saveLinkUrlIfChanged({ revertInvalid: false });
+        }
+
+        function saveLinkUrlIfChanged(options = {}) {
+            const notify = options.notify !== false;
+            const revertInvalid = options.revertInvalid !== false;
+            if (currentLink && currentLink.isConnected && editor.contains(currentLink) && linkPopover) {
                 const input = linkPopover.querySelector('.link-popover-input');
                 const newUrl = input.value.trim();
                 const oldUrl = currentLink.getAttribute('href') || '';
@@ -20087,16 +20562,30 @@ import { SearchManager } from './modules/SearchManager.js';
                     if (!isOpenableLinkUrl(newUrl)) {
                         // Opening file:// links is opt-in because they can launch local files,
                         // applications, or network shares.
-                        input.value = oldUrl;
-                        syncLinkPopoverOpenButtonState(input.value);
-                        return;
+                        if (revertInvalid) {
+                            input.value = oldUrl;
+                            syncLinkPopoverOpenButtonState(input.value);
+                        }
+                        return false;
                     }
                     currentLink.setAttribute('href', newUrl);
                     stateManager.saveStateDebounced();
-                    notifyChange();
+                    if (notify) {
+                        notifyChange();
+                    }
+                    return true;
                 }
             }
+            return false;
         }
+
+        // Sync snapshots call this in commit-only mode. If it changes the DOM,
+        // createSyncSnapshot advances the revision exactly once and serializes it
+        // directly instead of scheduling a redundant trailing update.
+        commitPendingTransientEditorUi = () => saveLinkUrlIfChanged({
+            notify: false,
+            revertInvalid: false
+        });
 
         function hideLinkPopover(skipSave = false) {
             if (!skipSave) {
@@ -20190,69 +20679,6 @@ import { SearchManager } from './modules/SearchManager.js';
             imageResizeOverlay.style.left = `${rect.left + window.scrollX}px`;
             imageResizeOverlay.style.width = `${rect.width}px`;
             imageResizeOverlay.style.height = `${rect.height}px`;
-        }
-
-        function hideImageResizeOverlay() {
-            if (imageResizeOverlay) {
-                imageResizeOverlay.style.display = 'none';
-            }
-            activeResizeImage = null;
-            imageResizeState = null;
-            document.body.classList.remove('image-resizing');
-        }
-
-        function placeCaretAfterImageRemoval(parentNode, nextSibling, prevSibling) {
-            const selection = window.getSelection();
-            if (!selection || !parentNode) return;
-
-            const range = document.createRange();
-            if (nextSibling && nextSibling.parentNode === parentNode) {
-                if (nextSibling.nodeType === Node.TEXT_NODE) {
-                    range.setStart(nextSibling, 0);
-                } else {
-                    const firstText = domUtils.getFirstTextNode(nextSibling);
-                    if (firstText) {
-                        range.setStart(firstText, 0);
-                    } else {
-                        const offset = Array.prototype.indexOf.call(parentNode.childNodes, nextSibling);
-                        range.setStart(parentNode, Math.max(0, offset));
-                    }
-                }
-            } else if (prevSibling && prevSibling.parentNode === parentNode) {
-                if (prevSibling.nodeType === Node.TEXT_NODE) {
-                    range.setStart(prevSibling, (prevSibling.textContent || '').length);
-                } else {
-                    const lastText = domUtils.getLastTextNode(prevSibling);
-                    if (lastText) {
-                        range.setStart(lastText, (lastText.textContent || '').length);
-                    } else {
-                        const prevOffset = Array.prototype.indexOf.call(parentNode.childNodes, prevSibling);
-                        range.setStart(parentNode, Math.max(0, prevOffset + 1));
-                    }
-                }
-            } else if (parentNode === editor) {
-                const paragraph = document.createElement('p');
-                paragraph.appendChild(document.createElement('br'));
-                editor.appendChild(paragraph);
-                range.setStart(paragraph, 0);
-            } else if (parentNode.nodeType === Node.ELEMENT_NODE) {
-                const parentElement = parentNode;
-                if (isEffectivelyEmptyBlock(parentElement) && parentElement.tagName === 'P') {
-                    if (!parentElement.querySelector('br')) {
-                        parentElement.appendChild(document.createElement('br'));
-                    }
-                    range.setStart(parentElement, 0);
-                } else {
-                    range.selectNodeContents(parentElement);
-                    range.collapse(false);
-                }
-            } else {
-                return;
-            }
-
-            range.collapse(true);
-            selection.removeAllRanges();
-            selection.addRange(range);
         }
 
         function deleteActiveResizeImage() {
@@ -20743,6 +21169,7 @@ import { SearchManager } from './modules/SearchManager.js';
                             linkInputSavedValue = linkInputUndoStack.pop();
                             input.value = linkInputSavedValue;
                             syncLinkPopoverOpenButtonState(input.value);
+                            syncLinkDraftToEditor();
                         }
                     }
                 } else if ((e.metaKey || e.ctrlKey) && (e.key === 'Z' || (e.key === 'z' && e.shiftKey)) && !e.altKey) {
@@ -20761,6 +21188,7 @@ import { SearchManager } from './modules/SearchManager.js';
                             linkInputSavedValue = linkInputRedoStack.pop();
                             input.value = linkInputSavedValue;
                             syncLinkPopoverOpenButtonState(input.value);
+                            syncLinkDraftToEditor();
                         }
                     }
                 }
@@ -20938,8 +21366,14 @@ import { SearchManager } from './modules/SearchManager.js';
     }
 
     // VSCodeからのメッセージ処理
-    window.addEventListener('message', event => {
-        const message = event.data;
+    handleHostMessage = (message) => {
+        if (!message || typeof message !== 'object') {
+            return;
+        }
+
+        if (compositionUpdateGate.defer(message)) {
+            return;
+        }
 
         if (
             editorLoadFailed &&
@@ -21104,21 +21538,42 @@ import { SearchManager } from './modules/SearchManager.js';
                 break;
             case 'insertImage':
                 {
+                    const requestId = typeof message.requestId === 'string'
+                        ? message.requestId
+                        : '';
+                    const pendingInsertion = requestId
+                        ? takePendingImageInsertion(requestId)
+                        : null;
+                    // A request-scoped insertion must never fall through to the
+                    // user's current caret if its original live Range was lost.
+                    if (requestId && !pendingInsertion) {
+                        break;
+                    }
+
                     const selection = window.getSelection();
-                    let range = null;
+                    let currentSelectionRange = null;
                     if (selection && selection.rangeCount > 0) {
                         const candidateRange = selection.getRangeAt(0);
-                        if (editor.contains(candidateRange.commonAncestorContainer)) {
-                            range = candidateRange;
+                        if (isEditorRange(candidateRange)) {
+                            currentSelectionRange = candidateRange;
                         }
                     }
+
+                    let range = pendingInsertion
+                        ? pendingInsertion.range
+                        : currentSelectionRange;
+                    const shouldMoveSelection = !pendingInsertion || rangesHaveSameBoundaries(
+                        currentSelectionRange,
+                        pendingInsertion.range
+                    );
+                    const insertionSelection = shouldMoveSelection ? selection : null;
 
                     if (!range) {
                         const fallbackRange = document.createRange();
                         fallbackRange.selectNodeContents(editor);
                         fallbackRange.collapse(false);
                         range = fallbackRange;
-                        if (selection) {
+                        if (insertionSelection) {
                             selection.removeAllRanges();
                             selection.addRange(fallbackRange);
                         }
@@ -21146,7 +21601,7 @@ import { SearchManager } from './modules/SearchManager.js';
                     applyImageRenderSizeFromAlt(img);
 
                     const isCollapsedTextCaret = (() => {
-                        if (!selection || !selection.isCollapsed) return false;
+                        if (!range.collapsed) return false;
                         const container = range.startContainer;
                         if (container.nodeType === Node.TEXT_NODE) {
                             return true;
@@ -21192,8 +21647,8 @@ import { SearchManager } from './modules/SearchManager.js';
                             }
 
                             getImageRightCaretTextAnchor(img, { create: true });
-                            if (selection) {
-                                setCaretAfterNode(selection, imageParagraph);
+                            if (insertionSelection) {
+                                setCaretAfterNode(insertionSelection, imageParagraph);
                             }
 
                             notifyChangeImmediate();
@@ -21214,23 +21669,42 @@ import { SearchManager } from './modules/SearchManager.js';
                         insertedImageBlock = img.parentElement;
                     }
 
-                    if (selection) {
+                    if (insertionSelection) {
                         const shouldPlaceCaretAfterBlock =
                             insertedImageBlock &&
                             insertedImageBlock !== editor &&
                             isImageOnlyBlockElement(insertedImageBlock);
                         if (shouldPlaceCaretAfterBlock) {
-                            setCaretAfterNode(selection, insertedImageBlock);
-                        } else if (!setCaretToImageRightEdge(selection, img)) {
-                            setCaretAfterNode(selection, img);
+                            setCaretAfterNode(insertionSelection, insertedImageBlock);
+                        } else if (!setCaretToImageRightEdge(insertionSelection, img)) {
+                            setCaretAfterNode(insertionSelection, img);
                         }
                     }
 
                     notifyChangeImmediate();
                 }
                 break;
+            case 'imageInsertFailed':
+                discardPendingImageInsertion(
+                    typeof message.requestId === 'string' ? message.requestId : ''
+                );
+                break;
             case 'requestSync':
                 notifyChangeImmediate();
+                break;
+            case 'prepareSyncSnapshot':
+                {
+                    // A will-save handshake must not cancel the normal update
+                    // retry path in case the host cannot use this snapshot.
+                    const snapshot = createSyncSnapshot({ preservePendingUpdate: true });
+                    vscode.postMessage({
+                        type: 'syncSnapshot',
+                        requestId: typeof message.requestId === 'string' ? message.requestId : '',
+                        reason: typeof message.reason === 'string' ? message.reason : '',
+                        content: snapshot.content,
+                        revision: snapshot.revision
+                    });
+                }
                 break;
             case 'retryPendingUpdate':
                 if (localUpdateRevision > acknowledgedUpdateRevision) {
@@ -21275,6 +21749,10 @@ import { SearchManager } from './modules/SearchManager.js';
                 }
                 break;
         }
+    };
+
+    window.addEventListener('message', event => {
+        handleHostMessage(event.data);
     });
 
     // DOM準備完了時に初期化

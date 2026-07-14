@@ -563,6 +563,9 @@ export class CodeBlockManager {
         if (!pre || pre.tagName !== 'PRE') {
             return false;
         }
+        if (pre.classList?.contains('mdw-opaque-source')) {
+            return false;
+        }
 
         const codeBlock = pre.querySelector('code');
         if (!codeBlock) {
@@ -905,6 +908,9 @@ export class CodeBlockManager {
         
         codeBlocks.forEach((block) => {
             const pre = block.parentElement;
+            if (pre?.classList?.contains('mdw-opaque-source')) {
+                return;
+            }
             
             // クラスから言語名を抽出
             const match = block.className.match(/language-(\w+)/);

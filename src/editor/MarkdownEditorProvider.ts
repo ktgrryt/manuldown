@@ -39,12 +39,15 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     private static readonly customSlashCommandCacheTtlMs = 2000;
     private static readonly maxImportedImageBytes = 20 * 1024 * 1024;
     private static readonly remoteImageTimeoutMs = 15_000;
+    private static readonly maxInternalHeadingMarkerLength = 1024;
+    private static readonly maxInternalListIndent = 1024;
     private static readonly defaultTocPanelWidthPx = 150;
     private static readonly minTocPanelWidthPx = 0;
     private static readonly maxTocPanelWidthPx = 480;
     private turndownService: TurndownService;
     private currentListIndent = '  ';
     private webviewPanels = new Map<string, vscode.WebviewPanel>();
+    private pendingImageSavePaths = new Set<string>();
     private lastActivePanel: vscode.WebviewPanel | null = null;
     private customSlashCommandCache: { loadedAt: number; items: CustomSlashCommandTemplate[] } | null = null;
     private tocPanelWidthPx = MarkdownEditorProvider.defaultTocPanelWidthPx;
@@ -133,7 +136,10 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 const marker = level === 1 ? '=' : '-';
                 const requestedLength = Number(node.getAttribute('data-mdw-heading-marker-length'));
                 const markerLength = Number.isSafeInteger(requestedLength) && requestedLength > 0
-                    ? requestedLength
+                    ? Math.min(
+                        requestedLength,
+                        MarkdownEditorProvider.maxInternalHeadingMarkerLength
+                    )
                     : 3;
                 const normalizedContent = content.trim();
                 if (!normalizedContent || normalizedContent.includes('\n')) {
@@ -193,7 +199,11 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                         return null;
                     }
                     const parsed = Number(rawValue);
-                    return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+                    return Number.isSafeInteger(parsed) &&
+                        parsed >= 0 &&
+                        parsed <= MarkdownEditorProvider.maxInternalListIndent
+                        ? parsed
+                        : null;
                 };
                 const findSourceIndentInListItem = (element: any): number | null => {
                     const ownIndent = getSourceIndent(element);
@@ -597,6 +607,139 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         let externalChangeSequence = 0;
         let unresolvedExternalChangeId = 0;
         let externalConflictPromptActive = false;
+        type WebviewSyncSnapshot = { content: string; revision: number };
+        type PendingSyncSnapshotRequest = {
+            resolve: (snapshot: WebviewSyncSnapshot | null) => void;
+            timeout: NodeJS.Timeout;
+        };
+        type ExpectedWillSaveUpdate = {
+            revision: number;
+            expectedDocumentVersion: number;
+            timeout: NodeJS.Timeout;
+        };
+        const pendingSyncSnapshotRequests = new Map<string, PendingSyncSnapshotRequest>();
+        const expectedWillSaveUpdates = new Map<string, ExpectedWillSaveUpdate>();
+        let syncSnapshotRequestSequence = 0;
+        let editorDisposed = false;
+        let terminalActionQueue: Promise<void> = Promise.resolve();
+        let saveSyncWarningShown = false;
+        let synchronizedProgrammaticSaveInProgress = false;
+
+        const normalizeWebviewRevision = (value: unknown): number =>
+            typeof value === 'number' && Number.isFinite(value)
+                ? Math.max(0, Math.floor(value))
+                : 0;
+
+        const getFullDocumentRange = (targetDocument: vscode.TextDocument): vscode.Range => {
+            const lastLine = targetDocument.lineAt(targetDocument.lineCount - 1);
+            return new vscode.Range(
+                0,
+                0,
+                targetDocument.lineCount - 1,
+                lastLine.text.length
+            );
+        };
+
+        const settleSyncSnapshotRequest = (
+            requestId: string,
+            snapshot: WebviewSyncSnapshot | null
+        ): void => {
+            const pendingRequest = pendingSyncSnapshotRequests.get(requestId);
+            if (!pendingRequest) {
+                return;
+            }
+            pendingSyncSnapshotRequests.delete(requestId);
+            clearTimeout(pendingRequest.timeout);
+            pendingRequest.resolve(snapshot);
+        };
+
+        const requestWebviewSyncSnapshot = (
+            reason: string,
+            timeoutMs = 2000
+        ): Promise<WebviewSyncSnapshot | null> => {
+            if (
+                editorDisposed ||
+                this.webviewPanels.get(documentKey) !== webviewPanel
+            ) {
+                return Promise.resolve(null);
+            }
+
+            const requestId = `host-sync-${Date.now()}-${++syncSnapshotRequestSequence}`;
+            return new Promise((resolve) => {
+                const timeout = setTimeout(() => {
+                    settleSyncSnapshotRequest(requestId, null);
+                }, Math.max(1, Math.floor(timeoutMs)));
+                pendingSyncSnapshotRequests.set(requestId, { resolve, timeout });
+
+                void webviewPanel.webview.postMessage({
+                    type: 'prepareSyncSnapshot',
+                    requestId,
+                    reason,
+                }).then(
+                    (delivered) => {
+                        if (!delivered) {
+                            settleSyncSnapshotRequest(requestId, null);
+                        }
+                    },
+                    () => settleSyncSnapshotRequest(requestId, null)
+                );
+            });
+        };
+
+        const registerExpectedWillSaveUpdate = (
+            markdown: string,
+            revision: number,
+            expectedDocumentVersion: number
+        ): void => {
+            const previous = expectedWillSaveUpdates.get(markdown);
+            if (previous) {
+                clearTimeout(previous.timeout);
+            }
+            const timeout = setTimeout(() => {
+                const current = expectedWillSaveUpdates.get(markdown);
+                if (current?.timeout === timeout) {
+                    expectedWillSaveUpdates.delete(markdown);
+                }
+            }, 10_000);
+            expectedWillSaveUpdates.set(markdown, {
+                revision,
+                expectedDocumentVersion,
+                timeout,
+            });
+        };
+
+        const clearExpectedWillSaveUpdates = (): void => {
+            for (const expectedUpdate of expectedWillSaveUpdates.values()) {
+                clearTimeout(expectedUpdate.timeout);
+            }
+            expectedWillSaveUpdates.clear();
+        };
+
+        const enqueueTerminalAction = async (action: () => Promise<void>): Promise<void> => {
+            const queuedAction = terminalActionQueue.then(action, action);
+            terminalActionQueue = queuedAction.then(
+                () => undefined,
+                () => undefined
+            );
+            await queuedAction;
+        };
+
+        const reportSaveSyncFailure = (detail: string): void => {
+            if (
+                editorDisposed ||
+                this.webviewPanels.get(documentKey) !== webviewPanel
+            ) {
+                return;
+            }
+            void webviewPanel.webview.postMessage({ type: 'retryPendingUpdate' });
+            if (saveSyncWarningShown) {
+                return;
+            }
+            saveSyncWarningShown = true;
+            void vscode.window.showErrorMessage(
+                `ManulDown could not synchronize the latest edit before saving (${detail}). Keep the editor open and save again.`
+            );
+        };
 
         const postExternalDocumentUpdate = (force = false): void => {
             if (unresolvedExternalChangeId === 0) {
@@ -731,10 +874,35 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             return operation;
         };
 
+        const flushAllPendingWebviewUpdates = async (): Promise<boolean> => {
+            while (pendingWebviewUpdate !== null && unresolvedExternalChangeId === 0) {
+                const succeeded = await flushPendingWebviewUpdate();
+                if (!succeeded && pendingWebviewUpdate === null) {
+                    return false;
+                }
+                // flushPendingWebviewUpdate may have returned an operation that was
+                // already resolving when a newer snapshot arrived. Its cleanup runs
+                // in a microtask; yield once before starting the next drain.
+                await Promise.resolve();
+            }
+            return pendingWebviewUpdate === null && unresolvedExternalChangeId === 0;
+        };
+
         // Handle messages from the webview
         webviewPanel.webview.onDidReceiveMessage(
             async (message) => {
                 switch (message.type) {
+                    case 'syncSnapshot':
+                        if (typeof message.requestId === 'string') {
+                            settleSyncSnapshotRequest(
+                                message.requestId,
+                                {
+                                    content: typeof message.content === 'string' ? message.content : '',
+                                    revision: normalizeWebviewRevision(message.revision),
+                                }
+                            );
+                        }
+                        break;
                     case 'undoRedo':
                         break;
                     case 'update':
@@ -744,31 +912,46 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                         }
                         pendingWebviewUpdate = {
                             html: typeof message.content === 'string' ? message.content : '',
-                            revision: Number.isFinite(message.revision)
-                                ? Math.max(0, Math.floor(message.revision))
-                                : 0,
+                            revision: normalizeWebviewRevision(message.revision),
                         };
                         void flushPendingWebviewUpdate();
                         break;
                     case 'saveDocument':
-                        if (unresolvedExternalChangeId !== 0) {
-                            postExternalDocumentUpdate();
-                            break;
-                        }
-                        pendingWebviewUpdate = {
-                            html: typeof message.content === 'string' ? message.content : '',
-                            revision: Number.isFinite(message.revision)
-                                ? Math.max(0, Math.floor(message.revision))
-                                : 0,
-                        };
-                        if (await flushPendingWebviewUpdate()) {
-                            const saved = await document.save();
-                            if (!saved) {
-                                void vscode.window.showErrorMessage(
-                                    'ManulDown synchronized the edit, but VS Code could not save the Markdown file.'
-                                );
+                        await enqueueTerminalAction(async () => {
+                            if (
+                                editorDisposed ||
+                                this.webviewPanels.get(documentKey) !== webviewPanel
+                            ) {
+                                return;
                             }
-                        }
+                            if (unresolvedExternalChangeId !== 0) {
+                                postExternalDocumentUpdate();
+                                reportSaveSyncFailure('an external edit conflict is unresolved');
+                                return;
+                            }
+                            pendingWebviewUpdate = {
+                                html: typeof message.content === 'string' ? message.content : '',
+                                revision: normalizeWebviewRevision(message.revision),
+                            };
+                            if (
+                                await flushAllPendingWebviewUpdates() &&
+                                !editorDisposed &&
+                                this.webviewPanels.get(documentKey) === webviewPanel
+                            ) {
+                                synchronizedProgrammaticSaveInProgress = true;
+                                let saved = false;
+                                try {
+                                    saved = await document.save();
+                                } finally {
+                                    synchronizedProgrammaticSaveInProgress = false;
+                                }
+                                if (!saved) {
+                                    void vscode.window.showErrorMessage(
+                                        'ManulDown synchronized the edit, but VS Code could not save the Markdown file.'
+                                    );
+                                }
+                            }
+                        });
                         break;
                     case 'externalUpdateApplied':
                         if (
@@ -812,7 +995,10 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                             webviewPanel.webview,
                             {
                                 insert: message.insert !== false,
-                                showNotification: message.insert === false
+                                showNotification: message.insert === false,
+                                requestId: typeof message.requestId === 'string'
+                                    ? message.requestId
+                                    : undefined
                             }
                         );
                         break;
@@ -828,7 +1014,10 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                                     message.source === 'paste' ||
                                     message.source === 'internal'
                                     ? message.source
-                                    : 'unknown'
+                                    : 'unknown',
+                                requestId: typeof message.requestId === 'string'
+                                    ? message.requestId
+                                    : undefined
                             }
                         );
                         break;
@@ -922,7 +1111,32 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                         }
                         break;
                     case 'closeEditorTab':
-                        await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+                        await enqueueTerminalAction(async () => {
+                            if (
+                                editorDisposed ||
+                                this.webviewPanels.get(documentKey) !== webviewPanel
+                            ) {
+                                return;
+                            }
+                            if (unresolvedExternalChangeId !== 0) {
+                                postExternalDocumentUpdate();
+                                return;
+                            }
+                            pendingWebviewUpdate = {
+                                html: typeof message.content === 'string' ? message.content : '',
+                                revision: normalizeWebviewRevision(message.revision),
+                            };
+                            if (
+                                await flushAllPendingWebviewUpdates() &&
+                                !editorDisposed &&
+                                this.webviewPanels.get(documentKey) === webviewPanel
+                            ) {
+                                // The flush can take long enough for focus to move to a
+                                // different tab. Close the originating custom-editor tab,
+                                // never whichever editor happens to be active now.
+                                await this.closeResidualCustomTabs(document.uri);
+                            }
+                        });
                         break;
                 }
             }
@@ -940,6 +1154,26 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 return;
             }
             lastObservedDocumentText = observedText;
+
+            const expectedWillSaveUpdate = expectedWillSaveUpdates.get(observedText);
+            if (expectedWillSaveUpdate) {
+                expectedWillSaveUpdates.delete(observedText);
+                clearTimeout(expectedWillSaveUpdate.timeout);
+                if (e.document.version >= expectedWillSaveUpdate.expectedDocumentVersion) {
+                    clearExpectedWillSaveUpdates();
+                    lastAppliedWebviewText = observedText;
+                    void webviewPanel.webview.postMessage({
+                        type: 'updateApplied',
+                        revision: expectedWillSaveUpdate.revision,
+                    });
+                    return;
+                }
+            }
+
+            // Any other text change means the pre-save transaction was ignored
+            // or combined with a concurrent edit. Do not let a stale text-only
+            // marker misclassify a later external change.
+            clearExpectedWillSaveUpdates();
 
             if (
                 activeWebviewUpdateTexts.has(observedText) ||
@@ -962,11 +1196,168 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             }
         });
 
+        const willSaveDocumentSubscription = vscode.workspace.onWillSaveTextDocument((event) => {
+            if (
+                event.document.uri.toString() !== document.uri.toString() ||
+                editorDisposed ||
+                this.webviewPanels.get(documentKey) !== webviewPanel
+            ) {
+                return;
+            }
+
+            // A save requested by this Webview already flushed and acknowledged
+            // its exact snapshot before calling document.save(). Avoid a second
+            // round-trip that can only add latency or a false timeout warning.
+            if (synchronizedProgrammaticSaveInProgress) {
+                return;
+            }
+
+            event.waitUntil((async (): Promise<vscode.TextEdit[]> => {
+                // VS Code shares a short time budget among all will-save listeners.
+                // Fetch the Webview snapshot alongside any in-flight host update,
+                // and keep enough headroom for conversion and other extensions.
+                const syncDeadline = Date.now() + 750;
+                const conversionHeadroomMs = 250;
+                const timeoutMarker = Symbol('will-save-timeout');
+                const waitUntilDeadline = async <T>(promise: Promise<T>): Promise<T | typeof timeoutMarker> => {
+                    const remainingMs = syncDeadline - Date.now() - conversionHeadroomMs;
+                    if (remainingMs <= 0) {
+                        return timeoutMarker;
+                    }
+                    let timeout: NodeJS.Timeout | null = null;
+                    try {
+                        return await Promise.race([
+                            promise,
+                            new Promise<typeof timeoutMarker>((resolve) => {
+                                timeout = setTimeout(() => resolve(timeoutMarker), remainingMs);
+                            }),
+                        ]);
+                    } finally {
+                        if (timeout) {
+                            clearTimeout(timeout);
+                        }
+                    }
+                };
+
+                const snapshotTimeoutMs = Math.max(
+                    1,
+                    syncDeadline - Date.now() - conversionHeadroomMs
+                );
+                const pendingFlush = webviewUpdateFlushPromise ?? Promise.resolve(true);
+                const syncResult = await waitUntilDeadline(Promise.all([
+                    pendingFlush,
+                    requestWebviewSyncSnapshot('willSave', snapshotTimeoutMs),
+                ]));
+                if (syncResult === timeoutMarker) {
+                    console.warn('[save sync] Timed out while preparing the ManulDown save snapshot.');
+                    reportSaveSyncFailure('the Webview did not respond in time');
+                    return [];
+                }
+
+                const [flushSucceeded, snapshot] = syncResult;
+                if (
+                    !flushSucceeded ||
+                    unresolvedExternalChangeId !== 0 ||
+                    editorDisposed ||
+                    this.webviewPanels.get(documentKey) !== webviewPanel
+                ) {
+                    if (
+                        !editorDisposed &&
+                        this.webviewPanels.get(documentKey) === webviewPanel
+                    ) {
+                        reportSaveSyncFailure(
+                            unresolvedExternalChangeId !== 0
+                                ? 'an external edit conflict is unresolved'
+                                : 'a pending editor update failed'
+                        );
+                    }
+                    return [];
+                }
+                if (
+                    !snapshot ||
+                    unresolvedExternalChangeId !== 0 ||
+                    editorDisposed ||
+                    this.webviewPanels.get(documentKey) !== webviewPanel
+                ) {
+                    if (
+                        !snapshot &&
+                        !editorDisposed &&
+                        this.webviewPanels.get(documentKey) === webviewPanel
+                    ) {
+                        console.warn('[save sync] Timed out waiting for the ManulDown Webview snapshot.');
+                        reportSaveSyncFailure('the Webview snapshot was unavailable');
+                    }
+                    return [];
+                }
+
+                let markdown: string;
+                try {
+                    markdown = this.htmlToMarkdown(snapshot.content, event.document);
+                } catch (error) {
+                    console.error('[save sync] Failed to convert the latest Webview snapshot:', error);
+                    void vscode.window.showErrorMessage(
+                        'ManulDown could not synchronize the latest edit before saving.'
+                    );
+                    void webviewPanel.webview.postMessage({ type: 'retryPendingUpdate' });
+                    return [];
+                }
+
+                if (
+                    Date.now() >= syncDeadline ||
+                    editorDisposed ||
+                    this.webviewPanels.get(documentKey) !== webviewPanel
+                ) {
+                    if (
+                        !editorDisposed &&
+                        this.webviewPanels.get(documentKey) === webviewPanel
+                    ) {
+                        reportSaveSyncFailure('snapshot conversion exceeded the save deadline');
+                    }
+                    return [];
+                }
+
+                saveSyncWarningShown = false;
+
+                if (markdown === event.document.getText()) {
+                    void webviewPanel.webview.postMessage({
+                        type: 'updateApplied',
+                        revision: snapshot.revision,
+                    });
+                    return [];
+                }
+
+                registerExpectedWillSaveUpdate(
+                    markdown,
+                    snapshot.revision,
+                    event.document.version + 1
+                );
+                return [vscode.TextEdit.replace(getFullDocumentRange(event.document), markdown)];
+            })());
+        });
+
+        const didSaveDocumentSubscription = vscode.workspace.onDidSaveTextDocument((savedDocument) => {
+            if (savedDocument.uri.toString() === document.uri.toString()) {
+                if (expectedWillSaveUpdates.size > 0) {
+                    reportSaveSyncFailure('the pre-save edit was not applied');
+                }
+                clearExpectedWillSaveUpdates();
+            }
+        });
+
         // Cleanup
         webviewPanel.onDidDispose(() => {
+            editorDisposed = true;
             changeDocumentSubscription.dispose();
             configurationChangeSubscription.dispose();
-            this.webviewPanels.delete(documentKey);
+            willSaveDocumentSubscription.dispose();
+            didSaveDocumentSubscription.dispose();
+            for (const requestId of Array.from(pendingSyncSnapshotRequests.keys())) {
+                settleSyncSnapshotRequest(requestId, null);
+            }
+            clearExpectedWillSaveUpdates();
+            if (this.webviewPanels.get(documentKey) === webviewPanel) {
+                this.webviewPanels.delete(documentKey);
+            }
             if (this.lastActivePanel === webviewPanel) {
                 this.lastActivePanel = null;
             }
@@ -1653,6 +2044,113 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         }).join('\n');
     }
 
+    private protectOpaqueMarkdownSources(
+        html: string,
+        document: vscode.TextDocument
+    ): { html: string; restore: (markdown: string) => string } {
+        const documentText = document.getText();
+        const normalizedDocumentText = documentText.replace(/^[ \t]+(?=\r?$)/gm, '');
+        const placeholderNamespace = this.createPlaceholderNamespace(
+            `${html}\n${documentText}`,
+            'OPAQUE_SOURCE'
+        );
+        const preservedSources: Array<{ marker: string; source: string; block: boolean }> = [];
+        const allowedKinds = new Set([
+            'front-matter',
+            'raw-html-block',
+            'raw-html-inline',
+            'reference-definition',
+            'reference-image',
+            'reference-link',
+        ]);
+        const privateAttributePattern = /\sdata-mdw-opaque-(?:kind|source)\s*=\s*(["'])[^"']*\1/gi;
+
+        const getAttribute = (attributes: string, name: string): string | null => {
+            const escapedName = this.escapeRegExp(name);
+            const match = attributes.match(
+                new RegExp(`(?:^|\\s)${escapedName}\\s*=\\s*(["'])([^"']*)\\1`, 'i')
+            );
+            return match ? match[2] : null;
+        };
+        const decodeTrustedSource = (attributes: string): string | null => {
+            const kind = getAttribute(attributes, 'data-mdw-opaque-kind');
+            const encoded = getAttribute(attributes, 'data-mdw-opaque-source');
+            if (
+                !kind ||
+                !allowedKinds.has(kind) ||
+                !encoded ||
+                !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)
+            ) {
+                return null;
+            }
+
+            const decoded = Buffer.from(encoded, 'base64').toString('utf8');
+            if (
+                decoded === '' ||
+                Buffer.from(decoded, 'utf8').toString('base64') !== encoded ||
+                (
+                    !documentText.includes(decoded) &&
+                    !normalizedDocumentText.includes(decoded)
+                )
+            ) {
+                return null;
+            }
+            return decoded;
+        };
+        const preserve = (match: string, attributes: string, block: boolean): string => {
+            const source = decodeTrustedSource(attributes);
+            if (source === null) {
+                return match.replace(privateAttributePattern, '');
+            }
+            const marker = `${placeholderNamespace}${block ? 'BLOCK' : 'INLINE'}${preservedSources.length}END`;
+            preservedSources.push({ marker, source, block });
+            return block ? `<p>${marker}</p>` : marker;
+        };
+
+        let protectedHtml = html;
+        protectedHtml = protectedHtml.replace(
+            /<pre\b([^>]*)>[\s\S]*?<\/pre>/gi,
+            (match, attributes) => preserve(match, attributes, true)
+        );
+        protectedHtml = protectedHtml.replace(
+            /<a\b([^>]*)>[\s\S]*?<\/a>/gi,
+            (match, attributes) => preserve(match, attributes, false)
+        );
+        protectedHtml = protectedHtml.replace(
+            /<code\b([^>]*)>[\s\S]*?<\/code>/gi,
+            (match, attributes) => preserve(match, attributes, false)
+        );
+        protectedHtml = protectedHtml.replace(
+            /<img\b([^>]*)\/?\s*>/gi,
+            (match, attributes) => preserve(match, attributes, false)
+        );
+
+        // Unknown elements cannot opt in to source restoration simply by using
+        // a private-looking attribute.
+        protectedHtml = protectedHtml.replace(privateAttributePattern, '');
+
+        return {
+            html: protectedHtml,
+            restore: (markdown: string): string => {
+                let restored = markdown;
+                for (const preserved of preservedSources) {
+                    // Turndown surrounds every block placeholder with up to two
+                    // structural line endings. The protected source already owns
+                    // its exact trailing boundary (including blank lines), so
+                    // consume those generated separators before restoring it.
+                    const trailingPattern = preserved.block
+                        ? '(?:\\r?\\n){0,2}'
+                        : '';
+                    restored = restored.replace(
+                        new RegExp(`${this.escapeRegExp(preserved.marker)}${trailingPattern}`, 'g'),
+                        () => preserved.source
+                    );
+                }
+                return restored;
+            }
+        };
+    }
+
     private htmlToMarkdown(html: string, document: vscode.TextDocument): string {
         // Use Turndown for reliable HTML to Markdown conversion
         const placeholderNamespace = this.createPlaceholderNamespace(html, 'CONVERSION');
@@ -1690,6 +2188,13 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
 
             // Pre-process HTML to convert webview URIs back to relative paths
             html = this.convertWebviewUrisToRelativePaths(html, document);
+
+            // Raw HTML, front matter, comments, and reference definitions cannot
+            // be represented faithfully by the editable DOM. MarkdownDocument
+            // renders them as source-backed opaque nodes. Only restore a marker
+            // when its decoded source still exists in the current document.
+            const protectedOpaqueSources = this.protectOpaqueMarkdownSources(html, document);
+            html = protectedOpaqueSources.html;
 
             // Remove zero-width markers used for caret placement
             html = html.replace(/[\u200B\u2060\uFEFF]/g, '');
@@ -1748,10 +2253,9 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             // Remove class attributes from list items (they are for display only)
             html = html.replace(/<li\s+class="[^"]*"([^>]*)>/gi, '<li$1>');
 
-            // Remove code block toolbars (language labels and copy buttons)
-            // Remove any element with data-exclude-from-markdown attribute
-            html = html.replace(/<div[^>]*data-exclude-from-markdown="true"[^>]*>[\s\S]*?<\/div>/gi, '');
-            // Also remove by class name as fallback
+            // Remove known editor UI. Do not trust the generic
+            // data-exclude-from-markdown attribute as document content can use
+            // the same name.
             html = html.replace(/<div class="code-block-toolbar"[^>]*>[\s\S]*?<\/div>/gi, '');
 
             // Remove drag handles (row-handle and col-handle)
@@ -2093,7 +2597,9 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             if (!markdown.endsWith('\n')) {
                 markdown += '\n';
             }
-            return protectedFencedMarkdown.restore(markdown);
+            return protectedOpaqueSources.restore(
+                protectedFencedMarkdown.restore(markdown)
+            );
         } catch (error) {
             console.error('Error converting HTML to Markdown:', error);
             throw error;
@@ -2150,12 +2656,54 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         return /^[a-z0-9]{1,10}$/.test(subtype) ? subtype : 'img';
     }
 
+    private async reserveImageSaveTarget(
+        directory: vscode.Uri,
+        documentFileName: string,
+        extension: string
+    ): Promise<{ filename: string; imageUri: vscode.Uri; reservationKey: string }> {
+        let sequence = 1;
+
+        while (true) {
+            const filename = sequence === 1
+                ? `${documentFileName}.${extension}`
+                : `${documentFileName}-${sequence}.${extension}`;
+            sequence++;
+
+            const imageUri = vscode.Uri.joinPath(directory, filename);
+            const reservationKey = imageUri.toString();
+            if (this.pendingImageSavePaths.has(reservationKey)) {
+                continue;
+            }
+
+            let exists = false;
+            try {
+                await vscode.workspace.fs.stat(imageUri);
+                exists = true;
+            } catch {
+                // A missing candidate can be reserved below.
+            }
+            if (exists || this.pendingImageSavePaths.has(reservationKey)) {
+                continue;
+            }
+
+            // Rechecking after the awaited stat closes the race between two image
+            // imports that inspected the same missing filename concurrently.
+            this.pendingImageSavePaths.add(reservationKey);
+            return { filename, imageUri, reservationKey };
+        }
+    }
+
     private async saveImageBytes(
         bytes: Uint8Array,
         mimeType: string,
         document: vscode.TextDocument,
         webview: vscode.Webview,
-        options: { insert?: boolean; showNotification?: boolean; altText?: string } = {}
+        options: {
+            insert?: boolean;
+            showNotification?: boolean;
+            altText?: string;
+            requestId?: string;
+        } = {}
     ): Promise<void> {
         this.assertImportedImageSize(bytes.byteLength);
         const normalizedMimeType = this.normalizeImportedImageMimeType(mimeType);
@@ -2178,44 +2726,35 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             await vscode.workspace.fs.createDirectory(documentImagesDir);
         }
 
-        let filename = `${documentFileName}.${extension}`;
-        let imageUri = vscode.Uri.joinPath(documentImagesDir, filename);
+        const reservedTarget = await this.reserveImageSaveTarget(
+            documentImagesDir,
+            documentFileName,
+            extension
+        );
+        const { filename, imageUri, reservationKey } = reservedTarget;
 
         try {
-            await vscode.workspace.fs.stat(imageUri);
-            let counter = 1;
-            let fileExists = true;
-            while (fileExists) {
-                counter++;
-                filename = `${documentFileName}-${counter}.${extension}`;
-                imageUri = vscode.Uri.joinPath(documentImagesDir, filename);
-                try {
-                    await vscode.workspace.fs.stat(imageUri);
-                } catch {
-                    fileExists = false;
-                }
+            await vscode.workspace.fs.writeFile(imageUri, bytes);
+
+            const relativePath = `images/${documentFileName}/${filename}`;
+            const altText = typeof options.altText === 'string' && options.altText !== ''
+                ? options.altText
+                : 'image';
+
+            if (options.insert !== false) {
+                void webview.postMessage({
+                    type: 'insertImage',
+                    requestId: options.requestId,
+                    markdown: `![${this.escapeMarkdownImageAltText(altText)}](${relativePath})`,
+                    src: webview.asWebviewUri(imageUri).toString(),
+                    alt: altText
+                });
+                void webview.postMessage({ type: 'requestSync' });
+            } else if (options.showNotification) {
+                void vscode.window.showInformationMessage(`Image saved: ${relativePath}`);
             }
-        } catch {
-            // The base filename is available.
-        }
-
-        await vscode.workspace.fs.writeFile(imageUri, bytes);
-
-        const relativePath = `images/${documentFileName}/${filename}`;
-        const altText = typeof options.altText === 'string' && options.altText !== ''
-            ? options.altText
-            : 'image';
-
-        if (options.insert !== false) {
-            void webview.postMessage({
-                type: 'insertImage',
-                markdown: `![${this.escapeMarkdownImageAltText(altText)}](${relativePath})`,
-                src: webview.asWebviewUri(imageUri).toString(),
-                alt: altText
-            });
-            void webview.postMessage({ type: 'requestSync' });
-        } else if (options.showNotification) {
-            void vscode.window.showInformationMessage(`Image saved: ${relativePath}`);
+        } finally {
+            this.pendingImageSavePaths.delete(reservationKey);
         }
     }
 
@@ -2224,7 +2763,12 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         mimeType: string,
         document: vscode.TextDocument,
         webview: vscode.Webview,
-        options: { insert?: boolean; showNotification?: boolean; altText?: string } = {}
+        options: {
+            insert?: boolean;
+            showNotification?: boolean;
+            altText?: string;
+            requestId?: string;
+        } = {}
     ): Promise<boolean> {
         try {
             if (typeof dataUrl !== 'string') {
@@ -2275,6 +2819,12 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             return true;
         } catch (error) {
             console.error('[saveImageFromDataUrl] Error saving image:', error);
+            if (options.insert !== false && options.requestId) {
+                void webview.postMessage({
+                    type: 'imageInsertFailed',
+                    requestId: options.requestId
+                });
+            }
             const message = error instanceof ImageImportError
                 ? error.message
                 : 'Failed to save image.';
@@ -2482,7 +3032,11 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         imageUriText: string,
         document: vscode.TextDocument,
         webview: vscode.Webview,
-        options: { altText?: string; source?: 'paste' | 'drop' | 'internal' | 'unknown' } = {}
+        options: {
+            altText?: string;
+            source?: 'paste' | 'drop' | 'internal' | 'unknown';
+            requestId?: string;
+        } = {}
     ): Promise<void> {
         try {
             if (!imageUriText || typeof imageUriText !== 'string') {
@@ -2503,7 +3057,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     {
                         insert: true,
                         showNotification: false,
-                        altText: options.altText
+                        altText: options.altText,
+                        requestId: options.requestId
                     }
                 );
                 return;
@@ -2559,11 +3114,18 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 {
                     insert: true,
                     showNotification: false,
-                    altText: options.altText
+                    altText: options.altText,
+                    requestId: options.requestId
                 }
             );
         } catch (error) {
             console.error('[saveImageFromUri] Error saving image from URI:', error);
+            if (options.requestId) {
+                void webview.postMessage({
+                    type: 'imageInsertFailed',
+                    requestId: options.requestId
+                });
+            }
             const message = error instanceof ImageImportError
                 ? error.message
                 : 'Failed to save dropped image.';
@@ -2849,7 +3411,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src 'none'; frame-src 'none'; object-src 'none'; media-src 'none'; worker-src 'none'; child-src 'none'; form-action 'none'; base-uri 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; img-src ${webview.cspSource} https: data: vscode-resource:;">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src 'none'; frame-src 'none'; object-src 'none'; media-src 'none'; worker-src 'none'; child-src 'none'; form-action 'none'; base-uri 'none'; style-src ${webview.cspSource} 'unsafe-inline'; style-src-attr 'unsafe-inline'; script-src 'nonce-${nonce}'; script-src-elem 'nonce-${nonce}'; script-src-attr 'none'; img-src ${webview.cspSource} https: data:;">
     <link href="${styleUri}" rel="stylesheet">
     <link href="${prismCssUri}" rel="stylesheet">
     <title>ManulDown</title>

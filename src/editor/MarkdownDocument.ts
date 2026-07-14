@@ -3,6 +3,36 @@ import { marked, Tokens } from 'marked';
 import * as path from 'path';
 import { getNonce } from '../utils/getNonce';
 
+function escapeOpaqueSourceForHtml(value: string): string {
+    return value
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function encodeOpaqueSource(value: string): string {
+    return Buffer.from(value, 'utf8').toString('base64');
+}
+
+function renderOpaqueSource(value: string, kind: string, block: boolean): string {
+    const encodedSource = encodeOpaqueSource(value);
+    const escapedSource = escapeOpaqueSourceForHtml(value);
+    if (block) {
+        return `<pre class="mdw-opaque-source" contenteditable="false" title="Preserved Markdown source (read-only)" data-mdw-opaque-kind="${kind}" data-mdw-opaque-source="${encodedSource}"><code class="language-markdown">${escapedSource}</code></pre>\n`;
+    }
+    return `<code class="mdw-opaque-source" contenteditable="false" title="Preserved Markdown source (read-only)" data-mdw-opaque-kind="${kind}" data-mdw-opaque-source="${encodedSource}">${escapedSource}</code>`;
+}
+
+function isReferenceStyleLink(raw: string): boolean {
+    return /^!?\[/.test(raw) && /\]$/.test(raw) && !/\]\(/.test(raw);
+}
+
+function escapeAttribute(value: string): string {
+    return escapeOpaqueSourceForHtml(value);
+}
+
 marked.use({
     breaks: true,
     gfm: true,
@@ -33,6 +63,44 @@ marked.use({
                     : '';
                 const content = this.parser.parseInline(headingToken.tokens);
                 return `<h${headingToken.depth}${setextAttributes}>${content}</h${headingToken.depth}>\n`;
+            }
+        },
+        {
+            name: 'html',
+            renderer(token) {
+                const htmlToken = token as Tokens.HTML;
+                return renderOpaqueSource(
+                    htmlToken.raw,
+                    htmlToken.block ? 'raw-html-block' : 'raw-html-inline',
+                    htmlToken.block === true
+                );
+            }
+        },
+        {
+            name: 'link',
+            renderer(token) {
+                const linkToken = token as Tokens.Link;
+                if (!isReferenceStyleLink(linkToken.raw)) {
+                    return false;
+                }
+                const content = this.parser.parseInline(linkToken.tokens);
+                const title = linkToken.title
+                    ? ` title="${escapeAttribute(linkToken.title)}"`
+                    : '';
+                return `<a href="${escapeAttribute(linkToken.href)}"${title} contenteditable="false" data-mdw-opaque-kind="reference-link" data-mdw-opaque-source="${encodeOpaqueSource(linkToken.raw)}">${content}</a>`;
+            }
+        },
+        {
+            name: 'image',
+            renderer(token) {
+                const imageToken = token as Tokens.Image;
+                if (!isReferenceStyleLink(imageToken.raw)) {
+                    return false;
+                }
+                const title = imageToken.title
+                    ? ` title="${escapeAttribute(imageToken.title)}"`
+                    : '';
+                return `<img src="${escapeAttribute(imageToken.href)}" alt="${escapeAttribute(imageToken.text)}"${title} data-mdw-opaque-kind="reference-image" data-mdw-opaque-source="${encodeOpaqueSource(imageToken.raw)}">`;
             }
         }
     ]
@@ -74,20 +142,51 @@ export class MarkdownDocument {
     public toHtml(): string {
         const markdown = this.normalizeIgnoredLineWhitespace(this.document.getText());
         try {
+            const opaqueBlockProtection = this.protectNonRenderedMarkdown(markdown);
+            const blanklineMarker = this.createPlaceholderMarker(
+                opaqueBlockProtection.markdown,
+                'BLANK_LINE'
+            );
+            const listIndentWrapperMarker = this.createPlaceholderMarker(
+                opaqueBlockProtection.markdown,
+                'LIST_INDENT_WRAPPER'
+            );
+            const listIndentMarkerPrefix = this.createPlaceholderMarker(
+                opaqueBlockProtection.markdown,
+                'LIST_INDENT'
+            );
             const blockquoteEmptyLineMarker = this.createPlaceholderMarker(
-                markdown,
+                opaqueBlockProtection.markdown,
                 'BLOCKQUOTE_EMPTY_LINE'
             );
-            const escapedPlaceholderMarkdown = this.escapePlaceholderAngleBrackets(markdown);
+            const escapedPlaceholderMarkdown = this.escapePlaceholderAngleBrackets(
+                opaqueBlockProtection.markdown
+            );
             const explicitBlockquoteMarkdown = this.breakLazyBlockquoteContinuations(escapedPlaceholderMarkdown);
             const blockquoteBlankPreservedMarkdown = this.preserveEmptyBlockquoteLines(
                 explicitBlockquoteMarkdown,
                 blockquoteEmptyLineMarker
             );
-            const preprocessedMarkdown = this.preserveExtraBlankLines(blockquoteBlankPreservedMarkdown);
-            const sourceIndentAnnotatedMarkdown = this.annotateListItemSourceIndents(preprocessedMarkdown);
+            const preprocessedMarkdown = this.preserveExtraBlankLines(
+                blockquoteBlankPreservedMarkdown,
+                blanklineMarker
+            );
+            const sourceIndentAnnotatedMarkdown = this.annotateListItemSourceIndents(
+                preprocessedMarkdown,
+                listIndentWrapperMarker,
+                listIndentMarkerPrefix
+            );
             let html = marked.parse(sourceIndentAnnotatedMarkdown) as string;
-            html = this.applyListItemSourceIndentMarkers(html);
+            html = opaqueBlockProtection.restore(html);
+            html = html.replace(
+                new RegExp(`<p>\\s*${blanklineMarker}\\s*<\\/p>`, 'gi'),
+                MarkdownDocument.blanklineMarkerHtml
+            );
+            html = this.applyListItemSourceIndentMarkers(
+                html,
+                listIndentWrapperMarker,
+                listIndentMarkerPrefix
+            );
 
 
             // Fix malformed HTML: Remove <p> tags that wrap <ul> or <ol> elements
@@ -290,7 +389,11 @@ export class MarkdownDocument {
         return null;
     }
 
-    private annotateListItemSourceIndents(markdown: string): string {
+    private annotateListItemSourceIndents(
+        markdown: string,
+        indentWrapperMarker: string,
+        sourceIndentMarkerPrefix: string
+    ): string {
         const segments = markdown.match(/[^\n]*\n|[^\n]+$/g);
         if (!segments || segments.length === 0) {
             return markdown;
@@ -392,7 +495,7 @@ export class MarkdownDocument {
             for (let depth = parentDepth + 1; depth < sourceDepth; depth++) {
                 const wrapperIndentText = ' '.repeat(depth * parserNestedIndent);
                 const wrapperPrefix = `${blockquotePrefix}${wrapperIndentText}${marker}${spacing}`;
-                output.push(`${wrapperPrefix}<span data-mdw-indent-wrapper-marker="true"></span>${lineEnding}`);
+                output.push(`${wrapperPrefix}${indentWrapperMarker}${lineEnding}`);
             }
 
             const parserIndent = sourceDepth > 0
@@ -400,7 +503,7 @@ export class MarkdownDocument {
                 : Math.min(sourceIndent, 3);
             const parserIndentText = ' '.repeat(Math.max(0, parserIndent));
             const markerPrefix = `${blockquotePrefix}${parserIndentText}${marker}${spacing}${taskPrefix}`;
-            output.push(`${markerPrefix}<span data-mdw-list-indent-marker="${sourceIndent}"></span>${rest}${lineEnding}`);
+            output.push(`${markerPrefix}${sourceIndentMarkerPrefix}${sourceIndent}END${rest}${lineEnding}`);
             stack.push({ sourceIndent, depth: sourceDepth });
             activeListStacks.set(stackKey, stack);
         }
@@ -408,8 +511,28 @@ export class MarkdownDocument {
         return output.join('');
     }
 
-    private applyListItemSourceIndentMarkers(html: string): string {
+    private applyListItemSourceIndentMarkers(
+        html: string,
+        indentWrapperMarker: string,
+        sourceIndentMarkerPrefix: string
+    ): string {
+        const escapedWrapperMarker = indentWrapperMarker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const escapedIndentMarkerPrefix = sourceIndentMarkerPrefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         return html
+            .replace(
+                new RegExp(`(<li\\b[^>]*>)((?:\\s|<input\\b[^>]*>\\s*)*)${escapedWrapperMarker}`, 'gi'),
+                (_match, openingTag, prefix) => openingTag.replace(
+                    /<li\b/i,
+                    '<li data-mdw-indent-wrapper="true" class="nested-list-only"'
+                ) + prefix
+            )
+            .replace(
+                new RegExp(`(<li\\b[^>]*>)((?:\\s|<input\\b[^>]*>\\s*)*)${escapedIndentMarkerPrefix}(\\d+)END`, 'gi'),
+                (_match, openingTag, prefix, indent) => openingTag.replace(
+                    /<li\b/i,
+                    `<li data-mdw-source-indent="${indent}"`
+                ) + prefix
+            )
             .replace(
                 /<li\b([^>]*)>((?:\s|<input\b[^>]*>\s*)*)<span\b[^>]*data-mdw-indent-wrapper-marker=(["'])true\2[^>]*>\s*<\/span>/gi,
                 (_match, attrs, prefix) => `<li${attrs} data-mdw-indent-wrapper="true" class="nested-list-only">${prefix}`
@@ -430,6 +553,215 @@ export class MarkdownDocument {
             .replace(/<!--MDW-LIST-INDENT:\d+-->/g, '')
             .replace(/<span\b[^>]*data-mdw-indent-wrapper-marker=(["'])true\1[^>]*>\s*<\/span>/gi, '')
             .replace(/<span\b[^>]*data-mdw-list-indent-marker=(["'])\d+\1[^>]*>\s*<\/span>/gi, '');
+    }
+
+    private protectNonRenderedMarkdown(markdown: string): {
+        markdown: string;
+        restore: (html: string) => string;
+    } {
+        const protectedBlocks: Array<{ marker: string; source: string; kind: string }> = [];
+        let protectedMarkdown = markdown;
+
+        const addProtectedBlock = (source: string, kind: string): string => {
+            const marker = this.createPlaceholderMarker(
+                `${protectedMarkdown}\n${protectedBlocks.map((entry) => entry.marker).join('\n')}`,
+                `OPAQUE_${kind}`
+            );
+            protectedBlocks.push({ marker, source, kind });
+            return marker;
+        };
+
+        // Marked interprets YAML front matter as a horizontal rule followed by a
+        // Setext heading. Keep it as source instead of exposing a lossy DOM form.
+        const frontMatterMatch = protectedMarkdown.match(
+            /^(?:\uFEFF)?---[ \t]*\r?\n(?:[\s\S]*?\r?\n)?(?:---|\.\.\.)[ \t]*(?:\r?\n|$)/
+        );
+        if (frontMatterMatch) {
+            let source = frontMatterMatch[0];
+            let remainingMarkdown = protectedMarkdown.slice(source.length);
+            const followingBlankLines = remainingMarkdown.match(/^(?:[ \t]*\r?\n)+/);
+            if (followingBlankLines) {
+                source += followingBlankLines[0];
+                remainingMarkdown = remainingMarkdown.slice(followingBlankLines[0].length);
+            }
+            const marker = addProtectedBlock(source, 'front-matter');
+            const lineEnding = source.includes('\r\n')
+                ? '\r\n'
+                : '\n';
+            protectedMarkdown = `${marker}${lineEnding}${lineEnding}${remainingMarkdown}`;
+        }
+
+        // Marked can split a raw HTML container at a blank line (for example a
+        // DIV with multiple paragraphs), which makes the independently converted
+        // pieces gain Markdown paragraph spacing. Protect complete, line-oriented
+        // containers before lexing so the original bytes stay together.
+        const rawHtmlSegments = protectedMarkdown.match(/[^\n]*\n|[^\n]+$/g) ?? [];
+        const rawHtmlOutput: string[] = [];
+        let rawHtmlFenceMarker: '`' | '~' | null = null;
+        let rawHtmlFenceLength = 0;
+        const voidHtmlTags = new Set([
+            'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input',
+            'link', 'meta', 'param', 'source', 'track', 'wbr',
+        ]);
+        for (let index = 0; index < rawHtmlSegments.length; index++) {
+            const segment = rawHtmlSegments[index];
+            const line = segment.replace(/\r?\n$/, '');
+            const fenceMatch = line.match(/^ {0,3}(`{3,}|~{3,})/);
+            if (fenceMatch) {
+                const run = fenceMatch[1];
+                const marker = run[0] as '`' | '~';
+                if (rawHtmlFenceMarker === null) {
+                    rawHtmlFenceMarker = marker;
+                    rawHtmlFenceLength = run.length;
+                } else if (
+                    rawHtmlFenceMarker === marker &&
+                    run.length >= rawHtmlFenceLength
+                ) {
+                    rawHtmlFenceMarker = null;
+                    rawHtmlFenceLength = 0;
+                }
+                rawHtmlOutput.push(segment);
+                continue;
+            }
+
+            const openingTag = rawHtmlFenceMarker === null
+                ? line.match(/^ {0,3}<([A-Za-z][\w:-]*)\b[^>]*>[ \t]*$/)
+                : null;
+            const tagName = openingTag?.[1]?.toLowerCase();
+            if (!tagName || voidHtmlTags.has(tagName)) {
+                rawHtmlOutput.push(segment);
+                continue;
+            }
+
+            const closingTagPattern = new RegExp(`^ {0,3}<\\/${tagName}\\s*>[ \\t]*$`, 'i');
+            const nestedOpeningTagPattern = new RegExp(
+                `^ {0,3}<${tagName}\\b[^>]*>[ \\t]*$`,
+                'i'
+            );
+            let closingIndex = -1;
+            let nestedDepth = 1;
+            for (let candidate = index + 1; candidate < rawHtmlSegments.length; candidate++) {
+                const candidateLine = rawHtmlSegments[candidate].replace(/\r?\n$/, '');
+                if (nestedOpeningTagPattern.test(candidateLine)) {
+                    nestedDepth++;
+                    continue;
+                }
+                if (closingTagPattern.test(candidateLine)) {
+                    nestedDepth--;
+                    if (nestedDepth === 0) {
+                        closingIndex = candidate;
+                        break;
+                    }
+                }
+            }
+            if (closingIndex < 0) {
+                rawHtmlOutput.push(segment);
+                continue;
+            }
+
+            let boundaryEndIndex = closingIndex;
+            while (
+                boundaryEndIndex + 1 < rawHtmlSegments.length &&
+                rawHtmlSegments[boundaryEndIndex + 1].replace(/\r?\n$/, '').trim() === ''
+            ) {
+                boundaryEndIndex++;
+            }
+            const source = rawHtmlSegments.slice(index, boundaryEndIndex + 1).join('');
+            const marker = addProtectedBlock(source, 'raw-html-block');
+            const lineEnding = source.includes('\r\n')
+                ? '\r\n'
+                : '\n';
+            rawHtmlOutput.push(`${marker}${lineEnding}${lineEnding}`);
+            index = boundaryEndIndex;
+        }
+        protectedMarkdown = rawHtmlOutput.join('');
+
+        // Reference definitions are consumed by Marked and would otherwise
+        // disappear. Leave the definition in place so references still resolve,
+        // and add an adjacent source marker that is rendered and restored later.
+        const segments = protectedMarkdown.match(/[^\n]*\n|[^\n]+$/g) ?? [];
+        const output: string[] = [];
+        const pendingReferenceDefinitions: string[] = [];
+        let fenceMarker: '`' | '~' | null = null;
+        let fenceLength = 0;
+        const flushReferenceDefinitions = (): void => {
+            if (pendingReferenceDefinitions.length === 0) {
+                return;
+            }
+            const source = pendingReferenceDefinitions.join('');
+            const marker = addProtectedBlock(source, 'reference-definition');
+            const sourceLineEnding = source.includes('\r\n') ? '\r\n' : '\n';
+            const previousOutput = output[output.length - 1] || '';
+            if (previousOutput !== '' && !previousOutput.endsWith('\n')) {
+                output.push(sourceLineEnding);
+            }
+            output.push(`${marker}${sourceLineEnding}${sourceLineEnding}`);
+            pendingReferenceDefinitions.length = 0;
+        };
+        for (const segment of segments) {
+            const lineEnding = segment.endsWith('\r\n')
+                ? '\r\n'
+                : (segment.endsWith('\n') ? '\n' : '');
+            const line = lineEnding ? segment.slice(0, -lineEnding.length) : segment;
+            const fenceMatch = line.match(/^ {0,3}(`{3,}|~{3,})/);
+            if (fenceMatch) {
+                flushReferenceDefinitions();
+                const run = fenceMatch[1];
+                const marker = run[0] as '`' | '~';
+                if (fenceMarker === null) {
+                    fenceMarker = marker;
+                    fenceLength = run.length;
+                } else if (fenceMarker === marker && run.length >= fenceLength) {
+                    fenceMarker = null;
+                    fenceLength = 0;
+                }
+                output.push(segment);
+                continue;
+            }
+
+            if (
+                fenceMarker === null &&
+                pendingReferenceDefinitions.length > 0 &&
+                line.trim() === ''
+            ) {
+                pendingReferenceDefinitions.push(segment);
+                continue;
+            }
+            if (fenceMarker === null && /^ {0,3}\[[^\]\r\n]+\]:[ \t]*\S/.test(line)) {
+                output.push(segment);
+                pendingReferenceDefinitions.push(segment);
+                continue;
+            }
+            if (
+                fenceMarker === null &&
+                pendingReferenceDefinitions.length > 0 &&
+                /^[ \t]+(?:["'(])/.test(line)
+            ) {
+                output.push(segment);
+                pendingReferenceDefinitions.push(segment);
+                continue;
+            }
+            flushReferenceDefinitions();
+            output.push(segment);
+        }
+        flushReferenceDefinitions();
+        protectedMarkdown = output.join('');
+
+        return {
+            markdown: protectedMarkdown,
+            restore: (html: string): string => {
+                let restoredHtml = html;
+                for (const block of protectedBlocks) {
+                    const escapedMarker = block.marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                    const opaqueHtml = renderOpaqueSource(block.source, block.kind, true);
+                    restoredHtml = restoredHtml.replace(
+                        new RegExp(`<p>\\s*${escapedMarker}\\s*<\\/p>\\s*`, 'i'),
+                        opaqueHtml
+                    );
+                }
+                return restoredHtml;
+            }
+        };
     }
 
     private normalizeIgnoredLineWhitespace(markdown: string): string {
@@ -478,7 +810,7 @@ export class MarkdownDocument {
         return output.join('');
     }
 
-    private preserveExtraBlankLines(markdown: string): string {
+    private preserveExtraBlankLines(markdown: string, blanklineMarker: string): string {
         // Keep original content when there is nothing to transform.
         const segments = markdown.match(/[^\n]*\n|[^\n]+$/g);
         if (!segments || segments.length === 0) {
@@ -509,7 +841,7 @@ export class MarkdownDocument {
 
             // Convert additional blank lines into explicit blank line markers.
             for (let i = 1; i < pendingBlankSegments.length; i++) {
-                output.push(`${MarkdownDocument.blanklineMarkerHtml}\n`);
+                output.push(`${blanklineMarker}\n`);
                 output.push('\n');
             }
 
@@ -906,13 +1238,19 @@ export class MarkdownDocument {
         // data-md-path is an internal trust marker added below. Raw Markdown HTML
         // must not be able to provide its own value and influence later imports
         // or Markdown serialization.
-        const htmlWithoutReservedImagePaths = html.replace(
-            /\sdata-md-path\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi,
-            ''
-        );
-
-        // Replace img src attributes with webview URIs
-        return htmlWithoutReservedImagePaths.replace(/<img([^>]*?)src="([^"]+)"([^>]*?)>/g, (match, before, src, after) => {
+        // Work one actual IMG tag at a time. A global attribute regex can cross
+        // escaped source text inside an opaque node (for example
+        // "&lt;img ... data-md-path=...&gt;") and truncate that node.
+        return html.replace(/<img\b[^>]*>/gi, (imageTag) => {
+            const cleanedImageTag = imageTag.replace(
+                /\sdata-md-path\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi,
+                ''
+            );
+            const sourceMatch = cleanedImageTag.match(/^<img([^>]*?)src="([^"]+)"([^>]*?)>$/i);
+            if (!sourceMatch) {
+                return cleanedImageTag;
+            }
+            const [, before, src, after] = sourceMatch;
             // Decode URL-encoded src (marked encodes non-ASCII characters like Japanese)
             let decodedSrc = src;
             try {
@@ -923,7 +1261,7 @@ export class MarkdownDocument {
 
             // Skip if already an absolute URL or data URI
             if (decodedSrc.startsWith('http://') || decodedSrc.startsWith('https://') || decodedSrc.startsWith('data:')) {
-                return match;
+                return cleanedImageTag;
             }
 
             // Convert relative path to absolute path
@@ -940,7 +1278,7 @@ export class MarkdownDocument {
                 return `<img${before}src="${webviewUri}" data-md-path="${markdownPath}"${after}>`;
             } catch (error) {
                 console.error('Error converting image path:', error);
-                return match;
+                return cleanedImageTag;
             }
         });
     }

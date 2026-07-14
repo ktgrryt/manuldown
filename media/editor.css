@@ -803,6 +803,18 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
     position: relative;
 }
 
+/* Source forms that cannot be edited losslessly by the WYSIWYG DOM stay
+   visible and copyable, but are intentionally read-only. */
+#editor pre.mdw-opaque-source {
+    padding-top: 12px;
+    cursor: default;
+    opacity: 0.9;
+}
+
+#editor code.mdw-opaque-source {
+    cursor: default;
+}
+
 /* Code block toolbar */
 .code-block-toolbar {
     position: absolute;
