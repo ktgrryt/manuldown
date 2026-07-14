@@ -520,8 +520,13 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         // Create document manager
         const markdownDocument = new MarkdownDocument(document, webviewPanel.webview);
 
-        // Track if we're currently updating from webview
-        let isUpdatingFromWebview = false;
+        // Track document text, not just change-event timing. VS Code can emit
+        // onDidChangeTextDocument when only the dirty state changes, and an edit
+        // event may arrive after applyEdit resolves. Timing alone therefore
+        // misclassifies normal ManulDown edits as external changes.
+        let lastObservedDocumentText = document.getText();
+        let lastAppliedWebviewText: string | null = lastObservedDocumentText;
+        const activeWebviewUpdateTexts = new Set<string>();
         let pendingWebviewUpdate: { html: string; revision: number } | null = null;
         let processingWebviewUpdate = false;
         let externalChangeSequence = 0;
@@ -591,28 +596,36 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             }
 
             processingWebviewUpdate = true;
-            isUpdatingFromWebview = true;
 
             try {
                 while (pendingWebviewUpdate !== null && unresolvedExternalChangeId === 0) {
                     const updateToApply = pendingWebviewUpdate;
                     pendingWebviewUpdate = null;
-                    const result = await this.updateTextDocument(document, updateToApply.html);
-                    const appliedTextIsCurrent = result.applied && document.getText() === result.markdown;
+                    const markdown = this.htmlToMarkdown(updateToApply.html, document);
+                    activeWebviewUpdateTexts.add(markdown);
+                    let applied = false;
+                    try {
+                        applied = await this.updateTextDocument(document, markdown);
+                    } finally {
+                        activeWebviewUpdateTexts.delete(markdown);
+                    }
+                    const appliedTextIsCurrent = applied && document.getText() === markdown;
                     if (appliedTextIsCurrent) {
+                        lastObservedDocumentText = markdown;
+                        lastAppliedWebviewText = markdown;
                         void webviewPanel.webview.postMessage({
                             type: 'updateApplied',
                             revision: updateToApply.revision,
                         });
-                    } else if (!result.applied) {
+                    } else if (!applied) {
                         void webviewPanel.webview.postMessage({ type: 'retryPendingUpdate' });
                     }
 
                     // applyEdit normally emits the document-change event while
-                    // our guard is active. If another writer races that edit,
+                    // the expected-text marker is active. If another writer races that edit,
                     // detect the final text mismatch explicitly instead of
                     // suppressing the external change with our own event.
-                    if (result.applied && !appliedTextIsCurrent) {
+                    if (applied && !appliedTextIsCurrent) {
                         unresolvedExternalChangeId = ++externalChangeSequence;
                         postExternalDocumentUpdate();
                     }
@@ -627,7 +640,6 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     return;
                 }
 
-                isUpdatingFromWebview = false;
             }
         };
 
@@ -801,12 +813,27 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
 
         // Handle document changes (external edits)
         const changeDocumentSubscription = vscode.workspace.onDidChangeTextDocument((e) => {
-            if (e.document.uri.toString() === document.uri.toString()) {
-                if (!isUpdatingFromWebview) {
-                    unresolvedExternalChangeId = ++externalChangeSequence;
-                    postExternalDocumentUpdate();
-                }
+            if (e.document.uri.toString() !== document.uri.toString()) {
+                return;
             }
+
+            const observedText = e.document.getText();
+            if (observedText === lastObservedDocumentText) {
+                // Dirty-state/save notifications can have no text difference.
+                return;
+            }
+            lastObservedDocumentText = observedText;
+
+            if (
+                activeWebviewUpdateTexts.has(observedText) ||
+                observedText === lastAppliedWebviewText
+            ) {
+                return;
+            }
+
+            lastAppliedWebviewText = null;
+            unresolvedExternalChangeId = ++externalChangeSequence;
+            postExternalDocumentUpdate();
         });
 
         const configurationChangeSubscription = vscode.workspace.onDidChangeConfiguration((event) => {
@@ -1120,12 +1147,10 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
 
     private async updateTextDocument(
         document: vscode.TextDocument,
-        html: string
-    ): Promise<{ applied: boolean; markdown: string }> {
-        // Convert HTML back to Markdown
-        const markdown = this.htmlToMarkdown(html, document);
+        markdown: string
+    ): Promise<boolean> {
         if (markdown === document.getText()) {
-            return { applied: true, markdown };
+            return true;
         }
 
         const edit = new vscode.WorkspaceEdit();
@@ -1149,7 +1174,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         if (!applied) {
             vscode.window.showErrorMessage('Failed to apply the ManulDown editor update.');
         }
-        return { applied, markdown };
+        return applied;
     }
 
     private getDefaultUnorderedListMarker(): UnorderedListMarker {
