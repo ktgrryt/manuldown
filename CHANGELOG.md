@@ -13,3 +13,4 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 - Table editing commands and keyboard shortcuts.
 - Slash commands for table, quote, code block, and checklist insertion.
 - Table of contents, find support, and two-way Markdown synchronization.
+

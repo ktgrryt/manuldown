@@ -7228,9 +7228,13 @@ import { CompositionUpdateGate } from './modules/CompositionUpdateGate.js';
             const isEmptyCodeBlock = normalizedCodeText.trim() === '';
 
             // 空のコードブロックはBackspace/Ctrl+Hでブロックごと削除
+            // This is a programmatic DOM removal, so Chromium emits no input
+            // event to capture the post-delete state. Queue it explicitly so
+            // an immediate Undo can restore the code block.
             if (isEmptyCodeBlock) {
                 deleteCodeBlock(preBlock, selection);
                 notifyChange();
+                stateManager.saveStateDebounced();
                 return true;
             }
 

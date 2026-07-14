@@ -252,12 +252,6 @@ export class StateManager {
      * @param {Function} notifyCallback - 変更を通知するコールバック
      */
     performUndo(notifyCallback) {
-        
-        // VSCodeにUndo操作の開始を通知（タイムスタンプ更新のため）
-        if (this.vscodeApi) {
-            this.vscodeApi.postMessage({ type: 'undoRedo' });
-        }
-        
         // 保留中の保存があれば即座に実行
         if (this.saveStateTimeout) {
             clearTimeout(this.saveStateTimeout);
@@ -271,6 +265,13 @@ export class StateManager {
         // undoStackが空、または1つしかない場合は何もしない
         if (this.undoStack.length <= 1) {
             return;
+        }
+
+        // The backing TextDocument can receive the same keyboard Undo through
+        // VS Code. Declare the exact history direction before restoring the DOM
+        // so the extension host can keep both sides in one transaction.
+        if (this.vscodeApi) {
+            this.vscodeApi.postMessage({ type: 'undoRedo', direction: 'undo' });
         }
         
         this.isRestoringState = true;
@@ -308,11 +309,6 @@ export class StateManager {
      * @param {Function} notifyCallback - 変更を通知するコールバック
      */
     performRedo(notifyCallback) {
-        // VSCodeにRedo操作の開始を通知（タイムスタンプ更新のため）
-        if (this.vscodeApi) {
-            this.vscodeApi.postMessage({ type: 'undoRedo' });
-        }
-        
         // 保留中の入力があれば先に履歴へ保存する。内容が変わっていれば
         // Redo履歴がクリアされるため、未保存の入力を上書きしない。
         if (this.saveStateTimeout) {
@@ -322,6 +318,10 @@ export class StateManager {
         }
         
         if (this.redoStack.length === 0) return;
+
+        if (this.vscodeApi) {
+            this.vscodeApi.postMessage({ type: 'undoRedo', direction: 'redo' });
+        }
         
         this.isRestoringState = true;
         

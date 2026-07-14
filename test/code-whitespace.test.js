@@ -87,6 +87,14 @@ function loadExtensionModules() {
         TextEdit: {
             replace: (range, newText) => ({ range, newText }),
         },
+        EndOfLine: {
+            LF: 1,
+            CRLF: 2,
+        },
+        TextDocumentChangeReason: {
+            Undo: 1,
+            Redo: 2,
+        },
         workspace: {
             getConfiguration: () => ({
                 get: (_key, defaultValue) => defaultValue,
@@ -175,9 +183,9 @@ function createTextDocument(text) {
     };
 }
 
-function fireDocumentChange(document) {
+function fireDocumentChange(document, reason) {
     for (const listener of [...vscodeMockState.documentChangeListeners]) {
-        listener({ document });
+        listener({ document, reason });
     }
 }
 
@@ -205,11 +213,15 @@ async function fireWillSaveDocument(document) {
 function createMutableTextDocument(initialText) {
     let text = initialText;
     let version = 1;
+    const eol = initialText.includes('\r\n') ? 2 : 1;
     const savedTexts = [];
     const document = {
         getText: () => text,
         get version() {
             return version;
+        },
+        get eol() {
+            return eol;
         },
         get lineCount() {
             return text.split('\n').length;
@@ -331,6 +343,251 @@ test('a ManulDown edit is not reported back as an external document change', asy
         assert.deepEqual(
             webview.postedMessages.filter((message) => message.type === 'updateApplied'),
             [{ type: 'updateApplied', revision: 1 }]
+        );
+    } finally {
+        webview.dispose();
+    }
+});
+
+test('a ManulDown edit in a CRLF document is not reported as external', async () => {
+    const { provider, document, webview } = await createEditorSyncHarness('before\r\nline\r\n');
+    provider.updateTextDocument = async (_document, markdown) => {
+        // VS Code normalizes inserted line breaks to the TextDocument EOL.
+        document.setText(markdown.replace(/\r?\n/g, '\r\n'));
+        fireDocumentChange(document);
+        return true;
+    };
+
+    try {
+        await webview.sendMessage({
+            type: 'update',
+            content: 'after\nline\n',
+            revision: 2,
+        });
+        await waitFor(
+            () => webview.postedMessages.some((message) => message.type === 'updateApplied'),
+            'The CRLF Webview update was not applied'
+        );
+
+        assert.equal(document.getText(), 'after\r\nline\r\n');
+        assert.deepEqual(
+            webview.postedMessages.filter((message) => message.external === true),
+            []
+        );
+        assert.deepEqual(
+            webview.postedMessages.filter((message) => message.type === 'updateApplied'),
+            [{ type: 'updateApplied', revision: 2 }]
+        );
+    } finally {
+        webview.dispose();
+    }
+});
+
+test('a Webview undo of its own document edit is not reported as external', async () => {
+    const codeBlockMarkdown = '```\n\n```\n';
+    const { provider, document, webview } = await createEditorSyncHarness(codeBlockMarkdown);
+    provider.updateTextDocument = async (_document, markdown) => {
+        document.setText(markdown);
+        fireDocumentChange(document);
+        return true;
+    };
+
+    try {
+        await webview.sendMessage({
+            type: 'update',
+            content: '\n',
+            revision: 1,
+        });
+        await waitFor(
+            () => webview.postedMessages.some(
+                (message) => message.type === 'updateApplied' && message.revision === 1
+            ),
+            'The empty code block deletion was not applied'
+        );
+
+        await webview.sendMessage({ type: 'undoRedo', direction: 'undo' });
+        document.setText(codeBlockMarkdown);
+        fireDocumentChange(document, 1);
+
+        assert.deepEqual(
+            webview.postedMessages.filter((message) => message.external === true),
+            [],
+            'The matching VS Code undo must stay inside the Webview history transaction'
+        );
+        assert.ok(
+            webview.postedMessages.some((message) => message.type === 'requestSync'),
+            'The host must request the final restored Webview snapshot'
+        );
+
+        await webview.sendMessage({
+            type: 'update',
+            content: codeBlockMarkdown,
+            revision: 2,
+        });
+        await waitFor(
+            () => webview.postedMessages.some(
+                (message) => message.type === 'updateApplied' && message.revision === 2
+            ),
+            'The restored code block was not acknowledged'
+        );
+        assert.deepEqual(
+            webview.postedMessages.filter((message) => message.external === true),
+            []
+        );
+    } finally {
+        webview.dispose();
+    }
+});
+
+test('a Webview undo can supersede an in-flight empty code block deletion', async () => {
+    const codeBlockMarkdown = '```\n\n```\n';
+    const { provider, document, webview } = await createEditorSyncHarness(codeBlockMarkdown);
+    let updateCount = 0;
+    let markDeletionStarted;
+    let releaseDeletion;
+    const deletionStarted = new Promise((resolve) => {
+        markDeletionStarted = resolve;
+    });
+    const deletionMayFinish = new Promise((resolve) => {
+        releaseDeletion = resolve;
+    });
+    provider.updateTextDocument = async (_document, markdown) => {
+        updateCount++;
+        document.setText(markdown);
+        fireDocumentChange(document);
+        if (updateCount === 1) {
+            markDeletionStarted();
+            await deletionMayFinish;
+        }
+        return true;
+    };
+
+    try {
+        await webview.sendMessage({
+            type: 'update',
+            content: '\n',
+            revision: 1,
+        });
+        await deletionStarted;
+
+        await webview.sendMessage({ type: 'undoRedo', direction: 'undo' });
+        document.setText(codeBlockMarkdown);
+        fireDocumentChange(document, 1);
+        await webview.sendMessage({
+            type: 'update',
+            content: codeBlockMarkdown,
+            revision: 2,
+        });
+
+        releaseDeletion();
+        await waitFor(
+            () => webview.postedMessages.some(
+                (message) => message.type === 'updateApplied' && message.revision === 2
+            ),
+            'The in-flight deletion was not superseded by the restored code block'
+        );
+        assert.deepEqual(
+            webview.postedMessages.filter((message) => message.external === true),
+            []
+        );
+    } finally {
+        webview.dispose();
+    }
+});
+
+test('a pending Webview undo does not hide an unrelated document edit', async () => {
+    const { document, webview } = await createEditorSyncHarness('before');
+
+    try {
+        await webview.sendMessage({ type: 'undoRedo', direction: 'undo' });
+        document.setText('external');
+        fireDocumentChange(document, 2);
+
+        assert.equal(
+            webview.postedMessages.filter((message) => message.external === true).length,
+            1
+        );
+    } finally {
+        webview.dispose();
+    }
+});
+
+test('an update arriving during flush cleanup is not stranded', async () => {
+    const { provider, document, webview } = await createEditorSyncHarness('before');
+    provider.updateTextDocument = async (_document, markdown) => {
+        document.setText(markdown);
+        fireDocumentChange(document);
+        return true;
+    };
+    const originalPostMessage = webview.panel.webview.postMessage;
+    webview.panel.webview.postMessage = (message) => {
+        const delivered = originalPostMessage(message);
+        if (message.type === 'updateApplied' && message.revision === 1) {
+            queueMicrotask(() => {
+                void webview.sendMessage({
+                    type: 'update',
+                    content: 'second update',
+                    revision: 2,
+                });
+            });
+        }
+        return delivered;
+    };
+
+    try {
+        await webview.sendMessage({
+            type: 'update',
+            content: 'first update',
+            revision: 1,
+        });
+        await waitFor(
+            () => webview.postedMessages.some(
+                (message) => message.type === 'updateApplied' && message.revision === 2
+            ),
+            'The update queued during flush cleanup was not applied'
+        );
+
+        assert.equal(document.getText(), 'second update');
+        assert.deepEqual(
+            webview.postedMessages.filter((message) => message.external === true),
+            []
+        );
+    } finally {
+        webview.dispose();
+    }
+});
+
+test('a synchronized Webview history snapshot expires its unmatched undo marker', async () => {
+    const { provider, document, webview } = await createEditorSyncHarness('before');
+    provider.updateTextDocument = async (_document, markdown) => {
+        document.setText(markdown);
+        fireDocumentChange(document);
+        return true;
+    };
+
+    try {
+        // Some Webview/platform paths prevent the matching VS Code Undo, so no
+        // reasoned document-change event consumes this declaration.
+        await webview.sendMessage({ type: 'undoRedo', direction: 'undo' });
+        await webview.sendMessage({
+            type: 'update',
+            content: 'restored in ManulDown',
+            revision: 2,
+        });
+        await waitFor(
+            () => webview.postedMessages.some(
+                (message) => message.type === 'updateApplied' && message.revision === 2
+            ),
+            'The Webview history snapshot was not synchronized'
+        );
+
+        document.setText('later external undo');
+        fireDocumentChange(document, 1);
+
+        assert.equal(
+            webview.postedMessages.filter((message) => message.external === true).length,
+            1,
+            'A later external Undo must not consume the expired Webview marker'
         );
     } finally {
         webview.dispose();
@@ -524,6 +781,90 @@ test('will-save requests and applies the latest Webview snapshot', async () => {
     }
 });
 
+test('will-save keeps CRLF snapshots inside the expected edit transaction', async () => {
+    const { document, webview } = await createEditorSyncHarness('old\r\ntext\r\n');
+
+    try {
+        const willSave = fireWillSaveDocument(document);
+        await waitFor(
+            () => webview.postedMessages.some((message) => message.type === 'prepareSyncSnapshot'),
+            'The CRLF Webview snapshot was not requested before save'
+        );
+        const request = webview.postedMessages.find(
+            (message) => message.type === 'prepareSyncSnapshot'
+        );
+        await webview.sendMessage({
+            type: 'syncSnapshot',
+            requestId: request.requestId,
+            content: 'latest\nCRLF\nsnapshot\n',
+            revision: 7,
+        });
+
+        const edits = await willSave;
+        assert.equal(edits.length, 1);
+        assert.equal(edits[0].newText, 'latest\r\nCRLF\r\nsnapshot\r\n');
+
+        document.setText(edits[0].newText);
+        fireDocumentChange(document);
+        assert.deepEqual(
+            webview.postedMessages.filter(
+                (message) => message.type === 'updateApplied' && message.revision === 7
+            ),
+            [{ type: 'updateApplied', revision: 7 }]
+        );
+        assert.deepEqual(
+            webview.postedMessages.filter((message) => message.external === true),
+            []
+        );
+    } finally {
+        webview.dispose();
+    }
+});
+
+test('did-save acknowledges an expected edit before its delayed change event', async () => {
+    const { document, webview } = await createEditorSyncHarness('old text');
+
+    try {
+        const willSave = fireWillSaveDocument(document);
+        await waitFor(
+            () => webview.postedMessages.some((message) => message.type === 'prepareSyncSnapshot'),
+            'The Webview snapshot was not requested before save'
+        );
+        const request = webview.postedMessages.find(
+            (message) => message.type === 'prepareSyncSnapshot'
+        );
+        await webview.sendMessage({
+            type: 'syncSnapshot',
+            requestId: request.requestId,
+            content: 'saved snapshot',
+            revision: 8,
+        });
+
+        const edits = await willSave;
+        assert.equal(edits.length, 1);
+        document.setText(edits[0].newText);
+
+        // A delayed onDidChangeTextDocument must not turn a completed save
+        // transaction into an apparent external edit.
+        fireDidSaveDocument(document);
+        fireDocumentChange(document);
+
+        assert.deepEqual(
+            webview.postedMessages.filter(
+                (message) => message.type === 'updateApplied' && message.revision === 8
+            ),
+            [{ type: 'updateApplied', revision: 8 }]
+        );
+        assert.deepEqual(
+            webview.postedMessages.filter((message) => message.external === true),
+            []
+        );
+        assert.deepEqual(vscodeMockState.errors, []);
+    } finally {
+        webview.dispose();
+    }
+});
+
 test('will-save snapshot waiting stays below the VS Code listener budget', async () => {
     const { document, webview } = await createEditorSyncHarness('old text');
 
@@ -654,6 +995,18 @@ test('clipboard HTML cannot opt into trusted editor metadata', () => {
         editorSource,
         /extractSingleImageFromClipboardHtml = \([\s\S]*?requireTrustedImagePaths &&\s*!Array\.isArray\(trustedImages\) &&\s*\/<img\\b\/i\.test\(rawHtml\)[\s\S]*?return null;[\s\S]*?createSanitizedContainerFromHtml/,
         'Single-image extraction must reject unauthenticated internal HTML before sanitization'
+    );
+});
+
+test('empty code block deletion records its post-delete Undo state', () => {
+    const editorSource = fs.readFileSync(
+        path.join(__dirname, '..', 'media', 'editor.js'),
+        'utf8'
+    );
+
+    assert.match(
+        editorSource,
+        /if \(isEmptyCodeBlock\) \{\s*deleteCodeBlock\(preBlock, selection\);\s*notifyChange\(\);\s*stateManager\.saveStateDebounced\(\);/
     );
 });
 

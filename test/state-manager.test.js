@@ -111,7 +111,14 @@ test('StateManager moves snapshots through redo without creating duplicates', as
     manager.performUndo(notify);
     assert.equal(editor.innerHTML, 'B');
     assert.equal(notifications, 3);
-    assert.equal(messages.filter((message) => message.type === 'undoRedo').length, 3);
+    assert.deepEqual(
+        messages.filter((message) => message.type === 'undoRedo'),
+        [
+            { type: 'undoRedo', direction: 'undo' },
+            { type: 'undoRedo', direction: 'redo' },
+            { type: 'undoRedo', direction: 'undo' },
+        ]
+    );
 });
 
 test('StateManager does not redo over a pending text edit', async () => {
@@ -134,6 +141,39 @@ test('StateManager does not redo over a pending text edit', async () => {
     assert.equal(editor.innerHTML, 'new text');
     assert.deepEqual(manager.undoStack.map((state) => state.html), ['A', 'B', 'new text']);
     assert.deepEqual(manager.redoStack, []);
+});
+
+test('StateManager can immediately undo a debounced programmatic deletion', async () => {
+    const { editor, manager, messages } = await createStateManager({
+        maxHistorySize: 10,
+        maxHistoryBytes: 1024,
+    });
+    const codeBlock = '<pre><code>\n</code></pre>';
+    const deleted = '<p><br></p>';
+
+    editor.innerHTML = codeBlock;
+    manager.saveState();
+    manager.saveState();
+    editor.innerHTML = deleted;
+    manager.saveStateDebounced();
+    manager.performUndo();
+
+    assert.equal(editor.innerHTML, codeBlock);
+    assert.deepEqual(
+        messages.filter((message) => message.type === 'undoRedo'),
+        [{ type: 'undoRedo', direction: 'undo' }]
+    );
+});
+
+test('StateManager does not declare no-op history actions', async () => {
+    const { editor, manager, messages } = await createStateManager();
+    editor.innerHTML = 'only state';
+    manager.saveState();
+
+    manager.performUndo();
+    manager.performRedo();
+
+    assert.deepEqual(messages, []);
 });
 
 test('StateManager clearHistory releases stacks and byte accounting', async () => {
