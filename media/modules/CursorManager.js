@@ -313,6 +313,19 @@ export class CursorManager {
         return false;
     }
 
+    _isInNavigationExcludedElement(node) {
+        let current = node && node.nodeType === Node.ELEMENT_NODE
+            ? node
+            : node?.parentElement;
+        while (current && current !== this.editor) {
+            if (this._isNavigationExcludedElement(current)) {
+                return true;
+            }
+            current = current.parentElement;
+        }
+        return false;
+    }
+
     _isSameVisualLine(lastLine, rect) {
         if (!lastLine || !rect) {
             return false;
@@ -984,7 +997,7 @@ export class CursorManager {
         }
     }
 
-    _normalizeSelectionForNavigation(selection) {
+    _normalizeSelectionForNavigation(selection, direction = null) {
         if (!selection || !selection.rangeCount) {
             return false;
         }
@@ -1038,6 +1051,12 @@ export class CursorManager {
         }
 
         if (invalid) {
+            // Vertical table navigation is owned by TableManager. If a browser probe
+            // leaves the caret on an edge/handle, keep it there for that manager to
+            // recover on the next event instead of converting it to the editor end.
+            if (direction === 'up' || direction === 'down') {
+                return true;
+            }
             this._normalizeSelectionAtEditorEnd(range);
             return true;
         }
@@ -2532,6 +2551,61 @@ export class CursorManager {
         return last;
     }
 
+    _placeCursorInTableWrapperAtX(wrapper, currentX, selection) {
+        if (!wrapper || !selection ||
+            wrapper.nodeType !== Node.ELEMENT_NODE ||
+            !wrapper.classList?.contains('md-table-wrapper')) {
+            return false;
+        }
+
+        const table = wrapper.querySelector('table');
+        if (!table || !table.rows || table.rows.length === 0) {
+            return false;
+        }
+
+        const lastRow = table.rows[table.rows.length - 1];
+        const cells = lastRow ? Array.from(lastRow.cells || []) : [];
+        if (cells.length === 0) {
+            return false;
+        }
+
+        let targetCell = cells[cells.length - 1];
+        if (Number.isFinite(currentX)) {
+            let bestHorizontalDistance = Infinity;
+            let bestCenterDistance = Infinity;
+            for (const cell of cells) {
+                const rect = cell.getBoundingClientRect ? cell.getBoundingClientRect() : null;
+                if (!rect || !Number.isFinite(rect.left) || !Number.isFinite(rect.right)) {
+                    continue;
+                }
+                const horizontalDistance = currentX < rect.left
+                    ? rect.left - currentX
+                    : (currentX > rect.right ? currentX - rect.right : 0);
+                const centerDistance = Math.abs(currentX - ((rect.left + rect.right) / 2));
+                if (horizontalDistance < bestHorizontalDistance ||
+                    (horizontalDistance === bestHorizontalDistance && centerDistance < bestCenterDistance)) {
+                    bestHorizontalDistance = horizontalDistance;
+                    bestCenterDistance = centerDistance;
+                    targetCell = cell;
+                }
+            }
+        }
+
+        const newRange = document.createRange();
+        const lastTextNode = this._getLastNavigableTextNode(targetCell);
+        if (lastTextNode) {
+            newRange.setStart(lastTextNode, (lastTextNode.textContent || '').length);
+        } else {
+            // Empty table cells contain only a BR (and optional non-editable handles).
+            // Position zero keeps the caret inside the cell instead of on a table edge.
+            newRange.setStart(targetCell, 0);
+        }
+        newRange.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(newRange);
+        return true;
+    }
+
     _buildLogicalEditorEndRange() {
         const endRange = document.createRange();
         if (!this.editor) {
@@ -3262,9 +3336,15 @@ export class CursorManager {
         const selection = window.getSelection();
         if (!selection || !selection.rangeCount) return;
         this._clearForwardImageStep();
-        this._normalizeSelectionForNavigation(selection);
+        if (this._normalizeSelectionForNavigation(selection, 'up')) return;
         const range = selection.getRangeAt(0);
         const container = range.startContainer;
+        const originTableCell =
+            this.domUtils.getParentElement(container, 'TD') ||
+            this.domUtils.getParentElement(container, 'TH');
+        if (originTableCell && selection.isCollapsed) {
+            return;
+        }
         const originContainer = range.startContainer;
         const originOffset = range.startOffset;
         const restoreOriginalCaret = () => {
@@ -4606,7 +4686,9 @@ export class CursorManager {
                     const afterRect = getVisualCaretRectForRange(afterRange);
                     const afterY = afterRect ? (afterRect.top || afterRect.y || 0) : null;
                     const movedUpByModify = Number.isFinite(afterY) && afterY < (currentY - 2);
-                    if (movedUpByModify) {
+                    const movedIntoExcludedElement =
+                        this._isInNavigationExcludedElement(afterRange.startContainer);
+                    if (movedUpByModify && !movedIntoExcludedElement) {
                         return;
                     }
                     restoreOriginalCaret();
@@ -4658,9 +4740,9 @@ export class CursorManager {
                 }
                 if (prevElement) {
                     // X位置を維持してカーソルを配置する
-                    let placed = false;
-                    const lastNode = this.domUtils.getLastTextNode(prevElement);
-                    if (lastNode) {
+                    let placed = this._placeCursorInTableWrapperAtX(prevElement, currentX, selection);
+                    const lastNode = placed ? null : this._getLastNavigableTextNode(prevElement);
+                    if (!placed && lastNode) {
                         const text = lastNode.textContent || '';
                         if (text.length > 0) {
                             // 最後の文字のrectからテキスト行のY中心を算出
@@ -5102,7 +5184,7 @@ export class CursorManager {
             return;
         }
 
-        this._normalizeSelectionForNavigation(selection);
+        if (this._normalizeSelectionForNavigation(selection, 'down')) return;
         normalizeCollapsedBoundaryToTextNode();
         if (this._normalizeCollapsedImageAnchor(selection, 'forward')) {
             return;
@@ -5111,6 +5193,15 @@ export class CursorManager {
         container = range.startContainer;
         originContainer = range.startContainer;
         originOffset = range.startOffset;
+        const originTableCell =
+            this.domUtils.getParentElement(container, 'TD') ||
+            this.domUtils.getParentElement(container, 'TH');
+        if (originTableCell && selection.isCollapsed) {
+            // TableManager performs row/cell navigation without viewport hit-testing.
+            // CursorManager's generic offscreen fallback would otherwise skip the rest
+            // of the table and move to the wrapper's following block.
+            return;
+        }
         const originCodeBlock = this.domUtils.getParentElement(container, 'CODE');
         const originPreBlock = originCodeBlock ? this.domUtils.getParentElement(originCodeBlock, 'PRE') : null;
         const originTopLevelBlock = getTopLevelBlockForNavigation(container, range.startOffset);
@@ -6611,6 +6702,22 @@ export class CursorManager {
             const beforeOffset = beforeRange.startOffset;
             const beforeRect = getVisualCaretRectForRange(beforeRange);
             const beforeTop = beforeRect ? (beforeRect.top || beforeRect.y || 0) : null;
+            const beforeScrollTop = this.editor.scrollTop;
+            const beforeEditorRect = this.editor.getBoundingClientRect
+                ? this.editor.getBoundingClientRect()
+                : null;
+            const beforeContentTop = Number.isFinite(beforeTop) && beforeEditorRect
+                ? beforeTop - beforeEditorRect.top + beforeScrollTop
+                : null;
+            const rejectNativeMove = () => {
+                restoreOriginalCaret();
+                // Selection.modify() can reveal its probe target synchronously. A rejected
+                // probe must not leave that browser-generated scroll behind.
+                if (Math.abs(this.editor.scrollTop - beforeScrollTop) >= 1) {
+                    this.editor.scrollTop = beforeScrollTop;
+                }
+                return false;
+            };
 
             try {
                 selection.modify('move', 'forward', 'line');
@@ -6620,8 +6727,7 @@ export class CursorManager {
 
             const afterSelection = window.getSelection();
             if (!afterSelection || !afterSelection.rangeCount) {
-                restoreOriginalCaret();
-                return false;
+                return rejectNativeMove();
             }
 
             const afterRange = afterSelection.getRangeAt(0);
@@ -6630,27 +6736,51 @@ export class CursorManager {
                 afterRange.endContainer !== beforeContainer ||
                 afterRange.endOffset !== beforeOffset;
             if (!movedByNative || !this.editor.contains(afterRange.startContainer)) {
-                restoreOriginalCaret();
-                return false;
+                return rejectNativeMove();
             }
 
             const afterRect = getVisualCaretRectForRange(afterRange);
             const afterTop = afterRect ? (afterRect.top || afterRect.y || 0) : null;
-            const movedDown = Number.isFinite(beforeTop) &&
-                Number.isFinite(afterTop) &&
-                afterTop > beforeTop + 2;
+            const afterEditorRect = this.editor.getBoundingClientRect
+                ? this.editor.getBoundingClientRect()
+                : null;
+            const afterContentTop = Number.isFinite(afterTop) && afterEditorRect
+                ? afterTop - afterEditorRect.top + this.editor.scrollTop
+                : null;
+            const movedDown = Number.isFinite(beforeContentTop) &&
+                Number.isFinite(afterContentTop) &&
+                afterContentTop > beforeContentTop + 2;
             if (!movedDown) {
-                restoreOriginalCaret();
-                return false;
+                return rejectNativeMove();
             }
 
-            // 2行以上飛んだケースは採用せず、既存の詳細ロジックへフォールバックする。
+            // Compare editor-content coordinates. Viewport coordinates can look only one
+            // line apart after the browser scrolls a far-away probe target into view.
             if (beforeRect && afterRect) {
                 const beforeLineHeight = getEstimatedLineHeight(beforeRange.startContainer, beforeRect);
-                const deltaY = (afterTop || 0) - (beforeTop || 0);
+                const deltaY = afterContentTop - beforeContentTop;
                 if (deltaY > beforeLineHeight * 1.65) {
-                    restoreOriginalCaret();
-                    return false;
+                    return rejectNativeMove();
+                }
+            }
+
+            const movedIntoExcludedElement =
+                this._isInNavigationExcludedElement(afterRange.startContainer);
+            if (movedIntoExcludedElement) {
+                return rejectNativeMove();
+            }
+
+            // A one-line move may cross into the immediately following top-level block,
+            // but it must never skip intervening blocks and land near the document end.
+            const afterTopLevelBlock = getTopLevelBlockForNavigation(
+                afterRange.startContainer,
+                afterRange.startOffset
+            );
+            if (originTopLevelBlock && afterTopLevelBlock &&
+                originTopLevelBlock !== afterTopLevelBlock) {
+                const immediateNextBlock = this._getNextNavigableElementInDocument(originTopLevelBlock);
+                if (immediateNextBlock !== afterTopLevelBlock) {
+                    return rejectNativeMove();
                 }
             }
 
@@ -6664,8 +6794,7 @@ export class CursorManager {
                 if (normalizeTopLevelIgnorableCaretDown()) {
                     return true;
                 }
-                restoreOriginalCaret();
-                return false;
+                return rejectNativeMove();
             }
 
             return true;

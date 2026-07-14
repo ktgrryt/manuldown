@@ -48,16 +48,6 @@ export class MarkdownDocument {
             tokenizer,
         });
 
-        // Custom renderer to preserve code block content exactly as-is
-        const renderer = new marked.Renderer();
-        const originalCode = renderer.code.bind(renderer);
-        renderer.code = function (code: string, language: string | undefined, isEscaped: boolean) {
-            // Preserve the code content exactly as-is, including all newlines
-            // Don't let marked trim or modify the content
-            return originalCode(code, language, isEscaped);
-        };
-        marked.use({ renderer });
-
         // Table parsing is enabled via gfm option
     }
 
@@ -158,17 +148,13 @@ export class MarkdownDocument {
             html = html.replace(/<input\s+disabled=""\s+type="checkbox"/gi, '<input type="checkbox"');
 
 
-            // Normalize code blocks: remove only leading whitespace
-            // Preserve all trailing whitespace including newlines (user input)
-            html = html.replace(/<code([^>]*)>([\s\S]*?)<\/code>/gi, (match, attrs, content) => {
-                // Only trim leading whitespace, preserve all trailing content including newlines
-                let trimmedContent = content.replace(/^\s+/, '');
-                if (trimmedContent === '' && content.includes('\n')) {
-                    // Keep a newline so empty fenced blocks stay editable in the webview.
-                    trimmedContent = '\n';
-                }
-                return `<code${attrs}>${trimmedContent}</code>`;
-            });
+            // Keep fenced-code content byte-for-byte. Only truly empty fenced blocks
+            // need a newline so Chromium has an editable text position.
+            html = html.replace(
+                /(<pre\b[^>]*>\s*<code\b[^>]*>)([\s\S]*?)(<\/code>\s*<\/pre>)/gi,
+                (_match, openTags, content, closeTags) =>
+                    `${openTags}${content === '' ? '\n' : content}${closeTags}`
+            );
 
 
             // Convert relative image paths to webview URIs
@@ -872,9 +858,16 @@ export class MarkdownDocument {
         }
 
         const documentDir = path.dirname(this.document.uri.fsPath);
+        // data-md-path is an internal trust marker added below. Raw Markdown HTML
+        // must not be able to provide its own value and influence later imports
+        // or Markdown serialization.
+        const htmlWithoutReservedImagePaths = html.replace(
+            /\sdata-md-path\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi,
+            ''
+        );
 
         // Replace img src attributes with webview URIs
-        return html.replace(/<img([^>]*?)src="([^"]+)"([^>]*?)>/g, (match, before, src, after) => {
+        return htmlWithoutReservedImagePaths.replace(/<img([^>]*?)src="([^"]+)"([^>]*?)>/g, (match, before, src, after) => {
             // Decode URL-encoded src (marked encodes non-ASCII characters like Japanese)
             let decodedSrc = src;
             try {
@@ -894,7 +887,12 @@ export class MarkdownDocument {
             try {
                 // Convert to webview URI
                 const webviewUri = this.webview!.asWebviewUri(vscode.Uri.file(absolutePath));
-                return `<img${before}src="${webviewUri}"${after}>`;
+                const markdownPath = decodedSrc
+                    .replace(/&/g, '&amp;')
+                    .replace(/"/g, '&quot;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;');
+                return `<img${before}src="${webviewUri}" data-md-path="${markdownPath}"${after}>`;
             } catch (error) {
                 console.error('Error converting image path:', error);
                 return match;

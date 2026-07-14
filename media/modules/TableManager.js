@@ -1148,6 +1148,9 @@ export class TableManager {
         const handled = this._handleTableNavigation(direction);
         if (handled) {
             e.preventDefault();
+            if (direction === 'up' || direction === 'down') {
+                this._revealCurrentSelection();
+            }
             return true;
         }
         return false;
@@ -1180,9 +1183,64 @@ export class TableManager {
         const handled = this._handleTableNavigation(direction);
         if (handled) {
             e.preventDefault();
+            if (direction === 'up' || direction === 'down') {
+                this._revealCurrentSelection();
+            }
             return true;
         }
         return false;
+    }
+
+    _revealCurrentSelection() {
+        const selection = window.getSelection();
+        if (!selection || !selection.rangeCount) return;
+
+        const range = selection.getRangeAt(0);
+        if (!this.editor.contains(range.startContainer)) return;
+
+        // Moving out of the last table row can select an adjacent HR. It is an
+        // atomic navigation target rather than a text selection, so reveal its
+        // element rectangle directly.
+        const selectedHR = (() => {
+            if (range.collapsed && range.startContainer.nodeType === Node.ELEMENT_NODE &&
+                range.startContainer.tagName === 'HR') {
+                return range.startContainer;
+            }
+            if (range.startContainer === range.endContainer &&
+                range.startContainer.nodeType === Node.ELEMENT_NODE &&
+                range.endOffset === range.startOffset + 1) {
+                const node = range.startContainer.childNodes[range.startOffset];
+                return node?.nodeType === Node.ELEMENT_NODE && node.tagName === 'HR'
+                    ? node
+                    : null;
+            }
+            return null;
+        })();
+        if (!selection.isCollapsed && !selectedHR) return;
+
+        let caretRect = selectedHR
+            ? selectedHR.getBoundingClientRect()
+            : this._getVisualCaretRectForRange(range);
+        if (!caretRect || !Number.isFinite(caretRect.top) || !Number.isFinite(caretRect.bottom) ||
+            (!caretRect.width && !caretRect.height)) {
+            const element = range.startContainer.nodeType === Node.ELEMENT_NODE
+                ? range.startContainer
+                : range.startContainer.parentElement;
+            const fallbackElement = element?.closest?.('td, th, .md-table-edge, p, div, li') || element;
+            caretRect = fallbackElement?.getBoundingClientRect?.() || null;
+        }
+        if (!caretRect || !Number.isFinite(caretRect.top) || !Number.isFinite(caretRect.bottom)) return;
+
+        const editorRect = this.editor.getBoundingClientRect();
+        const margin = 8;
+        const visibleTop = editorRect.top + margin;
+        const visibleBottom = editorRect.bottom - margin;
+
+        if (caretRect.top < visibleTop) {
+            this.editor.scrollTop -= visibleTop - caretRect.top;
+        } else if (caretRect.bottom > visibleBottom) {
+            this.editor.scrollTop += caretRect.bottom - visibleBottom;
+        }
     }
 
     handleBackspaceKeydown(e) {
@@ -2501,7 +2559,7 @@ export class TableManager {
         const isRight = edge.dataset.tableEdge === 'right';
 
         if (isLeft) {
-            if (direction === 'right' || direction === 'next') {
+            if (direction === 'right' || direction === 'next' || direction === 'down') {
                 const firstCell = table.querySelector('td, th');
                 if (firstCell) {
                     this._setCursorToCellStart(firstCell);
@@ -2514,10 +2572,6 @@ export class TableManager {
             }
             if (direction === 'up') {
                 this._moveCursorBeforeWrapper(wrapper, true);
-                return true;
-            }
-            if (direction === 'down') {
-                this._moveCursorAfterWrapper(wrapper);
                 return true;
             }
         }
@@ -3179,6 +3233,9 @@ export class TableManager {
                 range.setStart(prev, placeAtStart ? 0 : prev.textContent.length);
             } else if (prev.tagName === 'HR') {
                 range.selectNode(prev);
+                selection.removeAllRanges();
+                selection.addRange(range);
+                return;
             } else if (placeAtStart) {
                 const firstNode = this.domUtils.getFirstTextNode(prev);
                 if (firstNode) {
@@ -3231,6 +3288,14 @@ export class TableManager {
         if (next) {
             if (next.nodeType === Node.TEXT_NODE) {
                 range.setStart(next, 0);
+            } else if (next.tagName === 'HR') {
+                // Keep HR navigation as a real node selection. A collapsed range
+                // inside an empty HR has no caret rectangle, so the viewport cannot
+                // reliably follow it in Chromium WebViews.
+                range.selectNode(next);
+                selection.removeAllRanges();
+                selection.addRange(range);
+                return;
             } else {
                 const firstNode = this.domUtils.getFirstTextNode(next);
                 if (firstNode) {
@@ -3447,7 +3512,8 @@ export class TableManager {
             } catch (_e) {
                 probeRange = null;
             }
-            if (!probeRange || !targetCell.contains(probeRange.startContainer)) {
+            if (!probeRange || !targetCell.contains(probeRange.startContainer) ||
+                this._isExcludedCaretTarget(probeRange.startContainer, targetCell)) {
                 continue;
             }
 
@@ -3504,7 +3570,8 @@ export class TableManager {
             }
 
             const movedRange = selection.getRangeAt(0);
-            const movedInsideCell = cell.contains(movedRange.startContainer);
+            const movedInsideCell = cell.contains(movedRange.startContainer) &&
+                !this._isExcludedCaretTarget(movedRange.startContainer, cell);
             const movedPosition =
                 movedRange.startContainer !== restore.startContainer ||
                 movedRange.startOffset !== restore.startOffset;
@@ -3547,7 +3614,8 @@ export class TableManager {
         let bestRange = null;
         let bestLeft = side === 'start' ? Infinity : Number.NEGATIVE_INFINITY;
         const tryProbe = (probeRange) => {
-            if (!probeRange || !cell.contains(probeRange.startContainer)) return;
+            if (!probeRange || !cell.contains(probeRange.startContainer) ||
+                this._isExcludedCaretTarget(probeRange.startContainer, cell)) return;
             const probeRect = this._getVisualCaretRectForRange(probeRange);
             if (!probeRect) return;
             const probeTop = probeRect.top || probeRect.y || 0;
@@ -3638,32 +3706,40 @@ export class TableManager {
         if (!selection || typeof selection.modify !== 'function') return false;
 
         const restore = range.cloneRange();
+        const restoreScrollTop = this.editor.scrollTop;
+        const restoreSelectionAndScroll = () => {
+            selection.removeAllRanges();
+            selection.addRange(restore);
+            // A native line probe can scroll to an invalid target even when its
+            // selection is restored below. Keep dry-runs entirely side-effect free.
+            if (Math.abs(this.editor.scrollTop - restoreScrollTop) >= 1) {
+                this.editor.scrollTop = restoreScrollTop;
+            }
+        };
         selection.removeAllRanges();
         selection.addRange(restore.cloneRange());
 
         try {
             selection.modify('move', direction === 'up' ? 'backward' : 'forward', 'line');
             if (!selection.rangeCount) {
-                selection.removeAllRanges();
-                selection.addRange(restore);
+                restoreSelectionAndScroll();
                 return false;
             }
 
             const movedRange = selection.getRangeAt(0);
-            const movedInsideCell = cell.contains(movedRange.startContainer);
+            const movedInsideCell = cell.contains(movedRange.startContainer) &&
+                !this._isExcludedCaretTarget(movedRange.startContainer, cell);
             const movedPosition =
                 movedRange.startContainer !== restore.startContainer ||
                 movedRange.startOffset !== restore.startOffset;
             const moved = movedInsideCell && movedPosition;
 
             if (dryRun || !moved) {
-                selection.removeAllRanges();
-                selection.addRange(restore);
+                restoreSelectionAndScroll();
             }
             return moved;
         } catch (_e) {
-            selection.removeAllRanges();
-            selection.addRange(restore);
+            restoreSelectionAndScroll();
             return false;
         }
     }
@@ -3678,22 +3754,22 @@ export class TableManager {
 
         const lines = this._getVisualLinesForCell(cell);
         if (lines.length < 2) {
-            return this._moveWithinCellByNativeLine(cell, range, direction);
+            return false;
         }
 
         const currentRect = this._getVisualCaretRectForRange(range);
         if (!currentRect) {
-            return this._moveWithinCellByNativeLine(cell, range, direction);
+            return false;
         }
 
         const currentIndex = this._getNearestVisualLineIndex(lines, currentRect);
         if (currentIndex < 0) {
-            return this._moveWithinCellByNativeLine(cell, range, direction);
+            return false;
         }
 
         const targetIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1;
         if (targetIndex < 0 || targetIndex >= lines.length) {
-            return this._moveWithinCellByNativeLine(cell, range, direction);
+            return false;
         }
 
         const currentLine = lines[currentIndex];
@@ -3706,7 +3782,8 @@ export class TableManager {
         const targetY = targetLine.top + Math.max(1, Math.min(targetHeight * 0.5, targetHeight - 1));
 
         const trySetRange = (targetRange) => {
-            if (!targetRange || !cell.contains(targetRange.startContainer)) return false;
+            if (!targetRange || !cell.contains(targetRange.startContainer) ||
+                this._isExcludedCaretTarget(targetRange.startContainer, cell)) return false;
             const isSamePosition =
                 targetRange.startContainer === originContainer &&
                 targetRange.startOffset === originOffset;
@@ -3797,7 +3874,8 @@ export class TableManager {
         let bestScore = Infinity;
 
         const trySelectRange = (probeRange) => {
-            if (!probeRange || !cell.contains(probeRange.startContainer)) {
+            if (!probeRange || !cell.contains(probeRange.startContainer) ||
+                this._isExcludedCaretTarget(probeRange.startContainer, cell)) {
                 return;
             }
             const probeRect = this._getVisualCaretRectForRange(probeRange);
@@ -4097,17 +4175,17 @@ export class TableManager {
 
         const lines = this._getVisualLinesForCell(cell);
         if (lines.length < 2) {
-            return this._moveWithinCellByNativeLine(cell, range, direction, true);
+            return false;
         }
 
         const caretRect = this._getVisualCaretRectForRange(range);
         if (!caretRect) {
-            return this._moveWithinCellByNativeLine(cell, range, direction, true);
+            return false;
         }
 
         const currentIndex = this._getNearestVisualLineIndex(lines, caretRect);
         if (currentIndex < 0) {
-            return this._moveWithinCellByNativeLine(cell, range, direction, true);
+            return false;
         }
 
         return direction === 'up'
@@ -4183,6 +4261,20 @@ export class TableManager {
             node.classList &&
             node.classList.contains('md-table-structure-handle')
         );
+    }
+
+    _isExcludedCaretTarget(node, boundary = null) {
+        let current = node && node.nodeType === Node.ELEMENT_NODE
+            ? node
+            : node?.parentElement;
+        while (current && current !== boundary && current !== this.editor) {
+            if (current.getAttribute?.('data-exclude-from-markdown') === 'true' ||
+                current.getAttribute?.('contenteditable') === 'false') {
+                return true;
+            }
+            current = current.parentElement;
+        }
+        return false;
     }
 
     _isPlaceholderOnlyCellNode(node) {

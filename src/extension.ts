@@ -6,6 +6,7 @@ const MANULDOWN_EDITOR_VIEW_TYPE = 'manulDown.editor';
 const MANULDOWN_CONFIGURATION_SECTION = 'manulDown';
 const OPEN_BY_DEFAULT_SETTING_KEY = 'openByDefault';
 const MARKDOWN_FILE_ASSOCIATION_KEY = '*.md';
+const PREVIOUS_MARKDOWN_ASSOCIATION_KEY = 'manulDown.previousMarkdownEditorAssociation';
 
 export function activate(context: vscode.ExtensionContext) {
     void initializeDefaultMarkdownAssociation(context);
@@ -148,7 +149,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     const configurationListener = vscode.workspace.onDidChangeConfiguration((event) => {
         if (event.affectsConfiguration(`${MANULDOWN_CONFIGURATION_SECTION}.${OPEN_BY_DEFAULT_SETTING_KEY}`)) {
-            void syncDefaultMarkdownAssociationWithSetting();
+            void syncDefaultMarkdownAssociationWithSetting(context, true);
         }
     });
     context.subscriptions.push(configurationListener);
@@ -158,26 +159,29 @@ export function deactivate() {
 }
 
 async function initializeDefaultMarkdownAssociation(context: vscode.ExtensionContext): Promise<void> {
-    await promptForDefaultMarkdownAssociation(context);
-    await syncDefaultMarkdownAssociationWithSetting();
+    const explicitlyAccepted = await promptForDefaultMarkdownAssociation(context);
+    const updated = await syncDefaultMarkdownAssociationWithSetting(context, explicitlyAccepted);
+    if (explicitlyAccepted && updated) {
+        vscode.window.showInformationMessage('ManulDown is now the default editor for Markdown files.');
+    }
 }
 
-async function promptForDefaultMarkdownAssociation(context: vscode.ExtensionContext): Promise<void> {
+async function promptForDefaultMarkdownAssociation(context: vscode.ExtensionContext): Promise<boolean> {
     const hasPrompted = context.globalState.get<boolean>(MARKDOWN_ASSOCIATION_PROMPT_KEY, false);
     if (hasPrompted) {
-        return;
+        return false;
     }
 
     if (!getOpenByDefaultSetting()) {
         await context.globalState.update(MARKDOWN_ASSOCIATION_PROMPT_KEY, true);
-        return;
+        return false;
     }
 
     const editorAssociations = getEditorAssociations();
 
     if (editorAssociations[MARKDOWN_FILE_ASSOCIATION_KEY] === MANULDOWN_EDITOR_VIEW_TYPE) {
         await context.globalState.update(MARKDOWN_ASSOCIATION_PROMPT_KEY, true);
-        return;
+        return false;
     }
 
     const setDefaultAction = 'Set as Default';
@@ -192,12 +196,11 @@ async function promptForDefaultMarkdownAssociation(context: vscode.ExtensionCont
     if (selection === setDefaultAction) {
         try {
             await setOpenByDefaultSetting(true);
-            vscode.window.showInformationMessage('ManulDown is now the default editor for Markdown files.');
             await context.globalState.update(MARKDOWN_ASSOCIATION_PROMPT_KEY, true);
-            return;
+            return true;
         } catch {
             vscode.window.showErrorMessage('Failed to save the default Markdown editor setting.');
-            return;
+            return false;
         }
     }
 
@@ -205,13 +208,17 @@ async function promptForDefaultMarkdownAssociation(context: vscode.ExtensionCont
         await setOpenByDefaultSetting(false);
     } catch {
         vscode.window.showErrorMessage('Failed to save the default Markdown editor setting.');
-        return;
+        return false;
     }
 
     await context.globalState.update(MARKDOWN_ASSOCIATION_PROMPT_KEY, true);
+    return false;
 }
 
-async function syncDefaultMarkdownAssociationWithSetting(): Promise<void> {
+async function syncDefaultMarkdownAssociationWithSetting(
+    context: vscode.ExtensionContext,
+    allowOverride: boolean
+): Promise<boolean> {
     const openByDefault = getOpenByDefaultSetting();
     const workbenchConfig = vscode.workspace.getConfiguration('workbench');
     const editorAssociations = getEditorAssociations();
@@ -219,7 +226,10 @@ async function syncDefaultMarkdownAssociationWithSetting(): Promise<void> {
 
     if (openByDefault) {
         if (currentAssociation === MANULDOWN_EDITOR_VIEW_TYPE) {
-            return;
+            return false;
+        }
+        if (currentAssociation && !allowOverride) {
+            return false;
         }
 
         const updatedEditorAssociations: Record<string, string> = {
@@ -228,6 +238,10 @@ async function syncDefaultMarkdownAssociationWithSetting(): Promise<void> {
         };
 
         try {
+            await context.globalState.update(
+                PREVIOUS_MARKDOWN_ASSOCIATION_KEY,
+                currentAssociation || undefined
+            );
             await workbenchConfig.update(
                 'editorAssociations',
                 updatedEditorAssociations,
@@ -235,24 +249,35 @@ async function syncDefaultMarkdownAssociationWithSetting(): Promise<void> {
             );
         } catch {
             vscode.window.showErrorMessage('Failed to update default Markdown editor setting.');
+            return false;
         }
-        return;
+        return true;
     }
 
     if (currentAssociation !== MANULDOWN_EDITOR_VIEW_TYPE) {
-        return;
+        return false;
     }
 
-    const { [MARKDOWN_FILE_ASSOCIATION_KEY]: _, ...updatedEditorAssociations } = editorAssociations;
+    const previousAssociation = context.globalState.get<string>(PREVIOUS_MARKDOWN_ASSOCIATION_KEY);
+    const { [MARKDOWN_FILE_ASSOCIATION_KEY]: _, ...otherEditorAssociations } = editorAssociations;
+    const updatedEditorAssociations = previousAssociation
+        ? {
+            ...otherEditorAssociations,
+            [MARKDOWN_FILE_ASSOCIATION_KEY]: previousAssociation,
+        }
+        : otherEditorAssociations;
     try {
         await workbenchConfig.update(
             'editorAssociations',
             updatedEditorAssociations,
             vscode.ConfigurationTarget.Global
         );
+        await context.globalState.update(PREVIOUS_MARKDOWN_ASSOCIATION_KEY, undefined);
     } catch {
         vscode.window.showErrorMessage('Failed to update default Markdown editor setting.');
+        return false;
     }
+    return true;
 }
 
 function getOpenByDefaultSetting(): boolean {

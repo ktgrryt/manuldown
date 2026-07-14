@@ -18,6 +18,8 @@ import { SearchManager } from './modules/SearchManager.js';
     let isComposing = false;
     let lastCompositionEndTs = 0;
     let notifyTimeout = null;
+    let localUpdateRevision = 0;
+    let acknowledgedUpdateRevision = 0;
     let pendingDeleteListItem = null;
     let pendingStrikeCleanup = false;
     let pendingEmptyListItemInsert = null;
@@ -28,6 +30,7 @@ import { SearchManager } from './modules/SearchManager.js';
     let pendingMouseDriftCorrection = null;
     let manualPointerSelection = null;
     let lastPointerCaretIntentTs = 0;
+    let lastCaretIntentSource = null;
     let lastPointerCheckboxClickTs = 0;
     let lastCtrlNavKeydownTs = 0;
     let lastCtrlNavCommandTs = 0;
@@ -2395,6 +2398,7 @@ import { SearchManager } from './modules/SearchManager.js';
     }
 
     let caretScrollRaf = null;
+    let caretScrollForcePending = false;
     const caretScrollMargin = 8;
 
     function ensureCodeBlockCaretVisible(range, caretRect) {
@@ -2432,27 +2436,50 @@ import { SearchManager } from './modules/SearchManager.js';
         }
     }
 
-    function ensureCaretVisible() {
+    function ensureCaretVisible(force = false) {
         if (isUpdating) return;
         // Mouse click placement should not trigger additional auto-scroll corrections.
         // Browsers already scroll naturally for pointer caret placement.
-        if (Date.now() - lastPointerCaretIntentTs < 250) return;
+        // Once a navigation key is pressed, however, its selection changes must reveal
+        // the caret even when they occur immediately after that click.
+        if (!force && lastCaretIntentSource === 'pointer' &&
+            Date.now() - lastPointerCaretIntentTs < 250) return;
         const selection = window.getSelection();
-        if (!selection || !selection.rangeCount || !selection.isCollapsed) return;
+        if (!selection || !selection.rangeCount) return;
         const range = selection.getRangeAt(0);
         if (!editor.contains(range.startContainer)) return;
 
-        const isEditorBoundary = range.startContainer === editor;
-        const rectFromManager = cursorManager && cursorManager._getCaretRect
-            ? cursorManager._getCaretRect(range)
+        // Vertical navigation can select an atomic editor element instead of creating
+        // a collapsed caret. Treat recognized keyboard-only node selections as caret
+        // targets so they are revealed before navigation continues.
+        // Table navigation can leave a collapsed range whose container is the HR
+        // itself (HR, offset 0). It is still an atomic navigation target and has no
+        // usable caret rectangle of its own, so reveal the element rectangle.
+        const selectedHR = force ? isHRSelected() : null;
+        const selectedCodeLabel = force && !selection.isCollapsed
+            ? getSelectedCodeBlockLanguageLabel()
             : null;
+        const selectedImage = force && !selection.isCollapsed
+            ? getSelectedImageNodeFromRange(range)
+            : null;
+        const selectedAtomicElement = selectedHR || selectedCodeLabel || selectedImage;
+        if (!selection.isCollapsed && !selectedAtomicElement) return;
+
+        const isEditorBoundary = range.startContainer === editor;
+        const rectFromManager = selectedAtomicElement
+            ? selectedAtomicElement.getBoundingClientRect()
+            : (cursorManager && cursorManager._getCaretRect
+                ? cursorManager._getCaretRect(range)
+                : null);
         const rects = !isEditorBoundary && range.getClientRects ? range.getClientRects() : null;
         const caretRect = rectFromManager || (rects && rects.length ? rects[0] : null);
         if (!caretRect) return;
 
-        ensureCodeBlockCaretVisible(range, caretRect);
+        if (selection.isCollapsed) {
+            ensureCodeBlockCaretVisible(range, caretRect);
+        }
 
-        const isEditorEndBoundary = range.startContainer === editor &&
+        const isEditorEndBoundary = selection.isCollapsed && range.startContainer === editor &&
             range.startOffset >= (editor.childNodes ? editor.childNodes.length : 0);
         const editorViewportRect = editor.getBoundingClientRect();
         if (isEditorEndBoundary && caretRect.bottom < editorViewportRect.top) {
@@ -2472,12 +2499,25 @@ import { SearchManager } from './modules/SearchManager.js';
         }
     }
 
-    function scheduleEnsureCaretVisible() {
+    function scheduleEnsureCaretVisible(force = false) {
+        if (force) {
+            caretScrollForcePending = true;
+        }
         if (caretScrollRaf) return;
         caretScrollRaf = requestAnimationFrame(() => {
             caretScrollRaf = null;
-            ensureCaretVisible();
+            const shouldForce = caretScrollForcePending && lastCaretIntentSource === 'keyboard';
+            caretScrollForcePending = false;
+            ensureCaretVisible(shouldForce);
         });
+    }
+
+    function revealCaretAfterKeyboardNavigation() {
+        // The synchronous pass handles ordinary key presses. The forced RAF pass
+        // handles WebView selection/layout updates that settle after keydown returns.
+        lastCaretIntentSource = 'keyboard';
+        ensureCaretVisible(true);
+        scheduleEnsureCaretVisible(true);
     }
 
     function focusEditorAndRevealCaret() {
@@ -5439,7 +5479,8 @@ import { SearchManager } from './modules/SearchManager.js';
         const content = domUtils.getCleanedHTML();
         vscode.postMessage({
             type: 'update',
-            content: content
+            content: content,
+            revision: localUpdateRevision
         });
     }
 
@@ -5454,6 +5495,27 @@ import { SearchManager } from './modules/SearchManager.js';
             notifyTimeout = null;
         }, delayMs);
     }
+
+    function flushPendingUpdate() {
+        if (!notifyTimeout && localUpdateRevision <= acknowledgedUpdateRevision) {
+            return false;
+        }
+
+        clearNotifyTimeout();
+        postUpdate();
+        return true;
+    }
+
+    // A delayed update must reach the extension host before Chromium tears down
+    // the Webview. This also flushes when a retained Webview is merely hidden,
+    // keeping the backing TextDocument current while another tab is active.
+    window.addEventListener('pagehide', flushPendingUpdate);
+    window.addEventListener('beforeunload', flushPendingUpdate);
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'hidden') {
+            flushPendingUpdate();
+        }
+    });
 
     // 隣接する同タイプのリストをマージ
     function mergeAdjacentLists() {
@@ -5471,6 +5533,7 @@ import { SearchManager } from './modules/SearchManager.js';
 
     // 変更を通知
     function prepareEditorForNotify() {
+        localUpdateRevision++;
         pendingCtrlKDeleteSync = false;
 
         // ゴーストスタイル（削除されたインラインコードのスタイルが残ったもの）をクリーンアップ
@@ -5560,6 +5623,7 @@ import { SearchManager } from './modules/SearchManager.js';
 
     // Undo/Redo用の遅延通知（VSCodeの更新処理が完了するまで待つ）
     function notifyChangeDelayed() {
+        localUpdateRevision++;
         scheduleEditorOverflowStateUpdate();
         // VSCodeの更新処理が完了するまで待つ（100ms - 短縮）
         scheduleUpdate(100);
@@ -8834,12 +8898,39 @@ import { SearchManager } from './modules/SearchManager.js';
         const selection = window.getSelection();
         if (!selection || selection.rangeCount === 0) return null;
         const range = selection.getRangeAt(0);
-        // rangeが水平線ノードを選択しているか確認
+
+        const getContainingHR = (node) => {
+            if (!node) return null;
+            const element = node.nodeType === Node.ELEMENT_NODE
+                ? node
+                : node.parentElement;
+            if (!element) return null;
+            const hr = element.tagName === 'HR'
+                ? element
+                : (element.closest ? element.closest('hr') : null);
+            return hr && editor.contains(hr) ? hr : null;
+        };
+
+        // Moving out of a table can produce { container: HR, offset: 0 } rather
+        // than a node selection. Empty atomic elements have no text caret, but the
+        // range still represents the HR navigation position.
+        if (range.collapsed) {
+            const containingHR = getContainingHR(range.startContainer);
+            if (containingHR) {
+                return containingHR;
+            }
+        }
+
+        // rangeが水平線ノードだけを選択しているか確認。Chromiumは
+        // HR直前の折りたたみ境界で表すこともあるため、その形も維持する。
         if (range.startContainer === range.endContainer &&
             range.startContainer.nodeType === Node.ELEMENT_NODE) {
             const container = range.startContainer;
             const startNode = container.childNodes[range.startOffset];
-            if (startNode && startNode.tagName === 'HR') {
+            const selectsOnlyStartNode = range.collapsed ||
+                range.endOffset === range.startOffset + 1;
+            if (selectsOnlyStartNode && startNode && startNode.tagName === 'HR' &&
+                editor.contains(startNode)) {
                 return startNode;
             }
         }
@@ -8849,15 +8940,35 @@ import { SearchManager } from './modules/SearchManager.js';
             const prevNode = range.startOffset > 0
                 ? container.childNodes[range.startOffset - 1]
                 : null;
-            if (prevNode && prevNode.nodeType === Node.ELEMENT_NODE && prevNode.tagName === 'HR') {
+            if (prevNode && prevNode.nodeType === Node.ELEMENT_NODE && prevNode.tagName === 'HR' &&
+                editor.contains(prevNode)) {
                 return prevNode;
             }
         }
-        // 水平線自体が直接選択されている場合
-        if (range.startContainer.parentElement) {
-            const parent = range.startContainer.parentElement;
-            if (parent.tagName === 'HR') {
-                return parent;
+        // A browser-created non-collapsed range may keep both endpoints inside the
+        // same atomic element instead of representing it through the parent node.
+        const startHR = getContainingHR(range.startContainer);
+        const endHR = getContainingHR(range.endContainer);
+        if (startHR && startHR === endHR) {
+            return startHR;
+        }
+
+        // Some Chromium selection normalizations use one endpoint inside the empty
+        // HR and the other at the immediately adjacent parent boundary. Accept only
+        // that exact atomic span; a user selection extending into other content must
+        // remain an ordinary text selection.
+        if (startHR && range.startContainer === startHR && range.startOffset === 0 &&
+            range.endContainer === startHR.parentNode) {
+            const hrIndex = Array.prototype.indexOf.call(startHR.parentNode.childNodes, startHR);
+            if (hrIndex >= 0 && range.endOffset === hrIndex + 1) {
+                return startHR;
+            }
+        }
+        if (endHR && range.endContainer === endHR && range.endOffset === 0 &&
+            range.startContainer === endHR.parentNode) {
+            const hrIndex = Array.prototype.indexOf.call(endHR.parentNode.childNodes, endHR);
+            if (hrIndex >= 0 && range.startOffset === hrIndex) {
+                return endHR;
             }
         }
         return null;
@@ -15590,6 +15701,17 @@ import { SearchManager } from './modules/SearchManager.js';
             return;
         }
 
+        const key = typeof e.key === 'string' ? e.key.toLowerCase() : '';
+        const isPlainVerticalArrow =
+            (e.key === 'ArrowUp' || e.key === 'ArrowDown') &&
+            !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey;
+        const isMacVerticalCtrlNav = isMac &&
+            e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey &&
+            (key === 'p' || key === 'n');
+        if (isPlainVerticalArrow || isMacVerticalCtrlNav) {
+            lastCaretIntentSource = 'keyboard';
+        }
+
         if (handleTableStructureSelectKeydown(e)) {
             return;
         }
@@ -19113,7 +19235,7 @@ import { SearchManager } from './modules/SearchManager.js';
                             type: 'saveImageFromUri',
                             uri: copiedImage.src,
                             altText: copiedImage.altText,
-                            source: 'paste'
+                            source: internalPastedHtml ? 'internal' : 'paste'
                         });
                         return;
                     }
@@ -19305,7 +19427,24 @@ import { SearchManager } from './modules/SearchManager.js';
         });
 
         // キーボードイベント
-        editor.addEventListener('keydown', handleKeydown);
+        editor.addEventListener('keydown', (e) => {
+            const key = typeof e.key === 'string' ? e.key.toLowerCase() : '';
+            const shouldRevealAfterVerticalNavigation =
+                !isImeInteractionKeydown(e) && (
+                    ((e.key === 'ArrowUp' || e.key === 'ArrowDown') &&
+                        !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) ||
+                    (isMac && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey &&
+                        (key === 'p' || key === 'n'))
+                );
+
+            handleKeydown(e);
+
+            // Run after every vertical-key branch, including early returns for HR,
+            // list items, empty blocks, checkboxes, and code-block controls.
+            if (shouldRevealAfterVerticalNavigation) {
+                revealCaretAfterKeyboardNavigation();
+            }
+        });
 
         // mousedownイベント - 箇条書きでのカーソル位置を修正（clickより先に実行）
         editor.addEventListener('mousedown', (e) => {
@@ -19318,6 +19457,8 @@ import { SearchManager } from './modules/SearchManager.js';
             // 左クリックのみ処理
             if (e.button !== 0) return;
             lastPointerCaretIntentTs = Date.now();
+            lastCaretIntentSource = 'pointer';
+            caretScrollForcePending = false;
             const pointerTarget = e.target;
             const pointerCheckbox = pointerTarget && pointerTarget.closest
                 ? pointerTarget.closest('input[type="checkbox"]')
@@ -19871,7 +20012,12 @@ import { SearchManager } from './modules/SearchManager.js';
         }
 
         function isOpenableLinkUrl(url) {
-            return /^https?:\/\//i.test(url) || (settingsState.allowFileLinks && /^file:/i.test(url));
+            const safeUrl = sanitizeLinkHref(url);
+            if (!safeUrl) return false;
+            if (/^file:/i.test(safeUrl)) {
+                return settingsState.allowFileLinks;
+            }
+            return /^(?:https?:\/\/|mailto:)/i.test(safeUrl) || !hasExplicitScheme(safeUrl);
         }
 
         function saveLinkUrlIfChanged() {
@@ -19933,12 +20079,34 @@ import { SearchManager } from './modules/SearchManager.js';
             hideLinkPopover(true); // 保存をスキップ（リンク削除済み）
         }
 
+        function revealLinkAnchor(url) {
+            if (!url || !url.startsWith('#')) {
+                return false;
+            }
+
+            let anchorId = url.slice(1);
+            try {
+                anchorId = decodeURIComponent(anchorId);
+            } catch (_error) {
+                // Keep the literal fragment if decoding fails.
+            }
+            const target = anchorId ? document.getElementById(anchorId) : null;
+            if (target && editor.contains(target)) {
+                target.scrollIntoView({ block: 'start' });
+            }
+            return true;
+        }
+
         function openLink() {
             // 先にURLを保存してから開く
             saveLinkUrlIfChanged();
             if (currentLink) {
                 const url = currentLink.getAttribute('href');
                 if (url && isOpenableLinkUrl(url)) {
+                    if (revealLinkAnchor(url)) {
+                        hideLinkPopover(true);
+                        return;
+                    }
                     vscode.postMessage({
                         type: 'openLink',
                         url: url
@@ -20343,7 +20511,10 @@ import { SearchManager } from './modules/SearchManager.js';
                     e.preventDefault();
                     e.stopPropagation();
                     const url = link.getAttribute('href');
-                    if (url) {
+                    if (url && revealLinkAnchor(url)) {
+                        return;
+                    }
+                    if (url && isOpenableLinkUrl(url)) {
                         vscode.postMessage({
                             type: 'openLink',
                             url: url
@@ -20431,7 +20602,9 @@ import { SearchManager } from './modules/SearchManager.js';
             const image = e.target && e.target.closest ? e.target.closest('img') : null;
             if (!image || !editor.contains(image)) return;
 
-            const src = image.getAttribute('src') || image.currentSrc;
+            const src = image.getAttribute('data-md-path') ||
+                image.getAttribute('src') ||
+                image.currentSrc;
             if (!src) return;
 
             e.preventDefault();
@@ -20704,7 +20877,6 @@ import { SearchManager } from './modules/SearchManager.js';
         tocManager.setup();
 
         vscode.postMessage({ type: 'ready' });
-        requestCustomSlashCommands(true);
     }
 
     // VSCodeからのメッセージ処理
@@ -20737,41 +20909,87 @@ import { SearchManager } from './modules/SearchManager.js';
                     scheduleEditorOverflowStateUpdate();
                 }, 100);
                 break;
-            case 'update':
-                if (!editor.contains(document.activeElement)) {
-                    temporarilySuppressImageRemovalSync();
-                    isUpdating = true;
-                    const scrollTop = editor.scrollTop;
-                    replaceEditorContentFromHtml(message.content);
-                    editor.scrollTop = scrollTop;
-                    isUpdating = false;
-                    normalizeCheckboxListItems();
-                    domUtils.ensureInlineCodeSpaces();
-                    domUtils.cleanupGhostStyles();
-                    tableManager.ensureInsertLines();
-                    tableManager.wrapTables();
-                    applyImageRenderSizes();
-                    updateListItemClasses();
-                    tocManager.update();
-                    codeBlockManager.highlightCodeBlocks();
-                    scheduleEditorOverflowStateUpdate();
+            case 'updateApplied':
+                if (Number.isFinite(message.revision)) {
+                    acknowledgedUpdateRevision = Math.max(
+                        acknowledgedUpdateRevision,
+                        Math.floor(message.revision)
+                    );
                 }
                 break;
-            case 'refresh':
+            case 'update':
+                if (
+                    message.external === true &&
+                    localUpdateRevision > acknowledgedUpdateRevision
+                ) {
+                    clearNotifyTimeout();
+                    vscode.postMessage({
+                        type: 'externalEditConflict',
+                        changeId: message.changeId
+                    });
+                    break;
+                }
+
                 temporarilySuppressImageRemovalSync();
                 isUpdating = true;
-                const scrollTopRefresh = editor.scrollTop;
-                replaceEditorContentFromHtml(message.content);
-                editor.scrollTop = scrollTopRefresh;
-                isUpdating = false;
+                const scrollTop = editor.scrollTop;
+                const savedSelection = stateManager.saveSelection();
+                try {
+                    replaceEditorContentFromHtml(message.content);
+                    editor.scrollTop = scrollTop;
+                    stateManager.restoreSelection(savedSelection);
+                } finally {
+                    isUpdating = false;
+                }
                 normalizeCheckboxListItems();
+                domUtils.ensureInlineCodeSpaces();
+                domUtils.cleanupGhostStyles();
                 tableManager.ensureInsertLines();
                 tableManager.wrapTables();
                 applyImageRenderSizes();
                 updateListItemClasses();
                 tocManager.update();
                 codeBlockManager.highlightCodeBlocks();
+                stateManager.clearHistory();
+                stateManager.saveState();
                 scheduleEditorOverflowStateUpdate();
+                if (message.external === true) {
+                    vscode.postMessage({
+                        type: 'externalUpdateApplied',
+                        changeId: message.changeId
+                    });
+                }
+                break;
+            case 'refresh':
+                clearNotifyTimeout();
+                temporarilySuppressImageRemovalSync();
+                isUpdating = true;
+                const scrollTopRefresh = editor.scrollTop;
+                try {
+                    replaceEditorContentFromHtml(message.content);
+                    editor.scrollTop = scrollTopRefresh;
+                } finally {
+                    isUpdating = false;
+                }
+                normalizeCheckboxListItems();
+                domUtils.ensureInlineCodeSpaces();
+                domUtils.cleanupGhostStyles();
+                tableManager.ensureInsertLines();
+                tableManager.wrapTables();
+                applyImageRenderSizes();
+                updateListItemClasses();
+                tocManager.update();
+                codeBlockManager.highlightCodeBlocks();
+                stateManager.clearHistory();
+                stateManager.saveState();
+                acknowledgedUpdateRevision = localUpdateRevision;
+                scheduleEditorOverflowStateUpdate();
+                if (message.external === true) {
+                    vscode.postMessage({
+                        type: 'externalUpdateApplied',
+                        changeId: message.changeId
+                    });
+                }
                 break;
             case 'settings':
                 applySettings(message.settings);
@@ -20932,6 +21150,11 @@ import { SearchManager } from './modules/SearchManager.js';
                 break;
             case 'requestSync':
                 notifyChangeImmediate();
+                break;
+            case 'retryPendingUpdate':
+                if (localUpdateRevision > acknowledgedUpdateRevision) {
+                    scheduleUpdate(5000);
+                }
                 break;
             case 'tableCommand':
                 tableManager.executeTableCommand(message.command);

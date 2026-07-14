@@ -3,7 +3,7 @@
   "displayName": "ManulDown",
   "description": "WYSIWYG editor for Markdown files in VSCode",
   "icon": "images/icon.png",
-  "version": "1.0.11",
+  "version": "1.0.12",
   "publisher": "ktgrryt",
   "license": "MIT",
   "repository": {
@@ -272,7 +272,8 @@
     "compile": "npm run bundle:webview && tsc -p ./",
     "watch": "npm run bundle:webview && tsc -watch -p ./",
     "pretest": "npm run compile",
-    "lint": "eslint src"
+    "test": "node --test test/*.test.js",
+    "lint": "eslint src media"
   },
   "devDependencies": {
     "@types/node": "20.x",
@@ -283,12 +284,11 @@
     "@vscode/test-electron": "^2.3.8",
     "esbuild": "^0.28.1",
     "eslint": "^10.0.0",
+    "mermaid": "^11.16.0",
     "typescript": "^5.3.3"
   },
   "dependencies": {
-    "dompurify": "^3.4.11",
     "marked": "^11.1.1",
-    "mermaid": "^11.16.0",
     "prismjs": "^1.30.0",
     "turndown": "^7.2.2",
     "turndown-plugin-gfm": "^1.0.2"

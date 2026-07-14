@@ -2,6 +2,7 @@
 .vscode/**
 .vscode-test/**
 src/**
+test/**
 test.md
 media/editor.js.original
 package-lock.json

@@ -305,6 +305,10 @@ export class StateManager {
      * 履歴をクリア
      */
     clearHistory() {
+        if (this.saveStateTimeout) {
+            clearTimeout(this.saveStateTimeout);
+            this.saveStateTimeout = null;
+        }
         this.undoStack = [];
         this.redoStack = [];
     }

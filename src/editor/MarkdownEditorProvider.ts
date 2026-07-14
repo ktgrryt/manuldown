@@ -329,13 +329,31 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     (!node.parentNode || node.parentNode.nodeName !== 'PRE')
                 );
             },
-            replacement: function (content: string) {
-                // Don't escape backticks - just wrap with backticks
-                // If content contains backticks, use double backticks
-                if (content.includes('`')) {
-                    return '`` ' + content + ' ``';
-                }
-                return '`' + content + '`';
+            replacement: function (_content: string, node: any) {
+                const encodedWhitespace = node?.getAttribute?.('data-mdw-code-whitespace');
+                const encodedLeading = node?.getAttribute?.('data-mdw-code-leading');
+                const encodedTrailing = node?.getAttribute?.('data-mdw-code-trailing');
+                const decodeHex = (value: string | null | undefined): string =>
+                    value && /^[0-9a-f]+$/i.test(value)
+                        ? Buffer.from(value, 'hex').toString('utf8')
+                        : '';
+                const rawContent = encodedWhitespace
+                    ? decodeHex(encodedWhitespace)
+                    : `${decodeHex(encodedLeading)}${String(node?.textContent || '')}${decodeHex(encodedTrailing)}`;
+                const longestBacktickRun = Math.max(
+                    0,
+                    ...Array.from(rawContent.matchAll(/`+/g), (match) => match[0].length)
+                );
+                const fence = '`'.repeat(Math.max(1, longestBacktickRun + 1));
+                const needsPadding = rawContent.startsWith('`') ||
+                    rawContent.endsWith('`') ||
+                    (
+                        rawContent.trim() !== '' &&
+                        rawContent.startsWith(' ') &&
+                        rawContent.endsWith(' ')
+                    );
+                const padding = needsPadding ? ' ' : '';
+                return `${fence}${padding}${rawContent}${padding}${fence}`;
             }
         });
 
@@ -393,11 +411,14 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     }
                     return text;
                 };
-                const code = serializeCodeNode(codeNode);
+                const encodedWhitespace = codeNode.getAttribute('data-mdw-whitespace-code');
+                const code = encodedWhitespace && /^[0-9a-f]+$/i.test(encodedWhitespace)
+                    ? Buffer.from(encodedWhitespace, 'hex').toString('utf8')
+                    : serializeCodeNode(codeNode);
 
                 // Preserve the code as-is, but ensure proper formatting
                 let codeContent = code;
-                if (code.trim() === '') {
+                if (code === '') {
                     // Empty code block - add a newline to preserve it
                     codeContent = '\n';
                 } else {
@@ -408,7 +429,11 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     }
                 }
 
-                const fence = options.fence || '```';
+                const longestBacktickRun = Math.max(
+                    0,
+                    ...Array.from(codeContent.matchAll(/`+/g), (match) => match[0].length)
+                );
+                const fence = '`'.repeat(Math.max(3, longestBacktickRun + 1));
                 // Format: \n\n```language\ncodeContent```\n\n
                 // The codeContent already ends with \n, so closing fence will be on its own line
                 const result = '\n\n' + fence + language + '\n' + codeContent + fence + '\n\n';
@@ -497,9 +522,68 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
 
         // Track if we're currently updating from webview
         let isUpdatingFromWebview = false;
-        let lastWebviewUpdateTime = 0;
-        let pendingWebviewHtml: string | null = null;
+        let pendingWebviewUpdate: { html: string; revision: number } | null = null;
         let processingWebviewUpdate = false;
+        let externalChangeSequence = 0;
+        let unresolvedExternalChangeId = 0;
+        let externalConflictPromptActive = false;
+
+        const postExternalDocumentUpdate = (force = false): void => {
+            if (unresolvedExternalChangeId === 0) {
+                return;
+            }
+            void webviewPanel.webview.postMessage({
+                type: force ? 'refresh' : 'update',
+                content: markdownDocument.toHtml(),
+                external: true,
+                force,
+                changeId: unresolvedExternalChangeId,
+            });
+        };
+
+        const promptForExternalEditResolution = async (changeId: number): Promise<void> => {
+            if (
+                externalConflictPromptActive ||
+                changeId <= 0 ||
+                changeId !== unresolvedExternalChangeId
+            ) {
+                return;
+            }
+
+            externalConflictPromptActive = true;
+            const reloadAction = 'Reload External Changes';
+            const keepAction = 'Keep ManulDown Changes';
+            try {
+                const selection = await vscode.window.showWarningMessage(
+                    'This Markdown file changed outside ManulDown while the editor had unsaved changes.',
+                    { modal: true },
+                    reloadAction,
+                    keepAction
+                );
+
+                if (changeId !== unresolvedExternalChangeId) {
+                    void webviewPanel.webview.postMessage({ type: 'retryPendingUpdate' });
+                    return;
+                }
+                if (selection === reloadAction) {
+                    pendingWebviewUpdate = null;
+                    postExternalDocumentUpdate(true);
+                    return;
+                }
+                if (selection === keepAction) {
+                    unresolvedExternalChangeId = 0;
+                    void webviewPanel.webview.postMessage({ type: 'requestSync' });
+                    return;
+                }
+
+                // Dismissing the modal is not a resolution. Keep the local
+                // revision pending and ask the Webview to retry after a pause,
+                // so closing the dialog cannot silently turn into data loss.
+                void webviewPanel.webview.postMessage({ type: 'retryPendingUpdate' });
+            } finally {
+                externalConflictPromptActive = false;
+            }
+        };
 
         const flushPendingWebviewUpdate = async (): Promise<void> => {
             if (processingWebviewUpdate) {
@@ -510,20 +594,35 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             isUpdatingFromWebview = true;
 
             try {
-                while (pendingWebviewHtml !== null) {
-                    const htmlToApply = pendingWebviewHtml;
-                    pendingWebviewHtml = null;
-                    lastWebviewUpdateTime = Date.now();
-                    await this.updateTextDocument(document, htmlToApply);
+                while (pendingWebviewUpdate !== null && unresolvedExternalChangeId === 0) {
+                    const updateToApply = pendingWebviewUpdate;
+                    pendingWebviewUpdate = null;
+                    const result = await this.updateTextDocument(document, updateToApply.html);
+                    const appliedTextIsCurrent = result.applied && document.getText() === result.markdown;
+                    if (appliedTextIsCurrent) {
+                        void webviewPanel.webview.postMessage({
+                            type: 'updateApplied',
+                            revision: updateToApply.revision,
+                        });
+                    } else if (!result.applied) {
+                        void webviewPanel.webview.postMessage({ type: 'retryPendingUpdate' });
+                    }
+
+                    // applyEdit normally emits the document-change event while
+                    // our guard is active. If another writer races that edit,
+                    // detect the final text mismatch explicitly instead of
+                    // suppressing the external change with our own event.
+                    if (result.applied && !appliedTextIsCurrent) {
+                        unresolvedExternalChangeId = ++externalChangeSequence;
+                        postExternalDocumentUpdate();
+                    }
                 }
             } catch (error) {
                 console.error('[webview update] Failed to apply editor update:', error);
             } finally {
-                // Wait for all document change events to be processed
-                await new Promise(resolve => setTimeout(resolve, 300));
                 processingWebviewUpdate = false;
 
-                if (pendingWebviewHtml !== null) {
+                if (pendingWebviewUpdate !== null && unresolvedExternalChangeId === 0) {
                     void flushPendingWebviewUpdate();
                     return;
                 }
@@ -537,13 +636,32 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             async (message) => {
                 switch (message.type) {
                     case 'undoRedo':
-                        // Undo/Redo操作の開始を記録（外部変更と判断されないように）
-                        lastWebviewUpdateTime = Date.now();
                         break;
                     case 'update':
-                        pendingWebviewHtml = typeof message.content === 'string' ? message.content : '';
-                        lastWebviewUpdateTime = Date.now();
+                        if (unresolvedExternalChangeId !== 0) {
+                            postExternalDocumentUpdate();
+                            break;
+                        }
+                        pendingWebviewUpdate = {
+                            html: typeof message.content === 'string' ? message.content : '',
+                            revision: Number.isFinite(message.revision)
+                                ? Math.max(0, Math.floor(message.revision))
+                                : 0,
+                        };
                         void flushPendingWebviewUpdate();
+                        break;
+                    case 'externalUpdateApplied':
+                        if (
+                            Number.isFinite(message.changeId) &&
+                            Math.floor(message.changeId) === unresolvedExternalChangeId
+                        ) {
+                            unresolvedExternalChangeId = 0;
+                        }
+                        break;
+                    case 'externalEditConflict':
+                        if (Number.isFinite(message.changeId)) {
+                            void promptForExternalEditResolution(Math.floor(message.changeId));
+                        }
                         break;
                     case 'ready':
                         // Send initial content to webview
@@ -582,7 +700,9 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                             webviewPanel.webview,
                             {
                                 altText: typeof message.altText === 'string' ? message.altText : undefined,
-                                source: message.source === 'drop' || message.source === 'paste'
+                                source: message.source === 'drop' ||
+                                    message.source === 'paste' ||
+                                    message.source === 'internal'
                                     ? message.source
                                     : 'unknown'
                             }
@@ -606,16 +726,32 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                         // Open external links. file:// links are opt-in because they can
                         // launch local files, applications, or network shares.
                         if (typeof message.url === 'string') {
-                            const targetUri = vscode.Uri.parse(message.url);
+                            const rawUrl = message.url.trim();
                             const allowFileLinks = vscode.workspace
                                 .getConfiguration('manulDown')
                                 .get<boolean>('security.allowFileLinks', false);
-                            if (
-                                targetUri.scheme === 'http' ||
-                                targetUri.scheme === 'https' ||
-                                (allowFileLinks && targetUri.scheme === 'file')
-                            ) {
-                                vscode.env.openExternal(targetUri);
+                            const targetUri = vscode.Uri.parse(rawUrl);
+                            if (targetUri.scheme === 'http' || targetUri.scheme === 'https' || targetUri.scheme === 'mailto') {
+                                await vscode.env.openExternal(targetUri);
+                            } else if (targetUri.scheme === 'file' && allowFileLinks) {
+                                await vscode.env.openExternal(targetUri);
+                            } else if (!/^[a-z][a-z0-9+.-]*:/i.test(rawUrl) && !rawUrl.startsWith('#')) {
+                                const fragmentIndex = rawUrl.indexOf('#');
+                                const rawPath = fragmentIndex >= 0 ? rawUrl.slice(0, fragmentIndex) : rawUrl;
+                                const fragment = fragmentIndex >= 0 ? rawUrl.slice(fragmentIndex + 1) : '';
+                                let decodedPath = rawPath;
+                                try {
+                                    decodedPath = decodeURIComponent(rawPath);
+                                } catch {
+                                    // Use the literal Markdown path if decoding fails.
+                                }
+                                const relativeTarget = this.resolveImageSourceUri(decodedPath, document).with({ fragment });
+                                const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
+                                const isInsideWorkspace = !!workspaceFolder &&
+                                    this.isUriWithinDirectory(relativeTarget, workspaceFolder.uri);
+                                if (isInsideWorkspace || allowFileLinks) {
+                                    await vscode.commands.executeCommand('vscode.open', relativeTarget);
+                                }
                             }
                         }
                         break;
@@ -666,15 +802,9 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         // Handle document changes (external edits)
         const changeDocumentSubscription = vscode.workspace.onDidChangeTextDocument((e) => {
             if (e.document.uri.toString() === document.uri.toString()) {
-                const timeSinceLastUpdate = Date.now() - lastWebviewUpdateTime;
-                // Only update webview if not currently updating from webview
-                // AND if enough time has passed since the last webview update (2000ms grace period)
-                // Increased to 2000ms to account for slow applyEdit operations
-                if (!isUpdatingFromWebview && timeSinceLastUpdate > 2000) {
-                    webviewPanel.webview.postMessage({
-                        type: 'update',
-                        content: markdownDocument.toHtml(),
-                    });
+                if (!isUpdatingFromWebview) {
+                    unresolvedExternalChangeId = ++externalChangeSequence;
+                    postExternalDocumentUpdate();
                 }
             }
         });
@@ -988,11 +1118,17 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         }
     }
 
-    private async updateTextDocument(document: vscode.TextDocument, html: string): Promise<void> {
-        const edit = new vscode.WorkspaceEdit();
-
+    private async updateTextDocument(
+        document: vscode.TextDocument,
+        html: string
+    ): Promise<{ applied: boolean; markdown: string }> {
         // Convert HTML back to Markdown
         const markdown = this.htmlToMarkdown(html, document);
+        if (markdown === document.getText()) {
+            return { applied: true, markdown };
+        }
+
+        const edit = new vscode.WorkspaceEdit();
 
         // Replace entire document - use proper range to cover all content
         const lastLine = document.lineAt(document.lineCount - 1);
@@ -1009,7 +1145,11 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             markdown
         );
 
-        await vscode.workspace.applyEdit(edit);
+        const applied = await vscode.workspace.applyEdit(edit);
+        if (!applied) {
+            vscode.window.showErrorMessage('Failed to apply the ManulDown editor update.');
+        }
+        return { applied, markdown };
     }
 
     private getDefaultUnorderedListMarker(): UnorderedListMarker {
@@ -1409,27 +1549,61 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             // Remove drag handles (row-handle and col-handle)
             html = html.replace(/<div class="(row|col)-handle"[^>]*><\/div>/gi, '');
 
-            // Normalize code blocks before inline code so language-less fenced blocks
-            // preserve intentional trailing newlines.
-            const codeBlockPlaceholders: string[] = [];
-            html = html.replace(/<pre([^>]*)>\s*<code([^>]*)>([\s\S]*?)<\/code>\s*<\/pre>/gi,
-                (_match, preAttrs, codeAttrs, content) => {
-                    const placeholder = `MDW_CODE_BLOCK_${codeBlockPlaceholders.length}_PLACEHOLDER`;
-                    const trimmedContent = content.replace(/^\s+/g, '');
-                    codeBlockPlaceholders.push(`<pre${preAttrs}><code${codeAttrs}>${trimmedContent}</code></pre>`);
-                    return placeholder;
-                });
+            // These attributes are private, per-conversion transport fields.
+            // Remove any same-named attributes originating in Markdown/HTML so
+            // document content cannot collide with the preservation mechanism.
+            html = html.replace(
+                /\sdata-mdw-(?:code-whitespace|code-leading|code-trailing|whitespace-code)="[^"]*"/gi,
+                ''
+            );
 
-            // Normalize inline code: trim all surrounding whitespace.
+            // Turndown normalizes whitespace around inline CODE elements before
+            // custom rules run. Preserve only those boundary characters in
+            // temporary attributes while leaving encoded HTML content to its parser.
+            const fencedCodeBlocks: string[] = [];
+            const fencedCodePlaceholderPrefix = `MDW_FENCED_CODE_${getNonce()}_`;
+            html = html.replace(/<pre\b[^>]*>\s*<code\b[^>]*>[\s\S]*?<\/code>\s*<\/pre>/gi, (match) => {
+                const placeholder = `${fencedCodePlaceholderPrefix}${fencedCodeBlocks.length}_PLACEHOLDER`;
+                fencedCodeBlocks.push(match);
+                return placeholder;
+            });
             html = html.replace(/<code([^>]*)>([\s\S]*?)<\/code>/gi, (_match, attrs, content) => {
-                const trimmedContent = content.replace(/^\s+|\s+$/g, '');
-                return `<code${attrs}>${trimmedContent}</code>`;
+                if (content !== '' && content.trim() === '') {
+                    const encodedWhitespace = Buffer.from(content, 'utf8').toString('hex');
+                    return `<code${attrs} data-mdw-code-whitespace="${encodedWhitespace}">MDW_INLINE_CODE_WHITESPACE</code>`;
+                }
+                const leading = content.match(/^\s+/)?.[0] || '';
+                const trailing = content.match(/\s+$/)?.[0] || '';
+                const coreEnd = Math.max(leading.length, content.length - trailing.length);
+                const core = content.slice(leading.length, coreEnd);
+                const leadingAttr = leading
+                    ? ` data-mdw-code-leading="${Buffer.from(leading, 'utf8').toString('hex')}"`
+                    : '';
+                const trailingAttr = trailing
+                    ? ` data-mdw-code-trailing="${Buffer.from(trailing, 'utf8').toString('hex')}"`
+                    : '';
+                return `<code${attrs}${leadingAttr}${trailingAttr}>${core}</code>`;
             });
+            const fencedCodePlaceholderPattern = new RegExp(
+                `${this.escapeRegExp(fencedCodePlaceholderPrefix)}(\\d+)_PLACEHOLDER`,
+                'g'
+            );
+            html = html.replace(
+                fencedCodePlaceholderPattern,
+                (match, indexText) => fencedCodeBlocks[Number(indexText)] ?? match
+            );
 
-            html = html.replace(/MDW_CODE_BLOCK_(\d+)_PLACEHOLDER/g, (match, indexText) => {
-                const index = Number(indexText);
-                return codeBlockPlaceholders[index] ?? match;
-            });
+            // Turndown treats whitespace-only PRE elements as blank before custom
+            // rules run. Temporarily encode that exact content in an attribute so
+            // the fenced-code rule can restore it without trimming.
+            html = html.replace(/<pre([^>]*)>\s*<code([^>]*)>([\s\S]*?)<\/code>\s*<\/pre>/gi,
+                (match, preAttrs, codeAttrs, content) => {
+                    if (content === '' || content.trim() !== '') {
+                        return match;
+                    }
+                    const encodedWhitespace = Buffer.from(content, 'utf8').toString('hex');
+                    return `<pre${preAttrs}><code${codeAttrs} data-mdw-whitespace-code="${encodedWhitespace}">MDW_WHITESPACE_CODE</code></pre>`;
+                });
 
             // Handle empty code blocks by adding a placeholder
             // Match: <pre><code class="language-xxx"></code></pre> (now that we've trimmed whitespace)
@@ -1891,6 +2065,18 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         return document.uri.with({ path: path.posix.dirname(document.uri.path) });
     }
 
+    private isUriWithinDirectory(candidate: vscode.Uri, directory: vscode.Uri): boolean {
+        if (candidate.scheme !== directory.scheme || candidate.authority !== directory.authority) {
+            return false;
+        }
+        const relativePath = path.posix.relative(directory.path, candidate.path);
+        return relativePath === '' || (
+            relativePath !== '..' &&
+            !relativePath.startsWith('../') &&
+            !path.posix.isAbsolute(relativePath)
+        );
+    }
+
     private resolveImageSourceUri(sourceText: string, document: vscode.TextDocument): vscode.Uri {
         const normalized = sourceText.trim();
 
@@ -1905,67 +2091,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         return vscode.Uri.joinPath(this.getDocumentDirectoryUri(document), normalized);
     }
 
-    private resolveWebviewBackedImageUri(sourceText: string): vscode.Uri | null {
-        const normalized = sourceText.trim();
-        if (!normalized) {
-            return null;
-        }
-
-        const toFileUri = (rawPath: string): vscode.Uri | null => {
-            if (!rawPath) {
-                return null;
-            }
-
-            let fsPath = rawPath;
-            try {
-                fsPath = decodeURIComponent(rawPath);
-            } catch {
-                // Keep the raw path when decoding fails.
-            }
-
-            // URL pathname on Windows can be "/C:/..."; Uri.file expects "C:/...".
-            if (/^\/[A-Za-z]:\//.test(fsPath)) {
-                fsPath = fsPath.slice(1);
-            }
-
-            return vscode.Uri.file(fsPath);
-        };
-
-        try {
-            const parsedUrl = new URL(normalized);
-            if (
-                String(parsedUrl.protocol || '').toLowerCase() === 'https:' &&
-                String(parsedUrl.host || '').toLowerCase().endsWith('.vscode-cdn.net')
-            ) {
-                return toFileUri(parsedUrl.pathname);
-            }
-        } catch {
-            // Fall through to vscode.Uri parsing below.
-        }
-
-        try {
-            const uri = vscode.Uri.parse(normalized);
-            if (uri.scheme === 'vscode-resource' || uri.scheme === 'vscode-webview-resource') {
-                return toFileUri(uri.fsPath || uri.path);
-            }
-            if (
-                (uri.scheme === 'https' || uri.scheme === 'http') &&
-                String(uri.authority || '').toLowerCase().endsWith('.vscode-cdn.net')
-            ) {
-                return toFileUri(uri.path);
-            }
-        } catch {
-            // Fall back to manual extraction below.
-        }
-
-        const pathMatch = normalized.match(/vscode-cdn\.net([^?#]+)/i);
-        return pathMatch && pathMatch[1]
-            ? toFileUri(pathMatch[1])
-            : null;
-    }
-
     private resolveReadableImageSourceUri(sourceText: string, document: vscode.TextDocument): vscode.Uri {
-        return this.resolveWebviewBackedImageUri(sourceText) || this.resolveImageSourceUri(sourceText, document);
+        return this.resolveImageSourceUri(sourceText, document);
     }
 
     private async fetchRemoteImage(
@@ -2018,7 +2145,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         imageUriText: string,
         document: vscode.TextDocument,
         webview: vscode.Webview,
-        options: { altText?: string; source?: 'paste' | 'drop' | 'unknown' } = {}
+        options: { altText?: string; source?: 'paste' | 'drop' | 'internal' | 'unknown' } = {}
     ): Promise<void> {
         try {
             if (!imageUriText || typeof imageUriText !== 'string') {
@@ -2048,20 +2175,24 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             const importSource = options.source ?? 'unknown';
             const looksLikeAbsolutePath = path.win32.isAbsolute(raw) || path.posix.isAbsolute(raw);
             const looksLikeExplicitScheme = /^[a-z][a-z0-9+.-]*:/i.test(raw);
-            const webviewBackedUri = this.resolveWebviewBackedImageUri(raw);
             const allowRemoteImageImport = vscode.workspace
                 .getConfiguration('manulDown')
                 .get<boolean>('security.allowRemoteImageImport', false);
 
             if (
                 importSource === 'paste' &&
-                !webviewBackedUri &&
                 (looksLikeAbsolutePath || !looksLikeExplicitScheme || /^file:/i.test(raw))
             ) {
                 throw new Error('Pasted local image URIs are blocked for security reasons.');
             }
 
             const sourceUri = this.resolveReadableImageSourceUri(raw, document);
+            if (
+                importSource === 'internal' &&
+                !this.isUriWithinDirectory(sourceUri, this.getDocumentDirectoryUri(document))
+            ) {
+                throw new Error('Internal image URI is outside the Markdown document directory.');
+            }
             let bytes: Uint8Array;
             let mimeType = this.getImageMimeTypeFromPath(sourceUri.path || sourceUri.fsPath || raw);
 
@@ -2112,13 +2243,10 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
 
             // Check if it's a webview URI
             if (imageSrc.includes('vscode-resource') || imageSrc.includes('vscode-webview-resource')) {
-                // Parse the webview URI to get the file path
-                // Webview URIs have format: vscode-webview-resource://authority/path
-                // We need to extract the actual file path
-                const uri = vscode.Uri.parse(imageSrc);
-
-                // The fsPath should contain the actual file system path
-                imageUri = vscode.Uri.file(uri.fsPath);
+                // Webview resource URLs are display-only capabilities. Never infer a
+                // local filesystem path from URL text supplied by document content.
+                vscode.window.showErrorMessage('The original image path is unavailable. Reload the ManulDown editor and try again.');
+                return;
             } else if (imageSrc.startsWith('http://') || imageSrc.startsWith('https://')) {
                 // External URL - open in browser
                 vscode.env.openExternal(vscode.Uri.parse(imageSrc));
@@ -2231,23 +2359,11 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             try {
                 let fsPath: string;
 
-                // Check if it's a webview URI (including https://file+.vscode-resource...)
+                // A trusted Webview resource should always carry data-md-path. If it
+                // does not, keep the URL untouched instead of guessing a local path
+                // from attacker-controlled URL text.
                 if (decodedSrc.includes('vscode-resource') || decodedSrc.includes('vscode-webview-resource')) {
-                    // Extract the file path from the webview URI
-                    // Try to parse as URI first
-                    try {
-                        const uri = vscode.Uri.parse(decodedSrc);
-                        fsPath = uri.fsPath;
-                    } catch (parseError) {
-                        // If parsing fails, try to extract path manually
-                        // Format: https://file+.vscode-resource.vscode-cdn.net/path/to/file
-                        const pathMatch = decodedSrc.match(/vscode-cdn\.net(.+)$/);
-                        if (pathMatch) {
-                            fsPath = pathMatch[1];
-                        } else {
-                            return match;
-                        }
-                    }
+                    return match;
                 } else if (decodedSrc.startsWith('/')) {
                     // Absolute path
                     fsPath = decodedSrc;
