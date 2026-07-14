@@ -393,7 +393,8 @@ export class DOMUtils {
      * HTMLから不要な要素を除去してクリーンアップ
      * @returns {string} クリーンアップされたHTML
      */
-    getCleanedHTML() {
+    getCleanedHTML(options = {}) {
+        const historyComparable = options.historyComparable === true;
         // チェックボックスのcheckedプロパティをHTML属性に同期
         // (プロパティの変更はinnerHTMLに反映されないため)
         const checkboxes = this.editor.querySelectorAll('input[type="checkbox"]');
@@ -437,6 +438,47 @@ export class DOMUtils {
         selectedStructureCells.forEach(cell => {
             cell.classList.remove('md-table-structure-selected-cell');
         });
+
+        // Selection/caret indicators are view state, not document state. Leaving
+        // them in the history fingerprint makes a cursor move look like an edit,
+        // which can add a no-op Undo step and clear Redo.
+        const removeTransientClass = (selector, className) => {
+            clone.querySelectorAll(selector).forEach(element => {
+                element.classList.remove(className);
+                if (element.getAttribute('class') === '') {
+                    element.removeAttribute('class');
+                }
+            });
+        };
+        removeTransientClass('hr.selected', 'selected');
+        removeTransientClass('input[type="checkbox"].cursor-on', 'cursor-on');
+        removeTransientClass('img.image-caret-left-edge', 'image-caret-left-edge');
+        removeTransientClass('img.image-caret-right-edge', 'image-caret-right-edge');
+        removeTransientClass('table.md-table', 'md-table');
+
+        if (historyComparable) {
+            clone.querySelectorAll('img').forEach(image => {
+                if (image.closest('[data-mdw-opaque-source]')) return;
+
+                // Local-image resolution and responsive render dimensions are
+                // reconstructed asynchronously. Canonicalize them to the Markdown
+                // path/alt metadata so image load timing cannot create history.
+                const markdownPath = image.getAttribute('data-md-path');
+                if (markdownPath) {
+                    image.setAttribute('src', markdownPath);
+                }
+                image.removeAttribute('data-image-resolve-id');
+                image.removeAttribute('data-remote-image-blocked');
+                image.removeAttribute('width');
+                image.removeAttribute('height');
+                image.style.removeProperty('width');
+                image.style.removeProperty('height');
+                image.style.removeProperty('aspect-ratio');
+                if (image.getAttribute('style') === '') {
+                    image.removeAttribute('style');
+                }
+            });
+        }
 
         // Normalize table cells so browser-inserted BR/DIV/P don't break Markdown table rows.
         // Preserve visual line breaks as literal "<br>" text inside the Markdown table cell.

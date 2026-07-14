@@ -110,6 +110,24 @@ export function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(findInEditorCommand);
 
+    const historyCommands = [
+        { id: 'manulDown.undo', direction: 'undo' },
+        { id: 'manulDown.redo', direction: 'redo' },
+    ];
+
+    historyCommands.forEach(({ id, direction }) => {
+        const disposable = vscode.commands.registerCommand(id, () => {
+            const posted = provider.postMessageToActiveEditor({
+                type: 'historyCommand',
+                direction,
+            });
+            if (!posted) {
+                vscode.window.showInformationMessage('Open a ManulDown editor to use document history.');
+            }
+        });
+        context.subscriptions.push(disposable);
+    });
+
     const cursorRightCommand = vscode.commands.registerCommand(
         'manulDown.cursorRight',
         () => {

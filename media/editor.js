@@ -10,6 +10,12 @@ import { ToolbarManager } from './modules/ToolbarManager.js';
 import { TableManager } from './modules/TableManager.js';
 import { SearchManager } from './modules/SearchManager.js';
 import { CompositionUpdateGate } from './modules/CompositionUpdateGate.js';
+import {
+    calculateCaretAnchorScrollTop,
+    calculateCaretRevealScrollTop,
+    collapseRectToCaretEdge,
+    isUsableCaretRect
+} from './modules/CaretScroll.js';
 
 (function () {
     // @ts-ignore
@@ -17,6 +23,7 @@ import { CompositionUpdateGate } from './modules/CompositionUpdateGate.js';
     const editor = document.getElementById('editor');
     let isUpdating = false;
     let isComposing = false;
+    let activeCompositionElement = null;
     let lastCompositionEndTs = 0;
     let notifyTimeout = null;
     let localUpdateRevision = 0;
@@ -48,6 +55,7 @@ import { CompositionUpdateGate } from './modules/CompositionUpdateGate.js';
     let trustedClipboardPayload = null;
     let handleHostMessage = () => {};
     const compositionUpdateGate = new CompositionUpdateGate();
+    const pendingHistoryCommandsAfterComposition = [];
 
     const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
     const TOC_PANEL_DEFAULT_WIDTH = 150;
@@ -1159,7 +1167,11 @@ import { CompositionUpdateGate } from './modules/CompositionUpdateGate.js';
 
     // モジュールのインスタンスを作成
     const domUtils = new DOMUtils(editor);
-    const stateManager = new StateManager(editor, vscode);
+    const stateManager = new StateManager(editor, vscode, {
+        // History must ignore syntax spans, table wrappers, selection classes and
+        // other reconstructed UI. Treat only Markdown-relevant HTML as an edit.
+        getComparableHtml: () => domUtils.getCleanedHTML({ historyComparable: true })
+    });
     const cursorManager = new CursorManager(editor, domUtils);
     const listManager = new ListManager(editor, domUtils);
     const markdownConverter = new MarkdownConverter(editor, domUtils, {
@@ -2617,7 +2629,111 @@ import { CompositionUpdateGate } from './modules/CompositionUpdateGate.js';
 
     let caretScrollRaf = null;
     let caretScrollForcePending = false;
+    let caretScrollRestoreTopPending = null;
+    let historyCaretViewportOffsetPending = null;
     const caretScrollMargin = 8;
+
+    function getNativeCaretRect(range) {
+        if (!range) return null;
+
+        const rects = range.getClientRects ? range.getClientRects() : null;
+        if (rects && rects.length) {
+            for (let index = 0; index < rects.length; index++) {
+                if (isUsableCaretRect(rects[index])) {
+                    return rects[index];
+                }
+            }
+        }
+
+        const boundingRect = range.getBoundingClientRect
+            ? range.getBoundingClientRect()
+            : null;
+        return isUsableCaretRect(boundingRect) ? boundingRect : null;
+    }
+
+    function rectsHaveMatchingEdges(first, second) {
+        if (!first || !second) return false;
+        const tolerance = 0.5;
+        return ['top', 'bottom', 'left', 'right'].every((edge) => (
+            Number.isFinite(first[edge]) &&
+            Number.isFinite(second[edge]) &&
+            Math.abs(first[edge] - second[edge]) <= tolerance
+        ));
+    }
+
+    function normalizeCollapsedCaretRect(range, measuredRect, allowEditorBoundaryFallback = false) {
+        if (!range || !range.collapsed || !measuredRect) return measuredRect;
+
+        const container = range.startContainer;
+        const containerIsText = container && container.nodeType === Node.TEXT_NODE;
+        const element = containerIsText ? container.parentElement : container;
+        const isEditorBoundary = container === editor;
+        let isWholeElementRect = false;
+        if (element && typeof element.getBoundingClientRect === 'function') {
+            isWholeElementRect = rectsHaveMatchingEdges(
+                measuredRect,
+                element.getBoundingClientRect()
+            );
+        }
+
+        // At the editor boundary CursorManager returns the nearest block edge.
+        // For other element containers, collapse only when it returned the entire
+        // element bounds instead of an actual one-line caret rectangle.
+        if (!isWholeElementRect && !(allowEditorBoundaryFallback && isEditorBoundary)) {
+            return measuredRect;
+        }
+
+        const maxOffset = containerIsText
+            ? String(container.textContent || '').length
+            : (container && container.childNodes ? container.childNodes.length : 0);
+        // CursorManager's editor-boundary fallback intentionally uses the end of
+        // the preceding block whenever one exists. Other element fallbacks use
+        // the element edge corresponding to their own child offset.
+        const atEnd = isEditorBoundary
+            ? range.startOffset > 0
+            : (maxOffset > 0 && range.startOffset >= maxOffset);
+        return collapseRectToCaretEdge(measuredRect, atEnd) || measuredRect;
+    }
+
+    function measureCaretRangeRect(range) {
+        if (!range) return null;
+        const nativeCaretRect = getNativeCaretRect(range);
+        const rectFromManager = !nativeCaretRect && cursorManager && cursorManager._getCaretRect
+            ? cursorManager._getCaretRect(range)
+            : null;
+        return normalizeCollapsedCaretRect(
+            range,
+            nativeCaretRect || rectFromManager,
+            !nativeCaretRect
+        );
+    }
+
+    function captureHistoryCaretViewportOffset() {
+        if (Number.isFinite(historyCaretViewportOffsetPending)) return false;
+
+        const selection = window.getSelection();
+        if (!selection || !selection.rangeCount || !selection.isCollapsed) return false;
+        const range = selection.getRangeAt(0);
+        if (!editor.contains(range.startContainer)) return false;
+        // Empty element and atomic selections have ambiguous visual affinity. The
+        // preserved scrollTop remains their safer fallback.
+        if (!range.startContainer || range.startContainer.nodeType !== Node.TEXT_NODE) {
+            return false;
+        }
+
+        const caretRect = measureCaretRangeRect(range);
+        if (!caretRect) return false;
+        const editorRect = editor.getBoundingClientRect();
+        const viewportBottom = editorRect.top + editor.clientHeight;
+        if (caretRect.bottom < editorRect.top || caretRect.top > viewportBottom) {
+            return false;
+        }
+
+        const viewportOffset = caretRect.top - editorRect.top;
+        if (!Number.isFinite(viewportOffset)) return false;
+        historyCaretViewportOffsetPending = viewportOffset;
+        return true;
+    }
 
     function ensureCodeBlockCaretVisible(range, caretRect) {
         if (!range || !range.collapsed || !caretRect) return;
@@ -2681,51 +2797,100 @@ import { CompositionUpdateGate } from './modules/CompositionUpdateGate.js';
             ? getSelectedImageNodeFromRange(range)
             : null;
         const selectedAtomicElement = selectedHR || selectedCodeLabel || selectedImage;
-        if (!selection.isCollapsed && !selectedAtomicElement) return;
+        if (!selection.isCollapsed && !selectedAtomicElement && !force) return;
 
-        const isEditorBoundary = range.startContainer === editor;
-        const rectFromManager = selectedAtomicElement
+        // History restores can carry a normal text selection (for example a formatting
+        // change). Reveal its focus/end edge without changing the actual selection.
+        const caretRange = force && !selection.isCollapsed && !selectedAtomicElement
+            ? (() => {
+                const collapsedRange = range.cloneRange();
+                collapsedRange.collapse(false);
+                return collapsedRange;
+            })()
+            : range;
+
+        // A native collapsed Range is the browser's actual painted caret position.
+        // CursorManager's character/element heuristics are useful only as fallback:
+        // at wrapped lines or empty nested items they can describe another line, or
+        // even the full height of a list/code block.
+        const caretRect = selectedAtomicElement
             ? selectedAtomicElement.getBoundingClientRect()
-            : (cursorManager && cursorManager._getCaretRect
-                ? cursorManager._getCaretRect(range)
-                : null);
-        const rects = !isEditorBoundary && range.getClientRects ? range.getClientRects() : null;
-        const caretRect = rectFromManager || (rects && rects.length ? rects[0] : null);
+            : measureCaretRangeRect(caretRange);
         if (!caretRect) return;
 
-        if (selection.isCollapsed) {
-            ensureCodeBlockCaretVisible(range, caretRect);
+        if (caretRange.collapsed && !selectedAtomicElement) {
+            ensureCodeBlockCaretVisible(caretRange, caretRect);
         }
 
-        const isEditorEndBoundary = selection.isCollapsed && range.startContainer === editor &&
-            range.startOffset >= (editor.childNodes ? editor.childNodes.length : 0);
+        const isEditorEndBoundary = caretRange.collapsed && caretRange.startContainer === editor &&
+            caretRange.startOffset >= (editor.childNodes ? editor.childNodes.length : 0);
         const editorViewportRect = editor.getBoundingClientRect();
         if (isEditorEndBoundary && caretRect.bottom < editorViewportRect.top) {
             return;
         }
 
-        const editorRect = editor.getBoundingClientRect();
-        const caretTop = caretRect.top - editorRect.top + editor.scrollTop;
-        const caretBottom = caretRect.bottom - editorRect.top + editor.scrollTop;
-        const visibleTop = editor.scrollTop;
-        const visibleBottom = editor.scrollTop + editor.clientHeight;
-
-        if (caretTop < visibleTop + caretScrollMargin) {
-            editor.scrollTop = Math.max(0, caretTop - caretScrollMargin);
-        } else if (caretBottom > visibleBottom - caretScrollMargin) {
-            editor.scrollTop = Math.max(0, caretBottom - editor.clientHeight + caretScrollMargin);
+        const nextScrollTop = calculateCaretRevealScrollTop({
+            scrollTop: editor.scrollTop,
+            scrollHeight: editor.scrollHeight,
+            clientHeight: editor.clientHeight,
+            viewportTop: editorViewportRect.top,
+            viewportBottom: editorViewportRect.top + editor.clientHeight,
+            targetTop: caretRect.top,
+            targetBottom: caretRect.bottom,
+            margin: caretScrollMargin
+        });
+        if (Math.abs(nextScrollTop - editor.scrollTop) >= 1) {
+            editor.scrollTop = nextScrollTop;
         }
     }
 
-    function scheduleEnsureCaretVisible(force = false) {
+    function scheduleEnsureCaretVisible(force = false, preservedScrollTop = null) {
         if (force) {
             caretScrollForcePending = true;
+        }
+        if (
+            Number.isFinite(preservedScrollTop) &&
+            !Number.isFinite(caretScrollRestoreTopPending)
+        ) {
+            caretScrollRestoreTopPending = preservedScrollTop;
         }
         if (caretScrollRaf) return;
         caretScrollRaf = requestAnimationFrame(() => {
             caretScrollRaf = null;
             const shouldForce = caretScrollForcePending && lastCaretIntentSource === 'keyboard';
             caretScrollForcePending = false;
+            const restoreScrollTop = caretScrollRestoreTopPending;
+            caretScrollRestoreTopPending = null;
+            const desiredCaretViewportOffset = historyCaretViewportOffsetPending;
+            historyCaretViewportOffsetPending = null;
+
+            let alignedToHistoryCaret = false;
+            if (shouldForce && Number.isFinite(desiredCaretViewportOffset)) {
+                const selection = window.getSelection();
+                const range = selection && selection.rangeCount && selection.isCollapsed
+                    ? selection.getRangeAt(0)
+                    : null;
+                const caretRect = range && editor.contains(range.startContainer)
+                    ? measureCaretRangeRect(range)
+                    : null;
+                if (caretRect) {
+                    const editorRect = editor.getBoundingClientRect();
+                    const nextScrollTop = calculateCaretAnchorScrollTop({
+                        scrollTop: editor.scrollTop,
+                        scrollHeight: editor.scrollHeight,
+                        clientHeight: editor.clientHeight,
+                        currentCaretViewportOffset: caretRect.top - editorRect.top,
+                        desiredCaretViewportOffset
+                    });
+                    if (Math.abs(nextScrollTop - editor.scrollTop) >= 1) {
+                        editor.scrollTop = nextScrollTop;
+                    }
+                    alignedToHistoryCaret = true;
+                }
+            }
+            if (shouldForce && !alignedToHistoryCaret && Number.isFinite(restoreScrollTop)) {
+                editor.scrollTop = restoreScrollTop;
+            }
             ensureCaretVisible(shouldForce);
         });
     }
@@ -2733,9 +2898,19 @@ import { CompositionUpdateGate } from './modules/CompositionUpdateGate.js';
     function revealCaretAfterKeyboardNavigation() {
         // The synchronous pass handles ordinary key presses. The forced RAF pass
         // handles WebView selection/layout updates that settle after keydown returns.
+        historyCaretViewportOffsetPending = null;
+        caretScrollRestoreTopPending = null;
         lastCaretIntentSource = 'keyboard';
         ensureCaretVisible(true);
         scheduleEnsureCaretVisible(true);
+    }
+
+    function revealCaretAfterHistoryRestore(preservedScrollTop) {
+        // Run after StateManager's final selection pass. The pre-command viewport
+        // anchor keeps a same-line Undo visually stationary even if Chromium tried
+        // to scroll the restored selection during the intervening layout.
+        lastCaretIntentSource = 'keyboard';
+        scheduleEnsureCaretVisible(true, preservedScrollTop);
     }
 
     function focusEditorAndRevealCaret() {
@@ -5214,7 +5389,7 @@ import { CompositionUpdateGate } from './modules/CompositionUpdateGate.js';
         cmd.action();
         // Capture the post-command snapshot so slash execution can be redone.
         requestAnimationFrame(() => {
-            stateManager.saveState();
+            stateManager.commitStateAfterChange();
         });
     }
 
@@ -7534,34 +7709,82 @@ import { CompositionUpdateGate } from './modules/CompositionUpdateGate.js';
         return true;
     }
 
+    let performAuxiliaryHistoryCommand = () => false;
+
+    function getHistoryDirectionFromKeyboardEvent(e) {
+        if (!e || e.altKey) return null;
+        const key = String(e.key || '').toLowerCase();
+        if ((e.metaKey || e.ctrlKey) && key === 'z') {
+            return e.shiftKey ? 'redo' : 'undo';
+        }
+        if (!isMac && e.ctrlKey && !e.metaKey && !e.shiftKey && key === 'y') {
+            return 'redo';
+        }
+        return null;
+    }
+
+    function isHistoryCommandBlockedByComposition() {
+        if (activeCompositionElement && activeCompositionElement.isConnected === false) {
+            activeCompositionElement = null;
+        }
+        return !!(
+            isComposing ||
+            activeCompositionElement ||
+            compositionUpdateGate.composing ||
+            compositionUpdateGate.finalizing
+        );
+    }
+
+    function syncUiAfterHistoryRestore() {
+        tocManager.cancelScrollAnimation();
+        normalizeCheckboxListItems();
+        domUtils.ensureInlineCodeSpaces();
+        domUtils.cleanupGhostStyles();
+        tableManager.ensureInsertLines();
+        tableManager.wrapTables();
+        applyImageRenderSizes();
+        updateListItemClasses();
+        tocManager.update();
+        codeBlockManager.highlightCodeBlocks();
+        scheduleEditorOverflowStateUpdate();
+        notifyChangeDelayed();
+    }
+
+    function performEditorHistoryCommand(direction) {
+        if (performAuxiliaryHistoryCommand(direction)) {
+            return true;
+        }
+        const hadPendingViewportAnchor = Number.isFinite(historyCaretViewportOffsetPending);
+        if (!hadPendingViewportAnchor) {
+            captureHistoryCaretViewportOffset();
+        }
+        let performed = false;
+        if (direction === 'undo') {
+            performed = stateManager.performUndo(
+                syncUiAfterHistoryRestore,
+                revealCaretAfterHistoryRestore
+            );
+        } else if (direction === 'redo') {
+            performed = stateManager.performRedo(
+                syncUiAfterHistoryRestore,
+                revealCaretAfterHistoryRestore
+            );
+        }
+        if (!performed && !hadPendingViewportAnchor) {
+            historyCaretViewportOffsetPending = null;
+        }
+        return performed;
+    }
+
     function handleUndoRedoKeydown(e) {
-        const syncTableUIAfterHistoryRestore = () => {
-            normalizeCheckboxListItems();
-            domUtils.ensureInlineCodeSpaces();
-            domUtils.cleanupGhostStyles();
-            tableManager.ensureInsertLines();
-            tableManager.wrapTables();
-            applyImageRenderSizes();
-            updateListItemClasses();
-            tocManager.update();
-            codeBlockManager.highlightCodeBlocks();
-            scheduleEditorOverflowStateUpdate();
-            notifyChangeDelayed();
-        };
+        const direction = getHistoryDirectionFromKeyboardEvent(e);
+        if (!direction) return false;
 
-        if ((e.metaKey || e.ctrlKey) && e.key === 'z' && !e.shiftKey) {
-            e.preventDefault();
-            stateManager.performUndo(syncTableUIAfterHistoryRestore);
-            return true;
-        }
-
-        if ((e.metaKey || e.ctrlKey) && (e.key === 'Z' || (e.key === 'z' && e.shiftKey))) {
-            e.preventDefault();
-            stateManager.performRedo(syncTableUIAfterHistoryRestore);
-            return true;
-        }
-
-        return false;
+        e.preventDefault();
+        // The contributed VS Code command is the only executor. Keeping the DOM
+        // handler prevention-only avoids both Chromium's native contenteditable
+        // history and a second ManulDown history step for the same key press.
+        return true;
     }
 
     function handleFormatShortcutKeydown(e) {
@@ -16502,6 +16725,37 @@ import { CompositionUpdateGate } from './modules/CompositionUpdateGate.js';
     function setupEditor() {
         setupImageRemovalSyncObserver();
 
+        // VS Code owns the Cmd/Ctrl+Z keybinding while ManulDown owns the actual
+        // history. Suppress Chromium's parallel undo path without stopping the
+        // key event from reaching the workbench command dispatcher.
+        document.addEventListener('keydown', (e) => {
+            if (!getHistoryDirectionFromKeyboardEvent(e)) return;
+            if (activeCompositionElement && activeCompositionElement.isConnected === false) {
+                activeCompositionElement = null;
+            }
+            if (
+                e.isComposing ||
+                isComposing ||
+                activeCompositionElement ||
+                compositionUpdateGate.composing
+            ) {
+                return;
+            }
+            e.preventDefault();
+        }, true);
+
+        // The editor already tracks its own IME transaction. Track focused inputs
+        // as well so a host history message never replaces a browser-owned
+        // composition range in the search, link, or code-language fields.
+        document.addEventListener('compositionstart', (e) => {
+            activeCompositionElement = e.target || document.activeElement;
+        }, true);
+        document.addEventListener('compositionend', (e) => {
+            if (!activeCompositionElement || activeCompositionElement === e.target) {
+                activeCompositionElement = null;
+            }
+        }, true);
+
         // フォーカス監視
         let lastFocusTime = Date.now();
         let focusCheckInterval = null;
@@ -16862,6 +17116,16 @@ import { CompositionUpdateGate } from './modules/CompositionUpdateGate.js';
                     if (pendingExternalMessage) {
                         handleHostMessage(pendingExternalMessage);
                     }
+                    if (
+                        !compositionUpdateGate.composing &&
+                        !compositionUpdateGate.finalizing &&
+                        pendingHistoryCommandsAfterComposition.length > 0
+                    ) {
+                        const pendingDirections = pendingHistoryCommandsAfterComposition.splice(0);
+                        pendingDirections.forEach((direction) => {
+                            performEditorHistoryCommand(direction);
+                        });
+                    }
                 };
                 setTimeout(finalize, 0);
             };
@@ -16906,6 +17170,16 @@ import { CompositionUpdateGate } from './modules/CompositionUpdateGate.js';
             if (isComposing || e.isComposing || e.inputType === 'insertCompositionText') {
                 pendingEmptyListItemInsert = null;
                 return;
+            }
+
+            // Checkpoint the pre-edit DOM for every native keystroke. The input
+            // handler still debounces the post-edit snapshot, but the next
+            // beforeinput flushes that pending state. Without this checkpoint a
+            // fast `12345` followed by five Backspaces ends where it started and
+            // the whole burst is deduplicated, so Undo jumps to much older edits.
+            const nativeInputType = typeof e.inputType === 'string' ? e.inputType : '';
+            if (!e.defaultPrevented && /^(?:insert|delete)/.test(nativeInputType)) {
+                stateManager.saveState();
             }
 
             if (typeof e.inputType === 'string' && e.inputType.startsWith('delete')) {
@@ -20444,6 +20718,7 @@ import { CompositionUpdateGate } from './modules/CompositionUpdateGate.js';
         let linkInputSavedValue = '';
         let linkInputBaselineValue = '';
         let linkInputDebounceTimer = null;
+        let linkHistorySelection = null;
         function createLinkPopover() {
             const popover = document.createElement('div');
             popover.className = 'link-popover';
@@ -20489,7 +20764,18 @@ import { CompositionUpdateGate } from './modules/CompositionUpdateGate.js';
                 linkPopover = createLinkPopover();
             }
 
+            // Finish any preceding editor input before starting a separate link
+            // transaction. A no-op commit is deduplicated by StateManager.
+            stateManager.commitStateAfterChange();
             currentLink = link;
+            try {
+                const linkRange = document.createRange();
+                linkRange.selectNodeContents(link);
+                linkRange.collapse(true);
+                linkHistorySelection = stateManager.saveRange(linkRange);
+            } catch (_error) {
+                linkHistorySelection = null;
+            }
             const input = linkPopover.querySelector('.link-popover-input');
             input.value = link.getAttribute('href') || '';
             syncLinkPopoverOpenButtonState(input.value);
@@ -20538,7 +20824,6 @@ import { CompositionUpdateGate } from './modules/CompositionUpdateGate.js';
             } else {
                 currentLink.removeAttribute('href');
             }
-            stateManager.saveStateDebounced();
             notifyChange();
             return true;
         }
@@ -20573,7 +20858,6 @@ import { CompositionUpdateGate } from './modules/CompositionUpdateGate.js';
                         return false;
                     }
                     currentLink.setAttribute('href', newUrl);
-                    stateManager.saveStateDebounced();
                     if (notify) {
                         notifyChange();
                     }
@@ -20583,6 +20867,67 @@ import { CompositionUpdateGate } from './modules/CompositionUpdateGate.js';
             return false;
         }
 
+        function performLinkInputHistory(direction) {
+            if (!linkPopover || linkPopover.style.display === 'none') return false;
+            const input = linkPopover.querySelector('.link-popover-input');
+            if (!input || document.activeElement !== input) return false;
+
+            const sourceStack = direction === 'undo'
+                ? linkInputUndoStack
+                : direction === 'redo'
+                    ? linkInputRedoStack
+                    : null;
+            if (!sourceStack) return false;
+            if (sourceStack.length === 0) return true;
+
+            if (linkInputDebounceTimer !== null) {
+                clearTimeout(linkInputDebounceTimer);
+                linkInputSavedValue = input.value;
+                linkInputDebounceTimer = null;
+            }
+
+            if (direction === 'undo') {
+                linkInputRedoStack.push(linkInputSavedValue);
+                linkInputSavedValue = linkInputUndoStack.pop();
+            } else {
+                linkInputUndoStack.push(linkInputSavedValue);
+                linkInputSavedValue = linkInputRedoStack.pop();
+            }
+            input.value = linkInputSavedValue;
+            syncLinkPopoverOpenButtonState(input.value);
+            syncLinkDraftToEditor();
+            return true;
+        }
+
+        performAuxiliaryHistoryCommand = (direction) => {
+            if (performLinkInputHistory(direction)) {
+                return true;
+            }
+
+            const activeElement = document.activeElement;
+            if (!activeElement) return false;
+            const tagName = String(activeElement.tagName || '').toUpperCase();
+            const inputType = tagName === 'INPUT'
+                ? String(activeElement.getAttribute('type') || 'text').toLowerCase()
+                : '';
+            const nonTextInputTypes = new Set([
+                'button', 'checkbox', 'color', 'file', 'hidden', 'image',
+                'radio', 'range', 'reset', 'submit'
+            ]);
+            const isTextInput = tagName === 'INPUT' && !nonTextInputTypes.has(inputType);
+            const isTextArea = tagName === 'TEXTAREA';
+            const isStandaloneContentEditable =
+                activeElement !== editor &&
+                !editor.contains(activeElement) &&
+                activeElement.isContentEditable === true;
+            if (!isTextInput && !isTextArea && !isStandaloneContentEditable) return false;
+
+            if (typeof document.execCommand === 'function') {
+                document.execCommand(direction === 'redo' ? 'redo' : 'undo');
+            }
+            return true;
+        };
+
         // Sync snapshots call this in commit-only mode. If it changes the DOM,
         // createSyncSnapshot advances the revision exactly once and serializes it
         // directly instead of scheduling a redundant trailing update.
@@ -20591,14 +20936,31 @@ import { CompositionUpdateGate } from './modules/CompositionUpdateGate.js';
             revertInvalid: false
         });
 
+        function commitLinkHistoryState() {
+            if (!currentLink || !currentLink.isConnected || !editor.contains(currentLink)) {
+                return false;
+            }
+            const currentUrl = currentLink.getAttribute('href') || '';
+            if (currentUrl === linkInputBaselineValue) {
+                return false;
+            }
+            stateManager.commitStateAfterChange({
+                changeSelection: linkHistorySelection
+            });
+            linkInputBaselineValue = currentUrl;
+            return true;
+        }
+
         function hideLinkPopover(skipSave = false) {
             if (!skipSave) {
                 saveLinkUrlIfChanged();
             }
+            commitLinkHistoryState();
             if (linkPopover) {
                 linkPopover.style.display = 'none';
             }
             currentLink = null;
+            linkHistorySelection = null;
         }
 
         function unlinkLink() {
@@ -20624,7 +20986,7 @@ import { CompositionUpdateGate } from './modules/CompositionUpdateGate.js';
                 }
 
                 // Save immediately so unlink is always undoable/redoable.
-                stateManager.saveState();
+                stateManager.commitStateAfterChange({ preferLiveSelection: true });
                 notifyChange();
             }
             hideLinkPopover(true); // 保存をスキップ（リンク削除済み）
@@ -21033,8 +21395,14 @@ import { CompositionUpdateGate } from './modules/CompositionUpdateGate.js';
             const checkbox = e.target;
             if (checkbox.tagName === 'INPUT' && checkbox.type === 'checkbox') {
                 // Toggle checked state is handled by the browser automatically
-                // Just notify the change
-                stateManager.saveState();
+                // Reflect the property before taking the post-change HTML snapshot.
+                if (checkbox.checked) {
+                    checkbox.setAttribute('checked', '');
+                } else {
+                    checkbox.removeAttribute('checked');
+                }
+                restoreSelectionFromCheckboxTarget(checkbox);
+                stateManager.commitStateAfterChange({ preferLiveSelection: true });
                 notifyChange();
             }
         });
@@ -21155,44 +21523,6 @@ import { CompositionUpdateGate } from './modules/CompositionUpdateGate.js';
                         const pos = input.selectionStart;
                         if (pos < input.value.length) {
                             input.setSelectionRange(pos + 1, pos + 1);
-                        }
-                    }
-                } else if ((e.metaKey || e.ctrlKey) && e.key === 'z' && !e.shiftKey && !e.altKey) {
-                    // Undo
-                    const input = linkPopover.querySelector('.link-popover-input');
-                    if (input && document.activeElement === input) {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        if (linkInputUndoStack.length > 0) {
-                            if (linkInputDebounceTimer !== null) {
-                                clearTimeout(linkInputDebounceTimer);
-                                linkInputSavedValue = input.value;
-                                linkInputDebounceTimer = null;
-                            }
-                            linkInputRedoStack.push(linkInputSavedValue);
-                            linkInputSavedValue = linkInputUndoStack.pop();
-                            input.value = linkInputSavedValue;
-                            syncLinkPopoverOpenButtonState(input.value);
-                            syncLinkDraftToEditor();
-                        }
-                    }
-                } else if ((e.metaKey || e.ctrlKey) && (e.key === 'Z' || (e.key === 'z' && e.shiftKey)) && !e.altKey) {
-                    // Redo
-                    const input = linkPopover.querySelector('.link-popover-input');
-                    if (input && document.activeElement === input) {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        if (linkInputRedoStack.length > 0) {
-                            if (linkInputDebounceTimer !== null) {
-                                clearTimeout(linkInputDebounceTimer);
-                                linkInputSavedValue = input.value;
-                                linkInputDebounceTimer = null;
-                            }
-                            linkInputUndoStack.push(linkInputSavedValue);
-                            linkInputSavedValue = linkInputRedoStack.pop();
-                            input.value = linkInputSavedValue;
-                            syncLinkPopoverOpenButtonState(input.value);
-                            syncLinkDraftToEditor();
                         }
                     }
                 }
@@ -21392,10 +21722,14 @@ import { CompositionUpdateGate } from './modules/CompositionUpdateGate.js';
                 temporarilySuppressImageRemovalSync();
                 isUpdating = true;
                 replaceEditorContentFromHtml(message.content);
-                isUpdating = false;
-                scheduleEditorOverflowStateUpdate();
                 normalizeCheckboxListItems();
                 applyImageRenderSizes();
+                // Establish the baseline before the user can type. Delaying the
+                // first snapshot until normalization made early Undo a no-op.
+                stateManager.clearHistory();
+                stateManager.seedState();
+                isUpdating = false;
+                scheduleEditorOverflowStateUpdate();
                 setTimeout(() => {
                     try {
                         domUtils.ensureInlineCodeSpaces();
@@ -21404,7 +21738,6 @@ import { CompositionUpdateGate } from './modules/CompositionUpdateGate.js';
                         tableManager.wrapTables();
                         applyImageRenderSizes();
                         updateListItemClasses();
-                        stateManager.saveState();
                     } catch (error) {
                         console.error('Error in saveState:', error);
                     }
@@ -21469,7 +21802,12 @@ import { CompositionUpdateGate } from './modules/CompositionUpdateGate.js';
                 tocManager.update();
                 codeBlockManager.highlightCodeBlocks();
                 stateManager.clearHistory();
-                stateManager.saveState();
+                // Normalization and syntax highlighting can rebuild the node that held
+                // the caret. Reapply the pre-update position after that DOM work so a
+                // VS Code-side Undo/Redo cannot leave the selection at document start.
+                stateManager.restoreSelection(savedSelection);
+                editor.scrollTop = scrollTop;
+                stateManager.seedState();
                 scheduleEditorOverflowStateUpdate();
                 if (message.external === true) {
                     vscode.postMessage({
@@ -21500,7 +21838,7 @@ import { CompositionUpdateGate } from './modules/CompositionUpdateGate.js';
                 tocManager.update();
                 codeBlockManager.highlightCodeBlocks();
                 stateManager.clearHistory();
-                stateManager.saveState();
+                stateManager.seedState();
                 acknowledgedUpdateRevision = localUpdateRevision;
                 scheduleEditorOverflowStateUpdate();
                 if (message.external === true) {
@@ -21522,6 +21860,26 @@ import { CompositionUpdateGate } from './modules/CompositionUpdateGate.js';
                 break;
             case 'openSearch':
                 searchManager.open();
+                break;
+            case 'historyCommand':
+                if (message.direction !== 'undo' && message.direction !== 'redo') {
+                    break;
+                }
+                if (isHistoryCommandBlockedByComposition()) {
+                    if (
+                        compositionUpdateGate.finalizing &&
+                        !compositionUpdateGate.composing &&
+                        !isComposing &&
+                        !activeCompositionElement
+                    ) {
+                        if (pendingHistoryCommandsAfterComposition.length >= 20) {
+                            pendingHistoryCommandsAfterComposition.shift();
+                        }
+                        pendingHistoryCommandsAfterComposition.push(message.direction);
+                    }
+                    break;
+                }
+                performEditorHistoryCommand(message.direction);
                 break;
             case 'resolvedImageSrc':
                 {
@@ -21604,6 +21962,29 @@ import { CompositionUpdateGate } from './modules/CompositionUpdateGate.js';
                     }
                     applyImageRenderSizeFromAlt(img);
 
+                    // The picker response can arrive after the user moved elsewhere.
+                    // Serialize the request-scoped Range without stealing the live
+                    // Selection, then flush any intervening edit before inserting.
+                    const insertionHistorySelection = stateManager.saveRange(range);
+                    stateManager.beginChangeAtSelection(insertionHistorySelection);
+                    const commitInsertedImageState = (useInsertedImageLocation = false) => {
+                        let insertedImageSelection = insertionHistorySelection;
+                        if (useInsertedImageLocation && img.parentNode) {
+                            try {
+                                const imageRange = document.createRange();
+                                imageRange.setStartBefore(img);
+                                imageRange.collapse(true);
+                                insertedImageSelection =
+                                    stateManager.saveRange(imageRange) || insertionHistorySelection;
+                            } catch (_error) {
+                                // The original insertion Range remains a valid fallback.
+                            }
+                        }
+                        stateManager.commitStateAfterChange({
+                            changeSelection: insertedImageSelection
+                        });
+                    };
+
                     const isCollapsedTextCaret = (() => {
                         if (!range.collapsed) return false;
                         const container = range.startContainer;
@@ -21655,6 +22036,7 @@ import { CompositionUpdateGate } from './modules/CompositionUpdateGate.js';
                                 setCaretAfterNode(insertionSelection, imageParagraph);
                             }
 
+                            commitInsertedImageState(true);
                             notifyChangeImmediate();
                             break;
                         }
@@ -21685,6 +22067,7 @@ import { CompositionUpdateGate } from './modules/CompositionUpdateGate.js';
                         }
                     }
 
+                    commitInsertedImageState();
                     notifyChangeImmediate();
                 }
                 break;

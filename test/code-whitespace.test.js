@@ -383,63 +383,7 @@ test('a ManulDown edit in a CRLF document is not reported as external', async ()
     }
 });
 
-test('a Webview undo of its own document edit is not reported as external', async () => {
-    const codeBlockMarkdown = '```\n\n```\n';
-    const { provider, document, webview } = await createEditorSyncHarness(codeBlockMarkdown);
-    provider.updateTextDocument = async (_document, markdown) => {
-        document.setText(markdown);
-        fireDocumentChange(document);
-        return true;
-    };
-
-    try {
-        await webview.sendMessage({
-            type: 'update',
-            content: '\n',
-            revision: 1,
-        });
-        await waitFor(
-            () => webview.postedMessages.some(
-                (message) => message.type === 'updateApplied' && message.revision === 1
-            ),
-            'The empty code block deletion was not applied'
-        );
-
-        await webview.sendMessage({ type: 'undoRedo', direction: 'undo' });
-        document.setText(codeBlockMarkdown);
-        fireDocumentChange(document, 1);
-
-        assert.deepEqual(
-            webview.postedMessages.filter((message) => message.external === true),
-            [],
-            'The matching VS Code undo must stay inside the Webview history transaction'
-        );
-        assert.ok(
-            webview.postedMessages.some((message) => message.type === 'requestSync'),
-            'The host must request the final restored Webview snapshot'
-        );
-
-        await webview.sendMessage({
-            type: 'update',
-            content: codeBlockMarkdown,
-            revision: 2,
-        });
-        await waitFor(
-            () => webview.postedMessages.some(
-                (message) => message.type === 'updateApplied' && message.revision === 2
-            ),
-            'The restored code block was not acknowledged'
-        );
-        assert.deepEqual(
-            webview.postedMessages.filter((message) => message.external === true),
-            []
-        );
-    } finally {
-        webview.dispose();
-    }
-});
-
-test('a Webview undo can supersede an in-flight empty code block deletion', async () => {
+test('a restored Webview snapshot follows an in-flight edit through the normal update queue', async () => {
     const codeBlockMarkdown = '```\n\n```\n';
     const { provider, document, webview } = await createEditorSyncHarness(codeBlockMarkdown);
     let updateCount = 0;
@@ -470,9 +414,6 @@ test('a Webview undo can supersede an in-flight empty code block deletion', asyn
         });
         await deletionStarted;
 
-        await webview.sendMessage({ type: 'undoRedo', direction: 'undo' });
-        document.setText(codeBlockMarkdown);
-        fireDocumentChange(document, 1);
         await webview.sendMessage({
             type: 'update',
             content: codeBlockMarkdown,
@@ -495,17 +436,21 @@ test('a Webview undo can supersede an in-flight empty code block deletion', asyn
     }
 });
 
-test('a pending Webview undo does not hide an unrelated document edit', async () => {
+test('legacy Webview history markers cannot hide a native TextDocument undo', async () => {
     const { document, webview } = await createEditorSyncHarness('before');
 
     try {
         await webview.sendMessage({ type: 'undoRedo', direction: 'undo' });
-        document.setText('external');
-        fireDocumentChange(document, 2);
+        document.setText('native undo');
+        fireDocumentChange(document, 1);
 
         assert.equal(
             webview.postedMessages.filter((message) => message.external === true).length,
             1
+        );
+        assert.equal(
+            webview.postedMessages.some((message) => message.type === 'requestSync'),
+            false
         );
     } finally {
         webview.dispose();
@@ -551,43 +496,6 @@ test('an update arriving during flush cleanup is not stranded', async () => {
         assert.deepEqual(
             webview.postedMessages.filter((message) => message.external === true),
             []
-        );
-    } finally {
-        webview.dispose();
-    }
-});
-
-test('a synchronized Webview history snapshot expires its unmatched undo marker', async () => {
-    const { provider, document, webview } = await createEditorSyncHarness('before');
-    provider.updateTextDocument = async (_document, markdown) => {
-        document.setText(markdown);
-        fireDocumentChange(document);
-        return true;
-    };
-
-    try {
-        // Some Webview/platform paths prevent the matching VS Code Undo, so no
-        // reasoned document-change event consumes this declaration.
-        await webview.sendMessage({ type: 'undoRedo', direction: 'undo' });
-        await webview.sendMessage({
-            type: 'update',
-            content: 'restored in ManulDown',
-            revision: 2,
-        });
-        await waitFor(
-            () => webview.postedMessages.some(
-                (message) => message.type === 'updateApplied' && message.revision === 2
-            ),
-            'The Webview history snapshot was not synchronized'
-        );
-
-        document.setText('later external undo');
-        fireDocumentChange(document, 1);
-
-        assert.equal(
-            webview.postedMessages.filter((message) => message.external === true).length,
-            1,
-            'A later external Undo must not consume the expired Webview marker'
         );
     } finally {
         webview.dispose();
@@ -1029,6 +937,16 @@ test('async image insertion stays bound to its request-scoped editor range', () 
         editorSource,
         /const shouldMoveSelection = !pendingInsertion \|\| rangesHaveSameBoundaries\(/,
         'A delayed response must not steal the caret after the user moves it'
+    );
+    assert.match(
+        editorSource,
+        /const insertionHistorySelection = stateManager\.saveRange\(range\);\s*stateManager\.beginChangeAtSelection\(insertionHistorySelection\);/,
+        'Async image history must retain the request-scoped insertion location'
+    );
+    assert.match(
+        editorSource,
+        /stateManager\.commitStateAfterChange\(\{\s*changeSelection: insertedImageSelection\s*\}\);/,
+        'The inserted image snapshot must use its own location instead of the current caret'
     );
     assert.ok(
         (editorSource.match(/requestId: beginImageInsertionRequest\(\)/g) || []).length >= 2,

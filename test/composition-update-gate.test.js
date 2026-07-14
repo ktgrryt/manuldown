@@ -131,4 +131,14 @@ test('editor finalizes the local IME revision before replaying an external updat
         /handleHostMessage = \(message\)[\s\S]*?compositionUpdateGate\.defer\(message\)[\s\S]*?switch \(message\.type\)/,
         'External update and refresh messages must be gated before DOM replacement'
     );
+    assert.match(
+        editorSource,
+        /case 'historyCommand':[\s\S]*?compositionUpdateGate\.finalizing[\s\S]*?pendingHistoryCommandsAfterComposition\.push\(message\.direction\)/,
+        'History pressed during composition finalization must be queued instead of dropped'
+    );
+    assert.match(
+        editorSource,
+        /compositionUpdateGate\.finish\(finalizationToken\)[\s\S]*?pendingHistoryCommandsAfterComposition\.splice\(0\)[\s\S]*?performEditorHistoryCommand\(direction\)/,
+        'Queued history must run only after the browser-owned composition range is released'
+    );
 });

@@ -74,6 +74,16 @@
         "category": "ManulDown"
       },
       {
+        "command": "manulDown.undo",
+        "title": "Undo in ManulDown Editor",
+        "category": "ManulDown"
+      },
+      {
+        "command": "manulDown.redo",
+        "title": "Redo in ManulDown Editor",
+        "category": "ManulDown"
+      },
+      {
         "command": "manulDown.cursorRight",
         "title": "Cursor Right (ManulDown)",
         "category": "ManulDown"
@@ -141,6 +151,23 @@
         "key": "ctrl+f",
         "mac": "cmd+f",
         "when": "activeCustomEditorId == 'manulDown.editor'"
+      },
+      {
+        "command": "manulDown.undo",
+        "key": "ctrl+z",
+        "mac": "cmd+z",
+        "when": "activeCustomEditorId == 'manulDown.editor'"
+      },
+      {
+        "command": "manulDown.redo",
+        "key": "ctrl+shift+z",
+        "mac": "cmd+shift+z",
+        "when": "activeCustomEditorId == 'manulDown.editor'"
+      },
+      {
+        "command": "manulDown.redo",
+        "key": "ctrl+y",
+        "when": "!isMac && activeCustomEditorId == 'manulDown.editor'"
       },
       {
         "command": "manulDown.cursorRight",

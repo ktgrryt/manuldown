@@ -617,19 +617,13 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             expectedDocumentVersion: number;
             timeout: NodeJS.Timeout;
         };
-        type PendingWebviewHistoryAction = {
-            reason: vscode.TextDocumentChangeReason;
-            timeout: NodeJS.Timeout;
-        };
         const pendingSyncSnapshotRequests = new Map<string, PendingSyncSnapshotRequest>();
         const expectedWillSaveUpdates = new Map<string, ExpectedWillSaveUpdate>();
-        const pendingWebviewHistoryActions: PendingWebviewHistoryAction[] = [];
         let syncSnapshotRequestSequence = 0;
         let editorDisposed = false;
         let terminalActionQueue: Promise<void> = Promise.resolve();
         let saveSyncWarningShown = false;
         let synchronizedProgrammaticSaveInProgress = false;
-        let consumedWebviewHistorySequence = 0;
 
         const normalizeWebviewRevision = (value: unknown): number =>
             typeof value === 'number' && Number.isFinite(value)
@@ -719,62 +713,6 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 clearTimeout(expectedUpdate.timeout);
             }
             expectedWillSaveUpdates.clear();
-        };
-
-        const removePendingWebviewHistoryAction = (
-            action: PendingWebviewHistoryAction
-        ): void => {
-            const index = pendingWebviewHistoryActions.indexOf(action);
-            if (index >= 0) {
-                pendingWebviewHistoryActions.splice(index, 1);
-            }
-            clearTimeout(action.timeout);
-        };
-
-        const registerPendingWebviewHistoryAction = (direction: unknown): void => {
-            const reason = direction === 'undo'
-                ? vscode.TextDocumentChangeReason.Undo
-                : direction === 'redo'
-                    ? vscode.TextDocumentChangeReason.Redo
-                    : null;
-            if (reason === null) {
-                return;
-            }
-
-            // Keep the queue bounded even if a Webview sends malformed bursts.
-            while (pendingWebviewHistoryActions.length >= 20) {
-                removePendingWebviewHistoryAction(pendingWebviewHistoryActions[0]);
-            }
-            const action = {
-                reason,
-                timeout: setTimeout(() => {
-                    removePendingWebviewHistoryAction(action);
-                }, 2_000),
-            };
-            pendingWebviewHistoryActions.push(action);
-        };
-
-        const consumePendingWebviewHistoryAction = (
-            reason: vscode.TextDocumentChangeReason | undefined
-        ): boolean => {
-            if (reason === undefined) {
-                return false;
-            }
-            const action = pendingWebviewHistoryActions.find(
-                (candidate) => candidate.reason === reason
-            );
-            if (!action) {
-                return false;
-            }
-            removePendingWebviewHistoryAction(action);
-            consumedWebviewHistorySequence++;
-            return true;
-        };
-
-        const clearPendingWebviewHistoryActions = (): void => {
-            for (const action of [...pendingWebviewHistoryActions]) {
-                removePendingWebviewHistoryAction(action);
-            }
         };
 
         const enqueueTerminalAction = async (action: () => Promise<void>): Promise<void> => {
@@ -879,7 +817,6 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                             this.htmlToMarkdown(updateToApply.html, document),
                             document
                         );
-                        const historySequenceBeforeApply = consumedWebviewHistorySequence;
                         activeWebviewUpdateTexts.add(markdown);
                         let applied = false;
                         try {
@@ -904,19 +841,12 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                         // the expected-text marker is active. If another writer races that edit,
                         // detect the final text mismatch explicitly instead of
                         // suppressing the external change with our own event.
-                        const supersededByWebviewHistory =
-                            consumedWebviewHistorySequence > historySequenceBeforeApply;
-                        if (applied && !appliedTextIsCurrent && !supersededByWebviewHistory) {
+                        if (applied && !appliedTextIsCurrent) {
                             operationSucceeded = false;
                             if (unresolvedExternalChangeId === 0) {
                                 unresolvedExternalChangeId = ++externalChangeSequence;
                                 postExternalDocumentUpdate();
                             }
-                        } else if (applied && !appliedTextIsCurrent) {
-                            // A declared Webview Undo/Redo changed the TextDocument
-                            // while this older edit was awaiting applyEdit. Its newer
-                            // snapshot will either already be pending or arrive after
-                            // the Webview's short history-update delay.
                         }
                     }
                     return operationSucceeded &&
@@ -981,14 +911,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                             );
                         }
                         break;
-                    case 'undoRedo':
-                        registerPendingWebviewHistoryAction(message.direction);
-                        break;
                     case 'update':
-                        // The first snapshot after a declared history action closes
-                        // its pairing window. Do not let an unmatched marker hide a
-                        // later, unrelated TextDocument Undo/Redo.
-                        clearPendingWebviewHistoryActions();
                         if (unresolvedExternalChangeId !== 0) {
                             postExternalDocumentUpdate();
                             break;
@@ -1238,19 +1161,6 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             }
             lastObservedDocumentText = observedText;
 
-            if (consumePendingWebviewHistoryAction(e.reason)) {
-                // Command+Z/Shift+Command+Z can update the backing TextDocument
-                // through VS Code before the Webview posts its restored snapshot.
-                // The matching reason proves this is the declared local history
-                // action, not an unrelated writer.
-                clearExpectedWillSaveUpdates();
-                lastAppliedWebviewText = observedText;
-                // Re-read the restored Webview DOM instead of trusting whichever
-                // side of the dual history operation happened to finish first.
-                void webviewPanel.webview.postMessage({ type: 'requestSync' });
-                return;
-            }
-
             const expectedWillSaveUpdate = expectedWillSaveUpdates.get(observedText);
             if (expectedWillSaveUpdate) {
                 expectedWillSaveUpdates.delete(observedText);
@@ -1469,7 +1379,6 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 settleSyncSnapshotRequest(requestId, null);
             }
             clearExpectedWillSaveUpdates();
-            clearPendingWebviewHistoryActions();
             if (this.webviewPanels.get(documentKey) === webviewPanel) {
                 this.webviewPanels.delete(documentKey);
             }
