@@ -763,6 +763,17 @@ export class DOMUtils {
                 !!element.closest('pre code')
             );
         };
+        const isTableStructureHandle = (element) => {
+            const parent = element?.parentElement;
+            return !!(
+                element?.tagName === 'SPAN' &&
+                element.classList?.contains('md-table-structure-handle') &&
+                element.getAttribute('data-exclude-from-markdown') === 'true' &&
+                element.getAttribute('contenteditable') === 'false' &&
+                parent &&
+                (parent.tagName === 'TD' || parent.tagName === 'TH')
+            );
+        };
 
         // Pasting from rich text editors can leave visual styles in the live
         // contenteditable DOM even when the saved Markdown cannot represent them.
@@ -775,7 +786,7 @@ export class DOMUtils {
         });
 
         this.editor.querySelectorAll('font, span').forEach(element => {
-            if (isSyntaxHighlightToken(element)) {
+            if (isSyntaxHighlightToken(element) || isTableStructureHandle(element)) {
                 return;
             }
 

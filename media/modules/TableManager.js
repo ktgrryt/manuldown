@@ -1590,9 +1590,9 @@ export class TableManager {
         }
     }
 
-    _handleMouseUp() {
+    _handleMouseUp(e) {
         if (this.structureDrag) {
-            this._handleStructureDragMouseUp();
+            this._handleStructureDragMouseUp(e);
             return;
         }
 
@@ -1686,7 +1686,14 @@ export class TableManager {
             this.ensureInsertLines();
         }
 
-        const structureHandleInfo = this._getStructureHandleInfoFromTarget(e.target);
+        const pointTarget = Number.isFinite(e.clientX) && Number.isFinite(e.clientY)
+            ? document.elementFromPoint(e.clientX, e.clientY)
+            : null;
+        const hoverTarget = pointTarget && this.editor.contains(pointTarget)
+            ? pointTarget
+            : e.target;
+
+        const structureHandleInfo = this._getStructureHandleInfoFromTarget(hoverTarget);
         if (structureHandleInfo) {
             this.hoverHandleContext = {
                 table: structureHandleInfo.table,
@@ -1698,9 +1705,11 @@ export class TableManager {
             return;
         }
 
-        let cell = this._getCellFromTarget(e.target);
+        let cell = this._getCellFromTarget(hoverTarget);
         if (!cell) {
-            const targetEl = e.target && e.target.nodeType === Node.ELEMENT_NODE ? e.target : e.target?.parentElement;
+            const targetEl = hoverTarget && hoverTarget.nodeType === Node.ELEMENT_NODE
+                ? hoverTarget
+                : hoverTarget?.parentElement;
             const tableFromTarget = targetEl ? targetEl.closest('table') : null;
             if (tableFromTarget) {
                 cell = this._getCellFromTableAtPoint(tableFromTarget, e.clientX, e.clientY);
@@ -1899,7 +1908,7 @@ export class TableManager {
 
         if (this.hasStructureSelection()) return;
 
-        // Show handles only while mouse is currently over a table area.
+        // Only reveal the row and column controls for the cell under the pointer.
         const context = this._normalizeHandleContext(this.hoverHandleContext);
         if (!context) return;
 
@@ -2123,7 +2132,7 @@ export class TableManager {
         }
     }
 
-    _handleStructureDragMouseUp() {
+    _handleStructureDragMouseUp(e = null) {
         const drag = this.structureDrag;
         this.structureDrag = null;
         if (!drag) return;
@@ -2167,6 +2176,15 @@ export class TableManager {
         this._ensureStructureHandles(drag.table);
         // Keep click-to-select behavior, but clear highlight after any drag-drop interaction.
         this.clearStructureSelection();
+        // Rebuilding the table replaces the handle that received the mouseup.
+        // Resolve the current cell from coordinates so visibility does not stay
+        // tied to that detached handle until a later mousemove happens.
+        this.hoverHandleContext = null;
+        if (e) {
+            this._refreshInsertHoverFromPoint(e.clientX, e.clientY);
+        } else {
+            this._syncHandleVisibility();
+        }
         if (moved && this.notifyChange) this.notifyChange();
         setTimeout(() => this.editor.focus(), 0);
     }

@@ -1455,7 +1455,17 @@ import {
         scrollDuration: TOC_SCROLL_DURATION_MS
     });
     const tableManager = new TableManager(editor, domUtils, stateManager);
-    const searchManager = new SearchManager(editor);
+    const searchManager = new SearchManager(editor, {
+        onWillReplace: (range) => {
+            stateManager.beginChangeAtSelection(stateManager.saveRange(range));
+        },
+        onDidReplace: (range) => {
+            stateManager.commitStateAfterChange({
+                changeSelection: stateManager.saveRange(range)
+            });
+            notifyChangeImmediate();
+        }
+    });
     const toolbarManager = new ToolbarManager(editor, stateManager, {
         onInsertTable: () => tableManager.openTableDialog(),
         onInsertQuote: () => insertToolbarQuote(),

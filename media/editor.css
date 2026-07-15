@@ -1755,17 +1755,18 @@ body.image-resizing * {
 
 /* Search bar container */
 .search-bar {
+    --search-bar-actions-width: min(126px, 100%);
     position: absolute;
     top: 0;
     right: calc(var(--search-bar-edge-gap) + var(--toc-content-offset));
     z-index: 1001;
     display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    justify-content: flex-end;
+    flex-direction: column;
+    align-items: stretch;
+    justify-content: flex-start;
     column-gap: clamp(3px, 0.5vw, 4px);
     row-gap: clamp(3px, 0.4vw, 4px);
-    width: min(360px, calc(100% - (var(--search-bar-edge-gap) * 2) - var(--toc-content-offset)));
+    width: min(400px, calc(100% - (var(--search-bar-edge-gap) * 2) - var(--toc-content-offset)));
     max-width: calc(100% - (var(--search-bar-edge-gap) * 2) - var(--toc-content-offset));
     padding: clamp(4px, 0.75vw, 6px);
     background-color: var(--vscode-editorWidget-background, var(--vscode-editor-background));
@@ -1775,6 +1776,15 @@ body.image-resizing * {
     box-shadow: 0 5px 14px rgba(0, 0, 0, 0.16);
     font-size: 12px;
     transition: none;
+}
+
+.search-bar-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: clamp(3px, 0.5vw, 4px);
+    width: 100%;
+    min-width: 0;
 }
 
 .search-bar-input-container {
@@ -1813,9 +1823,10 @@ body.image-resizing * {
     align-items: center;
     justify-content: flex-end;
     gap: inherit;
-    flex: 0 0 auto;
+    flex: 0 0 var(--search-bar-actions-width);
     flex-wrap: nowrap;
-    min-width: max-content;
+    width: var(--search-bar-actions-width);
+    min-width: var(--search-bar-actions-width);
     margin-left: auto;
 }
 
@@ -1837,6 +1848,19 @@ body.image-resizing * {
 
 .search-bar-btn:hover {
     background-color: var(--vscode-list-hoverBackground);
+}
+
+.search-bar-btn:disabled {
+    opacity: 0.45;
+    cursor: default;
+    background: transparent;
+}
+
+.search-bar-text-btn {
+    width: auto;
+    min-width: 32px;
+    padding: 0 6px;
+    white-space: nowrap;
 }
 
 .search-bar-toggle {

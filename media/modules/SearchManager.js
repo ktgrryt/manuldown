@@ -1,39 +1,56 @@
 // @ts-nocheck
 /**
  * 検索管理モジュール
- * Cmd+F / Ctrl+F による文書内検索とハイライトを担当
+ * Cmd+F / Ctrl+F による文書内検索、置換、ハイライトを担当
  */
 export class SearchManager {
     /**
      * @param {HTMLElement} editor - The contenteditable editor element
+     * @param {Object} options
+     * @param {(range: Range) => void} options.onWillReplace - Called before replacing editor text
+     * @param {(range: Range) => void} options.onDidReplace - Called after replacing editor text
      */
-    constructor(editor) {
+    constructor(editor, options = {}) {
         this.editor = editor;
+        this.onWillReplace = typeof options.onWillReplace === 'function'
+            ? options.onWillReplace
+            : null;
+        this.onDidReplace = typeof options.onDidReplace === 'function'
+            ? options.onDidReplace
+            : null;
 
         // State
         this.isOpen = false;
         this.query = '';
         this.matches = [];          // Array of Range objects
+        this.matchOffsets = [];     // Clean-text offsets corresponding to matches
         this.currentMatchIndex = -1;
         this.caseSensitive = false;
 
         // DOM references
         this.searchBar = null;
         this.searchInput = null;
+        this.replaceInput = null;
         this.matchCountLabel = null;
         this.actionsContainer = null;
         this.prevButton = null;
         this.nextButton = null;
+        this.replaceButton = null;
+        this.replaceAllButton = null;
         this.caseSensitiveButton = null;
         this.closeButton = null;
 
         // Saved editor selection (to restore on close)
         this.savedSelection = null;
+        this._inputDebounceTimer = null;
         this._refreshDebounceTimer = null;
         this._searchRefreshDebounceMs = 120;
         this._mutationObserver = null;
         this._resizeObserver = null;
         this._reservedSpaceAnimationFrame = null;
+        this._composingInputs = new WeakSet();
+        this._lastCompositionEndByInput = new WeakMap();
+        this._compositionEndGraceMs = 100;
 
         this._isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
 
@@ -103,6 +120,10 @@ export class SearchManager {
         this.searchBar.style.display = 'none';
         this._setReservedSpace(0);
 
+        if (this._inputDebounceTimer) {
+            clearTimeout(this._inputDebounceTimer);
+            this._inputDebounceTimer = null;
+        }
         if (this._refreshDebounceTimer) {
             clearTimeout(this._refreshDebounceTimer);
             this._refreshDebounceTimer = null;
@@ -110,6 +131,7 @@ export class SearchManager {
 
         this._clearHighlights();
         this.matches = [];
+        this.matchOffsets = [];
         this.currentMatchIndex = -1;
         this._updateMatchCountLabel();
 
@@ -146,6 +168,70 @@ export class SearchManager {
         this._updateMatchCountLabel();
     }
 
+    replaceCurrent() {
+        this._ensureSearchIsCurrent();
+        if (this.currentMatchIndex < 0 || this.currentMatchIndex >= this.matches.length) {
+            return false;
+        }
+
+        const matchIndex = this.currentMatchIndex;
+        const matchOffset = this.matchOffsets[matchIndex] || 0;
+        const replacementText = this.replaceInput.value;
+        const range = this.matches[matchIndex].cloneRange();
+
+        this._notifyWillReplace(range);
+        const caretRange = this._replaceRange(range, replacementText);
+        if (!caretRange) {
+            return false;
+        }
+
+        this.savedSelection = caretRange.cloneRange();
+        this._notifyDidReplace(caretRange);
+        this._performSearch({
+            targetOffset: matchOffset + replacementText.length,
+            scrollToCurrentMatch: true
+        });
+        return true;
+    }
+
+    replaceAll() {
+        this._ensureSearchIsCurrent();
+        if (this.matches.length === 0) {
+            return 0;
+        }
+
+        const replacementText = this.replaceInput.value;
+        const ranges = this.matches.map(range => range.cloneRange());
+        const anchorIndex = this.currentMatchIndex >= 0 ? this.currentMatchIndex : 0;
+        this._notifyWillReplace(ranges[anchorIndex]);
+
+        let replacedCount = 0;
+        let caretRange = null;
+        // Replace from the end so earlier Range boundaries remain stable.
+        for (let index = ranges.length - 1; index >= 0; index--) {
+            const replacedRange = this._replaceRange(ranges[index], replacementText);
+            if (replacedRange) {
+                replacedCount++;
+                if (index === anchorIndex) {
+                    caretRange = replacedRange;
+                }
+            }
+        }
+
+        if (replacedCount === 0) {
+            return 0;
+        }
+
+        if (!caretRange) {
+            caretRange = ranges[0].cloneRange();
+            caretRange.collapse(true);
+        }
+        this.savedSelection = caretRange.cloneRange();
+        this._notifyDidReplace(caretRange);
+        this._performSearch({ scrollToCurrentMatch: false });
+        return replacedCount;
+    }
+
     refreshHighlights() {
         if (this.isOpen && this.query) {
             this._performSearch({
@@ -161,8 +247,11 @@ export class SearchManager {
         this.searchBar = document.createElement('div');
         this.searchBar.className = 'search-bar';
         this.searchBar.setAttribute('role', 'search');
-        this.searchBar.setAttribute('aria-label', 'Find in document');
+        this.searchBar.setAttribute('aria-label', 'Find and replace in document');
         this.searchBar.style.display = 'none';
+
+        const searchRow = document.createElement('div');
+        searchRow.className = 'search-bar-row';
 
         // Input container with case-sensitive toggle inside
         const inputContainer = document.createElement('div');
@@ -208,12 +297,48 @@ export class SearchManager {
         this.closeButton.innerHTML = '&#x2715;';
         this.closeButton.title = 'Close (Escape)';
 
-        this.searchBar.appendChild(inputContainer);
+        searchRow.appendChild(inputContainer);
         this.actionsContainer.appendChild(this.matchCountLabel);
         this.actionsContainer.appendChild(this.prevButton);
         this.actionsContainer.appendChild(this.nextButton);
         this.actionsContainer.appendChild(this.closeButton);
-        this.searchBar.appendChild(this.actionsContainer);
+        searchRow.appendChild(this.actionsContainer);
+
+        const replaceRow = document.createElement('div');
+        replaceRow.className = 'search-bar-row search-bar-replace-row';
+
+        const replaceInputContainer = document.createElement('div');
+        replaceInputContainer.className = 'search-bar-input-container';
+
+        this.replaceInput = document.createElement('input');
+        this.replaceInput.type = 'text';
+        this.replaceInput.className = 'search-bar-input search-bar-replace-input';
+        this.replaceInput.placeholder = 'Replace';
+        this.replaceInput.setAttribute('aria-label', 'Replace');
+        replaceInputContainer.appendChild(this.replaceInput);
+
+        const replaceActions = document.createElement('div');
+        replaceActions.className = 'search-bar-actions search-bar-replace-actions';
+
+        this.replaceButton = document.createElement('button');
+        this.replaceButton.className = 'search-bar-btn search-bar-text-btn';
+        this.replaceButton.textContent = 'Replace';
+        this.replaceButton.title = 'Replace Current Match (Enter)';
+        this.replaceButton.disabled = true;
+
+        this.replaceAllButton = document.createElement('button');
+        this.replaceAllButton.className = 'search-bar-btn search-bar-text-btn';
+        this.replaceAllButton.textContent = 'All';
+        this.replaceAllButton.title = 'Replace All Matches';
+        this.replaceAllButton.disabled = true;
+
+        replaceActions.appendChild(this.replaceButton);
+        replaceActions.appendChild(this.replaceAllButton);
+        replaceRow.appendChild(replaceInputContainer);
+        replaceRow.appendChild(replaceActions);
+
+        this.searchBar.appendChild(searchRow);
+        this.searchBar.appendChild(replaceRow);
 
         // Append inside .editor-container so it's positioned below the toolbar
         const editorContainer = document.querySelector('.editor-container');
@@ -228,17 +353,21 @@ export class SearchManager {
     }
 
     _bindEvents() {
-        let debounceTimer = null;
+        this._trackInputComposition(this.searchInput);
+        this._trackInputComposition(this.replaceInput);
+
         this.searchInput.addEventListener('input', () => {
-            clearTimeout(debounceTimer);
-            debounceTimer = setTimeout(() => {
-                this.query = this.searchInput.value;
+            this.query = this.searchInput.value;
+            clearTimeout(this._inputDebounceTimer);
+            this._inputDebounceTimer = setTimeout(() => {
+                this._inputDebounceTimer = null;
                 this._performSearch();
             }, 100);
         });
 
         this.searchInput.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') {
+                if (this._isImeConfirmationKeydown(e)) return;
                 e.preventDefault();
                 if (e.shiftKey) {
                     this.goToPrevious();
@@ -251,8 +380,21 @@ export class SearchManager {
             }
         });
 
+        this.replaceInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                if (this._isImeConfirmationKeydown(e)) return;
+                e.preventDefault();
+                this.replaceCurrent();
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                this.close();
+            }
+        });
+
         this.nextButton.addEventListener('click', () => this.goToNext());
         this.prevButton.addEventListener('click', () => this.goToPrevious());
+        this.replaceButton.addEventListener('click', () => this.replaceCurrent());
+        this.replaceAllButton.addEventListener('click', () => this.replaceAll());
         this.closeButton.addEventListener('click', () => this.close());
 
         this.caseSensitiveButton.addEventListener('click', () => {
@@ -275,6 +417,84 @@ export class SearchManager {
             }
             e.stopPropagation();
         });
+    }
+
+    _trackInputComposition(input) {
+        input.addEventListener('compositionstart', () => {
+            this._composingInputs.add(input);
+        });
+        input.addEventListener('compositionend', () => {
+            this._composingInputs.delete(input);
+            this._lastCompositionEndByInput.set(input, Date.now());
+        });
+    }
+
+    _isImeConfirmationKeydown(e) {
+        const input = e.currentTarget || e.target;
+        const keyCode = typeof e.keyCode === 'number'
+            ? e.keyCode
+            : (typeof e.which === 'number' ? e.which : 0);
+        const lastCompositionEnd = this._lastCompositionEndByInput.get(input) || 0;
+        return !!(
+            e.isComposing ||
+            keyCode === 229 ||
+            this._composingInputs.has(input) ||
+            (lastCompositionEnd > 0 && Date.now() - lastCompositionEnd < this._compositionEndGraceMs)
+        );
+    }
+
+    _ensureSearchIsCurrent() {
+        if (this._inputDebounceTimer) {
+            clearTimeout(this._inputDebounceTimer);
+            this._inputDebounceTimer = null;
+        }
+
+        const latestQuery = this.searchInput.value;
+        if (latestQuery !== this.query) {
+            this.query = latestQuery;
+        }
+        this._performSearch({
+            preserveCurrentMatch: true,
+            scrollToCurrentMatch: false
+        });
+    }
+
+    _replaceRange(range, replacementText) {
+        try {
+            range.deleteContents();
+
+            const caretRange = document.createRange();
+            if (replacementText) {
+                const replacementNode = document.createTextNode(replacementText);
+                range.insertNode(replacementNode);
+                caretRange.setStartAfter(replacementNode);
+            } else {
+                caretRange.setStart(range.startContainer, range.startOffset);
+            }
+            caretRange.collapse(true);
+            return caretRange;
+        } catch (error) {
+            console.error('[SearchManager] Error replacing match:', error);
+            return null;
+        }
+    }
+
+    _notifyWillReplace(range) {
+        if (!this.onWillReplace) return;
+        try {
+            this.onWillReplace(range.cloneRange());
+        } catch (error) {
+            console.error('[SearchManager] onWillReplace callback failed:', error);
+        }
+    }
+
+    _notifyDidReplace(range) {
+        if (!this.onDidReplace) return;
+        try {
+            this.onDidReplace(range.cloneRange());
+        } catch (error) {
+            console.error('[SearchManager] onDidReplace callback failed:', error);
+        }
     }
 
     _observeEditorMutations() {
@@ -340,12 +560,14 @@ export class SearchManager {
     _performSearch(options = {}) {
         const {
             preserveCurrentMatch = false,
-            scrollToCurrentMatch = true
+            scrollToCurrentMatch = true,
+            targetOffset = null
         } = options;
         const previousMatchIndex = this.currentMatchIndex;
 
         this._clearHighlights();
         this.matches = [];
+        this.matchOffsets = [];
         this.currentMatchIndex = -1;
 
         if (!this.query || this.query.length === 0) {
@@ -384,9 +606,14 @@ export class SearchManager {
             const range = this._cleanPositionToRange(index, searchQuery.length, originalPositions);
             if (range) {
                 this.matches.push(range);
+                this.matchOffsets.push(index);
             }
 
-            searchStart = index + 1;
+            // Find widgets conventionally report non-overlapping matches. This also
+            // keeps Replace All deterministic for repeated text such as "aaa" / "aa".
+            // An unsafe match across blocks may overlap a valid match inside the next
+            // block, so only skip the whole query when a Range was accepted.
+            searchStart = index + (range ? searchQuery.length : 1);
         }
 
         // Apply highlights
@@ -394,7 +621,10 @@ export class SearchManager {
 
         // Jump to nearest match
         if (this.matches.length > 0) {
-            if (preserveCurrentMatch && previousMatchIndex >= 0) {
+            if (Number.isSafeInteger(targetOffset) && targetOffset >= 0) {
+                const targetIndex = this.matchOffsets.findIndex(offset => offset >= targetOffset);
+                this.currentMatchIndex = targetIndex >= 0 ? targetIndex : 0;
+            } else if (preserveCurrentMatch && previousMatchIndex >= 0) {
                 this.currentMatchIndex = Math.min(previousMatchIndex, this.matches.length - 1);
             } else {
                 this.currentMatchIndex = this._findNearestMatch();
@@ -456,10 +686,38 @@ export class SearchManager {
             const range = document.createRange();
             range.setStart(start.node, start.offset);
             range.setEnd(end.node, end.offset + 1);
-            return range;
+            return this._rangeCrossesStructuralBoundary(range) ? null : range;
         } catch (e) {
             console.error('[SearchManager] Error creating range:', e);
             return null;
+        }
+    }
+
+    _rangeCrossesStructuralBoundary(range) {
+        const blockSelector = 'p, h1, h2, h3, h4, h5, h6, li, blockquote, pre, td, th, div';
+        const getBlock = (node) => {
+            const element = node && node.nodeType === Node.ELEMENT_NODE
+                ? node
+                : node?.parentElement;
+            return element?.closest(blockSelector) || this.editor;
+        };
+
+        if (getBlock(range.startContainer) !== getBlock(range.endContainer)) {
+            return true;
+        }
+
+        try {
+            const fragment = range.cloneContents();
+            return !!(
+                fragment &&
+                typeof fragment.querySelector === 'function' &&
+                fragment.querySelector(
+                    'br, img, input, hr, [data-exclude-from-markdown="true"], ' +
+                    '.code-block-toolbar, .row-handle, .col-handle'
+                )
+            );
+        } catch (_) {
+            return true;
         }
     }
 
@@ -561,5 +819,9 @@ export class SearchManager {
                 `${this.currentMatchIndex + 1}/${this.matches.length}`;
             this.matchCountLabel.classList.remove('no-results');
         }
+
+        const hasMatches = this.matches.length > 0;
+        this.replaceButton.disabled = !hasMatches;
+        this.replaceAllButton.disabled = !hasMatches;
     }
 }

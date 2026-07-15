@@ -85,6 +85,35 @@ test('editor cleanup excludes transient cursor and selection classes', async () 
     assert.match(cleanedHTML, /class="photo"/);
 });
 
+test('live DOM cleanup preserves generated table structure handles', async () => {
+    const window = domino.createWindow(
+        '<div id="editor"><table><tbody><tr><td>' +
+        '<span class="md-table-structure-handle md-table-row-handle" ' +
+        'data-exclude-from-markdown="true" contenteditable="false"></span>' +
+        '<span class="pasted-style">cell</span>' +
+        '</td></tr></tbody></table></div>'
+    );
+    const editor = window.document.querySelector('#editor');
+    const nodeListPrototype = Object.getPrototypeOf(editor.querySelectorAll('span'));
+    const previousForEach = nodeListPrototype.forEach;
+    nodeListPrototype.forEach = Array.prototype.forEach;
+
+    try {
+        const { DOMUtils } = await domUtilsModulePromise;
+        new DOMUtils(editor).cleanupGhostStyles();
+
+        assert.ok(editor.querySelector('.md-table-structure-handle'));
+        assert.ok(!editor.querySelector('.pasted-style'));
+        assert.equal(editor.querySelector('td').textContent, 'cell');
+    } finally {
+        if (previousForEach === undefined) {
+            delete nodeListPrototype.forEach;
+        } else {
+            nodeListPrototype.forEach = previousForEach;
+        }
+    }
+});
+
 test('history comparison canonicalizes asynchronously reconstructed image UI', async () => {
     const cleanedHTML = await cleanEditorHTML(
         '<p><img alt="diagram|320x180" data-md-path="./diagram.png" ' +
