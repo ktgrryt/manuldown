@@ -10,6 +10,11 @@ import { ToolbarManager } from './modules/ToolbarManager.js';
 import { TableManager } from './modules/TableManager.js';
 import { SearchManager } from './modules/SearchManager.js';
 import { CompositionUpdateGate } from './modules/CompositionUpdateGate.js';
+import { assignStableHeadingIds } from './modules/MarkdownHeadingSlug.js';
+import {
+    normalizeWorkspaceLinkLabel,
+    sanitizeInsertedLinkHref
+} from './modules/WorkspaceLinkSecurity.js';
 import {
     calculateCaretAnchorScrollTop,
     calculateCaretRevealScrollTop,
@@ -52,6 +57,7 @@ import {
     let editorLoadFailed = false;
     let syncRequestSequence = 0;
     let commitPendingTransientEditorUi = () => false;
+    let requestWorkspaceLink = () => false;
     let trustedClipboardPayload = null;
     let handleHostMessage = () => {};
     const compositionUpdateGate = new CompositionUpdateGate();
@@ -108,6 +114,10 @@ import {
     const pendingImageInsertionRanges = new Map();
     const PENDING_IMAGE_INSERTION_MAX_AGE_MS = 5 * 60 * 1000;
     const MAX_PENDING_IMAGE_INSERTIONS = 64;
+    let workspaceLinkRequestSeq = 0;
+    const pendingWorkspaceLinkInsertions = new Map();
+    const PENDING_WORKSPACE_LINK_MAX_AGE_MS = 5 * 60 * 1000;
+    const MAX_PENDING_WORKSPACE_LINKS = 8;
     let imageResizeOverlay = null;
     let activeResizeImage = null;
     let imageResizeState = null;
@@ -182,6 +192,65 @@ import {
             !pending ||
             Date.now() - pending.createdAt > PENDING_IMAGE_INSERTION_MAX_AGE_MS ||
             !isEditorRange(pending.range)
+        ) {
+            return null;
+        }
+        return pending;
+    }
+
+    function prunePendingWorkspaceLinkInsertions() {
+        const oldestAllowed = Date.now() - PENDING_WORKSPACE_LINK_MAX_AGE_MS;
+        for (const [requestId, pending] of pendingWorkspaceLinkInsertions) {
+            if (
+                !pending ||
+                pending.createdAt < oldestAllowed ||
+                !isEditorRange(pending.range)
+            ) {
+                pendingWorkspaceLinkInsertions.delete(requestId);
+            }
+        }
+        while (pendingWorkspaceLinkInsertions.size >= MAX_PENDING_WORKSPACE_LINKS) {
+            const oldestRequestId = pendingWorkspaceLinkInsertions.keys().next().value;
+            if (!oldestRequestId) break;
+            pendingWorkspaceLinkInsertions.delete(oldestRequestId);
+        }
+    }
+
+    function rememberWorkspaceLinkInsertion(range, existingLink = null) {
+        prunePendingWorkspaceLinkInsertions();
+        const requestId = `workspace-link-${Date.now()}-${++workspaceLinkRequestSeq}`;
+        pendingWorkspaceLinkInsertions.set(requestId, {
+            range: range.cloneRange(),
+            existingLink,
+            revision: localUpdateRevision,
+            createdAt: Date.now()
+        });
+        return requestId;
+    }
+
+    function discardPendingWorkspaceLinkInsertion(requestId) {
+        if (typeof requestId !== 'string' || requestId === '') return;
+        pendingWorkspaceLinkInsertions.delete(requestId);
+    }
+
+    function takePendingWorkspaceLinkInsertion(requestId) {
+        if (typeof requestId !== 'string' || requestId === '') return null;
+        const pending = pendingWorkspaceLinkInsertions.get(requestId) || null;
+        pendingWorkspaceLinkInsertions.delete(requestId);
+        if (
+            !pending ||
+            Date.now() - pending.createdAt > PENDING_WORKSPACE_LINK_MAX_AGE_MS ||
+            pending.revision !== localUpdateRevision ||
+            !isEditorRange(pending.range)
+        ) {
+            return null;
+        }
+        if (
+            pending.existingLink &&
+            (
+                !pending.existingLink.isConnected ||
+                !editor.contains(pending.existingLink)
+            )
         ) {
             return null;
         }
@@ -843,6 +912,7 @@ import {
             editor.appendChild(sanitizedContainer.firstChild);
         }
         stripEditorControlCharacters(editor, { preserveSelection: false });
+        assignStableHeadingIds(editor.querySelectorAll('h1, h2, h3, h4, h5, h6'));
     }
 
     function setEditorLoadFailureState(failed) {
@@ -1193,8 +1263,170 @@ import {
         onInsertTable: () => tableManager.openTableDialog(),
         onInsertQuote: () => insertToolbarQuote(),
         onInsertCodeBlock: () => insertToolbarCodeBlock(),
-        onInsertCheckbox: () => insertSlashCheckbox()
+        onInsertCheckbox: () => insertSlashCheckbox(),
+        onInsertLink: () => requestWorkspaceLink()
     });
+
+    function getNodeElement(node) {
+        if (!node) return null;
+        return node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+    }
+
+    function getClosestAnchor(node) {
+        const element = getNodeElement(node);
+        if (!element || !element.closest) return null;
+        const anchor = element.closest('a');
+        return anchor && editor.contains(anchor) ? anchor : null;
+    }
+
+    function getClosestLinkInsertionBlock(node) {
+        let current = getNodeElement(node);
+        while (current && current !== editor) {
+            if (current.tagName === 'TD' || current.tagName === 'TH') {
+                return current;
+            }
+            if (domUtils.isBlockElement(current)) {
+                return current;
+            }
+            current = current.parentElement;
+        }
+        return current === editor ? editor : null;
+    }
+
+    function isForbiddenWorkspaceLinkNode(node) {
+        const element = getNodeElement(node);
+        if (!element || !editor.contains(element)) return true;
+        return !!element.closest(
+            'pre, code, [contenteditable="false"], .mdw-opaque-source, ' +
+            '.code-block-toolbar, .md-table-edge, .md-table-insert-line'
+        );
+    }
+
+    function selectionCanBecomeWorkspaceLink(range) {
+        if (!range || !isEditorRange(range)) return false;
+        if (
+            isForbiddenWorkspaceLinkNode(range.startContainer) ||
+            isForbiddenWorkspaceLinkNode(range.endContainer)
+        ) {
+            return false;
+        }
+        if (editor.querySelector('.md-table-cell-selected, .md-table-structure-selected-cell')) {
+            return false;
+        }
+
+        const startAnchor = getClosestAnchor(range.startContainer);
+        const endAnchor = getClosestAnchor(range.endContainer);
+        if (startAnchor || endAnchor) {
+            return !!startAnchor && startAnchor === endAnchor;
+        }
+
+        const startBlock = getClosestLinkInsertionBlock(range.startContainer);
+        const endBlock = getClosestLinkInsertionBlock(range.endContainer);
+        if (!startBlock || startBlock !== endBlock) {
+            return false;
+        }
+
+        if (!range.collapsed) {
+            const fragment = range.cloneContents();
+            if (fragment.querySelector && fragment.querySelector('a, pre, code, [contenteditable="false"]')) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    requestWorkspaceLink = () => {
+        if (isUpdating || editorLoadFailed || isComposing || compositionUpdateGate.composing) {
+            return false;
+        }
+        const selection = window.getSelection();
+        if (!selection || selection.rangeCount !== 1) {
+            return false;
+        }
+        const range = selection.getRangeAt(0);
+        if (!selectionCanBecomeWorkspaceLink(range)) {
+            return false;
+        }
+
+        const startAnchor = getClosestAnchor(range.startContainer);
+        const endAnchor = getClosestAnchor(range.endContainer);
+        const existingLink = startAnchor && startAnchor === endAnchor ? startAnchor : null;
+        const requestId = rememberWorkspaceLinkInsertion(range, existingLink);
+        vscode.postMessage({
+            type: 'requestWorkspaceLink',
+            requestId
+        });
+        return true;
+    };
+
+    function insertSelectedWorkspaceLink(message) {
+        const requestId = typeof message.requestId === 'string' ? message.requestId : '';
+        const pending = takePendingWorkspaceLinkInsertion(requestId);
+        if (!pending) return false;
+
+        const href = sanitizeInsertedLinkHref(message.href, message.linkKind);
+        if (!href) return false;
+        const label = normalizeWorkspaceLinkLabel(message.label);
+        const range = pending.range;
+        const selection = window.getSelection();
+        let currentSelectionRange = null;
+        if (selection && selection.rangeCount === 1) {
+            const candidateRange = selection.getRangeAt(0);
+            if (isEditorRange(candidateRange)) {
+                currentSelectionRange = candidateRange;
+            }
+        }
+        const shouldMoveSelection = rangesHaveSameBoundaries(currentSelectionRange, range);
+        const insertionHistorySelection = stateManager.saveRange(range);
+        stateManager.beginChangeAtSelection(insertionHistorySelection);
+
+        if (pending.existingLink) {
+            pending.existingLink.setAttribute('href', href);
+            if (shouldMoveSelection && selection) {
+                focusEditorWithoutScroll();
+                selection.removeAllRanges();
+                selection.addRange(range);
+            }
+            stateManager.commitStateAfterChange({
+                changeSelection: insertionHistorySelection
+            });
+            notifyChangeImmediate();
+            return true;
+        }
+
+        const link = document.createElement('a');
+        link.setAttribute('href', href);
+        if (range.collapsed) {
+            link.textContent = label;
+        } else {
+            link.appendChild(range.extractContents());
+        }
+
+        let insertedNode = link;
+        if (range.collapsed && range.startContainer === editor) {
+            const paragraph = document.createElement('p');
+            paragraph.appendChild(link);
+            range.insertNode(paragraph);
+            insertedNode = paragraph;
+        } else {
+            range.insertNode(link);
+        }
+
+        if (shouldMoveSelection && selection) {
+            focusEditorWithoutScroll();
+            const nextRange = document.createRange();
+            nextRange.setStartAfter(insertedNode);
+            nextRange.collapse(true);
+            selection.removeAllRanges();
+            selection.addRange(nextRange);
+        }
+
+        stateManager.commitStateAfterChange({
+            changeSelection: insertionHistorySelection
+        });
+        notifyChangeImmediate();
+        return true;
+    }
 
     function applySettings(nextSettings) {
         if (!nextSettings) return;
@@ -4994,6 +5226,17 @@ import {
     }
 
     const builtInSlashCommands = [
+        {
+            id: 'link',
+            source: 'builtin',
+            description: 'Insert a link',
+            action: () => {
+                // Persist removal of the slash command before opening the
+                // asynchronous picker. Cancellation then leaves both sides in sync.
+                notifyChange();
+                requestWorkspaceLink();
+            }
+        },
         { id: 'table', source: 'builtin', description: 'Insert a 2x2 table', action: insertSlashTable },
         { id: 'quote', source: 'builtin', description: 'Insert a quote block', action: insertSlashQuote },
         { id: 'code', source: 'builtin', description: 'Insert a code block', action: insertSlashCodeBlock },
@@ -7784,6 +8027,22 @@ import {
         // The contributed VS Code command is the only executor. Keeping the DOM
         // handler prevention-only avoids both Chromium's native contenteditable
         // history and a second ManulDown history step for the same key press.
+        return true;
+    }
+
+    function handleWorkspaceLinkShortcutKeydown(e) {
+        if (e.isComposing || isComposing || e.altKey || e.shiftKey) {
+            return false;
+        }
+        const primaryModifier = isMac
+            ? e.metaKey && !e.ctrlKey
+            : e.ctrlKey && !e.metaKey;
+        if (!primaryModifier || String(e.key || '').toLowerCase() !== 'k') {
+            return false;
+        }
+        // The contributed VS Code command opens the native picker. Suppress only
+        // Chromium's contenteditable behavior here so the command runs once.
+        e.preventDefault();
         return true;
     }
 
@@ -16315,6 +16574,10 @@ import {
             return;
         }
 
+        if (handleWorkspaceLinkShortcutKeydown(e)) {
+            return;
+        }
+
         if (handleFormatShortcutKeydown(e)) {
             return;
         }
@@ -21003,6 +21266,7 @@ import {
             } catch (_error) {
                 // Keep the literal fragment if decoding fails.
             }
+            assignStableHeadingIds(editor.querySelectorAll('h1, h2, h3, h4, h5, h6'));
             const target = anchorId ? document.getElementById(anchorId) : null;
             if (target && editor.contains(target)) {
                 target.scrollIntoView({ block: 'start' });
@@ -21898,6 +22162,17 @@ import {
                 if (slashMenuState.visible) {
                     updateSlashCommandMenu();
                 }
+                break;
+            case 'openWorkspaceLinkPicker':
+                requestWorkspaceLink();
+                break;
+            case 'workspaceLinkSelected':
+                insertSelectedWorkspaceLink(message);
+                break;
+            case 'workspaceLinkCancelled':
+                discardPendingWorkspaceLinkInsertion(
+                    typeof message.requestId === 'string' ? message.requestId : ''
+                );
                 break;
             case 'openSearch':
                 searchManager.open();

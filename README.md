@@ -18,6 +18,7 @@ ManulDown is a VSCode extension that lets you edit Markdown files in a WYSIWYG e
 - **Automatic Markdown syntax conversion**: Recognizes syntax such as `#`, `**`, `*`, `-`, and `` ``` `` while typing.
 - **Syntax highlighting**: Multi-language highlighting powered by Prism.js.
 - **Image support**: Paste and drag-and-drop images.
+- **Links**: Insert HTTP, HTTPS, and email links, or safely encoded links to files and Markdown headings in the current workspace folder.
 - **Table of contents**: Auto-generated from headings.
 - **Two-way sync**: Changes in the editor are reflected in the Markdown file immediately.
 - **Toolbar**: Quick access buttons for common formatting.
@@ -39,6 +40,7 @@ ManulDown is a VSCode extension that lets you edit Markdown files in a WYSIWYG e
 - **H1, H2, H3**: Heading levels
 - **• List**: Unordered list
 - **1\. List**: Ordered list
+- **Link**: Enter a URL or select a workspace file or Markdown heading
 
 ### Slash Commands
 
@@ -46,6 +48,7 @@ Type `/` in the editor to open the slash command menu. You can narrow results by
 
 | Command | Action |
 | --- | --- |
+| `/link` | Enter a URL or select a workspace file or Markdown heading and insert a link |
 | `/table` | Insert a 2x2 table |
 | `/quote` | Convert the current block into a quote (or insert an empty quote block if conversion is not possible) |
 | `/code` | Insert a code block and focus the language label for editing |
@@ -62,7 +65,7 @@ For example, ~/.manuldown/meeting-minutes.md can be inserted with /meeting-minut
 Notes for custom command names:
 
 - Command IDs are normalized from file names (`spaces` -> `-`, leading `/` removed, lowercase).
-- Built-in command IDs (`table`, `quote`, `code`, `checkbox`) are reserved.
+- Built-in command IDs (`link`, `table`, `quote`, `code`, `checkbox`) are reserved.
 - Duplicate normalized command IDs are ignored.
 
 Menu controls:
@@ -90,6 +93,7 @@ Notes:
 
 | Action | Mac | Windows / Linux |
 | --- | --- | --- |
+| Insert link | `Cmd+K` | `Ctrl+K` |
 | Undo | `Cmd+Z` | `Ctrl+Z` |
 | Redo | `Cmd+Shift+Z` | `Ctrl+Shift+Z` |
 | Find | `Cmd+F` | `Ctrl+F` |
@@ -146,6 +150,8 @@ You can change the following options from VSCode settings (`Ctrl+,` / `Cmd+,`):
 Security notes:
 
 The `manulDown.security.*` options are disabled by default. Enabling them can let Markdown documents trigger outbound network requests, download files from external sources, disclose network metadata such as IP address or access time, or open local `file://` targets such as files, applications, shortcuts, or Windows network shares. Only enable these options when you trust the Markdown files you open.
+
+Link selection runs only after you invoke the link command. URL input, file candidates, and heading contents stay in VSCode's extension host; the editor receives only the validated result. New external links are limited to HTTP, HTTPS, and `mailto:` URLs, and ManulDown does not probe or open them while creating a link. Workspace links remain relative, and links that resolve outside the current workspace folder stay blocked unless `manulDown.security.allowFileLinks` is enabled.
 
 ### Markdown Syntax
 

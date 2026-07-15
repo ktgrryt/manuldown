@@ -3,7 +3,7 @@
   "displayName": "ManulDown",
   "description": "WYSIWYG editor for Markdown files in VSCode",
   "icon": "images/icon.png",
-  "version": "1.0.12",
+  "version": "1.0.13",
   "publisher": "ktgrryt",
   "license": "MIT",
   "repository": {
@@ -71,6 +71,11 @@
       {
         "command": "manulDown.findInEditor",
         "title": "Find in ManulDown Editor",
+        "category": "ManulDown"
+      },
+      {
+        "command": "manulDown.insertWorkspaceLink",
+        "title": "Insert Link",
         "category": "ManulDown"
       },
       {
@@ -150,6 +155,12 @@
         "command": "manulDown.findInEditor",
         "key": "ctrl+f",
         "mac": "cmd+f",
+        "when": "activeCustomEditorId == 'manulDown.editor'"
+      },
+      {
+        "command": "manulDown.insertWorkspaceLink",
+        "key": "ctrl+k",
+        "mac": "cmd+k",
         "when": "activeCustomEditorId == 'manulDown.editor'"
       },
       {

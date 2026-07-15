@@ -17,6 +17,12 @@ const vscodeMockState = {
     willSaveDocumentListeners: [],
     didSaveDocumentListeners: [],
     executedCommands: [],
+    quickPickCalls: [],
+    inputBoxCalls: [],
+    quickPickResponses: [],
+    inputBoxResponses: [],
+    findFilesCalls: [],
+    workspaceFolder: null,
 };
 
 function resetVscodeMockState() {
@@ -31,6 +37,12 @@ function resetVscodeMockState() {
     vscodeMockState.willSaveDocumentListeners.length = 0;
     vscodeMockState.didSaveDocumentListeners.length = 0;
     vscodeMockState.executedCommands.length = 0;
+    vscodeMockState.quickPickCalls.length = 0;
+    vscodeMockState.inputBoxCalls.length = 0;
+    vscodeMockState.quickPickResponses.length = 0;
+    vscodeMockState.inputBoxResponses.length = 0;
+    vscodeMockState.findFilesCalls.length = 0;
+    vscodeMockState.workspaceFolder = null;
 }
 
 function addMockListener(listeners, listener) {
@@ -95,7 +107,34 @@ function loadExtensionModules() {
             Undo: 1,
             Redo: 2,
         },
+        CancellationTokenSource: class CancellationTokenSource {
+            constructor() {
+                this.token = { isCancellationRequested: false };
+            }
+
+            cancel() {
+                this.token.isCancellationRequested = true;
+            }
+
+            dispose() {}
+        },
+        FileType: {
+            File: 1,
+            Directory: 2,
+            SymbolicLink: 64,
+        },
+        RelativePattern: class RelativePattern {
+            constructor(base, pattern) {
+                this.base = base;
+                this.pattern = pattern;
+            }
+        },
         workspace: {
+            getWorkspaceFolder: () => vscodeMockState.workspaceFolder,
+            findFiles: async (...args) => {
+                vscodeMockState.findFilesCalls.push(args);
+                return [];
+            },
             getConfiguration: () => ({
                 get: (_key, defaultValue) => defaultValue,
             }),
@@ -143,6 +182,20 @@ function loadExtensionModules() {
             },
         },
         window: {
+            showQuickPick: async (items, options, token) => {
+                vscodeMockState.quickPickCalls.push({ items, options, token });
+                const response = vscodeMockState.quickPickResponses.shift();
+                return typeof response === 'function'
+                    ? response(items, options, token)
+                    : response;
+            },
+            showInputBox: async (options, token) => {
+                vscodeMockState.inputBoxCalls.push({ options, token });
+                const response = vscodeMockState.inputBoxResponses.shift();
+                return typeof response === 'function'
+                    ? response(options, token)
+                    : response;
+            },
             showErrorMessage: async (message) => {
                 vscodeMockState.errors.push(message);
             },
@@ -318,6 +371,143 @@ async function waitFor(condition, message) {
     }
     assert.fail(message);
 }
+
+test('native link picker offers URL and workspace choices and validates URL host-side', async () => {
+    resetVscodeMockState();
+    vscodeMockState.workspaceFolder = {
+        uri: createMockUri('/workspace'),
+        name: 'workspace',
+        index: 0,
+    };
+    vscodeMockState.quickPickResponses.push((items) => {
+        assert.deepEqual(
+            items.map((item) => item.targetKind),
+            ['external', 'workspace']
+        );
+        return items.find((item) => item.targetKind === 'external');
+    });
+    vscodeMockState.inputBoxResponses.push('HTTPS://Example.COM/docs');
+
+    const provider = new MarkdownEditorProvider({});
+    const token = { isCancellationRequested: false };
+    const result = await provider.workspaceLinkPicker.pick(
+        createTextDocument(''),
+        token
+    );
+
+    assert.deepEqual(result, {
+        kind: 'external',
+        href: 'https://example.com/docs',
+        label: 'https://example.com/docs',
+    });
+    assert.equal(vscodeMockState.findFilesCalls.length, 0);
+    assert.equal(vscodeMockState.quickPickCalls[0].token, token);
+    assert.equal(vscodeMockState.inputBoxCalls[0].token, token);
+    assert.equal(
+        vscodeMockState.inputBoxCalls[0].options.validateInput('https://example.com'),
+        null
+    );
+    assert.match(
+        vscodeMockState.inputBoxCalls[0].options.validateInput('javascript:alert(1)'),
+        /HTTP/
+    );
+});
+
+test('native URL picker remains available without a workspace and revalidates its result', async () => {
+    resetVscodeMockState();
+    vscodeMockState.quickPickResponses.push((items) => {
+        assert.deepEqual(items.map((item) => item.targetKind), ['external']);
+        return items[0];
+    });
+    // A mocked or future UI could return a value despite validateInput. The
+    // picker must still reject it before anything reaches the Webview.
+    vscodeMockState.inputBoxResponses.push('file:///tmp/secret');
+
+    const provider = new MarkdownEditorProvider({});
+    const result = await provider.workspaceLinkPicker.pick(
+        createTextDocument(''),
+        { isCancellationRequested: false }
+    );
+
+    assert.equal(result, null);
+    assert.equal(vscodeMockState.findFilesCalls.length, 0);
+});
+
+test('invalid workspace-link requests cannot open the host picker or choose their own path', async () => {
+    const { provider, webview } = await createEditorSyncHarness();
+    let pickerCalls = 0;
+    provider.workspaceLinkPicker.pick = async () => {
+        pickerCalls++;
+        return { href: './safe.md', label: 'safe' };
+    };
+
+    try {
+        await webview.sendMessage({
+            type: 'requestWorkspaceLink',
+            requestId: 'invalid',
+            uri: 'file:///tmp/secret',
+            root: '/tmp',
+            glob: '**/*',
+            url: 'javascript:alert(1)',
+            href: 'command:workbench.action.openSettings',
+            label: '<img src=x onerror=alert(1)>',
+        });
+        assert.equal(pickerCalls, 0);
+        assert.deepEqual(webview.postedMessages.at(-1), {
+            type: 'workspaceLinkCancelled',
+            requestId: 'invalid',
+        });
+    } finally {
+        webview.dispose();
+    }
+});
+
+test('workspace-link results are bound to one active request and return only host output', async () => {
+    const { provider, webview } = await createEditorSyncHarness();
+    let resolveFirstPicker;
+    let pickerCalls = 0;
+    provider.workspaceLinkPicker.pick = async () => {
+        pickerCalls++;
+        return new Promise((resolve) => {
+            resolveFirstPicker = resolve;
+        });
+    };
+
+    try {
+        const firstRequest = webview.sendMessage({
+            type: 'requestWorkspaceLink',
+            requestId: 'workspace-link-1-1',
+        });
+        await waitFor(() => pickerCalls === 1, 'The first workspace picker did not start');
+
+        await webview.sendMessage({
+            type: 'requestWorkspaceLink',
+            requestId: 'workspace-link-1-2',
+            uri: 'file:///tmp/ignored',
+        });
+        assert.equal(pickerCalls, 1);
+        assert.deepEqual(webview.postedMessages.at(-1), {
+            type: 'workspaceLinkCancelled',
+            requestId: 'workspace-link-1-2',
+        });
+
+        resolveFirstPicker({
+            kind: 'external',
+            href: 'https://example.com/docs',
+            label: '<img src=x onerror=alert(1)>',
+        });
+        await firstRequest;
+        assert.deepEqual(webview.postedMessages.at(-1), {
+            type: 'workspaceLinkSelected',
+            requestId: 'workspace-link-1-1',
+            linkKind: 'external',
+            href: 'https://example.com/docs',
+            label: '<img src=x onerror=alert(1)>',
+        });
+    } finally {
+        webview.dispose();
+    }
+});
 
 test('a ManulDown edit is not reported back as an external document change', async () => {
     const { provider, document, webview } = await createEditorSyncHarness();

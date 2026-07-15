@@ -2,7 +2,9 @@ import * as vscode from 'vscode';
 import * as os from 'os';
 import * as path from 'path';
 import { MarkdownDocument } from './MarkdownDocument';
+import { WorkspaceLinkPicker } from './WorkspaceLinkPicker';
 import { getNonce } from '../utils/getNonce';
+import { isUriSecurelyWithinDirectory } from '../utils/workspaceLinks';
 import TurndownService from 'turndown';
 const { gfm } = require('turndown-plugin-gfm');
 
@@ -31,7 +33,8 @@ class ImageImportError extends Error {
 
 export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     private static readonly viewType = 'manulDown.editor';
-    private static readonly builtInSlashCommandIds = new Set(['table', 'quote', 'code', 'checkbox']);
+    private static readonly builtInSlashCommandIds = new Set(['table', 'quote', 'code', 'checkbox', 'link']);
+    private static readonly workspaceLinkRequestIdPattern = /^workspace-link-\d{1,16}-\d{1,10}$/;
     private static readonly customSlashTemplateDirectoryName = '.manuldown';
     private static readonly customSlashTemplateExtension = '.md';
     private static readonly maxCustomSlashCommands = 200;
@@ -52,6 +55,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     private customSlashCommandCache: { loadedAt: number; items: CustomSlashCommandTemplate[] } | null = null;
     private tocPanelWidthPx = MarkdownEditorProvider.defaultTocPanelWidthPx;
     private currentEmptyListItemMarker: string | null = null;
+    private readonly workspaceLinkPicker = new WorkspaceLinkPicker();
     public explicitlyRequested = false;
 
     constructor(private readonly context: vscode.ExtensionContext) {
@@ -619,6 +623,10 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         const expectedWillSaveUpdates = new Map<string, ExpectedWillSaveUpdate>();
         let syncSnapshotRequestSequence = 0;
         let editorDisposed = false;
+        let activeWorkspaceLinkRequest: {
+            requestId: string;
+            cancellation: vscode.CancellationTokenSource;
+        } | null = null;
         let terminalActionQueue: Promise<void> = Promise.resolve();
         let saveSyncWarningShown = false;
         let synchronizedProgrammaticSaveInProgress = false;
@@ -711,6 +719,13 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 clearTimeout(expectedUpdate.timeout);
             }
             expectedWillSaveUpdates.clear();
+        };
+
+        const postWorkspaceLinkCancellation = (requestId: string): void => {
+            void webviewPanel.webview.postMessage({
+                type: 'workspaceLinkCancelled',
+                requestId,
+            });
         };
 
         const enqueueTerminalAction = async (action: () => Promise<void>): Promise<void> => {
@@ -986,6 +1001,74 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     case 'requestCustomSlashCommands':
                         await this.postCustomSlashCommands(webviewPanel.webview);
                         break;
+                    case 'requestWorkspaceLink':
+                        {
+                            const requestId = typeof message.requestId === 'string'
+                                ? message.requestId
+                                : '';
+                            if (
+                                !MarkdownEditorProvider.workspaceLinkRequestIdPattern.test(requestId) ||
+                                editorDisposed ||
+                                this.webviewPanels.get(documentKey) !== webviewPanel ||
+                                !webviewPanel.active
+                            ) {
+                                if (requestId) {
+                                    postWorkspaceLinkCancellation(requestId);
+                                }
+                                break;
+                            }
+
+                            // A compromised or stale Webview must not be able to
+                            // stack native pickers. Keep the user-initiated picker
+                            // active and reject subsequent requests until it closes.
+                            if (activeWorkspaceLinkRequest) {
+                                postWorkspaceLinkCancellation(requestId);
+                                break;
+                            }
+
+                            const cancellation = new vscode.CancellationTokenSource();
+                            activeWorkspaceLinkRequest = { requestId, cancellation };
+                            try {
+                                const selection = await this.workspaceLinkPicker.pick(
+                                    document,
+                                    cancellation.token
+                                );
+                                if (
+                                    cancellation.token.isCancellationRequested ||
+                                    editorDisposed ||
+                                    this.webviewPanels.get(documentKey) !== webviewPanel ||
+                                    !webviewPanel.active ||
+                                    activeWorkspaceLinkRequest?.requestId !== requestId
+                                ) {
+                                    break;
+                                }
+                                if (!selection) {
+                                    postWorkspaceLinkCancellation(requestId);
+                                    break;
+                                }
+                                void webviewPanel.webview.postMessage({
+                                    type: 'workspaceLinkSelected',
+                                    requestId,
+                                    linkKind: selection.kind,
+                                    href: selection.href,
+                                    label: selection.label,
+                                });
+                            } catch (error) {
+                                console.error('[link picker] Failed to select a link target:', error);
+                                if (!editorDisposed) {
+                                    postWorkspaceLinkCancellation(requestId);
+                                    void vscode.window.showErrorMessage(
+                                        'ManulDown could not create the link.'
+                                    );
+                                }
+                            } finally {
+                                if (activeWorkspaceLinkRequest?.requestId === requestId) {
+                                    activeWorkspaceLinkRequest = null;
+                                }
+                                cancellation.dispose();
+                            }
+                        }
+                        break;
                     case 'openImage':
                         // Open the image file in VSCode
                         await this.openImageFile(message.src, document);
@@ -1070,7 +1153,10 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                                 const relativeTarget = this.resolveImageSourceUri(decodedPath, document).with({ fragment });
                                 const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
                                 const isInsideWorkspace = !!workspaceFolder &&
-                                    this.isUriWithinDirectory(relativeTarget, workspaceFolder.uri);
+                                    await isUriSecurelyWithinDirectory(
+                                        relativeTarget.with({ fragment: '' }),
+                                        workspaceFolder.uri
+                                    );
                                 if (isInsideWorkspace || allowFileLinks) {
                                     await vscode.commands.executeCommand('vscode.open', relativeTarget);
                                 }
@@ -1374,6 +1460,11 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         // Cleanup
         webviewPanel.onDidDispose(() => {
             editorDisposed = true;
+            if (activeWorkspaceLinkRequest) {
+                activeWorkspaceLinkRequest.cancellation.cancel();
+                activeWorkspaceLinkRequest.cancellation.dispose();
+                activeWorkspaceLinkRequest = null;
+            }
             changeDocumentSubscription.dispose();
             configurationChangeSubscription.dispose();
             willSaveDocumentSubscription.dispose();
@@ -3196,6 +3287,19 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 imageUri = this.resolveImageSourceUri(imageSrc, document);
             }
 
+            const allowFileLinks = vscode.workspace
+                .getConfiguration('manulDown')
+                .get<boolean>('security.allowFileLinks', false);
+            const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
+            const isInsideWorkspace = !!workspaceFolder &&
+                await isUriSecurelyWithinDirectory(imageUri, workspaceFolder.uri);
+            if (!isInsideWorkspace && !allowFileLinks) {
+                vscode.window.showErrorMessage(
+                    'Opening images outside the current workspace folder is blocked.'
+                );
+                return;
+            }
+
             // Check if file exists
             try {
                 await vscode.workspace.fs.stat(imageUri);
@@ -3595,6 +3699,9 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             &#9745; List
         </button>
         <div class="toolbar-separator"></div>
+        <button class="toolbar-btn" data-command="link" title="Insert Link (Cmd/Ctrl+K)">
+            Link
+        </button>
         <button class="toolbar-btn" data-command="quote" title="Quote">
             &gt; Quote
         </button>

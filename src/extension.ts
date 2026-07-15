@@ -110,6 +110,27 @@ export function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(findInEditorCommand);
 
+    const insertWorkspaceLinkCommand = vscode.commands.registerCommand(
+        'manulDown.insertWorkspaceLink',
+        () => {
+            const posted = provider.postMessageToActiveEditor(
+                {
+                    type: 'openWorkspaceLinkPicker',
+                },
+                {
+                    reveal: true,
+                }
+            );
+            if (!posted) {
+                vscode.window.showInformationMessage(
+                    'Open a ManulDown editor to insert a link.'
+                );
+            }
+        }
+    );
+
+    context.subscriptions.push(insertWorkspaceLinkCommand);
+
     const historyCommands = [
         { id: 'manulDown.undo', direction: 'undo' },
         { id: 'manulDown.redo', direction: 'redo' },

@@ -1,4 +1,6 @@
 // @ts-nocheck
+import { assignStableHeadingIds } from './MarkdownHeadingSlug.js';
+
 /**
  * 目次管理モジュール
  * 目次の表示、更新、ナビゲーション機能を提供
@@ -142,6 +144,7 @@ export class TableOfContentsManager {
         this.headings = [];
         this.tocItems = [];
         this.headingTops = [];
+        assignStableHeadingIds(headings);
         
         headings.forEach((heading, index) => {
             const level = parseInt(heading.tagName.substring(1));
@@ -154,11 +157,6 @@ export class TableOfContentsManager {
             tocItem.textContent = text;
             const tocIndex = this.headings.length;
             tocItem.dataset.index = tocIndex;
-            
-            // スクロール用に見出しにユニークなIDを追加
-            if (!heading.id) {
-                heading.id = `heading-${index}`;
-            }
             
             tocItem.addEventListener('click', () => {
                 this.scrollToHeading(heading);

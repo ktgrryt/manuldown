@@ -12,6 +12,7 @@ export class ToolbarManager {
         this.onInsertQuote = options.onInsertQuote || null;
         this.onInsertCodeBlock = options.onInsertCodeBlock || null;
         this.onInsertCheckbox = options.onInsertCheckbox || null;
+        this.onInsertLink = options.onInsertLink || null;
         this.commandButtons = new Map();
         this.activeStateCommands = new Map([
             ['bold', 'bold'],
@@ -56,7 +57,7 @@ export class ToolbarManager {
      * ツールバーをセットアップ
      */
     setup() {
-        const buttons = document.querySelectorAll('.toolbar-btn');
+        const buttons = document.querySelectorAll('.toolbar > .toolbar-btn');
         buttons.forEach(button => {
             const command = button.getAttribute('data-command');
             if (command) {
@@ -74,7 +75,7 @@ export class ToolbarManager {
                 const command = button.getAttribute('data-command');
                 this.executeCommand(command);
                 // ダイアログを開くコマンドはダイアログ側でフォーカスを管理するため、ここではスキップ
-                if (command !== 'table') {
+                if (command !== 'table' && command !== 'link') {
                     setTimeout(() => this.editor.focus(), 0);
                 }
             });
@@ -113,11 +114,6 @@ export class ToolbarManager {
             return;
         }
 
-        if (this.headingLevelCommands.has(command) && this.getActiveHeadingCommand() === command) {
-            this.updateToolbarState();
-            return;
-        }
-
         if (this.listRestrictedCommands.has(command) && this.isSelectionInListContext()) {
             this.updateToolbarState();
             return;
@@ -148,6 +144,11 @@ export class ToolbarManager {
             return;
         }
 
+        if (command === 'link' && this.onInsertLink) {
+            this.onInsertLink();
+            return;
+        }
+
         // コマンド実行前に状態を保存
         this.stateManager.saveState();
 
@@ -162,13 +163,13 @@ export class ToolbarManager {
                 document.execCommand('strikeThrough', false, null);
                 break;
             case 'h1':
-                this.formatBlock('h1');
+                this.formatBlock(this.getActiveHeadingCommand() === command ? 'p' : 'h1');
                 break;
             case 'h2':
-                this.formatBlock('h2');
+                this.formatBlock(this.getActiveHeadingCommand() === command ? 'p' : 'h2');
                 break;
             case 'h3':
-                this.formatBlock('h3');
+                this.formatBlock(this.getActiveHeadingCommand() === command ? 'p' : 'h3');
                 break;
             case 'ul':
                 if (this.isSelectionInHeadingContext()) {
@@ -217,25 +218,25 @@ export class ToolbarManager {
         this.commandButtons.forEach((button, command) => {
             const disabledByTable = this.tableCellRestrictedCommands.has(command) && inTableCellContext;
             const disabledBoldInHeading = command === 'bold' && inHeadingContext;
-            const disabledSameHeadingLevel =
-                this.headingLevelCommands.has(command) &&
-                !!activeHeadingCommand &&
-                activeHeadingCommand === command;
             const isCurrentHeadingLevel =
                 this.headingLevelCommands.has(command) &&
                 !!activeHeadingCommand &&
                 activeHeadingCommand === command;
             const disabledByList = this.listRestrictedCommands.has(command) && inListContext;
             const disabledCodeBlockInCodeBlock = command === 'codeblock' && inCodeBlockContext;
+            const disabledLinkInCodeBlock = command === 'link' && inCodeBlockContext;
             const isDisabled =
                 disabledByTable ||
                 disabledBoldInHeading ||
-                disabledSameHeadingLevel ||
                 disabledByList ||
-                disabledCodeBlockInCodeBlock;
+                disabledCodeBlockInCodeBlock ||
+                disabledLinkInCodeBlock;
             button.disabled = isDisabled;
             button.classList.toggle('is-disabled', isDisabled);
             button.classList.toggle('is-current-heading', isCurrentHeadingLevel);
+            if (this.headingLevelCommands.has(command)) {
+                button.setAttribute('aria-pressed', isCurrentHeadingLevel ? 'true' : 'false');
+            }
             if (isDisabled) {
                 button.setAttribute('aria-disabled', 'true');
             } else {
