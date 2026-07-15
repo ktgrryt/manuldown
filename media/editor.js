@@ -12,9 +12,19 @@ import { SearchManager } from './modules/SearchManager.js';
 import { CompositionUpdateGate } from './modules/CompositionUpdateGate.js';
 import { assignStableHeadingIds } from './modules/MarkdownHeadingSlug.js';
 import {
+    getWorkspaceLinkSuggestionQuery,
+    getPastedAbsolutePathCandidate,
+    linkInputLooksLikeNativeAbsolutePath,
+    linkInputRequiresWorkspaceResolution,
     normalizeWorkspaceLinkLabel,
     sanitizeInsertedLinkHref
 } from './modules/WorkspaceLinkSecurity.js';
+import {
+    createPastedPathFallback,
+    isPastedPathFallbackIntact,
+    releasePastedPathFallback,
+    replacePastedPathFallback
+} from './modules/PastedPathLinkDOM.js';
 import {
     calculateCaretAnchorScrollTop,
     calculateCaretRevealScrollTop,
@@ -58,6 +68,10 @@ import {
     let syncRequestSequence = 0;
     let commitPendingTransientEditorUi = () => false;
     let requestWorkspaceLink = () => false;
+    let openInlineLinkPopover = () => false;
+    let finishInlineLinkRequest = () => {};
+    let shouldApplyInlineLinkResponse = () => true;
+    let receiveWorkspaceLinkSuggestions = () => false;
     let trustedClipboardPayload = null;
     let handleHostMessage = () => {};
     const compositionUpdateGate = new CompositionUpdateGate();
@@ -115,9 +129,13 @@ import {
     const PENDING_IMAGE_INSERTION_MAX_AGE_MS = 5 * 60 * 1000;
     const MAX_PENDING_IMAGE_INSERTIONS = 64;
     let workspaceLinkRequestSeq = 0;
+    let workspaceLinkSuggestionRequestSeq = 0;
     const pendingWorkspaceLinkInsertions = new Map();
     const PENDING_WORKSPACE_LINK_MAX_AGE_MS = 5 * 60 * 1000;
     const MAX_PENDING_WORKSPACE_LINKS = 8;
+    let pastedPathLinkRequestSeq = 0;
+    const pendingPastedPathLinks = new Map();
+    const PASTED_PATH_LINK_TIMEOUT_MS = 2000;
     let imageResizeOverlay = null;
     let activeResizeImage = null;
     let imageResizeState = null;
@@ -216,12 +234,13 @@ import {
         }
     }
 
-    function rememberWorkspaceLinkInsertion(range, existingLink = null) {
+    function rememberWorkspaceLinkInsertion(range, existingLink = null, options = {}) {
         prunePendingWorkspaceLinkInsertions();
         const requestId = `workspace-link-${Date.now()}-${++workspaceLinkRequestSeq}`;
         pendingWorkspaceLinkInsertions.set(requestId, {
             range: range.cloneRange(),
             existingLink,
+            preferMoveSelection: options.preferMoveSelection === true,
             revision: localUpdateRevision,
             createdAt: Date.now()
         });
@@ -255,6 +274,184 @@ import {
             return null;
         }
         return pending;
+    }
+
+    function commitPastedPathFallback(pending) {
+        if (!pending) return;
+        const selection = window.getSelection();
+        const shouldMoveSelection = selectionIsImmediatelyAfterNode(
+            selection,
+            pending.endBoundary
+        );
+        const fallbackNode = releasePastedPathFallback(pending);
+        if (shouldMoveSelection && selection && fallbackNode) {
+            setCaretAfterNode(selection, fallbackNode);
+        }
+        stateManager.commitStateAfterChange({
+            changeSelection: pending.historySelection
+        });
+    }
+
+    function finalizePendingPastedPathLink(requestId) {
+        if (typeof requestId !== 'string' || requestId === '') return false;
+        const pending = pendingPastedPathLinks.get(requestId) || null;
+        if (!pending) return false;
+        pendingPastedPathLinks.delete(requestId);
+        clearTimeout(pending.timeout);
+        commitPastedPathFallback(pending);
+        return true;
+    }
+
+    function finalizePendingPastedPathLinks() {
+        for (const requestId of Array.from(pendingPastedPathLinks.keys())) {
+            finalizePendingPastedPathLink(requestId);
+        }
+    }
+
+    function takePendingPastedPathLink(requestId) {
+        if (typeof requestId !== 'string' || requestId === '') return null;
+        const pending = pendingPastedPathLinks.get(requestId) || null;
+        if (!pending) return null;
+        pendingPastedPathLinks.delete(requestId);
+        clearTimeout(pending.timeout);
+        if (
+            pending.revision !== localUpdateRevision ||
+            !isPastedPathFallbackIntact(pending, editor)
+        ) {
+            commitPastedPathFallback(pending);
+            return null;
+        }
+        return pending;
+    }
+
+    function selectionIsImmediatelyAfterNode(selection, node) {
+        if (!selection || selection.rangeCount !== 1 || !selection.isCollapsed || !node) {
+            return false;
+        }
+        const range = selection.getRangeAt(0);
+        const parent = node.parentNode;
+        if (!parent || range.startContainer !== parent) {
+            return false;
+        }
+        return range.startOffset === Array.from(parent.childNodes).indexOf(node) + 1;
+    }
+
+    function beginPastedPathLinkRequest(range, selection, pathText) {
+        const selectedText = selection ? String(selection.toString() || '') : '';
+        const isListBoundarySelection = !!(
+            range &&
+            range.startContainer === range.endContainer &&
+            range.startContainer &&
+            range.startContainer.nodeType === Node.ELEMENT_NODE &&
+            (range.startContainer.tagName === 'UL' || range.startContainer.tagName === 'OL')
+        );
+        if (
+            !range ||
+            range.collapsed ||
+            !selection ||
+            selectedText.replace(/[\u200B\u2060\uFEFF\u00A0\s]/g, '') === '' ||
+            !selectionCanBecomeWorkspaceLink(range) ||
+            isListBoundarySelection
+        ) {
+            return false;
+        }
+
+        finalizePendingPastedPathLinks();
+        const historySelection = stateManager.saveRange(range);
+        const startAnchor = getClosestAnchor(range.startContainer);
+        const endAnchor = getClosestAnchor(range.endContainer);
+        const existingLink = startAnchor && startAnchor === endAnchor ? startAnchor : null;
+        let originalContents;
+        let fallback;
+        try {
+            stateManager.beginChangeAtSelection(historySelection);
+            originalContents = range.extractContents();
+            fallback = createPastedPathFallback(document, pathText);
+            range.insertNode(fallback.fragment);
+            setCaretAfterNode(selection, fallback.endBoundary);
+        } catch (_error) {
+            return false;
+        }
+
+        const requestId = `pasted-path-link-${Date.now()}-${++pastedPathLinkRequestSeq}`;
+        const pending = {
+            requestId,
+            pathText,
+            startBoundary: fallback.startBoundary,
+            fallbackNode: fallback.fallbackNode,
+            endBoundary: fallback.endBoundary,
+            originalContents,
+            existingLink,
+            historySelection,
+            revision: null,
+            createdAt: Date.now(),
+            timeout: null
+        };
+        pending.timeout = setTimeout(() => {
+            finalizePendingPastedPathLink(requestId);
+        }, PASTED_PATH_LINK_TIMEOUT_MS);
+        pendingPastedPathLinks.set(requestId, pending);
+
+        // The literal path is the normal paste fallback and must reach the text
+        // document immediately. Keep this request pending across that one update.
+        notifyChange({ preservePendingPastedPathLinks: true });
+        pending.revision = localUpdateRevision;
+        vscode.postMessage({
+            type: 'requestPastedPathLink',
+            requestId,
+            pathText
+        });
+        return true;
+    }
+
+    function resolvePastedPathLink(message) {
+        const requestId = typeof message.requestId === 'string' ? message.requestId : '';
+        const pending = takePendingPastedPathLink(requestId);
+        if (!pending) return false;
+
+        const href = sanitizeInsertedLinkHref(message.href, message.linkKind);
+        if (!href || message.linkKind !== 'workspace') {
+            commitPastedPathFallback(pending);
+            return false;
+        }
+
+        const selection = window.getSelection();
+        const shouldMoveSelection = selectionIsImmediatelyAfterNode(
+            selection,
+            pending.endBoundary
+        );
+        let link;
+        if (
+            pending.existingLink &&
+            pending.existingLink.isConnected &&
+            editor.contains(pending.existingLink) &&
+            pending.existingLink.contains(pending.startBoundary) &&
+            pending.existingLink.contains(pending.endBoundary)
+        ) {
+            link = pending.existingLink;
+            if (!replacePastedPathFallback(pending, pending.originalContents)) {
+                commitPastedPathFallback(pending);
+                return false;
+            }
+            link.setAttribute('href', href);
+        } else {
+            link = document.createElement('a');
+            link.setAttribute('href', href);
+            link.appendChild(pending.originalContents);
+            if (!replacePastedPathFallback(pending, link)) {
+                commitPastedPathFallback(pending);
+                return false;
+            }
+        }
+
+        if (shouldMoveSelection && selection) {
+            setCaretAfterNode(selection, link);
+        }
+        stateManager.commitStateAfterChange({
+            changeSelection: pending.historySelection
+        });
+        notifyChangeImmediate();
+        return true;
     }
 
     function rangesHaveSameBoundaries(first, second) {
@@ -1336,6 +1533,7 @@ import {
     }
 
     requestWorkspaceLink = () => {
+        finalizePendingPastedPathLinks();
         if (isUpdating || editorLoadFailed || isComposing || compositionUpdateGate.composing) {
             return false;
         }
@@ -1351,21 +1549,27 @@ import {
         const startAnchor = getClosestAnchor(range.startContainer);
         const endAnchor = getClosestAnchor(range.endContainer);
         const existingLink = startAnchor && startAnchor === endAnchor ? startAnchor : null;
-        const requestId = rememberWorkspaceLinkInsertion(range, existingLink);
-        vscode.postMessage({
-            type: 'requestWorkspaceLink',
-            requestId
-        });
-        return true;
+        return openInlineLinkPopover(range.cloneRange(), existingLink);
     };
 
     function insertSelectedWorkspaceLink(message) {
         const requestId = typeof message.requestId === 'string' ? message.requestId : '';
+        if (!shouldApplyInlineLinkResponse(requestId)) {
+            discardPendingWorkspaceLinkInsertion(requestId);
+            finishInlineLinkRequest(requestId, false);
+            return false;
+        }
         const pending = takePendingWorkspaceLinkInsertion(requestId);
-        if (!pending) return false;
+        if (!pending) {
+            finishInlineLinkRequest(requestId, false);
+            return false;
+        }
 
         const href = sanitizeInsertedLinkHref(message.href, message.linkKind);
-        if (!href) return false;
+        if (!href) {
+            finishInlineLinkRequest(requestId, false);
+            return false;
+        }
         const label = normalizeWorkspaceLinkLabel(message.label);
         const range = pending.range;
         const selection = window.getSelection();
@@ -1376,7 +1580,8 @@ import {
                 currentSelectionRange = candidateRange;
             }
         }
-        const shouldMoveSelection = rangesHaveSameBoundaries(currentSelectionRange, range);
+        const shouldMoveSelection = pending.preferMoveSelection === true ||
+            rangesHaveSameBoundaries(currentSelectionRange, range);
         const insertionHistorySelection = stateManager.saveRange(range);
         stateManager.beginChangeAtSelection(insertionHistorySelection);
 
@@ -1390,6 +1595,10 @@ import {
             stateManager.commitStateAfterChange({
                 changeSelection: insertionHistorySelection
             });
+            finishInlineLinkRequest(requestId, true, href);
+            // Update the popover draft before snapshotting. Otherwise a
+            // host-resolved result on an existing link can be overwritten by the
+            // old input value through commitPendingTransientEditorUi.
             notifyChangeImmediate();
             return true;
         }
@@ -1424,6 +1633,7 @@ import {
         stateManager.commitStateAfterChange({
             changeSelection: insertionHistorySelection
         });
+        finishInlineLinkRequest(requestId, true, href);
         notifyChangeImmediate();
         return true;
     }
@@ -6237,7 +6447,10 @@ import {
     }
 
     // 変更を通知
-    function prepareEditorForNotify() {
+    function prepareEditorForNotify(options = {}) {
+        if (options.preservePendingPastedPathLinks !== true) {
+            finalizePendingPastedPathLinks();
+        }
         localUpdateRevision++;
         pendingCtrlKDeleteSync = false;
 
@@ -6253,17 +6466,17 @@ import {
         scheduleEditorOverflowStateUpdate();
     }
 
-    function notifyChange() {
+    function notifyChange(options = {}) {
         const wasFullySynchronized = localUpdateRevision <= acknowledgedUpdateRevision;
-        prepareEditorForNotify();
+        prepareEditorForNotify(options);
 
         // The leading update marks the backing TextDocument dirty immediately.
         // Further edits in the same burst stay coalesced until the host catches up.
         scheduleUpdate(wasFullySynchronized ? 0 : 500);
     }
 
-    function notifyChangeImmediate() {
-        prepareEditorForNotify();
+    function notifyChangeImmediate(options = {}) {
+        prepareEditorForNotify(options);
         scheduleUpdate(0);
     }
 
@@ -17402,6 +17615,7 @@ import {
         });
 
         editor.addEventListener('beforeinput', (e) => {
+            finalizePendingPastedPathLinks();
             if (suppressNextNativeCtrlKDelete && typeof e.inputType === 'string' && e.inputType.startsWith('delete')) {
                 // WebView can fire an extra native delete after custom Ctrl+K handling.
                 // Swallow that follow-up delete so the current line itself is preserved.
@@ -20214,6 +20428,7 @@ import {
         editor.addEventListener('paste', (e) => {
             if (!isUpdating) {
                 if (!e.clipboardData) return;
+                finalizePendingPastedPathLinks();
                 if (tableManager.handleEdgePaste(e)) {
                     return;
                 }
@@ -20231,13 +20446,15 @@ import {
                 const internalPastedHtml = clipboardData.getData(INTERNAL_EDITOR_HTML_CLIPBOARD_TYPE) || markedInternalHtml;
                 const pastedHtmlContainsImage = typeof pastedHtml === 'string' && /<img\b/i.test(pastedHtml);
                 const internalPastedText = clipboardData.getData(INTERNAL_EDITOR_PLAIN_TEXT_CLIPBOARD_TYPE);
-                const externalPastedText = normalizeExternalClipboardPlainText(clipboardData.getData('text/plain'));
+                const rawExternalPastedText = clipboardData.getData('text/plain');
+                const externalPastedText = normalizeExternalClipboardPlainText(rawExternalPastedText);
                 const pastedText = internalPastedText || externalPastedText;
                 const trustedInternalPayload = internalPastedHtml
                     ? getTrustedClipboardPayload(internalPastedHtml, pastedText)
                     : null;
                 const trustedInternalImages = trustedInternalPayload?.images || null;
                 const directLinkTarget = resolveDirectLinkTarget(pastedText);
+                const pastedAbsolutePath = getPastedAbsolutePathCandidate(rawExternalPastedText);
                 const hasListLikeText = !!(pastedText && pastedTextLooksLikeList(pastedText));
 
                 if (
@@ -20290,6 +20507,21 @@ import {
                         richPastedHtml,
                         trustedInternalImages,
                         !!internalPastedHtml
+                    )
+                ) {
+                    e.preventDefault();
+                    return;
+                }
+
+                if (
+                    e.isTrusted === true &&
+                    selection &&
+                    !selection.isCollapsed &&
+                    pastedAbsolutePath &&
+                    beginPastedPathLinkRequest(
+                        selection.getRangeAt(0),
+                        selection,
+                        pastedAbsolutePath
                     )
                 ) {
                     e.preventDefault();
@@ -20981,17 +21213,37 @@ import {
         let linkInputSavedValue = '';
         let linkInputBaselineValue = '';
         let linkInputDebounceTimer = null;
+        let linkInputIsComposing = false;
         let linkHistorySelection = null;
+        let linkCreationRange = null;
+        let linkCreationRevision = null;
+        let activeLinkPopoverRequestId = null;
+        let activeLinkPopoverRequestKind = null;
+        let activeLinkPopoverRequestInput = '';
+        let linkSuggestionDebounceTimer = null;
+        let activeLinkSuggestionRequestId = null;
+        let activeLinkSuggestionQuery = '';
+        let linkSuggestionSessionId = null;
+        let linkSuggestions = [];
+        let activeLinkSuggestionIndex = -1;
+        let selectedLinkSuggestion = null;
         function createLinkPopover() {
             const popover = document.createElement('div');
             popover.className = 'link-popover';
             popover.innerHTML = `
-                <input type="text" class="link-popover-input" placeholder="URL">
-                <button class="link-popover-btn danger" data-action="unlink">Unlink</button>
-                <button class="link-popover-btn primary" data-action="open">Open</button>
+                <div class="link-popover-controls">
+                    <input type="text" class="link-popover-input" role="combobox" aria-label="Link URL or workspace file path" aria-autocomplete="list" aria-controls="link-workspace-suggestions" aria-expanded="false" autocomplete="off" spellcheck="false" placeholder="URL or workspace file path">
+                    <button class="link-popover-btn danger" data-action="unlink">Unlink</button>
+                    <button class="link-popover-btn primary" data-action="apply">Apply</button>
+                    <button class="link-popover-btn primary" data-action="open">Open</button>
+                </div>
+                <div id="link-workspace-suggestions" class="link-popover-suggestions" role="listbox" aria-label="Workspace files" hidden></div>
             `;
             const input = popover.querySelector('.link-popover-input');
             input.addEventListener('input', () => {
+                input.removeAttribute('aria-invalid');
+                input.removeAttribute('title');
+                selectedLinkSuggestion = null;
                 if (linkInputDebounceTimer === null) {
                     // 入力開始時にスナップショットを保存
                     linkInputUndoStack.push(linkInputSavedValue);
@@ -21002,35 +21254,420 @@ import {
                     linkInputSavedValue = input.value;
                     linkInputDebounceTimer = null;
                 }, 500);
+                scheduleWorkspaceLinkSuggestions(input.value);
                 syncLinkPopoverOpenButtonState(input.value);
                 // Mirror each safe draft into the editor model immediately. This
                 // makes the backing TextDocument dirty even when the next action
                 // is clicking the workbench tab close button outside the Webview.
-                syncLinkDraftToEditor();
+                if (currentLink) {
+                    if (linkPopoverInputNeedsHostResolution(input.value)) {
+                        // Search terms and workspace paths must never become href
+                        // drafts before the host validates a selected candidate.
+                        restoreLinkHrefToBaseline();
+                    } else {
+                        syncLinkDraftToEditor();
+                    }
+                }
+            });
+            input.addEventListener('compositionstart', () => {
+                linkInputIsComposing = true;
+                clearWorkspaceLinkSuggestions({ cancelHost: true });
+            });
+            input.addEventListener('compositionend', () => {
+                linkInputIsComposing = false;
+                setTimeout(() => scheduleWorkspaceLinkSuggestions(input.value), 0);
+            });
+            input.addEventListener('keydown', (event) => {
+                if (isLinkInputImeInteraction(event, input)) return;
+                if (!areLinkSuggestionsVisible()) return;
+                if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    moveActiveLinkSuggestion(event.key === 'ArrowDown' ? 1 : -1);
+                } else if (event.key === 'Enter' && !event.isComposing) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    chooseActiveLinkSuggestion();
+                } else if (event.key === 'Escape') {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    clearWorkspaceLinkSuggestions({ cancelHost: true });
+                }
+            });
+            const suggestionList = popover.querySelector('.link-popover-suggestions');
+            suggestionList.addEventListener('mousedown', (event) => {
+                if (event.target.closest('.link-popover-suggestion')) {
+                    event.preventDefault();
+                }
+            });
+            suggestionList.addEventListener('click', (event) => {
+                const option = event.target.closest('.link-popover-suggestion');
+                if (!option) return;
+                const index = Number(option.dataset.index);
+                if (Number.isInteger(index)) {
+                    chooseLinkSuggestion(index);
+                }
+            });
+            suggestionList.addEventListener('mousemove', (event) => {
+                const option = event.target.closest('.link-popover-suggestion');
+                if (!option) return;
+                const index = Number(option.dataset.index);
+                if (Number.isInteger(index) && index !== activeLinkSuggestionIndex) {
+                    setActiveLinkSuggestion(index);
+                }
             });
             document.body.appendChild(popover);
             return popover;
         }
 
+        function isStoredCurrentLinkHref(value) {
+            const normalized = String(value || '').trim();
+            return !!(
+                currentLink &&
+                normalized &&
+                normalized === linkInputBaselineValue &&
+                normalized === (currentLink.getAttribute('href') || '')
+            );
+        }
+
+        function isLinkInputImeInteraction(event, input) {
+            return !!(
+                linkInputIsComposing ||
+                isImeInteractionKeydown(event) ||
+                (input && activeCompositionElement === input)
+            );
+        }
+
+        function linkPopoverInputNeedsHostResolution(value) {
+            const normalized = String(value || '').trim();
+            if (
+                selectedLinkSuggestion &&
+                normalized === selectedLinkSuggestion.path
+            ) {
+                return true;
+            }
+            if (linkInputLooksLikeNativeAbsolutePath(value)) {
+                return true;
+            }
+            if (getWorkspaceLinkSuggestionQuery(value) !== null) {
+                return !isStoredCurrentLinkHref(value);
+            }
+            if (linkInputRequiresWorkspaceResolution(value)) {
+                return !isStoredCurrentLinkHref(value);
+            }
+            return false;
+        }
+
+        function linkPopoverInputAwaitsWorkspaceSuggestion(value) {
+            const normalized = String(value || '').trim();
+            if (
+                selectedLinkSuggestion &&
+                normalized === selectedLinkSuggestion.path
+            ) {
+                return false;
+            }
+            return getWorkspaceLinkSuggestionQuery(value) !== null &&
+                !isStoredCurrentLinkHref(value);
+        }
+
+        function areLinkSuggestionsVisible() {
+            if (!linkPopover) return false;
+            const list = linkPopover.querySelector('.link-popover-suggestions');
+            return !!list && !list.hidden && linkSuggestions.length > 0;
+        }
+
+        function hideLinkSuggestionList() {
+            if (!linkPopover) return;
+            const input = linkPopover.querySelector('.link-popover-input');
+            const list = linkPopover.querySelector('.link-popover-suggestions');
+            if (list) {
+                list.hidden = true;
+                list.replaceChildren();
+            }
+            if (input) {
+                input.setAttribute('aria-expanded', 'false');
+                input.removeAttribute('aria-activedescendant');
+            }
+            linkSuggestions = [];
+            activeLinkSuggestionIndex = -1;
+            if (linkPopover.style.display !== 'none') {
+                repositionLinkPopoverWithinViewport();
+            }
+        }
+
+        function clearWorkspaceLinkSuggestions(options = {}) {
+            const cancelHost = options.cancelHost !== false;
+            const preserveSelected = options.preserveSelected === true;
+            clearTimeout(linkSuggestionDebounceTimer);
+            linkSuggestionDebounceTimer = null;
+            const requestIds = new Set([
+                activeLinkSuggestionRequestId,
+                linkSuggestionSessionId,
+            ].filter(Boolean));
+            if (cancelHost) {
+                for (const requestId of requestIds) {
+                    vscode.postMessage({
+                        type: 'cancelWorkspaceLinkSuggestions',
+                        requestId
+                    });
+                }
+            }
+            activeLinkSuggestionRequestId = null;
+            activeLinkSuggestionQuery = '';
+            linkSuggestionSessionId = null;
+            if (!preserveSelected) {
+                selectedLinkSuggestion = null;
+            }
+            hideLinkSuggestionList();
+        }
+
+        function scheduleWorkspaceLinkSuggestions(value) {
+            clearWorkspaceLinkSuggestions({ cancelHost: true });
+            if (
+                linkInputIsComposing ||
+                isComposing ||
+                compositionUpdateGate.composing
+            ) return false;
+            const query = getWorkspaceLinkSuggestionQuery(value);
+            if (query === null) return false;
+            linkSuggestionDebounceTimer = setTimeout(() => {
+                linkSuggestionDebounceTimer = null;
+                if (
+                    !linkPopover ||
+                    linkPopover.style.display === 'none' ||
+                    activeLinkPopoverRequestId !== null
+                ) {
+                    return;
+                }
+                const input = linkPopover.querySelector('.link-popover-input');
+                if (!input || input.value !== query) return;
+                const requestId = `workspace-link-suggest-${Date.now()}-${++workspaceLinkSuggestionRequestSeq}`;
+                activeLinkSuggestionRequestId = requestId;
+                activeLinkSuggestionQuery = query;
+                vscode.postMessage({
+                    type: 'requestWorkspaceLinkSuggestions',
+                    requestId,
+                    query
+                });
+            }, 150);
+            return true;
+        }
+
+        function setActiveLinkSuggestion(index) {
+            if (!linkPopover || linkSuggestions.length === 0) return false;
+            const normalizedIndex = (
+                (index % linkSuggestions.length) + linkSuggestions.length
+            ) % linkSuggestions.length;
+            activeLinkSuggestionIndex = normalizedIndex;
+            const input = linkPopover.querySelector('.link-popover-input');
+            const options = linkPopover.querySelectorAll('.link-popover-suggestion');
+            options.forEach((option, optionIndex) => {
+                const active = optionIndex === normalizedIndex;
+                option.classList.toggle('active', active);
+                option.setAttribute('aria-selected', active ? 'true' : 'false');
+                if (active) {
+                    input?.setAttribute('aria-activedescendant', option.id);
+                    option.scrollIntoView({ block: 'nearest' });
+                }
+            });
+            return true;
+        }
+
+        function moveActiveLinkSuggestion(delta) {
+            const startIndex = activeLinkSuggestionIndex >= 0
+                ? activeLinkSuggestionIndex
+                : (delta > 0 ? -1 : 0);
+            return setActiveLinkSuggestion(startIndex + delta);
+        }
+
+        function chooseLinkSuggestion(index) {
+            if (!linkPopover) return false;
+            const suggestion = linkSuggestions[index];
+            const input = linkPopover.querySelector('.link-popover-input');
+            if (!suggestion || !input) return false;
+
+            clearTimeout(linkInputDebounceTimer);
+            linkInputDebounceTimer = null;
+            linkInputUndoStack.push(input.value);
+            linkInputRedoStack = [];
+            input.value = suggestion.path;
+            linkInputSavedValue = suggestion.path;
+            selectedLinkSuggestion = suggestion;
+            linkSuggestionSessionId = suggestion.searchRequestId;
+            input.removeAttribute('aria-invalid');
+            input.removeAttribute('title');
+            hideLinkSuggestionList();
+            syncLinkPopoverOpenButtonState(input.value);
+            if (currentLink) {
+                restoreLinkHrefToBaseline();
+            }
+            input.focus();
+            input.setSelectionRange(input.value.length, input.value.length);
+            return true;
+        }
+
+        function chooseActiveLinkSuggestion() {
+            return chooseLinkSuggestion(activeLinkSuggestionIndex);
+        }
+
+        receiveWorkspaceLinkSuggestions = (message) => {
+            const requestId = typeof message.requestId === 'string' ? message.requestId : '';
+            const query = typeof message.query === 'string' ? message.query : '';
+            if (
+                !requestId ||
+                requestId !== activeLinkSuggestionRequestId ||
+                query !== activeLinkSuggestionQuery ||
+                !linkPopover ||
+                linkPopover.style.display === 'none'
+            ) {
+                return false;
+            }
+            const input = linkPopover.querySelector('.link-popover-input');
+            if (!input || input.value !== query) {
+                return false;
+            }
+
+            activeLinkSuggestionRequestId = null;
+            activeLinkSuggestionQuery = '';
+            const rawItems = Array.isArray(message.items) ? message.items.slice(0, 20) : [];
+            const items = rawItems.flatMap((item) => {
+                const candidateId = typeof item?.candidateId === 'string'
+                    ? item.candidateId
+                    : '';
+                const path = sanitizeInsertedLinkHref(item?.path, 'workspace');
+                if (!/^candidate-\d{1,2}$/.test(candidateId) || !path) {
+                    return [];
+                }
+                return [{
+                    candidateId,
+                    label: normalizeWorkspaceLinkLabel(item?.label),
+                    path,
+                    query,
+                    searchRequestId: requestId,
+                }];
+            });
+            if (items.length === 0) {
+                linkSuggestionSessionId = null;
+                hideLinkSuggestionList();
+                vscode.postMessage({
+                    type: 'cancelWorkspaceLinkSuggestions',
+                    requestId
+                });
+                return true;
+            }
+
+            linkSuggestionSessionId = requestId;
+            linkSuggestions = items;
+            const list = linkPopover.querySelector('.link-popover-suggestions');
+            list.replaceChildren();
+            items.forEach((item, index) => {
+                const option = document.createElement('button');
+                option.type = 'button';
+                option.id = `link-suggestion-${index}`;
+                option.className = 'link-popover-suggestion';
+                option.dataset.index = String(index);
+                option.setAttribute('role', 'option');
+                option.setAttribute('aria-selected', 'false');
+                const label = document.createElement('span');
+                label.className = 'link-popover-suggestion-label';
+                label.textContent = item.label;
+                const pathText = document.createElement('span');
+                pathText.className = 'link-popover-suggestion-path';
+                pathText.textContent = item.path;
+                option.append(label, pathText);
+                list.appendChild(option);
+            });
+            list.hidden = false;
+            input.setAttribute('aria-expanded', 'true');
+            setActiveLinkSuggestion(0);
+            setTimeout(() => repositionLinkPopoverWithinViewport(), 0);
+            return true;
+        };
+
+        function repositionLinkPopoverWithinViewport() {
+            if (!linkPopover || linkPopover.style.display === 'none') return;
+            const margin = 8;
+            let anchorRect = null;
+            if (currentLink && typeof currentLink.getBoundingClientRect === 'function') {
+                anchorRect = currentLink.getBoundingClientRect();
+            } else if (
+                linkCreationRange &&
+                typeof linkCreationRange.getBoundingClientRect === 'function'
+            ) {
+                anchorRect = linkCreationRange.getBoundingClientRect();
+            }
+            if (anchorRect) {
+                linkPopover.style.top = `${anchorRect.bottom + window.scrollY + 4}px`;
+            }
+            let popoverRect = linkPopover.getBoundingClientRect();
+            if (popoverRect.right > window.innerWidth - margin) {
+                linkPopover.style.left = `${Math.max(
+                    window.scrollX + margin,
+                    window.scrollX + window.innerWidth - popoverRect.width - margin
+                )}px`;
+            }
+            popoverRect = linkPopover.getBoundingClientRect();
+            if (popoverRect.left < margin) {
+                linkPopover.style.left = `${window.scrollX + margin}px`;
+            }
+            if (popoverRect.bottom <= window.innerHeight - margin) return;
+
+            const topAboveAnchor = anchorRect
+                ? anchorRect.top + window.scrollY - popoverRect.height - 4
+                : window.scrollY + window.innerHeight - popoverRect.height - margin;
+            linkPopover.style.top = `${Math.max(window.scrollY + margin, topAboveAnchor)}px`;
+        }
+
         function syncLinkPopoverOpenButtonState(urlValue) {
             if (!linkPopover) return;
+            const input = linkPopover.querySelector('.link-popover-input');
             const openButton = linkPopover.querySelector('[data-action="open"]');
-            if (!openButton) return;
+            const applyButton = linkPopover.querySelector('[data-action="apply"]');
+            const unlinkButton = linkPopover.querySelector('[data-action="unlink"]');
             const normalized = String(urlValue || '').trim();
             const canOpen = isOpenableLinkUrl(normalized);
-            openButton.disabled = !canOpen;
-            openButton.setAttribute('aria-disabled', canOpen ? 'false' : 'true');
+            const needsHostResolution = linkPopoverInputNeedsHostResolution(urlValue);
+            const awaitsWorkspaceSuggestion =
+                linkPopoverInputAwaitsWorkspaceSuggestion(urlValue);
+            const isCreation = !!linkCreationRange && !currentLink;
+            const isBusy = activeLinkPopoverRequestId !== null;
+            if (input) {
+                input.disabled = isBusy;
+            }
+            if (openButton) {
+                openButton.hidden = isCreation;
+                openButton.textContent = needsHostResolution ? 'Apply' : 'Open';
+                openButton.disabled = isBusy || awaitsWorkspaceSuggestion || (
+                    needsHostResolution
+                        ? !normalized || String(urlValue || '').length > 4096
+                        : !canOpen
+                );
+                openButton.setAttribute('aria-disabled', !openButton.disabled ? 'false' : 'true');
+            }
+            if (applyButton) {
+                applyButton.hidden = !isCreation;
+                applyButton.disabled = isBusy || awaitsWorkspaceSuggestion ||
+                    !normalized || normalized.length > 4096;
+                applyButton.setAttribute('aria-disabled', !applyButton.disabled ? 'false' : 'true');
+            }
+            if (unlinkButton) {
+                unlinkButton.hidden = isCreation;
+            }
         }
 
         function showLinkPopover(link) {
             if (!linkPopover) {
                 linkPopover = createLinkPopover();
             }
+            cancelActiveLinkPopoverRequest();
+            clearWorkspaceLinkSuggestions({ cancelHost: true });
 
             // Finish any preceding editor input before starting a separate link
             // transaction. A no-op commit is deduplicated by StateManager.
             stateManager.commitStateAfterChange();
             currentLink = link;
+            linkCreationRange = null;
+            linkCreationRevision = null;
             try {
                 const linkRange = document.createRange();
                 linkRange.selectNodeContents(link);
@@ -21040,14 +21677,17 @@ import {
                 linkHistorySelection = null;
             }
             const input = linkPopover.querySelector('.link-popover-input');
+            linkInputIsComposing = false;
             input.value = link.getAttribute('href') || '';
-            syncLinkPopoverOpenButtonState(input.value);
+            input.removeAttribute('aria-invalid');
+            input.removeAttribute('title');
             linkInputUndoStack = [];
             linkInputRedoStack = [];
             linkInputSavedValue = input.value;
             linkInputBaselineValue = input.value;
             clearTimeout(linkInputDebounceTimer);
             linkInputDebounceTimer = null;
+            syncLinkPopoverOpenButtonState(input.value);
 
             // リンクの位置に合わせてポップオーバーを表示
             const rect = link.getBoundingClientRect();
@@ -21060,10 +21700,80 @@ import {
             if (popoverRect.right > window.innerWidth) {
                 linkPopover.style.left = `${window.innerWidth - popoverRect.width - 8}px`;
             }
+            repositionLinkPopoverWithinViewport();
 
             // 入力フィールドにフォーカス
             setTimeout(() => input.select(), 0);
         }
+
+        function showNewLinkPopover(range) {
+            if (!range || !selectionCanBecomeWorkspaceLink(range)) {
+                return false;
+            }
+            if (!linkPopover) {
+                linkPopover = createLinkPopover();
+            }
+            if (
+                linkPopover.style.display !== 'none' &&
+                linkCreationRange &&
+                !currentLink &&
+                document.activeElement === linkPopover.querySelector('.link-popover-input')
+            ) {
+                linkPopover.querySelector('.link-popover-input').select();
+                return true;
+            }
+
+            cancelActiveLinkPopoverRequest();
+            clearWorkspaceLinkSuggestions({ cancelHost: true });
+            stateManager.commitStateAfterChange();
+            currentLink = null;
+            linkCreationRange = range.cloneRange();
+            linkCreationRevision = localUpdateRevision;
+            linkHistorySelection = stateManager.saveRange(range);
+
+            const input = linkPopover.querySelector('.link-popover-input');
+            linkInputIsComposing = false;
+            input.value = '';
+            input.removeAttribute('aria-invalid');
+            input.removeAttribute('title');
+            linkInputUndoStack = [];
+            linkInputRedoStack = [];
+            linkInputSavedValue = '';
+            linkInputBaselineValue = '';
+            clearTimeout(linkInputDebounceTimer);
+            linkInputDebounceTimer = null;
+            syncLinkPopoverOpenButtonState('');
+
+            let rect = typeof range.getBoundingClientRect === 'function'
+                ? range.getBoundingClientRect()
+                : null;
+            if (!rect || (!rect.width && !rect.height)) {
+                const anchorElement = getNodeElement(range.startContainer);
+                if (anchorElement && typeof anchorElement.getBoundingClientRect === 'function') {
+                    rect = anchorElement.getBoundingClientRect();
+                }
+            }
+            const left = rect && Number.isFinite(rect.left) ? rect.left : 8;
+            const bottom = rect && Number.isFinite(rect.bottom) ? rect.bottom : 8;
+            linkPopover.style.display = 'flex';
+            linkPopover.style.top = `${bottom + window.scrollY + 4}px`;
+            linkPopover.style.left = `${left + window.scrollX}px`;
+            const popoverRect = linkPopover.getBoundingClientRect();
+            if (popoverRect.right > window.innerWidth) {
+                linkPopover.style.left = `${Math.max(8, window.innerWidth - popoverRect.width - 8)}px`;
+            }
+            repositionLinkPopoverWithinViewport();
+            setTimeout(() => input.focus(), 0);
+            return true;
+        }
+
+        openInlineLinkPopover = (range, existingLink = null) => {
+            if (existingLink) {
+                showLinkPopover(existingLink);
+                return true;
+            }
+            return showNewLinkPopover(range);
+        };
 
         function isOpenableLinkUrl(url) {
             const safeUrl = sanitizeLinkHref(url);
@@ -21073,6 +21783,209 @@ import {
             }
             return /^(?:https?:\/\/|mailto:)/i.test(safeUrl) || !hasExplicitScheme(safeUrl);
         }
+
+        function getLinkPopoverTarget() {
+            if (currentLink && currentLink.isConnected && editor.contains(currentLink)) {
+                const range = document.createRange();
+                range.selectNodeContents(currentLink);
+                return { range, existingLink: currentLink };
+            }
+            if (
+                linkCreationRange &&
+                linkCreationRevision === localUpdateRevision &&
+                isEditorRange(linkCreationRange) &&
+                selectionCanBecomeWorkspaceLink(linkCreationRange)
+            ) {
+                return { range: linkCreationRange.cloneRange(), existingLink: null };
+            }
+            return null;
+        }
+
+        function markLinkPopoverInputInvalid(message) {
+            if (!linkPopover) return;
+            const input = linkPopover.querySelector('.link-popover-input');
+            if (!input) return;
+            input.setAttribute('aria-invalid', 'true');
+            input.setAttribute('title', message);
+            input.focus();
+            input.select();
+        }
+
+        function cancelActiveLinkPopoverRequest() {
+            const requestId = activeLinkPopoverRequestId;
+            if (!requestId) return false;
+            activeLinkPopoverRequestId = null;
+            activeLinkPopoverRequestKind = null;
+            activeLinkPopoverRequestInput = '';
+            discardPendingWorkspaceLinkInsertion(requestId);
+            vscode.postMessage({
+                type: 'cancelWorkspaceLinkRequest',
+                requestId
+            });
+            if (linkPopover) {
+                syncLinkPopoverOpenButtonState(
+                    linkPopover.querySelector('.link-popover-input')?.value || ''
+                );
+            }
+            return true;
+        }
+
+        function beginLinkPopoverRequest(type, inputValue = '', suggestion = null) {
+            if (
+                (type !== 'input' && type !== 'suggestion') ||
+                !linkPopover ||
+                linkPopover.style.display === 'none' ||
+                activeLinkPopoverRequestId !== null
+            ) {
+                return false;
+            }
+            const target = getLinkPopoverTarget();
+            if (!target) {
+                markLinkPopoverInputInvalid('The original link selection is no longer available.');
+                return false;
+            }
+            if (type === 'suggestion') {
+                hideLinkSuggestionList();
+                clearTimeout(linkSuggestionDebounceTimer);
+                linkSuggestionDebounceTimer = null;
+            } else {
+                clearWorkspaceLinkSuggestions({ cancelHost: true });
+            }
+            const requestId = rememberWorkspaceLinkInsertion(
+                target.range,
+                target.existingLink,
+                { preferMoveSelection: true }
+            );
+            activeLinkPopoverRequestId = requestId;
+            activeLinkPopoverRequestKind = type;
+            activeLinkPopoverRequestInput = String(inputValue || '');
+            const input = linkPopover.querySelector('.link-popover-input');
+            if (input) {
+                input.removeAttribute('aria-invalid');
+                input.removeAttribute('title');
+            }
+            syncLinkPopoverOpenButtonState(input?.value || '');
+
+            if (type === 'input') {
+                vscode.postMessage({
+                    type: 'requestLinkInputResolution',
+                    requestId,
+                    input: activeLinkPopoverRequestInput
+                });
+            } else {
+                vscode.postMessage({
+                    type: 'resolveWorkspaceLinkSuggestion',
+                    requestId,
+                    searchRequestId: suggestion?.searchRequestId || '',
+                    candidateId: suggestion?.candidateId || ''
+                });
+            }
+            return true;
+        }
+
+        function submitLinkPopoverInput() {
+            if (!linkPopover) return false;
+            const input = linkPopover.querySelector('.link-popover-input');
+            if (!input) return false;
+            const rawInput = String(input.value || '');
+            if (
+                !rawInput ||
+                rawInput !== rawInput.trim() ||
+                rawInput.length > 4096
+            ) {
+                markLinkPopoverInputInvalid(
+                    'Enter an HTTP, HTTPS, mailto URL, or an absolute path inside this workspace.'
+                );
+                return false;
+            }
+            if (linkPopoverInputAwaitsWorkspaceSuggestion(rawInput)) {
+                // A bare search term is not a file identity. Wait until the user
+                // chooses a host-provided candidate instead of treating timing
+                // as permission to resolve the text directly.
+                syncLinkPopoverOpenButtonState(rawInput);
+                return false;
+            }
+            if (
+                selectedLinkSuggestion &&
+                rawInput === selectedLinkSuggestion.path
+            ) {
+                return beginLinkPopoverRequest(
+                    'suggestion',
+                    rawInput,
+                    selectedLinkSuggestion
+                );
+            }
+            return beginLinkPopoverRequest('input', rawInput);
+        }
+
+        shouldApplyInlineLinkResponse = (requestId) => {
+            if (
+                !requestId ||
+                requestId !== activeLinkPopoverRequestId ||
+                !linkPopover ||
+                linkPopover.style.display === 'none'
+            ) {
+                return false;
+            }
+            const input = linkPopover.querySelector('.link-popover-input');
+            return !!input && input.value === activeLinkPopoverRequestInput;
+        };
+
+        finishInlineLinkRequest = (requestId, succeeded, resolvedHref = '') => {
+            if (!requestId || requestId !== activeLinkPopoverRequestId) {
+                return false;
+            }
+            const requestKind = activeLinkPopoverRequestKind;
+            const submittedInput = activeLinkPopoverRequestInput;
+            activeLinkPopoverRequestId = null;
+            activeLinkPopoverRequestKind = null;
+            activeLinkPopoverRequestInput = '';
+            discardPendingWorkspaceLinkInsertion(requestId);
+
+            if (!linkPopover || linkPopover.style.display === 'none') {
+                return false;
+            }
+            const input = linkPopover.querySelector('.link-popover-input');
+            if (!succeeded) {
+                if (requestKind === 'suggestion') {
+                    // The host consumes a candidate before revalidating it. Do
+                    // not leave a now-unusable opaque ID available for retries.
+                    clearWorkspaceLinkSuggestions({ cancelHost: true });
+                }
+                syncLinkPopoverOpenButtonState(input?.value || '');
+                if (
+                    (requestKind === 'input' || requestKind === 'suggestion') &&
+                    input &&
+                    input.value === submittedInput
+                ) {
+                    markLinkPopoverInputInvalid(
+                        'Use an HTTP, HTTPS, or mailto URL, or an existing file inside this workspace.'
+                    );
+                }
+                return false;
+            }
+
+            clearWorkspaceLinkSuggestions({ cancelHost: true });
+            if (input) {
+                input.value = resolvedHref;
+                input.removeAttribute('aria-invalid');
+                input.removeAttribute('title');
+            }
+            linkInputSavedValue = resolvedHref;
+            linkInputBaselineValue = resolvedHref;
+            syncLinkPopoverOpenButtonState(resolvedHref);
+
+            if (currentLink) {
+                setTimeout(() => input?.select(), 0);
+                return true;
+            }
+
+            linkCreationRange = null;
+            linkCreationRevision = null;
+            linkHistorySelection = null;
+            linkPopover.style.display = 'none';
+            return true;
+        };
 
         function restoreLinkHrefToBaseline() {
             if (!currentLink || !currentLink.isConnected || !editor.contains(currentLink)) {
@@ -21094,7 +22007,11 @@ import {
         function syncLinkDraftToEditor() {
             if (!linkPopover) return false;
             const input = linkPopover.querySelector('.link-popover-input');
-            if (!input || !isOpenableLinkUrl(input.value.trim())) {
+            if (
+                !input ||
+                linkPopoverInputNeedsHostResolution(input.value) ||
+                !isOpenableLinkUrl(input.value.trim())
+            ) {
                 // A blocked explicit scheme is often preceded by a sequence that
                 // looked like a relative URL (for example "javascript"). Never
                 // leave that partial prefix as the saved href.
@@ -21111,7 +22028,10 @@ import {
                 const newUrl = input.value.trim();
                 const oldUrl = currentLink.getAttribute('href') || '';
                 if (newUrl && newUrl !== oldUrl) {
-                    if (!isOpenableLinkUrl(newUrl)) {
+                    if (
+                        linkPopoverInputNeedsHostResolution(input.value) ||
+                        !isOpenableLinkUrl(newUrl)
+                    ) {
                         // Opening file:// links is opt-in because they can launch local files,
                         // applications, or network shares.
                         if (revertInvalid) {
@@ -21157,8 +22077,14 @@ import {
                 linkInputSavedValue = linkInputRedoStack.pop();
             }
             input.value = linkInputSavedValue;
+            selectedLinkSuggestion = null;
+            scheduleWorkspaceLinkSuggestions(input.value);
             syncLinkPopoverOpenButtonState(input.value);
-            syncLinkDraftToEditor();
+            if (currentLink && linkPopoverInputNeedsHostResolution(input.value)) {
+                restoreLinkHrefToBaseline();
+            } else {
+                syncLinkDraftToEditor();
+            }
             return true;
         }
 
@@ -21215,14 +22141,21 @@ import {
         }
 
         function hideLinkPopover(skipSave = false) {
-            if (!skipSave) {
-                saveLinkUrlIfChanged();
+            cancelActiveLinkPopoverRequest();
+            clearWorkspaceLinkSuggestions({ cancelHost: true });
+            linkInputIsComposing = false;
+            if (currentLink) {
+                if (!skipSave) {
+                    saveLinkUrlIfChanged();
+                }
+                commitLinkHistoryState();
             }
-            commitLinkHistoryState();
             if (linkPopover) {
                 linkPopover.style.display = 'none';
             }
             currentLink = null;
+            linkCreationRange = null;
+            linkCreationRevision = null;
             linkHistorySelection = null;
         }
 
@@ -21275,6 +22208,18 @@ import {
         }
 
         function openLink() {
+            const input = linkPopover?.querySelector('.link-popover-input');
+            if (
+                currentLink &&
+                input &&
+                linkPopoverInputNeedsHostResolution(input.value)
+            ) {
+                // The button is labelled Apply for a native path. Resolve and
+                // reduce it to a safe workspace-relative href first; a second
+                // click on Open can then open the validated result.
+                submitLinkPopoverInput();
+                return;
+            }
             // 先にURLを保存してから開く
             saveLinkUrlIfChanged();
             if (currentLink) {
@@ -21748,6 +22693,8 @@ import {
                     const action = linkBtn.dataset.action;
                     if (action === 'unlink') {
                         unlinkLink();
+                    } else if (action === 'apply') {
+                        submitLinkPopoverInput();
                     } else if (action === 'open') {
                         openLink();
                     }
@@ -21765,6 +22712,36 @@ import {
             }
         });
 
+        document.addEventListener('visibilitychange', () => {
+            if (!linkPopover || linkPopover.style.display === 'none') return;
+            const input = linkPopover.querySelector('.link-popover-input');
+            if (!input) return;
+            if (document.visibilityState !== 'visible') {
+                const selectedSuggestion = selectedLinkSuggestion;
+                clearWorkspaceLinkSuggestions({ cancelHost: true });
+                linkInputIsComposing = false;
+                if (
+                    selectedSuggestion &&
+                    selectedSuggestion.query &&
+                    input.value === selectedSuggestion.path
+                ) {
+                    // The host invalidates candidate IDs when this panel loses
+                    // focus. Restore the query so returning to the tab can issue
+                    // a fresh, safely scoped search instead of showing a dead ID.
+                    input.value = selectedSuggestion.query;
+                    linkInputSavedValue = input.value;
+                    input.removeAttribute('aria-invalid');
+                    input.removeAttribute('title');
+                    syncLinkPopoverOpenButtonState(input.value);
+                    if (currentLink) {
+                        restoreLinkHrefToBaseline();
+                    }
+                }
+                return;
+            }
+            scheduleWorkspaceLinkSuggestions(input.value);
+        });
+
         // ポップオーバー内でEnter/Escapeキーで閉じる
         document.addEventListener('keydown', (e) => {
             if (activeResizeImage && e.key === 'Escape') {
@@ -21773,15 +22750,31 @@ import {
                 return;
             }
             if (linkPopover && linkPopover.style.display !== 'none') {
-                if (e.key === 'Enter') {
+                const input = linkPopover.querySelector('.link-popover-input');
+                if (
+                    document.activeElement === input &&
+                    isLinkInputImeInteraction(e, input)
+                ) {
+                    return;
+                }
+                if (
+                    e.key === 'Enter' &&
+                    document.activeElement === input
+                ) {
                     e.preventDefault();
-                    hideLinkPopover(); // 自動保存される
+                    if (linkPopoverInputAwaitsWorkspaceSuggestion(input.value)) {
+                        return;
+                    }
+                    if (linkCreationRange || linkPopoverInputNeedsHostResolution(input.value)) {
+                        submitLinkPopoverInput();
+                    } else {
+                        hideLinkPopover(); // Existing safe URL edits auto-save.
+                    }
                 } else if (e.key === 'Escape') {
                     e.preventDefault();
                     hideLinkPopover();
                 } else if (isMac && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && e.key === 'f') {
                     // Ctrl+F: カーソルを1文字前に進める（macOS Emacsスタイル）
-                    const input = linkPopover.querySelector('.link-popover-input');
                     if (input && document.activeElement === input) {
                         e.preventDefault();
                         const pos = input.selectionStart;
@@ -22166,11 +23159,27 @@ import {
             case 'openWorkspaceLinkPicker':
                 requestWorkspaceLink();
                 break;
+            case 'workspaceLinkSuggestions':
+                receiveWorkspaceLinkSuggestions(message);
+                break;
             case 'workspaceLinkSelected':
                 insertSelectedWorkspaceLink(message);
                 break;
             case 'workspaceLinkCancelled':
-                discardPendingWorkspaceLinkInsertion(
+                {
+                    const requestId = typeof message.requestId === 'string'
+                        ? message.requestId
+                        : '';
+                    if (!finishInlineLinkRequest(requestId, false)) {
+                        discardPendingWorkspaceLinkInsertion(requestId);
+                    }
+                }
+                break;
+            case 'pastedPathLinkResolved':
+                resolvePastedPathLink(message);
+                break;
+            case 'pastedPathLinkRejected':
+                finalizePendingPastedPathLink(
                     typeof message.requestId === 'string' ? message.requestId : ''
                 );
                 break;

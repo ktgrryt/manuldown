@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const Module = require('node:module');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { marked } = require('marked');
 
@@ -17,11 +18,15 @@ const vscodeMockState = {
     willSaveDocumentListeners: [],
     didSaveDocumentListeners: [],
     executedCommands: [],
+    externalOpens: [],
     quickPickCalls: [],
     inputBoxCalls: [],
     quickPickResponses: [],
     inputBoxResponses: [],
     findFilesCalls: [],
+    findFilesResponses: [],
+    statCalls: [],
+    statHandler: null,
     workspaceFolder: null,
 };
 
@@ -37,11 +42,15 @@ function resetVscodeMockState() {
     vscodeMockState.willSaveDocumentListeners.length = 0;
     vscodeMockState.didSaveDocumentListeners.length = 0;
     vscodeMockState.executedCommands.length = 0;
+    vscodeMockState.externalOpens.length = 0;
     vscodeMockState.quickPickCalls.length = 0;
     vscodeMockState.inputBoxCalls.length = 0;
     vscodeMockState.quickPickResponses.length = 0;
     vscodeMockState.inputBoxResponses.length = 0;
     vscodeMockState.findFilesCalls.length = 0;
+    vscodeMockState.findFilesResponses.length = 0;
+    vscodeMockState.statCalls.length = 0;
+    vscodeMockState.statHandler = null;
     vscodeMockState.workspaceFolder = null;
 }
 
@@ -133,7 +142,10 @@ function loadExtensionModules() {
             getWorkspaceFolder: () => vscodeMockState.workspaceFolder,
             findFiles: async (...args) => {
                 vscodeMockState.findFilesCalls.push(args);
-                return [];
+                const response = vscodeMockState.findFilesResponses.shift();
+                return typeof response === 'function'
+                    ? response(...args)
+                    : (response || []);
             },
             getConfiguration: () => ({
                 get: (_key, defaultValue) => defaultValue,
@@ -156,6 +168,10 @@ function loadExtensionModules() {
             ),
             fs: {
                 stat: async (uri) => {
+                    vscodeMockState.statCalls.push(uri);
+                    if (typeof vscodeMockState.statHandler === 'function') {
+                        return vscodeMockState.statHandler(uri);
+                    }
                     const stat = vscodeMockState.stats.get(uri.path);
                     if (!stat) {
                         throw new Error('File not found');
@@ -206,6 +222,12 @@ function loadExtensionModules() {
         commands: {
             executeCommand: async (...args) => {
                 vscodeMockState.executedCommands.push(args);
+            },
+        },
+        env: {
+            openExternal: async (uri) => {
+                vscodeMockState.externalOpens.push(uri);
+                return true;
             },
         },
     };
@@ -307,6 +329,7 @@ function createWebviewPanelHarness() {
     const postedMessages = [];
     let messageListener = null;
     let disposeListener = null;
+    let viewStateListener = null;
     const webview = {
         options: {},
         html: '',
@@ -324,7 +347,10 @@ function createWebviewPanelHarness() {
         active: true,
         visible: true,
         viewColumn: 1,
-        onDidChangeViewState: () => ({ dispose: () => {} }),
+        onDidChangeViewState: (listener) => {
+            viewStateListener = listener;
+            return { dispose: () => {} };
+        },
         onDidDispose: (listener) => {
             disposeListener = listener;
             return { dispose: () => {} };
@@ -337,6 +363,12 @@ function createWebviewPanelHarness() {
         sendMessage: async (message) => {
             assert.ok(messageListener, 'Webview message listener was not registered');
             await messageListener(message);
+        },
+        setActive: (active) => {
+            panel.active = active;
+            if (viewStateListener) {
+                viewStateListener({ webviewPanel: panel });
+            }
         },
         dispose: () => {
             if (disposeListener) {
@@ -372,27 +404,12 @@ async function waitFor(condition, message) {
     assert.fail(message);
 }
 
-test('native link picker offers URL and workspace choices and validates URL host-side', async () => {
+test('inline link input resolves URLs host-side without opening native UI', async () => {
     resetVscodeMockState();
-    vscodeMockState.workspaceFolder = {
-        uri: createMockUri('/workspace'),
-        name: 'workspace',
-        index: 0,
-    };
-    vscodeMockState.quickPickResponses.push((items) => {
-        assert.deepEqual(
-            items.map((item) => item.targetKind),
-            ['external', 'workspace']
-        );
-        return items.find((item) => item.targetKind === 'external');
-    });
-    vscodeMockState.inputBoxResponses.push('HTTPS://Example.COM/docs');
-
     const provider = new MarkdownEditorProvider({});
-    const token = { isCancellationRequested: false };
-    const result = await provider.workspaceLinkPicker.pick(
+    const result = await provider.workspaceLinkPicker.resolveLinkInput(
         createTextDocument(''),
-        token
+        'HTTPS://Example.COM/docs'
     );
 
     assert.deepEqual(result, {
@@ -401,50 +418,424 @@ test('native link picker offers URL and workspace choices and validates URL host
         label: 'https://example.com/docs',
     });
     assert.equal(vscodeMockState.findFilesCalls.length, 0);
-    assert.equal(vscodeMockState.quickPickCalls[0].token, token);
-    assert.equal(vscodeMockState.inputBoxCalls[0].token, token);
-    assert.equal(
-        vscodeMockState.inputBoxCalls[0].options.validateInput('https://example.com'),
-        null
-    );
-    assert.match(
-        vscodeMockState.inputBoxCalls[0].options.validateInput('javascript:alert(1)'),
-        /HTTP/
-    );
+    assert.equal(vscodeMockState.quickPickCalls.length, 0);
+    assert.equal(vscodeMockState.inputBoxCalls.length, 0);
 });
 
-test('native URL picker remains available without a workspace and revalidates its result', async () => {
+test('inline link input rejects dangerous URLs without opening file search', async () => {
     resetVscodeMockState();
-    vscodeMockState.quickPickResponses.push((items) => {
-        assert.deepEqual(items.map((item) => item.targetKind), ['external']);
-        return items[0];
-    });
-    // A mocked or future UI could return a value despite validateInput. The
-    // picker must still reject it before anything reaches the Webview.
-    vscodeMockState.inputBoxResponses.push('file:///tmp/secret');
-
     const provider = new MarkdownEditorProvider({});
-    const result = await provider.workspaceLinkPicker.pick(
+    const result = await provider.workspaceLinkPicker.resolveLinkInput(
         createTextDocument(''),
-        { isCancellationRequested: false }
+        'file:///tmp/secret'
     );
 
     assert.equal(result, null);
     assert.equal(vscodeMockState.findFilesCalls.length, 0);
+    assert.equal(vscodeMockState.quickPickCalls.length, 0);
+    assert.equal(vscodeMockState.inputBoxCalls.length, 0);
 });
 
-test('invalid workspace-link requests cannot open the host picker or choose their own path', async () => {
-    const { provider, webview } = await createEditorSyncHarness();
-    let pickerCalls = 0;
-    provider.workspaceLinkPicker.pick = async () => {
-        pickerCalls++;
-        return { href: './safe.md', label: 'safe' };
+test('inline file suggestions rank literal workspace matches and exclude unsafe targets', async (t) => {
+    if (process.platform === 'win32') {
+        t.skip('The lightweight URI mock does not emulate Windows vscode.Uri.file paths.');
+        return;
+    }
+    resetVscodeMockState();
+    const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'manuldown-suggestions-'));
+    const workspaceRoot = path.join(temporaryRoot, 'workspace');
+    const docsRoot = path.join(workspaceRoot, 'docs');
+    const outsideRoot = path.join(temporaryRoot, 'outside');
+    const documentPath = path.join(docsRoot, 'current.md');
+    const candidatePaths = [
+        path.join(docsRoot, 'my-test3.md'),
+        path.join(workspaceRoot, 'test3', 'notes.md'),
+        path.join(docsRoot, 'test3-guide.md'),
+        path.join(docsRoot, 'test3.md'),
+    ];
+    const directoryCandidate = path.join(docsRoot, 'test3-directory');
+    const unsafeCandidate = path.join(docsRoot, 'test3-secret.md');
+    fs.mkdirSync(docsRoot, { recursive: true });
+    fs.mkdirSync(path.dirname(candidatePaths[1]), { recursive: true });
+    fs.mkdirSync(outsideRoot, { recursive: true });
+    fs.writeFileSync(documentPath, '# current\n');
+    for (const candidatePath of candidatePaths) {
+        fs.writeFileSync(candidatePath, '# candidate\n');
+        vscodeMockState.stats.set(candidatePath, { size: 12, type: 1 });
+    }
+    fs.mkdirSync(directoryCandidate);
+    vscodeMockState.stats.set(directoryCandidate, { size: 0, type: 2 });
+    const outsideFile = path.join(outsideRoot, 'secret.md');
+    fs.writeFileSync(outsideFile, '# secret\n');
+    fs.symlinkSync(outsideFile, unsafeCandidate);
+    t.after(() => fs.rmSync(temporaryRoot, { recursive: true, force: true }));
+
+    vscodeMockState.workspaceFolder = {
+        uri: createMockUri(workspaceRoot),
+        name: 'workspace',
+        index: 0,
+    };
+    vscodeMockState.findFilesResponses.push([
+        ...candidatePaths.map((candidatePath) => createMockUri(candidatePath)),
+        createMockUri(directoryCandidate),
+        createMockUri(unsafeCandidate),
+    ]);
+    const provider = new MarkdownEditorProvider({});
+    const token = { isCancellationRequested: false };
+    const suggestions = await provider.workspaceLinkPicker.searchWorkspaceFiles(
+        { uri: createMockUri(documentPath) },
+        'TeSt3',
+        token
+    );
+
+    assert.deepEqual(
+        suggestions.map((item) => item.label),
+        ['test3.md', 'test3-guide.md', 'my-test3.md', 'notes.md']
+    );
+    assert.deepEqual(
+        suggestions.map((item) => item.path),
+        ['./test3.md', './test3-guide.md', './my-test3.md', '../test3/notes.md']
+    );
+    assert.equal(JSON.stringify(suggestions).includes(temporaryRoot), true);
+    assert.equal(
+        JSON.stringify(suggestions.map(({ label, path: suggestionPath }) => ({
+            label,
+            path: suggestionPath,
+        }))).includes(temporaryRoot),
+        false
+    );
+    assert.equal(vscodeMockState.findFilesCalls[0][0].pattern, '**/*');
+    assert.equal(vscodeMockState.findFilesCalls[0][2], 2000);
+    assert.equal(vscodeMockState.findFilesCalls[0][3], token);
+
+    assert.deepEqual(
+        await provider.workspaceLinkPicker.resolveWorkspaceFileSuggestion(
+            { uri: createMockUri(documentPath) },
+            createMockUri(candidatePaths[3]),
+            token
+        ),
+        {
+            kind: 'workspace',
+            href: './test3.md',
+            label: 'test3',
+        }
+    );
+    fs.unlinkSync(candidatePaths[3]);
+    fs.symlinkSync(outsideFile, candidatePaths[3]);
+    assert.equal(
+        await provider.workspaceLinkPicker.resolveWorkspaceFileSuggestion(
+            { uri: createMockUri(documentPath) },
+            createMockUri(candidatePaths[3]),
+            token
+        ),
+        null
+    );
+
+    assert.deepEqual(
+        await provider.workspaceLinkPicker.searchWorkspaceFiles(
+            { uri: createMockUri(documentPath) },
+            'x'.repeat(257),
+            token
+        ),
+        []
+    );
+    assert.equal(vscodeMockState.findFilesCalls.length, 1);
+});
+
+test('remote inline file suggestions share a bounded cancellation-aware stat budget', async () => {
+    resetVscodeMockState();
+    const workspaceRoot = '/workspace';
+    const authority = 'remote-host';
+    const createRemoteUri = (uriPath) =>
+        createMockUri(uriPath, 'vscode-remote', authority);
+    vscodeMockState.workspaceFolder = {
+        uri: createRemoteUri(workspaceRoot),
+        name: 'workspace',
+        index: 0,
+    };
+    vscodeMockState.stats.set(workspaceRoot, { size: 0, type: 2 });
+
+    const candidates = Array.from({ length: 80 }, (_, candidateIndex) => {
+        const segments = [
+            `candidate-${candidateIndex}`,
+            ...Array.from({ length: 18 }, (_, segmentIndex) => `depth-${segmentIndex}`),
+        ];
+        let componentPath = workspaceRoot;
+        for (const segment of segments) {
+            componentPath = path.posix.join(componentPath, segment);
+            vscodeMockState.stats.set(componentPath, { size: 0, type: 2 });
+        }
+        const candidatePath = path.posix.join(
+            componentPath,
+            `test3-${candidateIndex}.md`
+        );
+        vscodeMockState.stats.set(candidatePath, { size: 0, type: 64 });
+        return createRemoteUri(candidatePath);
+    });
+    vscodeMockState.findFilesResponses.push(candidates);
+
+    const provider = new MarkdownEditorProvider({});
+    const suggestions = await provider.workspaceLinkPicker.searchWorkspaceFiles(
+        { uri: createRemoteUri('/workspace/docs/current.md') },
+        'test3',
+        { isCancellationRequested: false }
+    );
+
+    assert.deepEqual(suggestions, []);
+    assert.ok(vscodeMockState.statCalls.length <= 1024);
+    assert.equal(vscodeMockState.findFilesCalls.length, 1);
+});
+
+test('remote relative link validation stops between path components after cancellation', async () => {
+    resetVscodeMockState();
+    const authority = 'remote-host';
+    const createRemoteUri = (uriPath) =>
+        createMockUri(uriPath, 'vscode-remote', authority);
+    vscodeMockState.workspaceFolder = {
+        uri: createRemoteUri('/workspace'),
+        name: 'workspace',
+        index: 0,
+    };
+    for (const [uriPath, type] of [
+        ['/workspace', 2],
+        ['/workspace/depth-1', 2],
+        ['/workspace/depth-1/depth-2', 2],
+        ['/workspace/depth-1/depth-2/target.md', 1],
+    ]) {
+        vscodeMockState.stats.set(uriPath, { size: type === 1 ? 8 : 0, type });
+    }
+    const token = { isCancellationRequested: false };
+    vscodeMockState.statHandler = (uri) => {
+        const stat = vscodeMockState.stats.get(uri.path);
+        if (!stat) throw new Error('File not found');
+        if (vscodeMockState.statCalls.length === 2) {
+            token.isCancellationRequested = true;
+        }
+        return stat;
+    };
+
+    const provider = new MarkdownEditorProvider({});
+    assert.equal(
+        await provider.workspaceLinkPicker.resolveWorkspaceRelativePath(
+            { uri: createRemoteUri('/workspace/docs/current.md') },
+            '../depth-1/depth-2/target.md',
+            token
+        ),
+        null
+    );
+    assert.equal(vscodeMockState.statCalls.length, 2);
+});
+
+test('pasted absolute path resolution returns only an encoded in-workspace relative href', async (t) => {
+    if (process.platform === 'win32') {
+        t.skip('The lightweight URI mock does not emulate Windows vscode.Uri.file paths.');
+        return;
+    }
+    resetVscodeMockState();
+    const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'manuldown-path-paste-'));
+    const workspaceRoot = path.join(temporaryRoot, 'workspace');
+    const docsRoot = path.join(workspaceRoot, 'docs');
+    const outsideRoot = path.join(temporaryRoot, 'outside');
+    const documentPath = path.join(docsRoot, 'current.md');
+    const targetPath = path.join(docsRoot, 'read me#1.md');
+    const outsidePath = path.join(outsideRoot, 'secret.md');
+    fs.mkdirSync(docsRoot, { recursive: true });
+    fs.mkdirSync(outsideRoot, { recursive: true });
+    fs.writeFileSync(documentPath, '# current\n');
+    fs.writeFileSync(targetPath, '# target\n');
+    fs.writeFileSync(outsidePath, '# secret\n');
+    t.after(() => fs.rmSync(temporaryRoot, { recursive: true, force: true }));
+
+    vscodeMockState.workspaceFolder = {
+        uri: createMockUri(workspaceRoot),
+        name: 'workspace',
+        index: 0,
+    };
+    vscodeMockState.stats.set(targetPath, { size: 9, type: 1 });
+    const provider = new MarkdownEditorProvider({});
+    const result = await provider.workspaceLinkPicker.resolvePastedAbsolutePath(
+        { uri: createMockUri(documentPath) },
+        targetPath
+    );
+
+    assert.deepEqual(result, {
+        kind: 'workspace',
+        href: './read%20me%231.md',
+        label: 'read me#1.md',
+    });
+    assert.equal(JSON.stringify(result).includes(temporaryRoot), false);
+    assert.equal(vscodeMockState.statCalls.length, 2);
+
+    vscodeMockState.statCalls.length = 0;
+    assert.deepEqual(
+        await provider.workspaceLinkPicker.resolveLinkInput(
+            { uri: createMockUri(documentPath) },
+            targetPath
+        ),
+        result
+    );
+    assert.equal(vscodeMockState.statCalls.length, 2);
+
+    vscodeMockState.statCalls.length = 0;
+    assert.deepEqual(
+        await provider.workspaceLinkPicker.resolveLinkInput(
+            { uri: createMockUri(documentPath) },
+            './read%20me%231.md'
+        ),
+        {
+            kind: 'workspace',
+            href: './read%20me%231.md',
+            label: 'read me#1',
+        }
+    );
+    assert.equal(vscodeMockState.statCalls.length, 2);
+
+    vscodeMockState.statCalls.length = 0;
+    assert.equal(
+        await provider.workspaceLinkPicker.resolveLinkInput(
+            { uri: createMockUri(documentPath) },
+            '../../outside/secret.md'
+        ),
+        null
+    );
+    assert.equal(vscodeMockState.statCalls.length, 0);
+    assert.equal(
+        await provider.workspaceLinkPicker.resolveLinkInput(
+            { uri: createMockUri(documentPath) },
+            './read%0Ame.md'
+        ),
+        null
+    );
+
+    vscodeMockState.statCalls.length = 0;
+    assert.equal(
+        await provider.workspaceLinkPicker.resolvePastedAbsolutePath(
+            { uri: createMockUri(documentPath) },
+            outsidePath
+        ),
+        null
+    );
+    assert.equal(
+        vscodeMockState.statCalls.length,
+        0,
+        'Outside paths must be rejected before any workspace.fs.stat call'
+    );
+
+    vscodeMockState.stats.set(docsRoot, { size: 0, type: 2 });
+    assert.equal(
+        await provider.workspaceLinkPicker.resolvePastedAbsolutePath(
+            { uri: createMockUri(documentPath) },
+            docsRoot
+        ),
+        null
+    );
+
+    const escapingLinkPath = path.join(docsRoot, 'escape.md');
+    fs.symlinkSync(outsidePath, escapingLinkPath);
+    vscodeMockState.statCalls.length = 0;
+    assert.equal(
+        await provider.workspaceLinkPicker.resolvePastedAbsolutePath(
+            { uri: createMockUri(documentPath) },
+            escapingLinkPath
+        ),
+        null
+    );
+    assert.equal(vscodeMockState.statCalls.length, 0);
+    assert.equal(
+        await provider.workspaceLinkPicker.resolveLinkInput(
+            { uri: createMockUri(documentPath) },
+            './escape.md'
+        ),
+        null
+    );
+
+    const inWorkspaceLinkPath = path.join(docsRoot, 'linked.md');
+    fs.symlinkSync(targetPath, inWorkspaceLinkPath);
+    vscodeMockState.stats.set(inWorkspaceLinkPath, { size: 9, type: 65 });
+    assert.equal(
+        await provider.workspaceLinkPicker.resolvePastedAbsolutePath(
+            { uri: createMockUri(documentPath) },
+            inWorkspaceLinkPath
+        ),
+        null
+    );
+
+    vscodeMockState.statCalls.length = 0;
+    assert.equal(
+        await provider.workspaceLinkPicker.resolvePastedAbsolutePath(
+            { uri: createMockUri('/workspace/current.md', 'vscode-remote', 'host') },
+            targetPath
+        ),
+        null
+    );
+    assert.equal(vscodeMockState.statCalls.length, 0);
+});
+
+test('pasted path protocol ignores attacker-provided roots and hrefs', async () => {
+    const { provider, document, webview } = await createEditorSyncHarness();
+    const resolverCalls = [];
+    provider.workspaceLinkPicker.resolvePastedAbsolutePath = async (resolvedDocument, pathText) => {
+        resolverCalls.push({ resolvedDocument, pathText });
+        return {
+            kind: 'workspace',
+            href: './safe%20target.md',
+            label: 'safe target.md',
+        };
     };
 
     try {
         await webview.sendMessage({
-            type: 'requestWorkspaceLink',
+            type: 'requestPastedPathLink',
+            requestId: 'pasted-path-link-1-1',
+            pathText: '/workspace/safe target.md',
+            root: '/',
+            documentUri: 'file:///tmp/attacker.md',
+            allowOutside: true,
+            href: 'javascript:alert(1)',
+        });
+        assert.equal(resolverCalls.length, 1);
+        assert.equal(resolverCalls[0].resolvedDocument, document);
+        assert.equal(resolverCalls[0].pathText, '/workspace/safe target.md');
+        assert.deepEqual(webview.postedMessages.at(-1), {
+            type: 'pastedPathLinkResolved',
+            requestId: 'pasted-path-link-1-1',
+            linkKind: 'workspace',
+            href: './safe%20target.md',
+        });
+
+        await webview.sendMessage({
+            type: 'requestPastedPathLink',
             requestId: 'invalid',
+            pathText: '/workspace/secret.md',
+        });
+        assert.equal(resolverCalls.length, 1);
+        assert.deepEqual(webview.postedMessages.at(-1), {
+            type: 'pastedPathLinkRejected',
+            requestId: 'invalid',
+        });
+
+        provider.workspaceLinkPicker.resolvePastedAbsolutePath = async () => null;
+        await webview.sendMessage({
+            type: 'requestPastedPathLink',
+            requestId: 'pasted-path-link-1-2',
+            pathText: '/outside/not-allowed.md',
+        });
+        assert.deepEqual(webview.postedMessages.at(-1), {
+            type: 'pastedPathLinkRejected',
+            requestId: 'pasted-path-link-1-2',
+        });
+    } finally {
+        webview.dispose();
+    }
+});
+
+test('obsolete native workspace-picker messages are ignored', async () => {
+    const { webview } = await createEditorSyncHarness();
+    try {
+        const postedMessageCount = webview.postedMessages.length;
+        await webview.sendMessage({
+            type: 'requestWorkspaceLink',
+            requestId: 'workspace-link-1-1',
             uri: 'file:///tmp/secret',
             root: '/tmp',
             glob: '**/*',
@@ -452,58 +843,305 @@ test('invalid workspace-link requests cannot open the host picker or choose thei
             href: 'command:workbench.action.openSettings',
             label: '<img src=x onerror=alert(1)>',
         });
-        assert.equal(pickerCalls, 0);
+        assert.equal(webview.postedMessages.length, postedMessageCount);
+    } finally {
+        webview.dispose();
+    }
+});
+
+test('workspace suggestion protocol coalesces searches and resolves only host-held candidates', async () => {
+    const { provider, document, webview } = await createEditorSyncHarness();
+    const hostCandidateUri = createMockUri('/workspace/test3.md');
+    const searchCalls = [];
+    let finishFirstSearch;
+    let finishSecondSearch;
+    let concurrentSearches = 0;
+    let maxConcurrentSearches = 0;
+    provider.workspaceLinkPicker.searchWorkspaceFiles = async (
+        resolvedDocument,
+        query,
+        token
+    ) => {
+        concurrentSearches++;
+        maxConcurrentSearches = Math.max(maxConcurrentSearches, concurrentSearches);
+        searchCalls.push({ resolvedDocument, query, token });
+        return new Promise((resolve) => {
+            const finish = (items) => {
+                concurrentSearches--;
+                resolve(items);
+            };
+            if (searchCalls.length === 1) {
+                finishFirstSearch = finish;
+            } else {
+                finishSecondSearch = finish;
+            }
+        });
+    };
+
+    try {
+        await webview.sendMessage({
+            type: 'requestWorkspaceLinkSuggestions',
+            requestId: 'workspace-link-suggest-1-1',
+            query: 'test',
+            root: '/',
+            glob: '**/secret*',
+            href: 'javascript:alert(1)',
+        });
+        await waitFor(() => searchCalls.length === 1, 'The first suggestion search did not start');
+        await webview.sendMessage({
+            type: 'requestWorkspaceLinkSuggestions',
+            requestId: 'workspace-link-suggest-1-2',
+            query: 'test3',
+            documentUri: 'file:///tmp/attacker.md',
+        });
+        assert.equal(searchCalls.length, 1);
+        assert.equal(searchCalls[0].token.isCancellationRequested, true);
+
+        finishFirstSearch([{
+            uri: createMockUri('/workspace/stale.md'),
+            path: './stale.md',
+            label: 'stale.md',
+        }]);
+        await waitFor(() => searchCalls.length === 2, 'The latest suggestion search did not start');
+        assert.equal(maxConcurrentSearches, 1);
+        assert.equal(searchCalls[1].resolvedDocument, document);
+        assert.equal(searchCalls[1].query, 'test3');
+
+        finishSecondSearch([{
+            uri: hostCandidateUri,
+            path: './test3.md',
+            label: 'test3.md',
+        }]);
+        await waitFor(
+            () => webview.postedMessages.some((message) =>
+                message.type === 'workspaceLinkSuggestions' &&
+                message.requestId === 'workspace-link-suggest-1-2'
+            ),
+            'The latest suggestion response was not posted'
+        );
+        assert.equal(
+            webview.postedMessages.some((message) =>
+                message.type === 'workspaceLinkSuggestions' &&
+                message.requestId === 'workspace-link-suggest-1-1'
+            ),
+            false
+        );
+        assert.deepEqual(webview.postedMessages.at(-1), {
+            type: 'workspaceLinkSuggestions',
+            requestId: 'workspace-link-suggest-1-2',
+            query: 'test3',
+            items: [{
+                candidateId: 'candidate-1',
+                label: 'test3.md',
+                path: './test3.md',
+            }],
+        });
+        assert.equal(JSON.stringify(webview.postedMessages.at(-1)).includes('/workspace/'), false);
+
+        const resolutionCalls = [];
+        provider.workspaceLinkPicker.resolveWorkspaceFileSuggestion = async (
+            resolvedDocument,
+            candidateUri,
+            token
+        ) => {
+            resolutionCalls.push({ resolvedDocument, candidateUri, token });
+            return {
+                kind: 'workspace',
+                href: './test3.md',
+                label: 'test3',
+            };
+        };
+        await webview.sendMessage({
+            type: 'resolveWorkspaceLinkSuggestion',
+            requestId: 'workspace-link-9-1',
+            searchRequestId: 'workspace-link-suggest-1-2',
+            candidateId: 'candidate-1',
+            uri: 'file:///tmp/attacker.md',
+            path: '../../secret.md',
+            href: 'javascript:alert(1)',
+        });
+        assert.equal(resolutionCalls.length, 1);
+        assert.equal(resolutionCalls[0].resolvedDocument, document);
+        assert.equal(resolutionCalls[0].candidateUri, hostCandidateUri);
+        assert.deepEqual(webview.postedMessages.at(-1), {
+            type: 'workspaceLinkSelected',
+            requestId: 'workspace-link-9-1',
+            linkKind: 'workspace',
+            href: './test3.md',
+            label: 'test3',
+        });
+
+        await webview.sendMessage({
+            type: 'resolveWorkspaceLinkSuggestion',
+            requestId: 'workspace-link-9-2',
+            searchRequestId: 'workspace-link-suggest-1-2',
+            candidateId: 'candidate-1',
+        });
+        assert.equal(resolutionCalls.length, 1);
         assert.deepEqual(webview.postedMessages.at(-1), {
             type: 'workspaceLinkCancelled',
-            requestId: 'invalid',
+            requestId: 'workspace-link-9-2',
         });
     } finally {
         webview.dispose();
     }
 });
 
-test('workspace-link results are bound to one active request and return only host output', async () => {
+test('inline link input protocol trusts only the current document and host resolver', async () => {
+    const { provider, document, webview } = await createEditorSyncHarness();
+    const resolverCalls = [];
+    provider.workspaceLinkPicker.resolveLinkInput = async (resolvedDocument, input) => {
+        resolverCalls.push({ resolvedDocument, input });
+        return {
+            kind: 'external',
+            href: 'https://example.com/docs',
+            label: 'https://example.com/docs',
+        };
+    };
+
+    try {
+        await webview.sendMessage({
+            type: 'requestLinkInputResolution',
+            requestId: 'workspace-link-2-1',
+            input: 'HTTPS://Example.COM/docs',
+            root: '/',
+            documentUri: 'file:///tmp/attacker.md',
+            allowOutside: true,
+            href: 'javascript:alert(1)',
+            linkKind: 'external',
+        });
+        assert.deepEqual(resolverCalls, [{
+            resolvedDocument: document,
+            input: 'HTTPS://Example.COM/docs',
+        }]);
+        assert.deepEqual(webview.postedMessages.at(-1), {
+            type: 'workspaceLinkSelected',
+            requestId: 'workspace-link-2-1',
+            linkKind: 'external',
+            href: 'https://example.com/docs',
+            label: 'https://example.com/docs',
+        });
+
+        provider.workspaceLinkPicker.resolveLinkInput = async () => null;
+        await webview.sendMessage({
+            type: 'requestLinkInputResolution',
+            requestId: 'workspace-link-2-2',
+            input: 'javascript:alert(1)',
+        });
+        assert.deepEqual(webview.postedMessages.at(-1), {
+            type: 'workspaceLinkCancelled',
+            requestId: 'workspace-link-2-2',
+        });
+
+        await webview.sendMessage({
+            type: 'requestLinkInputResolution',
+            requestId: 'workspace-link-2-3',
+            input: 'a'.repeat(4097),
+        });
+        assert.deepEqual(webview.postedMessages.at(-1), {
+            type: 'workspaceLinkCancelled',
+            requestId: 'workspace-link-2-3',
+        });
+    } finally {
+        webview.dispose();
+    }
+});
+
+test('cancelled inline link resolution propagates cancellation and keeps one host operation', async () => {
     const { provider, webview } = await createEditorSyncHarness();
-    let resolveFirstPicker;
-    let pickerCalls = 0;
-    provider.workspaceLinkPicker.pick = async () => {
-        pickerCalls++;
+    const resolverCalls = [];
+    let finishFirstResolution;
+    provider.workspaceLinkPicker.resolveLinkInput = async (
+        resolvedDocument,
+        input,
+        token
+    ) => {
+        resolverCalls.push({ resolvedDocument, input, token });
         return new Promise((resolve) => {
-            resolveFirstPicker = resolve;
+            finishFirstResolution = resolve;
         });
     };
 
     try {
         const firstRequest = webview.sendMessage({
-            type: 'requestWorkspaceLink',
-            requestId: 'workspace-link-1-1',
+            type: 'requestLinkInputResolution',
+            requestId: 'workspace-link-4-1',
+            input: '../target.md',
         });
-        await waitFor(() => pickerCalls === 1, 'The first workspace picker did not start');
+        await waitFor(() => resolverCalls.length === 1, 'The first link resolver did not start');
 
         await webview.sendMessage({
-            type: 'requestWorkspaceLink',
-            requestId: 'workspace-link-1-2',
-            uri: 'file:///tmp/ignored',
+            type: 'cancelWorkspaceLinkRequest',
+            requestId: 'workspace-link-4-1',
         });
-        assert.equal(pickerCalls, 1);
+        assert.equal(resolverCalls[0].token.isCancellationRequested, true);
+
+        await webview.sendMessage({
+            type: 'requestLinkInputResolution',
+            requestId: 'workspace-link-4-2',
+            input: '../other.md',
+        });
+        assert.equal(resolverCalls.length, 1);
         assert.deepEqual(webview.postedMessages.at(-1), {
             type: 'workspaceLinkCancelled',
-            requestId: 'workspace-link-1-2',
+            requestId: 'workspace-link-4-2',
         });
 
-        resolveFirstPicker({
-            kind: 'external',
-            href: 'https://example.com/docs',
-            label: '<img src=x onerror=alert(1)>',
-        });
+        finishFirstResolution(null);
         await firstRequest;
+
+        provider.workspaceLinkPicker.resolveLinkInput = async () => ({
+            kind: 'external',
+            href: 'https://example.com/after-cancel',
+            label: 'https://example.com/after-cancel',
+        });
+        await webview.sendMessage({
+            type: 'requestLinkInputResolution',
+            requestId: 'workspace-link-4-3',
+            input: 'https://example.com/after-cancel',
+        });
         assert.deepEqual(webview.postedMessages.at(-1), {
             type: 'workspaceLinkSelected',
-            requestId: 'workspace-link-1-1',
+            requestId: 'workspace-link-4-3',
             linkKind: 'external',
-            href: 'https://example.com/docs',
-            label: '<img src=x onerror=alert(1)>',
+            href: 'https://example.com/after-cancel',
+            label: 'https://example.com/after-cancel',
         });
+    } finally {
+        webview.dispose();
+    }
+});
+
+test('opening document links validates external URLs and blocks decoded custom schemes', async () => {
+    const { webview } = await createEditorSyncHarness();
+    try {
+        await webview.sendMessage({
+            type: 'openLink',
+            url: 'HTTPS://Example.COM/docs',
+        });
+        assert.equal(vscodeMockState.externalOpens.length, 1);
+        assert.equal(vscodeMockState.externalOpens[0].scheme, 'https');
+        assert.equal(vscodeMockState.externalOpens[0].authority, 'example.com');
+        assert.equal(vscodeMockState.externalOpens[0].path, '/docs');
+
+        for (const unsafeUrl of [
+            'https://trusted.example@evil.example/',
+            'mailto:person@example.com?body=%0d%0abcc:other@example.com',
+            'command%3Aworkbench.action.openSettings',
+            'file%3A%2F%2F%2Ftmp%2Fsecret',
+            ' https://example.com/',
+        ]) {
+            await webview.sendMessage({ type: 'openLink', url: unsafeUrl });
+        }
+        assert.equal(vscodeMockState.externalOpens.length, 1);
+        assert.equal(vscodeMockState.executedCommands.length, 0);
+
+        webview.setActive(false);
+        await webview.sendMessage({
+            type: 'openLink',
+            url: 'https://example.com/inactive',
+        });
+        assert.equal(vscodeMockState.externalOpens.length, 1);
     } finally {
         webview.dispose();
     }

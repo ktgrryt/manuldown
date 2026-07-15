@@ -3,10 +3,10 @@ import * as vscode from 'vscode';
 import {
     buildWorkspaceRelativeHref,
     canCreateRelativeWorkspaceLink,
-    extractMarkdownHeadings,
     isUriLexicallyWithinDirectory,
     isUriSecurelyWithinDirectory,
     normalizeExternalLinkHref,
+    normalizeNativeAbsolutePathForLink,
     sanitizeWorkspaceLinkDisplayText,
 } from '../utils/workspaceLinks';
 
@@ -16,111 +16,182 @@ export type WorkspaceLinkSelection = {
     label: string;
 };
 
-type LinkTargetItem = vscode.QuickPickItem & {
-    targetKind: 'external' | 'workspace';
-};
-
-type WorkspaceFileItem = vscode.QuickPickItem & {
+export type WorkspaceLinkSuggestion = {
     uri: vscode.Uri;
-};
-
-type WorkspaceHeadingItem = vscode.QuickPickItem & {
-    fragment: string;
-    resultLabel: string;
+    path: string;
+    label: string;
 };
 
 export class WorkspaceLinkPicker {
     private static readonly maxWorkspaceFiles = 2000;
-    private static readonly maxMarkdownBytes = 1024 * 1024;
-    private static readonly maxMarkdownHeadings = 200;
+    private static readonly maxWorkspaceSuggestions = 20;
+    private static readonly maxSuggestionValidationCandidates = 80;
+    private static readonly maxSuggestionQueryLength = 256;
+    private static readonly maxSuggestionStatReads = 1024;
+    private static readonly maxWorkspacePathInputLength = 4096;
+    private static readonly unsafeWorkspacePathInputPattern =
+        /[\u0000-\u001f\u007f-\u009f\u061c\u200b\u200e\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]/u;
     private static readonly excludedWorkspaceFiles =
         '**/{.git,.hg,.svn,node_modules,.vscode-test}/**';
 
-    public async pick(
+    public async resolvePastedAbsolutePath(
         document: vscode.TextDocument,
-        token: vscode.CancellationToken
+        pathText: string,
+        token?: vscode.CancellationToken
     ): Promise<WorkspaceLinkSelection | null> {
         const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
-        if (token.isCancellationRequested) {
+        const normalizedPath = normalizeNativeAbsolutePathForLink(pathText);
+        if (
+            !workspaceFolder ||
+            token?.isCancellationRequested ||
+            !normalizedPath ||
+            document.uri.scheme !== 'file' ||
+            workspaceFolder.uri.scheme !== 'file'
+        ) {
             return null;
         }
 
-        const targetItems: LinkTargetItem[] = [
-            {
-                label: '$(globe) URL',
-                description: 'Enter an HTTP, HTTPS, or email link',
-                targetKind: 'external',
-            },
-        ];
-        if (workspaceFolder) {
-            targetItems.push({
-                label: '$(files) Workspace file or heading',
-                description: 'Create a safe relative link',
-                targetKind: 'workspace',
-            });
-        }
-
-        const selectedTarget = await vscode.window.showQuickPick(targetItems, {
-            title: 'Insert Link',
-            placeHolder: 'Choose a link target',
-            ignoreFocusOut: false,
-        }, token);
-        if (!selectedTarget || token.isCancellationRequested) {
+        const targetUri = vscode.Uri.file(normalizedPath);
+        // Reject outside paths lexically before realpath/stat to avoid turning a
+        // compromised Webview into an existence oracle for arbitrary files.
+        if (
+            !isUriLexicallyWithinDirectory(targetUri, workspaceFolder.uri) ||
+            !canCreateRelativeWorkspaceLink(document.uri, targetUri) ||
+            !await this.isSafeWorkspaceFile(targetUri, workspaceFolder, token)
+        ) {
             return null;
         }
 
-        if (selectedTarget.targetKind === 'external') {
-            return this.pickExternalLink(token);
-        }
-        if (!workspaceFolder) {
-            return null;
-        }
-        return this.pickWorkspaceLink(document, workspaceFolder, token);
-    }
-
-    private async pickExternalLink(
-        token: vscode.CancellationToken
-    ): Promise<WorkspaceLinkSelection | null> {
-        const rawHref = await vscode.window.showInputBox({
-            title: 'Insert Link',
-            prompt: 'Enter an HTTP, HTTPS, or email link',
-            placeHolder: 'https://example.com',
-            ignoreFocusOut: false,
-            validateInput: (value) => {
-                if (!String(value || '').trim()) {
-                    return 'Enter a URL.';
-                }
-                return normalizeExternalLinkHref(value)
-                    ? null
-                    : 'Use an HTTP, HTTPS, or mailto URL without credentials or spaces.';
-            },
-        }, token);
-        if (rawHref === undefined || token.isCancellationRequested) {
-            return null;
-        }
-
-        // Validate again after the native input returns. Tests, extensions, and
-        // future UI changes must not be able to bypass validateInput.
-        const href = normalizeExternalLinkHref(rawHref);
-        if (!href) {
+        const href = buildWorkspaceRelativeHref(document.uri, targetUri);
+        if (
+            !href ||
+            token?.isCancellationRequested ||
+            !await this.isSafeWorkspaceFile(targetUri, workspaceFolder, token)
+        ) {
             return null;
         }
         return {
-            kind: 'external',
+            kind: 'workspace',
             href,
-            label: sanitizeWorkspaceLinkDisplayText(href, 240) || 'link',
+            label: sanitizeWorkspaceLinkDisplayText(path.basename(normalizedPath), 240) || 'link',
         };
     }
 
-    private async pickWorkspaceLink(
+    public async resolveLinkInput(
         document: vscode.TextDocument,
-        workspaceFolder: vscode.WorkspaceFolder,
-        token: vscode.CancellationToken
+        rawInput: string,
+        token?: vscode.CancellationToken
     ): Promise<WorkspaceLinkSelection | null> {
-        if (token.isCancellationRequested) {
+        if (token?.isCancellationRequested) {
+            return null;
+        }
+        const externalHref = normalizeExternalLinkHref(rawInput);
+        if (externalHref) {
+            return {
+                kind: 'external',
+                href: externalHref,
+                label: sanitizeWorkspaceLinkDisplayText(externalHref, 240) || 'link',
+            };
+        }
+        const absolutePathSelection = await this.resolvePastedAbsolutePath(
+            document,
+            rawInput,
+            token
+        );
+        if (absolutePathSelection) {
+            return absolutePathSelection;
+        }
+        return this.resolveWorkspaceRelativePath(document, rawInput, token);
+    }
+
+    public async resolveWorkspaceRelativePath(
+        document: vscode.TextDocument,
+        pathText: string,
+        token?: vscode.CancellationToken
+    ): Promise<WorkspaceLinkSelection | null> {
+        const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
+        const rawPath = String(pathText || '');
+        if (
+            !workspaceFolder ||
+            token?.isCancellationRequested ||
+            !/^(?:\.\/|\.\.\/)/.test(rawPath) ||
+            rawPath !== rawPath.trim() ||
+            rawPath.length > WorkspaceLinkPicker.maxWorkspacePathInputLength ||
+            rawPath.includes('\\') ||
+            WorkspaceLinkPicker.unsafeWorkspacePathInputPattern.test(rawPath)
+        ) {
             return null;
         }
 
+        let decodedPath: string;
+        try {
+            decodedPath = decodeURIComponent(rawPath);
+        } catch {
+            return null;
+        }
+        if (
+            !decodedPath ||
+            decodedPath.length > WorkspaceLinkPicker.maxWorkspacePathInputLength ||
+            decodedPath.includes('\\') ||
+            path.posix.isAbsolute(decodedPath) ||
+            WorkspaceLinkPicker.unsafeWorkspacePathInputPattern.test(decodedPath)
+        ) {
+            return null;
+        }
+
+        const documentDirectory = document.uri.with({
+            path: path.posix.dirname(document.uri.path),
+            query: '',
+            fragment: '',
+        });
+        const targetUri = vscode.Uri.joinPath(documentDirectory, decodedPath);
+        if (
+            !isUriLexicallyWithinDirectory(targetUri, workspaceFolder.uri) ||
+            !canCreateRelativeWorkspaceLink(document.uri, targetUri) ||
+            !await this.isSafeWorkspaceFile(targetUri, workspaceFolder, token)
+        ) {
+            return null;
+        }
+        const href = buildWorkspaceRelativeHref(document.uri, targetUri);
+        if (
+            !href ||
+            token?.isCancellationRequested ||
+            !await this.isSafeWorkspaceFile(targetUri, workspaceFolder, token)
+        ) {
+            return null;
+        }
+        return {
+            kind: 'workspace',
+            href,
+            label: sanitizeWorkspaceLinkDisplayText(
+                path.posix.parse(targetUri.path).name,
+                240
+            ) || 'link',
+        };
+    }
+
+    public async searchWorkspaceFiles(
+        document: vscode.TextDocument,
+        rawQuery: string,
+        token: vscode.CancellationToken
+    ): Promise<WorkspaceLinkSuggestion[]> {
+        const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
+        const query = String(rawQuery || '');
+        if (
+            !workspaceFolder ||
+            token.isCancellationRequested ||
+            query !== query.trim() ||
+            query.length < 2 ||
+            query.length > WorkspaceLinkPicker.maxSuggestionQueryLength ||
+            /[\u0000-\u001f\u007f-\u009f\u061c\u200b\u200e\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]/u.test(query)
+        ) {
+            return [];
+        }
+
+        const normalizedQuery = this.normalizeSuggestionSearchText(query);
+        if (!normalizedQuery) {
+            return [];
+        }
         const fileUris = await vscode.workspace.findFiles(
             new vscode.RelativePattern(workspaceFolder, '**/*'),
             WorkspaceLinkPicker.excludedWorkspaceFiles,
@@ -128,144 +199,211 @@ export class WorkspaceLinkPicker {
             token
         );
         if (token.isCancellationRequested) {
-            return null;
+            return [];
         }
 
-        const fileItems = fileUris
+        const ranked = fileUris
             .filter((uri) =>
                 isUriLexicallyWithinDirectory(uri, workspaceFolder.uri) &&
                 canCreateRelativeWorkspaceLink(document.uri, uri)
             )
-            .map((uri): WorkspaceFileItem => {
+            .map((uri) => {
                 const relativePath = path.posix.relative(workspaceFolder.uri.path, uri.path);
-                const fileName = sanitizeWorkspaceLinkDisplayText(
-                    path.posix.basename(uri.path),
-                    160
-                ) || 'file';
-                const displayPath = sanitizeWorkspaceLinkDisplayText(relativePath, 320);
-                return {
-                    label: `$(file) ${fileName}`,
-                    description: displayPath,
-                    uri,
-                };
+                const fileName = path.posix.basename(uri.path);
+                const score = this.getSuggestionScore(
+                    normalizedQuery,
+                    this.normalizeSuggestionSearchText(fileName),
+                    this.normalizeSuggestionSearchText(path.posix.parse(fileName).name),
+                    this.normalizeSuggestionSearchText(relativePath)
+                );
+                return { uri, relativePath, fileName, score };
             })
+            .filter((candidate) => candidate.score !== null)
             .sort((first, second) =>
-                String(first.description || '').localeCompare(
-                    String(second.description || ''),
+                (first.score as number) - (second.score as number) ||
+                first.relativePath.localeCompare(
+                    second.relativePath,
                     undefined,
                     { numeric: true, sensitivity: 'base' }
                 )
-            );
+            )
+            .slice(0, WorkspaceLinkPicker.maxSuggestionValidationCandidates);
 
-        if (fileItems.length === 0) {
-            void vscode.window.showInformationMessage(
-                'No linkable files were found in this workspace folder.'
-            );
-            return null;
-        }
-
-        const selectedFile = await vscode.window.showQuickPick(fileItems, {
-            title: 'Insert Link',
-            placeHolder: 'Select a file in the current workspace folder',
-            matchOnDescription: true,
-            ignoreFocusOut: false,
-        }, token);
-        if (!selectedFile || token.isCancellationRequested) {
-            return null;
-        }
-
-        if (!await this.isSafeWorkspaceFile(selectedFile.uri, workspaceFolder)) {
-            void vscode.window.showErrorMessage(
-                'The selected file is no longer a safe workspace link target.'
-            );
-            return null;
-        }
-
-        const targetName = sanitizeWorkspaceLinkDisplayText(
-            path.posix.parse(selectedFile.uri.path).name,
-            240
-        ) || 'link';
-        let fragment = '';
-        let resultLabel = targetName;
-
-        if (this.isMarkdownFile(selectedFile.uri)) {
-            const headings = await this.readMarkdownHeadings(
-                selectedFile.uri,
-                workspaceFolder,
-                token
-            );
+        const suggestionStatCache = new Map<string, Promise<vscode.FileStat>>();
+        let suggestionStatReads = 0;
+        const readSuggestionStat = async (uri: vscode.Uri): Promise<vscode.FileStat> => {
             if (token.isCancellationRequested) {
-                return null;
+                throw new Error('Workspace link suggestion search was cancelled.');
             }
-            if (headings.length > 0) {
-                const headingItems: WorkspaceHeadingItem[] = [
-                    {
-                        label: '$(file) Link to file',
-                        description: sanitizeWorkspaceLinkDisplayText(
-                            path.posix.basename(selectedFile.uri.path),
-                            160
-                        ),
-                        fragment: '',
-                        resultLabel: targetName,
-                    },
-                    ...headings.map((heading): WorkspaceHeadingItem => ({
-                        label: `$(symbol-key) ${sanitizeWorkspaceLinkDisplayText(heading.label, 200)}`,
-                        description: `H${heading.level}`,
-                        fragment: heading.slug,
-                        resultLabel: sanitizeWorkspaceLinkDisplayText(heading.label, 240) || targetName,
-                    })),
-                ];
-                const selectedHeading = await vscode.window.showQuickPick(headingItems, {
-                    title: 'Insert Link',
-                    placeHolder: 'Link to the file or to one of its headings',
-                    matchOnDescription: true,
-                    ignoreFocusOut: false,
-                }, token);
-                if (!selectedHeading || token.isCancellationRequested) {
-                    return null;
+            const key = uri.toString();
+            let pendingStat = suggestionStatCache.get(key);
+            if (!pendingStat) {
+                if (suggestionStatReads >= WorkspaceLinkPicker.maxSuggestionStatReads) {
+                    throw new Error('Workspace link suggestion stat budget was exhausted.');
                 }
-                fragment = selectedHeading.fragment;
-                resultLabel = selectedHeading.resultLabel;
+                suggestionStatReads++;
+                pendingStat = Promise.resolve(vscode.workspace.fs.stat(uri));
+                suggestionStatCache.set(key, pendingStat);
+            }
+            const stat = await pendingStat;
+            if (token.isCancellationRequested) {
+                throw new Error('Workspace link suggestion search was cancelled.');
+            }
+            return stat;
+        };
+
+        const suggestions: WorkspaceLinkSuggestion[] = [];
+        for (const candidate of ranked) {
+            if (token.isCancellationRequested) {
+                return [];
+            }
+            if (!await this.isSafeWorkspaceFile(
+                candidate.uri,
+                workspaceFolder,
+                token,
+                readSuggestionStat
+            )) {
+                continue;
+            }
+            const href = buildWorkspaceRelativeHref(document.uri, candidate.uri);
+            if (!href) {
+                continue;
+            }
+            suggestions.push({
+                uri: candidate.uri,
+                path: href,
+                label: sanitizeWorkspaceLinkDisplayText(candidate.fileName, 160) || 'file',
+            });
+            if (suggestions.length >= WorkspaceLinkPicker.maxWorkspaceSuggestions) {
+                break;
             }
         }
+        return suggestions;
+    }
 
-        // The file may have been replaced by a symlink while the second picker
-        // was open. Revalidate immediately before returning its href.
-        if (!await this.isSafeWorkspaceFile(selectedFile.uri, workspaceFolder)) {
-            void vscode.window.showErrorMessage(
-                'The selected file is no longer a safe workspace link target.'
-            );
+    public async resolveWorkspaceFileSuggestion(
+        document: vscode.TextDocument,
+        candidateUri: vscode.Uri,
+        token: vscode.CancellationToken
+    ): Promise<WorkspaceLinkSelection | null> {
+        const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
+        if (
+            !workspaceFolder ||
+            token.isCancellationRequested ||
+            !isUriLexicallyWithinDirectory(candidateUri, workspaceFolder.uri) ||
+            !canCreateRelativeWorkspaceLink(document.uri, candidateUri) ||
+            !await this.isSafeWorkspaceFile(candidateUri, workspaceFolder, token)
+        ) {
             return null;
         }
-
-        const href = buildWorkspaceRelativeHref(document.uri, selectedFile.uri, fragment);
-        if (!href) {
+        const href = buildWorkspaceRelativeHref(document.uri, candidateUri);
+        if (
+            !href ||
+            token.isCancellationRequested ||
+            !await this.isSafeWorkspaceFile(candidateUri, workspaceFolder, token)
+        ) {
             return null;
         }
         return {
             kind: 'workspace',
             href,
-            label: resultLabel,
+            label: sanitizeWorkspaceLinkDisplayText(
+                path.posix.parse(candidateUri.path).name,
+                240
+            ) || 'link',
         };
     }
 
-    private isMarkdownFile(uri: vscode.Uri): boolean {
-        const extension = path.posix.extname(uri.path).toLowerCase();
-        return extension === '.md' || extension === '.markdown';
+    private normalizeSuggestionSearchText(value: string): string {
+        return String(value || '').normalize('NFKC').toLocaleLowerCase();
+    }
+
+    private getSuggestionScore(
+        query: string,
+        fileName: string,
+        fileStem: string,
+        relativePath: string
+    ): number | null {
+        if (fileStem === query) {
+            return 0;
+        }
+        if (fileName === query) {
+            return 10;
+        }
+        if (fileStem.startsWith(query)) {
+            return 100 + fileStem.length - query.length;
+        }
+        if (fileName.startsWith(query)) {
+            return 200 + fileName.length - query.length;
+        }
+        const stemIndex = fileStem.indexOf(query);
+        if (stemIndex >= 0) {
+            return 300 + stemIndex;
+        }
+        const nameIndex = fileName.indexOf(query);
+        if (nameIndex >= 0) {
+            return 400 + nameIndex;
+        }
+        const pathSegments = relativePath.split('/');
+        const segmentIndex = pathSegments.findIndex((segment) => segment.startsWith(query));
+        if (segmentIndex >= 0) {
+            return 500 + segmentIndex;
+        }
+        const pathIndex = relativePath.indexOf(query);
+        if (pathIndex >= 0) {
+            return 600 + pathIndex;
+        }
+
+        let queryIndex = 0;
+        let gapPenalty = 0;
+        let previousMatch = -1;
+        for (let index = 0; index < relativePath.length && queryIndex < query.length; index++) {
+            if (relativePath[index] !== query[queryIndex]) {
+                continue;
+            }
+            if (previousMatch >= 0) {
+                gapPenalty += index - previousMatch - 1;
+            }
+            previousMatch = index;
+            queryIndex++;
+        }
+        return queryIndex === query.length ? 700 + gapPenalty : null;
     }
 
     private async isSafeWorkspaceFile(
         uri: vscode.Uri,
-        workspaceFolder: vscode.WorkspaceFolder
+        workspaceFolder: vscode.WorkspaceFolder,
+        token?: vscode.CancellationToken,
+        readStat: (uri: vscode.Uri) => PromiseLike<vscode.FileStat> =
+            (targetUri) => vscode.workspace.fs.stat(targetUri)
     ): Promise<boolean> {
-        if (!isUriLexicallyWithinDirectory(uri, workspaceFolder.uri)) {
+        if (
+            token?.isCancellationRequested ||
+            !isUriLexicallyWithinDirectory(uri, workspaceFolder.uri)
+        ) {
             return false;
         }
-        if (!await isUriSecurelyWithinDirectory(uri, workspaceFolder.uri)) {
+        const readCancellationAwareStat = async (
+            targetUri: vscode.Uri
+        ): Promise<vscode.FileStat> => {
+            if (token?.isCancellationRequested) {
+                throw new Error('Workspace link validation was cancelled.');
+            }
+            const stat = await readStat(targetUri);
+            if (token?.isCancellationRequested) {
+                throw new Error('Workspace link validation was cancelled.');
+            }
+            return stat;
+        };
+        if (!await isUriSecurelyWithinDirectory(
+            uri,
+            workspaceFolder.uri,
+            readCancellationAwareStat
+        )) {
             return false;
         }
         try {
-            const stat = await vscode.workspace.fs.stat(uri);
+            const stat = await readCancellationAwareStat(uri);
             return (
                 (stat.type & vscode.FileType.File) !== 0 &&
                 (stat.type & vscode.FileType.SymbolicLink) === 0
@@ -275,44 +413,4 @@ export class WorkspaceLinkPicker {
         }
     }
 
-    private async readMarkdownHeadings(
-        uri: vscode.Uri,
-        workspaceFolder: vscode.WorkspaceFolder,
-        token: vscode.CancellationToken
-    ) {
-        try {
-            if (!await this.isSafeWorkspaceFile(uri, workspaceFolder)) {
-                return [];
-            }
-            const stat = await vscode.workspace.fs.stat(uri);
-            if (
-                token.isCancellationRequested ||
-                (stat.type & vscode.FileType.File) === 0 ||
-                (stat.type & vscode.FileType.SymbolicLink) !== 0 ||
-                !Number.isSafeInteger(stat.size) ||
-                stat.size < 0 ||
-                stat.size > WorkspaceLinkPicker.maxMarkdownBytes
-            ) {
-                return [];
-            }
-            const bytes = await vscode.workspace.fs.readFile(uri);
-            if (
-                token.isCancellationRequested ||
-                bytes.byteLength > WorkspaceLinkPicker.maxMarkdownBytes
-            ) {
-                return [];
-            }
-            // Do not display data read from a target that crossed the workspace
-            // boundary or became a symbolic link while it was being read.
-            if (!await this.isSafeWorkspaceFile(uri, workspaceFolder)) {
-                return [];
-            }
-            return extractMarkdownHeadings(
-                Buffer.from(bytes).toString('utf8'),
-                WorkspaceLinkPicker.maxMarkdownHeadings
-            );
-        } catch {
-            return [];
-        }
-    }
 }

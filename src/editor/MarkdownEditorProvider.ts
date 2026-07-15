@@ -4,7 +4,10 @@ import * as path from 'path';
 import { MarkdownDocument } from './MarkdownDocument';
 import { WorkspaceLinkPicker } from './WorkspaceLinkPicker';
 import { getNonce } from '../utils/getNonce';
-import { isUriSecurelyWithinDirectory } from '../utils/workspaceLinks';
+import {
+    isUriSecurelyWithinDirectory,
+    normalizeExternalLinkHref,
+} from '../utils/workspaceLinks';
 import TurndownService from 'turndown';
 const { gfm } = require('turndown-plugin-gfm');
 
@@ -35,6 +38,11 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     private static readonly viewType = 'manulDown.editor';
     private static readonly builtInSlashCommandIds = new Set(['table', 'quote', 'code', 'checkbox', 'link']);
     private static readonly workspaceLinkRequestIdPattern = /^workspace-link-\d{1,16}-\d{1,10}$/;
+    private static readonly workspaceLinkSuggestionRequestIdPattern =
+        /^workspace-link-suggest-\d{1,16}-\d{1,10}$/;
+    private static readonly workspaceLinkSuggestionCandidateIdPattern = /^candidate-\d{1,2}$/;
+    private static readonly workspaceLinkSuggestionSessionMaxAgeMs = 2 * 60 * 1000;
+    private static readonly pastedPathLinkRequestIdPattern = /^pasted-path-link-\d{1,16}-\d{1,10}$/;
     private static readonly customSlashTemplateDirectoryName = '.manuldown';
     private static readonly customSlashTemplateExtension = '.md';
     private static readonly maxCustomSlashCommands = 200;
@@ -571,12 +579,6 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             this.lastActivePanel = webviewPanel;
         }
 
-        webviewPanel.onDidChangeViewState((event) => {
-            if (event.webviewPanel.active) {
-                this.lastActivePanel = webviewPanel;
-            }
-        });
-
         // Create document manager
         const markdownDocument = new MarkdownDocument(document, webviewPanel.webview);
         let documentRenderErrorShown = false;
@@ -627,6 +629,18 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             requestId: string;
             cancellation: vscode.CancellationTokenSource;
         } | null = null;
+        type WorkspaceLinkSuggestionRequest = { requestId: string; query: string };
+        let activeWorkspaceLinkSuggestionRequest: {
+            requestId: string;
+            cancellation: vscode.CancellationTokenSource;
+        } | null = null;
+        let queuedWorkspaceLinkSuggestionRequest: WorkspaceLinkSuggestionRequest | null = null;
+        let workspaceLinkSuggestionSession: {
+            requestId: string;
+            createdAt: number;
+            candidates: Map<string, vscode.Uri>;
+        } | null = null;
+        let activePastedPathLinkRequestId: string | null = null;
         let terminalActionQueue: Promise<void> = Promise.resolve();
         let saveSyncWarningShown = false;
         let synchronizedProgrammaticSaveInProgress = false;
@@ -724,6 +738,140 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         const postWorkspaceLinkCancellation = (requestId: string): void => {
             void webviewPanel.webview.postMessage({
                 type: 'workspaceLinkCancelled',
+                requestId,
+            });
+        };
+
+        const postWorkspaceLinkSuggestions = (
+            requestId: string,
+            query: string,
+            items: Array<{ candidateId: string; label: string; path: string }>
+        ): void => {
+            void webviewPanel.webview.postMessage({
+                type: 'workspaceLinkSuggestions',
+                requestId,
+                query,
+                items,
+            });
+        };
+
+        const clearWorkspaceLinkSuggestionState = (): void => {
+            queuedWorkspaceLinkSuggestionRequest = null;
+            workspaceLinkSuggestionSession = null;
+            if (activeWorkspaceLinkSuggestionRequest) {
+                activeWorkspaceLinkSuggestionRequest.cancellation.cancel();
+            }
+        };
+
+        const runWorkspaceLinkSuggestionRequest = async (
+            request: WorkspaceLinkSuggestionRequest
+        ): Promise<void> => {
+            if (
+                editorDisposed ||
+                this.webviewPanels.get(documentKey) !== webviewPanel ||
+                !webviewPanel.active ||
+                activeWorkspaceLinkRequest !== null
+            ) {
+                postWorkspaceLinkSuggestions(request.requestId, request.query, []);
+                return;
+            }
+            const cancellation = new vscode.CancellationTokenSource();
+            activeWorkspaceLinkSuggestionRequest = {
+                requestId: request.requestId,
+                cancellation,
+            };
+            try {
+                const suggestions = await this.workspaceLinkPicker.searchWorkspaceFiles(
+                    document,
+                    request.query,
+                    cancellation.token
+                );
+                if (
+                    cancellation.token.isCancellationRequested ||
+                    editorDisposed ||
+                    this.webviewPanels.get(documentKey) !== webviewPanel ||
+                    !webviewPanel.active ||
+                    activeWorkspaceLinkSuggestionRequest?.requestId !== request.requestId
+                ) {
+                    return;
+                }
+                const candidates = new Map<string, vscode.Uri>();
+                const items = suggestions.slice(0, 20).map((suggestion, index) => {
+                    const candidateId = `candidate-${index + 1}`;
+                    candidates.set(candidateId, suggestion.uri);
+                    return {
+                        candidateId,
+                        label: suggestion.label,
+                        path: suggestion.path,
+                    };
+                });
+                workspaceLinkSuggestionSession = {
+                    requestId: request.requestId,
+                    createdAt: Date.now(),
+                    candidates,
+                };
+                postWorkspaceLinkSuggestions(request.requestId, request.query, items);
+            } catch (error) {
+                if (!cancellation.token.isCancellationRequested) {
+                    console.error('[link suggestions] Failed to search workspace files:', error);
+                    if (
+                        !editorDisposed &&
+                        this.webviewPanels.get(documentKey) === webviewPanel &&
+                        webviewPanel.active &&
+                        activeWorkspaceLinkSuggestionRequest?.requestId === request.requestId
+                    ) {
+                        postWorkspaceLinkSuggestions(request.requestId, request.query, []);
+                    }
+                }
+            } finally {
+                if (activeWorkspaceLinkSuggestionRequest?.requestId === request.requestId) {
+                    activeWorkspaceLinkSuggestionRequest = null;
+                }
+                cancellation.dispose();
+                const queuedRequest = queuedWorkspaceLinkSuggestionRequest;
+                queuedWorkspaceLinkSuggestionRequest = null;
+                if (
+                    queuedRequest &&
+                    !editorDisposed &&
+                    this.webviewPanels.get(documentKey) === webviewPanel &&
+                    webviewPanel.active
+                ) {
+                    void runWorkspaceLinkSuggestionRequest(queuedRequest);
+                }
+            }
+        };
+
+        const enqueueWorkspaceLinkSuggestionRequest = (
+            request: WorkspaceLinkSuggestionRequest
+        ): void => {
+            workspaceLinkSuggestionSession = null;
+            if (activeWorkspaceLinkSuggestionRequest) {
+                queuedWorkspaceLinkSuggestionRequest = request;
+                activeWorkspaceLinkSuggestionRequest.cancellation.cancel();
+                return;
+            }
+            void runWorkspaceLinkSuggestionRequest(request);
+        };
+
+        webviewPanel.onDidChangeViewState((event) => {
+            if (event.webviewPanel.active) {
+                this.lastActivePanel = webviewPanel;
+                return;
+            }
+            const activeRequest = activeWorkspaceLinkRequest;
+            if (activeRequest) {
+                // Keep the slot occupied until the cancelled operation unwinds.
+                // Otherwise a compromised Webview could stack slow remote
+                // filesystem validation by alternating request and cancel.
+                activeRequest.cancellation.cancel();
+                postWorkspaceLinkCancellation(activeRequest.requestId);
+            }
+            clearWorkspaceLinkSuggestionState();
+        });
+
+        const postPastedPathLinkRejection = (requestId: string): void => {
+            void webviewPanel.webview.postMessage({
+                type: 'pastedPathLinkRejected',
                 requestId,
             });
         };
@@ -1001,36 +1149,232 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     case 'requestCustomSlashCommands':
                         await this.postCustomSlashCommands(webviewPanel.webview);
                         break;
-                    case 'requestWorkspaceLink':
+                    case 'requestPastedPathLink':
                         {
                             const requestId = typeof message.requestId === 'string'
                                 ? message.requestId
                                 : '';
+                            const pathText = typeof message.pathText === 'string'
+                                ? message.pathText
+                                : '';
                             if (
-                                !MarkdownEditorProvider.workspaceLinkRequestIdPattern.test(requestId) ||
+                                !MarkdownEditorProvider.pastedPathLinkRequestIdPattern.test(requestId) ||
                                 editorDisposed ||
                                 this.webviewPanels.get(documentKey) !== webviewPanel ||
-                                !webviewPanel.active
+                                !webviewPanel.active ||
+                                pathText.length > 4096 ||
+                                activePastedPathLinkRequestId !== null
                             ) {
-                                if (requestId) {
+                                if (requestId && requestId.length <= 64) {
+                                    postPastedPathLinkRejection(requestId);
+                                }
+                                break;
+                            }
+
+                            activePastedPathLinkRequestId = requestId;
+                            try {
+                                const selection = await this.workspaceLinkPicker
+                                    .resolvePastedAbsolutePath(document, pathText);
+                                if (
+                                    editorDisposed ||
+                                    this.webviewPanels.get(documentKey) !== webviewPanel ||
+                                    !webviewPanel.active ||
+                                    activePastedPathLinkRequestId !== requestId
+                                ) {
+                                    break;
+                                }
+                                if (!selection) {
+                                    postPastedPathLinkRejection(requestId);
+                                    break;
+                                }
+                                void webviewPanel.webview.postMessage({
+                                    type: 'pastedPathLinkResolved',
+                                    requestId,
+                                    linkKind: selection.kind,
+                                    href: selection.href,
+                                });
+                            } catch (error) {
+                                console.error('[path link] Failed to validate a pasted path:', error);
+                                if (!editorDisposed) {
+                                    postPastedPathLinkRejection(requestId);
+                                }
+                            } finally {
+                                if (activePastedPathLinkRequestId === requestId) {
+                                    activePastedPathLinkRequestId = null;
+                                }
+                            }
+                        }
+                        break;
+                    case 'requestWorkspaceLinkSuggestions':
+                        {
+                            const requestId = typeof message.requestId === 'string'
+                                ? message.requestId
+                                : '';
+                            const query = typeof message.query === 'string'
+                                ? message.query
+                                : '';
+                            if (
+                                !MarkdownEditorProvider.workspaceLinkSuggestionRequestIdPattern
+                                    .test(requestId) ||
+                                editorDisposed ||
+                                this.webviewPanels.get(documentKey) !== webviewPanel ||
+                                !webviewPanel.active ||
+                                query.length < 2 ||
+                                query.length > 256 ||
+                                query !== query.trim() ||
+                                activeWorkspaceLinkRequest !== null
+                            ) {
+                                if (
+                                    MarkdownEditorProvider.workspaceLinkSuggestionRequestIdPattern
+                                        .test(requestId) &&
+                                    requestId.length <= 64
+                                ) {
+                                    postWorkspaceLinkSuggestions(requestId, query.slice(0, 256), []);
+                                }
+                                break;
+                            }
+                            enqueueWorkspaceLinkSuggestionRequest({ requestId, query });
+                        }
+                        break;
+                    case 'cancelWorkspaceLinkSuggestions':
+                        {
+                            const requestId = typeof message.requestId === 'string'
+                                ? message.requestId
+                                : '';
+                            if (!MarkdownEditorProvider.workspaceLinkSuggestionRequestIdPattern.test(requestId)) {
+                                break;
+                            }
+                            if (queuedWorkspaceLinkSuggestionRequest?.requestId === requestId) {
+                                queuedWorkspaceLinkSuggestionRequest = null;
+                            }
+                            const activeSuggestionRequest = activeWorkspaceLinkSuggestionRequest;
+                            if (
+                                activeSuggestionRequest &&
+                                activeSuggestionRequest.requestId === requestId
+                            ) {
+                                activeSuggestionRequest.cancellation.cancel();
+                            }
+                            if (workspaceLinkSuggestionSession?.requestId === requestId) {
+                                workspaceLinkSuggestionSession = null;
+                            }
+                        }
+                        break;
+                    case 'resolveWorkspaceLinkSuggestion':
+                        {
+                            const requestId = typeof message.requestId === 'string'
+                                ? message.requestId
+                                : '';
+                            const searchRequestId = typeof message.searchRequestId === 'string'
+                                ? message.searchRequestId
+                                : '';
+                            const candidateId = typeof message.candidateId === 'string'
+                                ? message.candidateId
+                                : '';
+                            const session = workspaceLinkSuggestionSession;
+                            let candidateUri: vscode.Uri | null = null;
+                            if (
+                                MarkdownEditorProvider.workspaceLinkRequestIdPattern.test(requestId) &&
+                                MarkdownEditorProvider.workspaceLinkSuggestionRequestIdPattern
+                                    .test(searchRequestId) &&
+                                MarkdownEditorProvider.workspaceLinkSuggestionCandidateIdPattern
+                                    .test(candidateId) &&
+                                session !== null &&
+                                session.requestId === searchRequestId &&
+                                Date.now() - session.createdAt <=
+                                    MarkdownEditorProvider.workspaceLinkSuggestionSessionMaxAgeMs
+                            ) {
+                                candidateUri = session.candidates.get(candidateId) || null;
+                            }
+                            if (
+                                !candidateUri ||
+                                editorDisposed ||
+                                this.webviewPanels.get(documentKey) !== webviewPanel ||
+                                !webviewPanel.active ||
+                                activeWorkspaceLinkRequest !== null
+                            ) {
+                                if (requestId && requestId.length <= 64) {
                                     postWorkspaceLinkCancellation(requestId);
                                 }
                                 break;
                             }
 
-                            // A compromised or stale Webview must not be able to
-                            // stack native pickers. Keep the user-initiated picker
-                            // active and reject subsequent requests until it closes.
-                            if (activeWorkspaceLinkRequest) {
-                                postWorkspaceLinkCancellation(requestId);
-                                break;
-                            }
-
+                            // Consume the host-held candidate before awaiting any
+                            // filesystem work so forged or replayed selections fail.
+                            workspaceLinkSuggestionSession = null;
+                            clearWorkspaceLinkSuggestionState();
                             const cancellation = new vscode.CancellationTokenSource();
                             activeWorkspaceLinkRequest = { requestId, cancellation };
                             try {
-                                const selection = await this.workspaceLinkPicker.pick(
+                                const selection = await this.workspaceLinkPicker
+                                    .resolveWorkspaceFileSuggestion(
+                                        document,
+                                        candidateUri,
+                                        cancellation.token
+                                    );
+                                if (
+                                    cancellation.token.isCancellationRequested ||
+                                    editorDisposed ||
+                                    this.webviewPanels.get(documentKey) !== webviewPanel ||
+                                    !webviewPanel.active ||
+                                    activeWorkspaceLinkRequest?.requestId !== requestId
+                                ) {
+                                    break;
+                                }
+                                if (!selection) {
+                                    postWorkspaceLinkCancellation(requestId);
+                                    break;
+                                }
+                                void webviewPanel.webview.postMessage({
+                                    type: 'workspaceLinkSelected',
+                                    requestId,
+                                    linkKind: selection.kind,
+                                    href: selection.href,
+                                    label: selection.label,
+                                });
+                            } catch (error) {
+                                if (!cancellation.token.isCancellationRequested) {
+                                    console.error('[link suggestions] Failed to resolve a candidate:', error);
+                                    if (!editorDisposed) {
+                                        postWorkspaceLinkCancellation(requestId);
+                                    }
+                                }
+                            } finally {
+                                if (activeWorkspaceLinkRequest?.requestId === requestId) {
+                                    activeWorkspaceLinkRequest = null;
+                                }
+                                cancellation.dispose();
+                            }
+                        }
+                        break;
+                    case 'requestLinkInputResolution':
+                        {
+                            const requestId = typeof message.requestId === 'string'
+                                ? message.requestId
+                                : '';
+                            const rawInput = typeof message.input === 'string'
+                                ? message.input
+                                : '';
+                            if (
+                                !MarkdownEditorProvider.workspaceLinkRequestIdPattern.test(requestId) ||
+                                editorDisposed ||
+                                this.webviewPanels.get(documentKey) !== webviewPanel ||
+                                !webviewPanel.active ||
+                                rawInput.length > 4096 ||
+                                activeWorkspaceLinkRequest !== null
+                            ) {
+                                if (requestId && requestId.length <= 64) {
+                                    postWorkspaceLinkCancellation(requestId);
+                                }
+                                break;
+                            }
+
+                            clearWorkspaceLinkSuggestionState();
+                            const cancellation = new vscode.CancellationTokenSource();
+                            activeWorkspaceLinkRequest = { requestId, cancellation };
+                            try {
+                                const selection = await this.workspaceLinkPicker.resolveLinkInput(
                                     document,
+                                    rawInput,
                                     cancellation.token
                                 );
                                 if (
@@ -1054,18 +1398,34 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                                     label: selection.label,
                                 });
                             } catch (error) {
-                                console.error('[link picker] Failed to select a link target:', error);
-                                if (!editorDisposed) {
+                                if (!cancellation.token.isCancellationRequested) {
+                                    console.error('[link input] Failed to validate a link target:', error);
+                                }
+                                if (!editorDisposed && !cancellation.token.isCancellationRequested) {
                                     postWorkspaceLinkCancellation(requestId);
-                                    void vscode.window.showErrorMessage(
-                                        'ManulDown could not create the link.'
-                                    );
                                 }
                             } finally {
                                 if (activeWorkspaceLinkRequest?.requestId === requestId) {
                                     activeWorkspaceLinkRequest = null;
                                 }
                                 cancellation.dispose();
+                            }
+                        }
+                        break;
+                    case 'cancelWorkspaceLinkRequest':
+                        {
+                            const requestId = typeof message.requestId === 'string'
+                                ? message.requestId
+                                : '';
+                            const activeRequest = activeWorkspaceLinkRequest;
+                            if (!activeRequest) {
+                                break;
+                            }
+                            if (
+                                MarkdownEditorProvider.workspaceLinkRequestIdPattern.test(requestId) &&
+                                activeRequest.requestId === requestId
+                            ) {
+                                activeRequest.cancellation.cancel();
                             }
                         }
                         break;
@@ -1130,16 +1490,43 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     case 'openLink':
                         // Open external links. file:// links are opt-in because they can
                         // launch local files, applications, or network shares.
-                        if (typeof message.url === 'string') {
+                        if (
+                            typeof message.url === 'string' &&
+                            !editorDisposed &&
+                            this.webviewPanels.get(documentKey) === webviewPanel &&
+                            webviewPanel.active
+                        ) {
                             const rawUrl = message.url.trim();
+                            const unsafeLinkTextPattern = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069\s\\]/u;
+                            const unsafeDecodedLinkTextPattern = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u;
+                            if (
+                                !rawUrl ||
+                                rawUrl !== message.url ||
+                                rawUrl.length > 4096 ||
+                                unsafeLinkTextPattern.test(rawUrl)
+                            ) {
+                                break;
+                            }
+                            let decodedUrl = rawUrl;
+                            try {
+                                decodedUrl = decodeURIComponent(rawUrl);
+                            } catch {
+                                break;
+                            }
+                            if (unsafeDecodedLinkTextPattern.test(decodedUrl)) {
+                                break;
+                            }
                             const allowFileLinks = vscode.workspace
                                 .getConfiguration('manulDown')
                                 .get<boolean>('security.allowFileLinks', false);
-                            const targetUri = vscode.Uri.parse(rawUrl);
-                            if (targetUri.scheme === 'http' || targetUri.scheme === 'https' || targetUri.scheme === 'mailto') {
-                                await vscode.env.openExternal(targetUri);
-                            } else if (targetUri.scheme === 'file' && allowFileLinks) {
-                                await vscode.env.openExternal(targetUri);
+                            const externalHref = normalizeExternalLinkHref(rawUrl);
+                            if (externalHref) {
+                                await vscode.env.openExternal(vscode.Uri.parse(externalHref));
+                            } else if (/^file:/i.test(rawUrl) && allowFileLinks) {
+                                const fileTarget = vscode.Uri.parse(rawUrl);
+                                if (fileTarget.scheme === 'file') {
+                                    await vscode.env.openExternal(fileTarget);
+                                }
                             } else if (!/^[a-z][a-z0-9+.-]*:/i.test(rawUrl) && !rawUrl.startsWith('#')) {
                                 const fragmentIndex = rawUrl.indexOf('#');
                                 const rawPath = fragmentIndex >= 0 ? rawUrl.slice(0, fragmentIndex) : rawUrl;
@@ -1151,13 +1538,23 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                                     // Use the literal Markdown path if decoding fails.
                                 }
                                 const relativeTarget = this.resolveImageSourceUri(decodedPath, document).with({ fragment });
+                                const targetsDocumentFileSystem =
+                                    relativeTarget.scheme === document.uri.scheme &&
+                                    relativeTarget.authority === document.uri.authority;
+                                const isOptInLocalFileTarget =
+                                    allowFileLinks && relativeTarget.scheme === 'file';
+                                if (!targetsDocumentFileSystem && !isOptInLocalFileTarget) {
+                                    break;
+                                }
                                 const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
-                                const isInsideWorkspace = !!workspaceFolder &&
+                                const isInsideWorkspace = targetsDocumentFileSystem &&
+                                    !!workspaceFolder &&
                                     await isUriSecurelyWithinDirectory(
                                         relativeTarget.with({ fragment: '' }),
-                                        workspaceFolder.uri
+                                        workspaceFolder.uri,
+                                        (componentUri) => vscode.workspace.fs.stat(componentUri)
                                     );
-                                if (isInsideWorkspace || allowFileLinks) {
+                                if (isInsideWorkspace || isOptInLocalFileTarget) {
                                     await vscode.commands.executeCommand('vscode.open', relativeTarget);
                                 }
                             }
@@ -1460,10 +1857,18 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         // Cleanup
         webviewPanel.onDidDispose(() => {
             editorDisposed = true;
+            activePastedPathLinkRequestId = null;
             if (activeWorkspaceLinkRequest) {
                 activeWorkspaceLinkRequest.cancellation.cancel();
                 activeWorkspaceLinkRequest.cancellation.dispose();
                 activeWorkspaceLinkRequest = null;
+            }
+            queuedWorkspaceLinkSuggestionRequest = null;
+            workspaceLinkSuggestionSession = null;
+            if (activeWorkspaceLinkSuggestionRequest) {
+                activeWorkspaceLinkSuggestionRequest.cancellation.cancel();
+                activeWorkspaceLinkSuggestionRequest.cancellation.dispose();
+                activeWorkspaceLinkSuggestionRequest = null;
             }
             changeDocumentSubscription.dispose();
             configurationChangeSubscription.dispose();
@@ -3292,7 +3697,11 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 .get<boolean>('security.allowFileLinks', false);
             const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
             const isInsideWorkspace = !!workspaceFolder &&
-                await isUriSecurelyWithinDirectory(imageUri, workspaceFolder.uri);
+                await isUriSecurelyWithinDirectory(
+                    imageUri,
+                    workspaceFolder.uri,
+                    (componentUri) => vscode.workspace.fs.stat(componentUri)
+                );
             if (!isInsideWorkspace && !allowFileLinks) {
                 vscode.window.showErrorMessage(
                     'Opening images outside the current workspace folder is blocked.'

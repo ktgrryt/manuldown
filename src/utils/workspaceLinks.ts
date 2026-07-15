@@ -14,6 +14,8 @@ const unsafeExternalLinkCharacterPattern = /[\u0000-\u001f\u007f-\u009f\s\\]/u;
 const unsafeExternalLinkBidiPattern = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u;
 const unsafeDecodedExternalLinkPattern = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u;
 const maxExternalLinkLength = 4096;
+const unsafePastedPathPattern = /[\u0000-\u001f\u007f-\u009f\u061c\u200b\u200e\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]/u;
+const maxPastedPathLength = 4096;
 
 export function sanitizeWorkspaceLinkDisplayText(value: string, maxLength = 240): string {
     const normalized = String(value || '')
@@ -71,6 +73,39 @@ export function normalizeExternalLinkHref(value: string): string | null {
     } catch {
         return null;
     }
+}
+
+export function normalizeNativeAbsolutePathForLink(
+    value: string,
+    platform = process.platform
+): string | null {
+    const rawPath = String(value || '');
+    if (
+        !rawPath ||
+        rawPath.length > maxPastedPathLength ||
+        rawPath !== rawPath.trim() ||
+        unsafePastedPathPattern.test(rawPath)
+    ) {
+        return null;
+    }
+
+    if (platform === 'win32') {
+        // Do not turn UNC shares, device paths, or drive-relative paths into
+        // links. A second colon would address an NTFS alternate data stream.
+        if (
+            /^[\\/]{2}/.test(rawPath) ||
+            !/^[a-z]:[\\/]/i.test(rawPath)
+        ) {
+            return null;
+        }
+        const normalized = path.win32.normalize(rawPath);
+        return normalized.slice(2).includes(':') ? null : normalized;
+    }
+
+    if (!rawPath.startsWith('/') || rawPath.startsWith('//')) {
+        return null;
+    }
+    return path.posix.normalize(rawPath);
 }
 
 export function encodeMarkdownRelativePath(relativePath: string): string {
@@ -188,13 +223,43 @@ export function isNativePathWithinDirectory(candidatePath: string, directoryPath
 
 export async function isUriSecurelyWithinDirectory(
     candidate: Uri,
-    directory: Uri
+    directory: Uri,
+    readStat?: (uri: Uri) => PromiseLike<{ type: number }>
 ): Promise<boolean> {
     if (!isUriLexicallyWithinDirectory(candidate, directory)) {
         return false;
     }
     if (candidate.scheme !== 'file') {
-        return true;
+        if (!readStat) {
+            // Non-file providers have no realpath equivalent. Do not call a
+            // lexical check "secure" unless every visible path component can
+            // at least be checked for a symbolic-link file type.
+            return false;
+        }
+        try {
+            const relativePath = path.posix.relative(directory.path, candidate.path);
+            const pathSegments = relativePath.split('/').filter(Boolean);
+            if (pathSegments.length > 256) {
+                return false;
+            }
+            const componentPaths = [directory.path];
+            let currentPath = directory.path;
+            for (const segment of pathSegments) {
+                currentPath = path.posix.join(currentPath, segment);
+                componentPaths.push(currentPath);
+            }
+            for (const componentPath of componentPaths) {
+                const stat = await readStat(directory.with({ path: componentPath }));
+                // vscode.FileType.SymbolicLink. Keep the numeric flag here so
+                // this low-level utility retains a type-only vscode import.
+                if ((stat.type & 64) !== 0) {
+                    return false;
+                }
+            }
+            return true;
+        } catch {
+            return false;
+        }
     }
     try {
         const [canonicalCandidate, canonicalDirectory] = await Promise.all([

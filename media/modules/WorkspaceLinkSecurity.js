@@ -4,6 +4,7 @@ const explicitSchemePattern = /^[a-z][a-z0-9+.-]*:/i;
 const unsafeLinkCharacterPattern = /[\u0000-\u001f\u007f-\u009f\s\\]/u;
 const unsafeLinkBidiPattern = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u;
 const unsafeDecodedLinkPattern = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u;
+const unsafePastedPathPattern = /[\u0000-\u001f\u007f-\u009f\u061c\u200b\u200e\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]/u;
 const MAX_INSERTED_LINK_LENGTH = 4096;
 
 export function normalizeWorkspaceLinkLabel(value) {
@@ -13,6 +14,49 @@ export function normalizeWorkspaceLinkLabel(value) {
         .replace(/\s+/g, ' ')
         .trim();
     return (normalized || 'link').slice(0, 240);
+}
+
+export function getPastedAbsolutePathCandidate(value) {
+    const pathText = String(value || '');
+    if (
+        !pathText ||
+        pathText.length > MAX_INSERTED_LINK_LENGTH ||
+        pathText !== pathText.trim() ||
+        unsafePastedPathPattern.test(pathText)
+    ) {
+        return null;
+    }
+    if (/^\/(?!\/)/.test(pathText) || /^[a-z]:[\\/]/i.test(pathText)) {
+        return pathText;
+    }
+    return null;
+}
+
+export function linkInputLooksLikeNativeAbsolutePath(value) {
+    // Treat surrounding whitespace as path-like even though the host rejects
+    // it. This guard runs before an existing-link draft can reach href.
+    return /^(?:[\\/]|[a-z]:[\\/])/i.test(String(value || '').trim());
+}
+
+export function linkInputRequiresWorkspaceResolution(value) {
+    const normalized = String(value || '').trim();
+    return linkInputLooksLikeNativeAbsolutePath(normalized) ||
+        /^(?:\.\.?[\\/])/.test(normalized);
+}
+
+export function getWorkspaceLinkSuggestionQuery(value) {
+    const query = String(value || '');
+    if (
+        query.length < 2 ||
+        query.length > 256 ||
+        query !== query.trim() ||
+        /[\u0000-\u001f\u007f-\u009f\u061c\u200b\u200e\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]/u.test(query) ||
+        /^[a-z][a-z0-9+.-]*:/i.test(query) ||
+        linkInputRequiresWorkspaceResolution(query)
+    ) {
+        return null;
+    }
+    return query;
 }
 
 export function sanitizeInsertedLinkHref(rawHref, linkKind) {

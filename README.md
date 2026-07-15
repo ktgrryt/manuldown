@@ -18,7 +18,7 @@ ManulDown is a VSCode extension that lets you edit Markdown files in a WYSIWYG e
 - **Automatic Markdown syntax conversion**: Recognizes syntax such as `#`, `**`, `*`, `-`, and `` ``` `` while typing.
 - **Syntax highlighting**: Multi-language highlighting powered by Prism.js.
 - **Image support**: Paste and drag-and-drop images.
-- **Links**: Insert HTTP, HTTPS, and email links, or safely encoded links to files and Markdown headings in the current workspace folder.
+- **Links**: Insert HTTP, HTTPS, and email links, or safely encoded links to files in the current workspace folder.
 - **Table of contents**: Auto-generated from headings.
 - **Two-way sync**: Changes in the editor are reflected in the Markdown file immediately.
 - **Toolbar**: Quick access buttons for common formatting.
@@ -40,7 +40,11 @@ ManulDown is a VSCode extension that lets you edit Markdown files in a WYSIWYG e
 - **H1, H2, H3**: Heading levels
 - **• List**: Unordered list
 - **1\. List**: Ordered list
-- **Link**: Enter a URL or select a workspace file or Markdown heading
+- **Link**: Open the inline link field for a URL, an absolute workspace path, or workspace file search
+
+Select text and use the Link button, `/link`, `Cmd+K`, or `Ctrl+K` to open the same inline link popover used for existing links. Paste an HTTP, HTTPS, or `mailto:` URL directly, paste an absolute path or an explicit `./` / `../` path to an existing file in the current workspace, or type at least two characters such as `test3` to see matching workspace files below the field. Choosing a suggestion fills the field with its relative path; press **Apply** or Enter to confirm it. Absolute paths are stored as relative Markdown links.
+
+Pasting an absolute local path directly over selected text also creates a relative link. Invalid, missing, symbolic-link, remote, and out-of-workspace targets remain an ordinary plain-text paste.
 
 ### Slash Commands
 
@@ -48,7 +52,7 @@ Type `/` in the editor to open the slash command menu. You can narrow results by
 
 | Command | Action |
 | --- | --- |
-| `/link` | Enter a URL or select a workspace file or Markdown heading and insert a link |
+| `/link` | Open the inline link field and insert a URL or workspace link |
 | `/table` | Insert a 2x2 table |
 | `/quote` | Convert the current block into a quote (or insert an empty quote block if conversion is not possible) |
 | `/code` | Insert a code block and focus the language label for editing |
@@ -151,7 +155,7 @@ Security notes:
 
 The `manulDown.security.*` options are disabled by default. Enabling them can let Markdown documents trigger outbound network requests, download files from external sources, disclose network metadata such as IP address or access time, or open local `file://` targets such as files, applications, shortcuts, or Windows network shares. Only enable these options when you trust the Markdown files you open.
 
-Link selection runs only after you invoke the link command. URL input, file candidates, and heading contents stay in VSCode's extension host; the editor receives only the validated result. New external links are limited to HTTP, HTTPS, and `mailto:` URLs, and ManulDown does not probe or open them while creating a link. Workspace links remain relative, and links that resolve outside the current workspace folder stay blocked unless `manulDown.security.allowFileLinks` is enabled.
+Link selection runs only after you invoke the link command. Text entered in the inline URL/path field is sent to VSCode's extension host for validation; workspace file discovery stays in the host, and the editable document receives only bounded display labels and relative candidate paths. Candidate selection is resolved through a short-lived opaque ID and revalidated before insertion. New external links are limited to HTTP, HTTPS, and `mailto:` URLs, and ManulDown does not probe or open them while creating a link. Pasted absolute paths and explicit relative paths are accepted only for a real, non-symbolic file inside the current document's workspace and are converted to an encoded relative path; rejected absolute-path pastes remain plain text without probing outside the workspace. Workspace links remain relative, and links that resolve outside the current workspace folder stay blocked unless `manulDown.security.allowFileLinks` is enabled.
 
 ### Markdown Syntax
 

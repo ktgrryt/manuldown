@@ -1453,9 +1453,19 @@ body.toc-resizing #toc-resizer::before {
     z-index: 1000;
     padding: 8px;
     display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+    width: min(560px, calc(100vw - 16px));
+    min-width: min(300px, calc(100vw - 16px));
+    box-sizing: border-box;
+}
+
+.link-popover-controls {
+    display: flex;
     align-items: center;
     gap: 6px;
-    min-width: 300px;
+    min-width: 0;
 }
 
 .image-resize-overlay {
@@ -1508,6 +1518,7 @@ body.image-resizing * {
 
 .link-popover-input {
     flex: 1;
+    min-width: 0;
     padding: 4px 8px;
     font-size: 12px;
     background-color: var(--vscode-input-background);
@@ -1520,6 +1531,65 @@ body.image-resizing * {
 
 .link-popover-input:focus {
     border-color: var(--vscode-focusBorder);
+}
+
+.link-popover-input[aria-invalid="true"] {
+    border-color: var(--vscode-inputValidation-errorBorder, #be1100);
+    background-color: var(--vscode-inputValidation-errorBackground, var(--vscode-input-background));
+}
+
+.link-popover-suggestions {
+    max-height: 200px;
+    overflow-y: auto;
+    border: 1px solid var(--vscode-dropdown-border);
+    border-radius: 3px;
+    background-color: var(--vscode-quickInput-background, var(--vscode-dropdown-background));
+    padding: 3px;
+}
+
+.link-popover-suggestion {
+    display: flex;
+    align-items: baseline;
+    width: 100%;
+    box-sizing: border-box;
+    gap: 10px;
+    padding: 5px 7px;
+    border: none;
+    border-radius: 3px;
+    background: transparent;
+    color: var(--vscode-quickInput-foreground, var(--vscode-editor-foreground));
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.link-popover-suggestion:hover,
+.link-popover-suggestion.active {
+    background-color: var(--vscode-list-activeSelectionBackground);
+    color: var(--vscode-list-activeSelectionForeground);
+}
+
+.link-popover-suggestion-label {
+    flex: 0 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.link-popover-suggestion-path {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    color: var(--vscode-descriptionForeground);
+    font-size: 11px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.link-popover-suggestion.active .link-popover-suggestion-path,
+.link-popover-suggestion:hover .link-popover-suggestion-path {
+    color: inherit;
+    opacity: 0.85;
 }
 
 .link-popover-btn {

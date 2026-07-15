@@ -12,6 +12,7 @@ const {
     isUriLexicallyWithinDirectory,
     isUriSecurelyWithinDirectory,
     normalizeExternalLinkHref,
+    normalizeNativeAbsolutePathForLink,
     sanitizeWorkspaceLinkDisplayText,
     slugifyMarkdownHeading,
 } = require('../out/utils/workspaceLinks.js');
@@ -26,6 +27,10 @@ const pickerSource = fs.readFileSync(
 );
 const editorSource = fs.readFileSync(
     path.join(__dirname, '..', 'media', 'editor.js'),
+    'utf8'
+);
+const editorCss = fs.readFileSync(
+    path.join(__dirname, '..', 'media', 'editor.css'),
     'utf8'
 );
 const toolbarSource = fs.readFileSync(
@@ -66,6 +71,10 @@ function createRemoteUri(uriPath, authority = 'remote') {
         authority,
         path: uriPath,
         fsPath: uriPath,
+        with: (changes) => createRemoteUri(
+            changes.path ?? uriPath,
+            changes.authority ?? authority
+        ),
     };
 }
 
@@ -163,6 +172,45 @@ test('canonical workspace checks reject a local symlink that escapes the root', 
     );
 });
 
+test('remote workspace checks reject symbolic links in any path component', async () => {
+    const root = createRemoteUri('/workspace/root');
+    const statTypes = new Map([
+        ['/workspace/root', 2],
+        ['/workspace/root/docs', 2],
+        ['/workspace/root/docs/safe.md', 1],
+        ['/workspace/root/escape', 2 | 64],
+        ['/workspace/root/escape/secret.md', 1],
+    ]);
+    const readStat = async (uri) => {
+        if (!statTypes.has(uri.path)) throw new Error('missing');
+        return { type: statTypes.get(uri.path) };
+    };
+
+    assert.equal(
+        await isUriSecurelyWithinDirectory(
+            createRemoteUri('/workspace/root/docs/safe.md'),
+            root,
+            readStat
+        ),
+        true
+    );
+    assert.equal(
+        await isUriSecurelyWithinDirectory(
+            createRemoteUri('/workspace/root/escape/secret.md'),
+            root,
+            readStat
+        ),
+        false
+    );
+    assert.equal(
+        await isUriSecurelyWithinDirectory(
+            createRemoteUri('/workspace/root/docs/safe.md'),
+            root
+        ),
+        false
+    );
+});
+
 test('bounded heading extraction skips front matter and fences and creates stable duplicates', () => {
     const markdown = [
         '---',
@@ -250,6 +298,70 @@ test('external URL input is canonicalized without permitting dangerous schemes o
     }
 });
 
+test('pasted native paths accept only bounded local absolute path syntax', () => {
+    assert.equal(
+        normalizeNativeAbsolutePathForLink('/workspace/docs/read me.md', 'darwin'),
+        '/workspace/docs/read me.md'
+    );
+    assert.equal(
+        normalizeNativeAbsolutePathForLink('/workspace/docs/../target#1.md', 'linux'),
+        '/workspace/target#1.md'
+    );
+    assert.equal(
+        normalizeNativeAbsolutePathForLink('C:/workspace/docs/read me.md', 'win32'),
+        'C:\\workspace\\docs\\read me.md'
+    );
+
+    for (const unsafePath of [
+        './target.md',
+        '../target.md',
+        '~/target.md',
+        'file:///workspace/target.md',
+        '//server/share/file.md',
+        ' /workspace/target.md',
+        '/workspace/target.md\n',
+        '/workspace/\u202etarget.md',
+        `/${'a'.repeat(4096)}`,
+        'C:\\workspace\\target.md',
+    ]) {
+        assert.equal(normalizeNativeAbsolutePathForLink(unsafePath, 'linux'), null, unsafePath);
+    }
+    for (const unsafePath of [
+        'C:relative.md',
+        '\\\\server\\share\\file.md',
+        '\\\\?\\C:\\workspace\\file.md',
+        'C:\\workspace\\file.md:stream',
+        '/workspace/target.md',
+    ]) {
+        assert.equal(normalizeNativeAbsolutePathForLink(unsafePath, 'win32'), null, unsafePath);
+    }
+});
+
+test('Webview path detection keeps raw suspicious clipboard text out of host requests', async () => {
+    const { getPastedAbsolutePathCandidate } = await workspaceLinkSecurityModulePromise;
+    for (const safePath of [
+        '/workspace/docs/read me.md',
+        'C:\\workspace\\docs\\target.md',
+        'C:/workspace/docs/target.md',
+    ]) {
+        assert.equal(getPastedAbsolutePathCandidate(safePath), safePath, safePath);
+    }
+    for (const unsafePath of [
+        './target.md',
+        '~/target.md',
+        'file:///workspace/target.md',
+        '//server/share/file.md',
+        '\\\\server\\share\\file.md',
+        'C:relative.md',
+        ' /workspace/target.md',
+        '/workspace/target.md\n',
+        '/workspace/\u202etarget.md',
+        `/${'a'.repeat(4096)}`,
+    ]) {
+        assert.equal(getPastedAbsolutePathCandidate(unsafePath), null, unsafePath);
+    }
+});
+
 test('Webview insertion validation keeps workspace and external link kinds separate', async () => {
     const { sanitizeInsertedLinkHref } = await workspaceLinkSecurityModulePromise;
     for (const safeHref of [
@@ -303,44 +415,239 @@ test('Webview insertion validation keeps workspace and external link kinds separ
     );
 });
 
-test('the native link picker offers URL and workspace targets without accepting Webview input', () => {
-    assert.match(pickerSource, /targetKind: 'external'/);
-    assert.match(pickerSource, /targetKind: 'workspace'/);
-    assert.match(pickerSource, /vscode\.window\.showInputBox/);
-    assert.match(pickerSource, /normalizeExternalLinkHref\(value\)/);
-    assert.match(pickerSource, /const href = normalizeExternalLinkHref\(rawHref\)/);
-    assert.match(pickerSource, /kind: 'external'/);
-    assert.match(pickerSource, /kind: 'workspace'/);
-    assert.doesNotMatch(pickerSource, /(?:fetch|openExternal)/);
-    assert.ok(
-        pickerSource.indexOf("targetKind: 'external'") <
-        pickerSource.indexOf('vscode.workspace.findFiles'),
-        'The URL choice should be available before any workspace scan'
+test('inline link path guard blocks whitespace-wrapped native paths before href mutation', async () => {
+    const {
+        getWorkspaceLinkSuggestionQuery,
+        linkInputLooksLikeNativeAbsolutePath,
+        linkInputRequiresWorkspaceResolution,
+    } = await workspaceLinkSecurityModulePromise;
+    for (const pathInput of [
+        '/Users/example/workspace/target.md',
+        ' /Users/example/workspace/target.md',
+        '\u00a0/Users/example/workspace/target.md',
+        'C:\\workspace\\target.md',
+        '\tC:\\workspace\\target.md ',
+    ]) {
+        assert.equal(linkInputLooksLikeNativeAbsolutePath(pathInput), true, pathInput);
+    }
+    for (const urlInput of [
+        'https://example.com/docs',
+        'mailto:person@example.com',
+        './relative.md',
+        'plain-relative.md',
+    ]) {
+        assert.equal(linkInputLooksLikeNativeAbsolutePath(urlInput), false, urlInput);
+    }
+
+    assert.equal(getWorkspaceLinkSuggestionQuery('test3'), 'test3');
+    assert.equal(getWorkspaceLinkSuggestionQuery('docs/test3'), 'docs/test3');
+    for (const blockedQuery of [
+        'x',
+        ' https',
+        'https://example.com',
+        'mailto:person@example.com',
+        'javascript:alert(1)',
+        '/Users/example/test3.md',
+        'C:\\workspace\\test3.md',
+        './test3.md',
+        '../test3.md',
+        'test\n3',
+        'test\u202e3',
+        'x'.repeat(257),
+    ]) {
+        assert.equal(getWorkspaceLinkSuggestionQuery(blockedQuery), null, blockedQuery);
+    }
+    assert.equal(linkInputRequiresWorkspaceResolution('./test3.md'), true);
+    assert.equal(linkInputRequiresWorkspaceResolution('../test3.md'), true);
+    assert.equal(linkInputRequiresWorkspaceResolution('test3'), false);
+});
+
+test('inline workspace suggestions are debounced, request-scoped, and rendered as text', () => {
+    assert.match(editorSource, /role="combobox"/);
+    assert.match(editorSource, /role="listbox"/);
+    assert.match(editorSource, /setTimeout\(\(\) => \{[\s\S]*?requestWorkspaceLinkSuggestions[\s\S]*?\}, 150\)/);
+    assert.match(editorSource, /type: 'cancelWorkspaceLinkSuggestions'/);
+    assert.match(editorSource, /type: 'resolveWorkspaceLinkSuggestion'/);
+    assert.match(editorSource, /searchRequestId: suggestion\?\.searchRequestId \|\| ''/);
+    assert.match(editorSource, /candidateId: suggestion\?\.candidateId \|\| ''/);
+    assert.match(editorSource, /requestId !== activeLinkSuggestionRequestId/);
+    assert.match(editorSource, /query !== activeLinkSuggestionQuery/);
+    assert.match(editorSource, /input\.value !== query/);
+    assert.match(editorSource, /sanitizeInsertedLinkHref\(item\?\.path, 'workspace'\)/);
+    assert.match(editorSource, /function linkPopoverInputAwaitsWorkspaceSuggestion/);
+    assert.match(editorSource, /openButton\.disabled = isBusy \|\| awaitsWorkspaceSuggestion/);
+    assert.match(editorSource, /applyButton\.disabled = isBusy \|\| awaitsWorkspaceSuggestion/);
+    assert.match(
+        editorSource,
+        /e\.preventDefault\(\);[\s\S]*?linkPopoverInputAwaitsWorkspaceSuggestion\(input\.value\)[\s\S]*?return;/
+    );
+
+    const receiverStart = editorSource.indexOf('receiveWorkspaceLinkSuggestions = (message) =>');
+    const receiverEnd = editorSource.indexOf('function repositionLinkPopoverWithinViewport', receiverStart);
+    const receiverSource = editorSource.slice(receiverStart, receiverEnd);
+    assert.match(receiverSource, /document\.createElement\('button'\)/);
+    assert.match(receiverSource, /label\.textContent = item\.label/);
+    assert.match(receiverSource, /pathText\.textContent = item\.path/);
+    assert.doesNotMatch(receiverSource, /innerHTML/);
+    assert.match(editorSource, /event\.key === 'ArrowDown' \|\| event\.key === 'ArrowUp'/);
+    assert.match(editorSource, /event\.key === 'Enter'/);
+    assert.match(editorSource, /event\.key === 'Escape'/);
+    assert.match(
+        editorSource,
+        /input\.addEventListener\('compositionstart',[\s\S]*?linkInputIsComposing = true/
+    );
+    assert.match(editorSource, /isLinkInputImeInteraction\(event, input\)/);
+    assert.match(
+        editorSource,
+        /linkInputIsComposing \|\|[\s\S]*?compositionUpdateGate\.composing/
+    );
+    assert.match(editorSource, /document\.addEventListener\('visibilitychange'/);
+    assert.match(
+        editorSource,
+        /document\.visibilityState !== 'visible'[\s\S]*?clearWorkspaceLinkSuggestions\(\{ cancelHost: true \}\)/
+    );
+    assert.match(
+        editorSource,
+        /document\.activeElement === input &&[\s\S]*?isLinkInputImeInteraction\(e, input\)/
+    );
+    assert.match(
+        editorCss,
+        /\.link-popover-suggestion\s*\{[\s\S]*?box-sizing: border-box/
+    );
+    assert.match(
+        editorSource,
+        /if \(requestKind === 'suggestion'\)[\s\S]*?clearWorkspaceLinkSuggestions\(\{ cancelHost: true \}\)/
+    );
+    assert.match(
+        editorSource,
+        /linkPopoverInputNeedsHostResolution\(input\.value\)[\s\S]*?restoreLinkHrefToBaseline\(\)/
     );
 });
 
-test('workspace picker protocol keeps discovery host-owned and request scoped', () => {
-    const requestCaseStart = providerSource.indexOf("case 'requestWorkspaceLink':");
-    const nextCaseStart = providerSource.indexOf("case 'openImage':", requestCaseStart);
+test('link entry opens the inline URL or path UI without a native Files action', () => {
+    const requestStart = editorSource.indexOf(
+        'requestWorkspaceLink = () =>',
+        editorSource.indexOf('function selectionCanBecomeWorkspaceLink')
+    );
+    const requestEnd = editorSource.indexOf('function insertSelectedWorkspaceLink', requestStart);
+    const requestSource = editorSource.slice(requestStart, requestEnd);
+    assert.match(requestSource, /openInlineLinkPopover\(range\.cloneRange\(\), existingLink\)/);
+    assert.doesNotMatch(requestSource, /vscode\.postMessage/);
+
+    assert.match(editorSource, /placeholder="URL or workspace file path"/);
+    assert.doesNotMatch(editorSource, /data-action="browse"|Files…/);
+    assert.match(editorSource, /data-action="apply">Apply<\/button>/);
+    assert.match(editorSource, /type: 'requestLinkInputResolution'/);
+    assert.doesNotMatch(editorSource, /type: 'requestWorkspaceLink'/);
+    assert.match(editorSource, /linkPopoverInputNeedsHostResolution\(input\.value\)/);
+    assert.match(
+        editorSource,
+        /linkInputBaselineValue = input\.value;[\s\S]*?syncLinkPopoverOpenButtonState\(input\.value\)/
+    );
+    assert.match(editorSource, /shouldApplyInlineLinkResponse\(requestId\)/);
+    assert.match(
+        editorSource,
+        /finishInlineLinkRequest\(requestId, true, href\);[\s\S]*?notifyChangeImmediate\(\)/
+    );
+    assert.match(
+        editorSource,
+        /function openLink\(\)[\s\S]*?linkPopoverInputNeedsHostResolution\(input\.value\)[\s\S]*?submitLinkPopoverInput\(\)/
+    );
+
+    assert.match(pickerSource, /resolveLinkInput/);
+    assert.match(pickerSource, /normalizeExternalLinkHref\(rawInput\)/);
+    assert.match(
+        pickerSource,
+        /resolvePastedAbsolutePath\(\s*document,\s*rawInput,\s*token/
+    );
+    assert.match(pickerSource, /resolveWorkspaceRelativePath\(document, rawInput, token\)/);
+    assert.doesNotMatch(pickerSource, /pickWorkspaceFileLink|showQuickPick/);
+    assert.doesNotMatch(pickerSource, /targetKind: '(?:external|workspace)'/);
+    assert.doesNotMatch(pickerSource, /vscode\.window\.showInputBox/);
+    assert.match(pickerSource, /kind: 'external'/);
+    assert.match(pickerSource, /kind: 'workspace'/);
+    assert.doesNotMatch(pickerSource, /(?:fetch|openExternal)/);
+});
+
+test('selected-text path paste keeps a literal fallback until a host-only relative link resolves', () => {
+    assert.match(editorSource, /getPastedAbsolutePathCandidate\(rawExternalPastedText\)/);
+    assert.match(editorSource, /e\.isTrusted === true/);
+    assert.match(editorSource, /originalContents = range\.extractContents\(\)/);
+    assert.match(editorSource, /createPastedPathFallback\(document, pathText\)/);
+    assert.match(editorSource, /isPastedPathFallbackIntact\(pending, editor\)/);
+    assert.match(editorSource, /type: 'requestPastedPathLink'/);
+    assert.match(editorSource, /PASTED_PATH_LINK_TIMEOUT_MS = 2000/);
+    assert.match(editorSource, /case 'pastedPathLinkRejected':/);
+    assert.match(editorSource, /finalizePendingPastedPathLink/);
+    assert.match(editorSource, /sanitizeInsertedLinkHref\(message\.href, message\.linkKind\)/);
+    assert.match(editorSource, /replacePastedPathFallback\(pending, link\)/);
+    assert.match(editorSource, /releasePastedPathFallback\(pending\)/);
+    assert.doesNotMatch(
+        editorSource.slice(
+            editorSource.indexOf('function beginPastedPathLinkRequest'),
+            editorSource.indexOf('function tryOverrideGlobalProperty')
+        ),
+        /innerHTML/
+    );
+});
+
+test('workspace discovery is host-owned without the obsolete native picker protocol', () => {
+    assert.doesNotMatch(providerSource, /case 'requestWorkspaceLink':/);
+    assert.doesNotMatch(pickerSource, /pickWorkspaceFileLink|pickWorkspaceLink|showQuickPick/);
+    assert.match(pickerSource, /new vscode\.RelativePattern\(workspaceFolder, '\*\*\/\*'\)/);
+    assert.match(pickerSource, /maxWorkspaceFiles = 2000/);
+    assert.match(pickerSource, /isUriSecurelyWithinDirectory/);
+    assert.match(pickerSource, /resolvePastedAbsolutePath/);
+    assert.doesNotMatch(pickerSource, /(?:fetch|openExternal)/);
+});
+
+test('inline URL or path input is bounded and resolved entirely by the host', () => {
+    const requestCaseStart = providerSource.indexOf("case 'requestLinkInputResolution':");
+    const nextCaseStart = providerSource.indexOf("case 'cancelWorkspaceLinkRequest':", requestCaseStart);
     assert.ok(requestCaseStart >= 0 && nextCaseStart > requestCaseStart);
     const requestCase = providerSource.slice(requestCaseStart, nextCaseStart);
 
     assert.match(requestCase, /workspaceLinkRequestIdPattern\.test\(requestId\)/);
-    assert.match(requestCase, /!webviewPanel\.active/);
-    assert.match(requestCase, /if \(activeWorkspaceLinkRequest\)/);
-    assert.match(requestCase, /this\.workspaceLinkPicker\.pick\(\s*document,/);
+    assert.match(requestCase, /rawInput\.length > 4096/);
+    assert.match(requestCase, /activeWorkspaceLinkRequest !== null/);
+    assert.match(requestCase, /resolveLinkInput\(\s*document,\s*rawInput/);
+    assert.match(
+        requestCase,
+        /resolveLinkInput\(\s*document,\s*rawInput,\s*cancellation\.token/
+    );
     assert.match(requestCase, /linkKind: selection\.kind/);
-    assert.doesNotMatch(requestCase, /message\.(?:url|href|label|uri|path|root|glob|document)/);
+    assert.doesNotMatch(
+        requestCase,
+        /message\.(?:root|documentUri|workspaceFolder|allowOutside|href|label|linkKind)/
+    );
 
-    assert.match(pickerSource, /new vscode\.RelativePattern\(workspaceFolder, '\*\*\/\*'\)/);
-    assert.match(pickerSource, /maxWorkspaceFiles = 2000/);
-    assert.match(pickerSource, /maxMarkdownBytes = 1024 \* 1024/);
-    assert.match(pickerSource, /isUriSecurelyWithinDirectory/);
-    assert.doesNotMatch(pickerSource, /(?:fetch|openExternal)/);
+    const cancelCaseStart = providerSource.indexOf("case 'cancelWorkspaceLinkRequest':");
+    const cancelCaseEnd = providerSource.indexOf("case 'openImage':", cancelCaseStart);
+    const cancelCase = providerSource.slice(cancelCaseStart, cancelCaseEnd);
+    assert.match(cancelCase, /activeRequest\.cancellation\.cancel\(\)/);
+    assert.doesNotMatch(cancelCase, /activeWorkspaceLinkRequest = null/);
+    assert.match(pickerSource, /readCancellationAwareStat/);
+});
+
+test('pasted path protocol is request-scoped and ignores Webview trust-boundary fields', () => {
+    const requestCaseStart = providerSource.indexOf("case 'requestPastedPathLink':");
+    const nextCaseStart = providerSource.indexOf("case 'requestWorkspaceLinkSuggestions':", requestCaseStart);
+    assert.ok(requestCaseStart >= 0 && nextCaseStart > requestCaseStart);
+    const requestCase = providerSource.slice(requestCaseStart, nextCaseStart);
+
+    assert.match(requestCase, /pastedPathLinkRequestIdPattern\.test\(requestId\)/);
+    assert.match(requestCase, /activePastedPathLinkRequestId !== null/);
+    assert.match(requestCase, /resolvePastedAbsolutePath\(document, pathText\)/);
+    assert.match(requestCase, /linkKind: selection\.kind/);
+    assert.doesNotMatch(
+        requestCase,
+        /message\.(?:root|documentUri|workspaceFolder|allowOutside|href|label)/
+    );
 });
 
 test('Webview accepts picker results only for a live exact request and inserts text-only DOM', () => {
     assert.match(editorSource, /takePendingWorkspaceLinkInsertion\(requestId\)/);
+    assert.match(editorSource, /shouldApplyInlineLinkResponse\(requestId\)/);
     assert.match(editorSource, /pending\.revision !== localUpdateRevision/);
     assert.match(editorSource, /sanitizeInsertedLinkHref\(message\.href, message\.linkKind\)/);
     assert.match(editorSource, /document\.createElement\('a'\)/);
@@ -349,6 +656,12 @@ test('Webview accepts picker results only for a live exact request and inserts t
     assert.match(editorSource, /stateManager\.commitStateAfterChange\(\{/);
     assert.match(editorSource, /case 'workspaceLinkCancelled':/);
     assert.match(editorSource, /discardPendingWorkspaceLinkInsertion/);
+    assert.match(editorSource, /type: 'cancelWorkspaceLinkRequest'/);
+    assert.match(
+        editorSource,
+        /linkPopoverInputNeedsHostResolution\(input\.value\)[\s\S]*?restoreLinkHrefToBaseline\(\)/
+    );
+    assert.match(editorSource, /linkInputLooksLikeNativeAbsolutePath,/);
     assert.doesNotMatch(
         editorSource.slice(
             editorSource.indexOf('function insertSelectedWorkspaceLink'),

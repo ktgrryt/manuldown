@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 const domino = require('@mixmark-io/domino');
+const TurndownService = require('turndown');
 
 const domUtilsSource = fs.readFileSync(
     path.join(__dirname, '..', 'media', 'modules', 'DOMUtils.js'),
@@ -10,6 +11,13 @@ const domUtilsSource = fs.readFileSync(
 );
 const domUtilsModulePromise = import(
     `data:text/javascript;base64,${Buffer.from(domUtilsSource).toString('base64')}`
+);
+const pastedPathLinkDomSource = fs.readFileSync(
+    path.join(__dirname, '..', 'media', 'modules', 'PastedPathLinkDOM.js'),
+    'utf8'
+);
+const pastedPathLinkDomModulePromise = import(
+    `data:text/javascript;base64,${Buffer.from(pastedPathLinkDomSource).toString('base64')}`
 );
 
 async function cleanEditorHTML(editorHTML, options = {}) {
@@ -91,6 +99,104 @@ test('history comparison canonicalizes asynchronously reconstructed image UI', a
     assert.doesNotMatch(cleanedHTML, /\s(?:width|height)="/);
     assert.doesNotMatch(cleanedHTML, /(?:width|height|aspect-ratio)\s*:/);
     assert.match(cleanedHTML, /border:\s*1px solid red/);
+});
+
+test('pasted path fallback survives editor normalization and restores selected link text', async () => {
+    const pastedPath = '/Users/ryoto/code/test-md/test3.md';
+    const window = domino.createWindow(
+        '<div id="editor">' +
+        '<p id="target">にリンクを貼る</p>' +
+        '<span class="md-table-structure-handle">transient control</span>' +
+        '</div>'
+    );
+    const editor = window.document.querySelector('#editor');
+    const target = window.document.querySelector('#target');
+    const nodeListPrototype = Object.getPrototypeOf(editor.querySelectorAll('span'));
+    const previousForEach = nodeListPrototype.forEach;
+    const previousDocument = global.document;
+    const previousNode = global.Node;
+    nodeListPrototype.forEach = Array.prototype.forEach;
+    global.document = window.document;
+    global.Node = window.Node;
+
+    try {
+        const { DOMUtils } = await domUtilsModulePromise;
+        const {
+            createPastedPathFallback,
+            isPastedPathFallbackIntact,
+            releasePastedPathFallback,
+            replacePastedPathFallback,
+        } = await pastedPathLinkDomModulePromise;
+        const fallback = createPastedPathFallback(window.document, pastedPath);
+        target.insertBefore(fallback.fragment, target.firstChild);
+        const pending = { ...fallback, pathText: pastedPath };
+
+        assert.equal(isPastedPathFallbackIntact(pending, editor), true);
+        new DOMUtils(editor).cleanupGhostStyles();
+        assert.equal(isPastedPathFallbackIntact(pending, editor), true);
+        assert.equal(fallback.fallbackNode.data, pastedPath);
+        const pendingMarkdown = new TurndownService().turndown(
+            new DOMUtils(editor).getCleanedHTML()
+        );
+        assert.match(pendingMarkdown, /\/Users\/ryoto\/code\/test-md\/test3\.md/);
+        assert.doesNotMatch(pendingMarkdown, /<!--|-->/);
+
+        const originalSelection = window.document.createDocumentFragment();
+        originalSelection.appendChild(window.document.createTextNode('ここ'));
+        const link = window.document.createElement('a');
+        link.setAttribute('href', './test3.md');
+        link.appendChild(originalSelection);
+        assert.equal(replacePastedPathFallback(pending, link), true);
+        assert.equal(
+            target.innerHTML,
+            '<a href="./test3.md">ここ</a>にリンクを貼る'
+        );
+        assert.equal(editor.innerHTML.includes('<!---->'), false);
+
+        const rejectedFallback = createPastedPathFallback(window.document, pastedPath);
+        while (target.firstChild) {
+            target.removeChild(target.firstChild);
+        }
+        target.appendChild(rejectedFallback.fragment);
+        target.appendChild(window.document.createTextNode('のまま'));
+        const rejectedPending = { ...rejectedFallback, pathText: pastedPath };
+        new DOMUtils(editor).cleanupGhostStyles();
+        assert.equal(isPastedPathFallbackIntact(rejectedPending, editor), true);
+        assert.equal(releasePastedPathFallback(rejectedPending), rejectedFallback.fallbackNode);
+        assert.equal(target.textContent, `${pastedPath}のまま`);
+        assert.equal(editor.innerHTML.includes('<!---->'), false);
+
+        while (target.firstChild) {
+            target.removeChild(target.firstChild);
+        }
+        const tamperedFallback = createPastedPathFallback(window.document, pastedPath);
+        target.appendChild(tamperedFallback.fragment);
+        const tamperedPending = { ...tamperedFallback, pathText: pastedPath };
+        tamperedFallback.fallbackNode.data += 'に追記';
+        const unexpectedLink = window.document.createElement('a');
+        unexpectedLink.setAttribute('href', './test3.md');
+        unexpectedLink.textContent = 'ここ';
+        assert.equal(isPastedPathFallbackIntact(tamperedPending, editor), false);
+        assert.equal(replacePastedPathFallback(tamperedPending, unexpectedLink), false);
+        releasePastedPathFallback(tamperedPending);
+        assert.equal(target.textContent, `${pastedPath}に追記`);
+    } finally {
+        if (previousForEach === undefined) {
+            delete nodeListPrototype.forEach;
+        } else {
+            nodeListPrototype.forEach = previousForEach;
+        }
+        if (previousDocument === undefined) {
+            delete global.document;
+        } else {
+            global.document = previousDocument;
+        }
+        if (previousNode === undefined) {
+            delete global.Node;
+        } else {
+            global.Node = previousNode;
+        }
+    }
 });
 
 test('table cleanup preserves formatting and visual line boundaries', async () => {
