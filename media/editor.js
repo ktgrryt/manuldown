@@ -91,6 +91,7 @@ import {
     const INTERNAL_EDITOR_HTML_MARKER_END = '<!--manuldown-clipboard-end-->';
     const TRUSTED_CLIPBOARD_PAYLOAD_MAX_AGE_MS = 5 * 60 * 1000;
     const SOFT_LINE_BREAK_ATTRIBUTE = 'data-mdw-soft-break';
+    const INLINE_CODE_RIGHT_CARET_ANCHOR = '\u200B';
 
     function normalizeTocPanelWidth(value) {
         if (typeof value !== 'number' || !Number.isFinite(value)) {
@@ -11600,8 +11601,8 @@ import {
             const rawText = nextSibling.textContent || '';
             const isBoundaryOnlyText = rawText === '' || rawText.replace(/[\u200B\u2060\uFEFF]/g, '') === '';
             if (isBoundaryOnlyText) {
-                if (createPlaceholder && rawText.length === 0) {
-                    nextSibling.textContent = '';
+                if (createPlaceholder && rawText !== INLINE_CODE_RIGHT_CARET_ANCHOR) {
+                    nextSibling.textContent = INLINE_CODE_RIGHT_CARET_ANCHOR;
                 }
                 targetContainer = nextSibling;
                 targetOffset = (nextSibling.textContent || '').length;
@@ -11611,7 +11612,7 @@ import {
                 targetOffset = 0;
             }
         } else if (!nextSibling && createPlaceholder) {
-            const spacer = document.createTextNode('');
+            const spacer = document.createTextNode(INLINE_CODE_RIGHT_CARET_ANCHOR);
             parent.appendChild(spacer);
             targetContainer = spacer;
             targetOffset = (spacer.textContent || '').length;
@@ -16629,12 +16630,14 @@ import {
             }
         }
         if (!placeholder) {
-            placeholder = document.createTextNode('');
+            placeholder = document.createTextNode(INLINE_CODE_RIGHT_CARET_ANCHOR);
             if (immediateNext) {
                 parent.insertBefore(placeholder, immediateNext);
             } else {
                 parent.appendChild(placeholder);
             }
+        } else if ((placeholder.textContent || '') !== INLINE_CODE_RIGHT_CARET_ANCHOR) {
+            placeholder.textContent = INLINE_CODE_RIGHT_CARET_ANCHOR;
         }
         newRange.setStart(placeholder, placeholder.textContent.length);
         newRange.collapse(true);

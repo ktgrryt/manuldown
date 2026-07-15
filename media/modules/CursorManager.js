@@ -4,6 +4,13 @@
  * カーソルの移動（上下左右、行頭行末）を担当
  */
 
+// Empty text nodes do not provide a stable caret position in Chromium WebView.
+// These zero-width characters give both sides a real DOM offset and are stripped
+// by the existing Markdown cleanup paths. ZWSP on the right keeps line wrapping
+// possible after inline code, matching the browser behavior before regression.
+const INLINE_CODE_LEFT_CARET_ANCHOR = '\uFEFF';
+const INLINE_CODE_RIGHT_CARET_ANCHOR = '\u200B';
+
 export class CursorManager {
     constructor(editor, domUtils) {
         this.editor = editor;
@@ -667,11 +674,11 @@ export class CursorManager {
             anchor = prevSibling;
             // Keep an explicit non-rendering anchor so WebView does not normalize
             // outside-left directly into inline-code start.
-            if ((anchor.textContent || '') !== '') {
-                anchor.textContent = '';
+            if ((anchor.textContent || '') !== INLINE_CODE_LEFT_CARET_ANCHOR) {
+                anchor.textContent = INLINE_CODE_LEFT_CARET_ANCHOR;
             }
         } else {
-            anchor = document.createTextNode('');
+            anchor = document.createTextNode(INLINE_CODE_LEFT_CARET_ANCHOR);
             parent.insertBefore(anchor, code);
         }
         const range = document.createRange();
@@ -738,11 +745,11 @@ export class CursorManager {
             nextSibling.nodeType === Node.TEXT_NODE &&
             hasOnlyCaretPlaceholders(nextSibling.textContent)) {
             anchor = nextSibling;
-            if ((anchor.textContent || '').length === 0) {
-                anchor.textContent = '';
+            if ((anchor.textContent || '') !== INLINE_CODE_RIGHT_CARET_ANCHOR) {
+                anchor.textContent = INLINE_CODE_RIGHT_CARET_ANCHOR;
             }
         } else {
-            anchor = document.createTextNode('');
+            anchor = document.createTextNode(INLINE_CODE_RIGHT_CARET_ANCHOR);
             if (nextSibling) {
                 parent.insertBefore(anchor, nextSibling);
             } else {
@@ -1523,16 +1530,16 @@ export class CursorManager {
 
         let firstTextNode = this.domUtils.getFirstTextNode(code);
         if (!firstTextNode) {
-            firstTextNode = document.createTextNode('');
+            firstTextNode = document.createTextNode(INLINE_CODE_LEFT_CARET_ANCHOR);
             code.insertBefore(firstTextNode, code.firstChild || null);
         } else {
             const raw = firstTextNode.textContent || '';
-            const content = raw.replace(/^[\u2060\uFEFF]+/, '');
-            firstTextNode.textContent = content;
+            const content = raw.replace(/^[\u200B\u2060\uFEFF]+/, '');
+            firstTextNode.textContent = `${INLINE_CODE_LEFT_CARET_ANCHOR}${content}`;
         }
 
         const range = document.createRange();
-        range.setStart(firstTextNode, 0);
+        range.setStart(firstTextNode, INLINE_CODE_LEFT_CARET_ANCHOR.length);
         range.collapse(true);
         selection.removeAllRanges();
         selection.addRange(range);
@@ -1540,7 +1547,7 @@ export class CursorManager {
         this._debugInlineNav('set-inside-left', {
             containerType: appliedRange.startContainer?.nodeType,
             offset: appliedRange.startOffset,
-            mode: 'feff-forced'
+            mode: 'zero-width-anchor'
         });
         return true;
     }
@@ -1673,9 +1680,10 @@ export class CursorManager {
                 this._debugInlineNav('consume-pending-enter-inside-normalized', {
                     offset: cursorInfo?.offset ?? null
                 });
-                // Already at inline start: clear pending and continue normal forward handling
-                // so this keypress advances instead of becoming a visual no-op.
-                return false;
+                // The WebView may normalize the outside-left anchor to the code's
+                // first DOM position. The pending boundary still represents a
+                // distinct caret step, so do not consume the first code character.
+                return this._placeCursorInsideInlineCodeStart(code, selection);
             }
             this._clearPendingForwardInlineCodeEntry();
             this._debugInlineNav('consume-pending-inside-cleared', {
@@ -7377,6 +7385,23 @@ export class CursorManager {
                 return false;
             }
 
+            // A visible text node ending immediately before <code> is the caret
+            // after that text, not yet the outside-left edge of inline code. Only
+            // an explicit boundary anchor (or an element boundary) may enter code.
+            const hasExplicitOutsideLeftAnchor = !!(
+                currentContainer &&
+                (
+                    currentContainer.nodeType === Node.ELEMENT_NODE ||
+                    (
+                        currentContainer.nodeType === Node.TEXT_NODE &&
+                        this._isInlineCodeBoundaryPlaceholder(currentContainer)
+                    )
+                )
+            );
+            if (!hasExplicitOutsideLeftAnchor) {
+                return false;
+            }
+
             let targetInlineCode = null;
             if (currentContainer && currentContainer.nodeType === Node.TEXT_NODE) {
                 const nextSibling = currentContainer.nextSibling;
@@ -7494,35 +7519,6 @@ export class CursorManager {
                 candidate.tagName === 'CODE' &&
                 !this.domUtils.getParentElement(candidate, 'PRE'));
             if (isInlineCodeCandidate) {
-                let prevSibling = offset > 0 ? node.childNodes[offset - 1] : null;
-                while (prevSibling &&
-                    prevSibling.nodeType === Node.TEXT_NODE &&
-                    this._isInlineCodeBoundaryPlaceholder(prevSibling)) {
-                    prevSibling = prevSibling.previousSibling;
-                }
-                let hasRealContentBefore = false;
-                if (prevSibling && prevSibling.nodeType === Node.TEXT_NODE) {
-                    hasRealContentBefore = (prevSibling.textContent || '').replace(/[\u200B\u2060\uFEFF]/g, '') !== '';
-                } else if (prevSibling &&
-                    prevSibling.nodeType === Node.ELEMENT_NODE &&
-                    !this._isNavigationExcludedElement(prevSibling) &&
-                    prevSibling.tagName !== 'BR') {
-                    const lastTextNode = this._getLastNavigableTextNode(prevSibling);
-                    hasRealContentBefore = !!(
-                        lastTextNode &&
-                        (lastTextNode.textContent || '').replace(/[\u200B\u2060\uFEFF]/g, '') !== ''
-                    );
-                }
-                if (hasRealContentBefore) {
-                    this._debugInlineNav('forward-element-boundary-direct-inside-left', {
-                        containerType: node?.nodeType,
-                        offset
-                    });
-                    this._clearPendingForwardInlineCodeEntry();
-                    if (this._placeCursorInsideInlineCodeStart(candidate, selection)) {
-                        return true;
-                    }
-                }
                 if (this._placeCursorBeforeInlineCodeElement(candidate, selection)) {
                     return true;
                 }
@@ -7725,12 +7721,14 @@ export class CursorManager {
                     }
                 }
                 if (!placeholder) {
-                    placeholder = document.createTextNode('');
+                    placeholder = document.createTextNode(INLINE_CODE_RIGHT_CARET_ANCHOR);
                     if (immediateNext) {
                         parent.insertBefore(placeholder, immediateNext);
                     } else {
                         parent.appendChild(placeholder);
                     }
+                } else if ((placeholder.textContent || '') !== INLINE_CODE_RIGHT_CARET_ANCHOR) {
+                    placeholder.textContent = INLINE_CODE_RIGHT_CARET_ANCHOR;
                 }
                 const fallbackRange = document.createRange();
                 fallbackRange.setStart(placeholder, placeholder.textContent.length);
@@ -7800,6 +7798,9 @@ export class CursorManager {
                             range.setStart(sibling, targetOffset);
                             range.collapse(true);
                             applyRange(range);
+                            if (isInlineCodeOutsideRightPlaceholder && currentNode.parentNode) {
+                                currentNode.remove();
+                            }
                             return true;
                         }
                     } else if (sibling.nodeType === Node.ELEMENT_NODE) {
@@ -7880,26 +7881,6 @@ export class CursorManager {
                         const isInlineCodeSibling = sibling.tagName === 'CODE' &&
                             !this.domUtils.getParentElement(sibling, 'PRE');
                         if (isInlineCodeSibling) {
-                            const currentText = currentNode.textContent || '';
-                            let trailingBoundaryStart = currentText.length;
-                            while (trailingBoundaryStart > 0 &&
-                                this._isInlineBoundaryChar(currentText[trailingBoundaryStart - 1])) {
-                                trailingBoundaryStart--;
-                            }
-                            const isDirectTextBoundaryBeforeInlineCode =
-                                currentNode.nextSibling === sibling &&
-                                !this._isInlineCodeBoundaryPlaceholder(currentNode) &&
-                                currentOffset >= trailingBoundaryStart;
-                            if (isDirectTextBoundaryBeforeInlineCode) {
-                                this._debugInlineNav('forward-direct-enter-inside-from-text-end', {
-                                    containerType: currentNode?.nodeType,
-                                    offset: currentOffset
-                                });
-                                this._clearPendingForwardInlineCodeEntry();
-                                if (this._placeCursorInsideInlineCodeStart(sibling, selection)) {
-                                    return true;
-                                }
-                            }
                             if (this._placeCursorBeforeInlineCodeElement(sibling, selection)) {
                                 return true;
                             }
@@ -8048,6 +8029,9 @@ export class CursorManager {
             // カーソル位置が変わらない場合は何もしない（選択範囲の再設定による副作用を防ぐ）
             if (currentNode === node && currentOffset === offset) {
                 if (reachedEditorEnd) {
+                    if (isInlineCodeOutsideRightPlaceholder) {
+                        return true;
+                    }
                     if (isTrailingEmptyBlock(node)) {
                         return true;
                     }
@@ -8305,36 +8289,6 @@ export class CursorManager {
             targetRange.collapse(true);
             return true;
         };
-        const moveFromInlineCodeStartToPreviousTextChar = (inlineCodeElement) => {
-            if (!inlineCodeElement ||
-                inlineCodeElement.nodeType !== Node.ELEMENT_NODE ||
-                inlineCodeElement.tagName !== 'CODE') {
-                return false;
-            }
-
-            let prevSibling = inlineCodeElement.previousSibling;
-            while (prevSibling &&
-                prevSibling.nodeType === Node.TEXT_NODE &&
-                this._isInlineCodeBoundaryPlaceholder(prevSibling)) {
-                prevSibling = prevSibling.previousSibling;
-            }
-            if (!prevSibling || prevSibling.nodeType !== Node.TEXT_NODE) {
-                return false;
-            }
-
-            const prevText = prevSibling.textContent || '';
-            const lastOffset = this._getLastNonZwspOffset(prevText);
-            if (lastOffset === null) {
-                return false;
-            }
-            const targetOffset = Math.min(lastOffset + 1, prevText.length);
-
-            const targetRange = document.createRange();
-            targetRange.setStart(prevSibling, targetOffset);
-            targetRange.collapse(true);
-            applyRange(targetRange);
-            return true;
-        };
         const moveToInlineCodeOutsideRightFromTextStart = (textNode, inlineCodeElement) => {
             if (!textNode || textNode.nodeType !== Node.TEXT_NODE) {
                 return false;
@@ -8360,8 +8314,10 @@ export class CursorManager {
                 placeholder.nodeType === Node.TEXT_NODE &&
                 this._isInlineCodeBoundaryPlaceholder(placeholder) &&
                 placeholder.previousSibling === inlineCodeElement)) {
-                placeholder = document.createTextNode('');
+                placeholder = document.createTextNode(INLINE_CODE_RIGHT_CARET_ANCHOR);
                 parent.insertBefore(placeholder, textNode);
+            } else if ((placeholder.textContent || '') !== INLINE_CODE_RIGHT_CARET_ANCHOR) {
+                placeholder.textContent = INLINE_CODE_RIGHT_CARET_ANCHOR;
             }
 
             const targetRange = document.createRange();
@@ -8463,9 +8419,6 @@ export class CursorManager {
                 this._isRangeAtInlineCodeStart(range, codeElement);
             if (startedAtInlineCodeStart) {
                 this._debugInlineNav('backward-inside-left-to-outside-left', {});
-                if (moveFromInlineCodeStartToPreviousTextChar(codeElement)) {
-                    return true;
-                }
                 if (this._placeCursorBeforeInlineCodeElement(codeElement, selection)) {
                     return true;
                 }
@@ -8616,16 +8569,25 @@ export class CursorManager {
                         const text = sibling.textContent || '';
                         const lastOffset = this._getLastNonZwspOffset(text);
                         if (lastOffset !== null) {
-                            // Consume one visible character when crossing inline-style boundaries.
-                            const targetOffset = lastOffset;
+                            // The outside-left edge is distinct from the previous
+                            // text character. Move to that text's end first.
+                            const targetOffset = nextIsInlineCode
+                                ? Math.min(lastOffset + 1, text.length)
+                                : lastOffset;
                             range.setStart(sibling, targetOffset);
                             range.collapse(true);
                             applyRange(range);
+                            if (nextIsInlineCode && currentNode.parentNode) {
+                                currentNode.remove();
+                            }
                             return true;
                         }
                     } else if (sibling.nodeType === Node.ELEMENT_NODE) {
                         if (setRangeToInlineCodeEnd(range, sibling)) {
                             applyRange(range);
+                            if (currentNode.parentNode) {
+                                currentNode.remove();
+                            }
                             return true;
                         }
                         const textNode = this._getLastNavigableTextNode(sibling);
@@ -8679,6 +8641,10 @@ export class CursorManager {
                             return true;
                         }
                     }
+                    // This is the logical start of an inline-code-only first line.
+                    // Keep the caret on outside-left instead of stepping through
+                    // the two offsets of the invisible anchor.
+                    return true;
                 }
             }
             if (currentOffset <= 0) {

@@ -85,6 +85,14 @@ test('editor cleanup excludes transient cursor and selection classes', async () 
     assert.match(cleanedHTML, /class="photo"/);
 });
 
+test('editor cleanup removes transient inline-code caret anchors', async () => {
+    const cleanedHTML = await cleanEditorHTML(
+        '<p>\uFEFF<code>aaa</code>\u200B</p>'
+    );
+
+    assert.equal(cleanedHTML, '<p><code>aaa</code></p>');
+});
+
 test('live DOM cleanup preserves generated table structure handles', async () => {
     const window = domino.createWindow(
         '<div id="editor"><table><tbody><tr><td>' +
