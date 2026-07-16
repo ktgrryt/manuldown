@@ -87,10 +87,38 @@ test('editor cleanup excludes transient cursor and selection classes', async () 
 
 test('editor cleanup removes transient inline-code caret anchors', async () => {
     const cleanedHTML = await cleanEditorHTML(
-        '<p>\uFEFF<code>aaa</code>\u200B</p>'
+        '<p>\uFEFF<code>' +
+        '<span class="md-inline-code-left-caret-anchor" ' +
+        'data-inline-code-left-caret-anchor="true" ' +
+        'data-exclude-from-markdown="true" contenteditable="false"></span>' +
+        'aaa</code>\u200B</p>'
     );
 
     assert.equal(cleanedHTML, '<p><code>aaa</code></p>');
+});
+
+test('live DOM cleanup preserves the inline-code caret marker', async () => {
+    const window = domino.createWindow(
+        '<div id="editor"><p><code>' +
+        '<span class="md-inline-code-left-caret-anchor" ' +
+        'data-inline-code-left-caret-anchor="true" ' +
+        'data-exclude-from-markdown="true" contenteditable="false"></span>' +
+        'aaa</code></p></div>'
+    );
+    const editor = window.document.querySelector('#editor');
+    const nodeListPrototype = Object.getPrototypeOf(editor.querySelectorAll('span'));
+    const previousForEach = nodeListPrototype.forEach;
+    nodeListPrototype.forEach = Array.prototype.forEach;
+
+    try {
+        const { DOMUtils } = await domUtilsModulePromise;
+        new DOMUtils(editor).cleanupGhostStyles();
+
+        assert.ok(editor.querySelector('.md-inline-code-left-caret-anchor'));
+        assert.equal(editor.querySelector('code').textContent, 'aaa');
+    } finally {
+        nodeListPrototype.forEach = previousForEach;
+    }
 });
 
 test('live DOM cleanup preserves generated table structure handles', async () => {

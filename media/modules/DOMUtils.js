@@ -774,6 +774,15 @@ export class DOMUtils {
                 (parent.tagName === 'TD' || parent.tagName === 'TH')
             );
         };
+        const isInlineCodeCaretAnchor = (element) => !!(
+            element?.tagName === 'SPAN' &&
+            element.classList?.contains('md-inline-code-left-caret-anchor') &&
+            element.getAttribute('data-inline-code-left-caret-anchor') === 'true' &&
+            element.getAttribute('data-exclude-from-markdown') === 'true' &&
+            element.getAttribute('contenteditable') === 'false' &&
+            element.parentElement?.tagName === 'CODE' &&
+            !this.getParentElement(element.parentElement, 'PRE')
+        );
 
         // Pasting from rich text editors can leave visual styles in the live
         // contenteditable DOM even when the saved Markdown cannot represent them.
@@ -786,7 +795,9 @@ export class DOMUtils {
         });
 
         this.editor.querySelectorAll('font, span').forEach(element => {
-            if (isSyntaxHighlightToken(element) || isTableStructureHandle(element)) {
+            if (isSyntaxHighlightToken(element) ||
+                isTableStructureHandle(element) ||
+                isInlineCodeCaretAnchor(element)) {
                 return;
             }
 

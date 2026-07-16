@@ -791,6 +791,22 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
     border: 1px solid var(--vscode-editorGroup-border);
 }
 
+/* A real zero-width child gives Chromium an addressable caret position inside
+   the left padding of inline code. Text control characters are normalized to
+   the element's outside edge by WebView and therefore cannot represent it. */
+#editor code:not(pre code) > .md-inline-code-left-caret-anchor {
+    display: inline-block;
+    width: 0;
+    min-width: 0;
+    height: 1em;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    vertical-align: text-bottom;
+    pointer-events: none;
+    user-select: none;
+}
+
 #editor pre {
     background-color: rgba(128, 128, 128, 0.15);
     border: 1px solid var(--vscode-editorGroup-border);

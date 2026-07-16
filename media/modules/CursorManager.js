@@ -4,19 +4,33 @@
  * カーソルの移動（上下左右、行頭行末）を担当
  */
 
-// Empty text nodes do not provide a stable caret position in Chromium WebView.
-// These zero-width characters give both sides a real DOM offset and are stripped
-// by the existing Markdown cleanup paths. ZWSP on the right keeps line wrapping
-// possible after inline code, matching the browser behavior before regression.
+// Empty text nodes and a visible text offset 0 do not provide distinct, stable
+// sides of an inline element in Chromium WebView. Outside edges can reuse an
+// adjacent text endpoint (or a control-character fallback for code-only lines),
+// while inside-left needs a real atomic child boundary. Horizontal navigation is
+// always consumed here so neither representation becomes an extra native step.
 const INLINE_CODE_LEFT_CARET_ANCHOR = '\uFEFF';
 const INLINE_CODE_RIGHT_CARET_ANCHOR = '\u200B';
+const INLINE_CODE_LEFT_CARET_MARKER_ATTRIBUTE = 'data-inline-code-left-caret-anchor';
+
+export function shouldRouteHorizontalArrowAfterComposition(event, compositionActive = false) {
+    return !!(
+        event &&
+        !compositionActive &&
+        (event.key === 'ArrowLeft' || event.key === 'ArrowRight') &&
+        !event.metaKey &&
+        !event.ctrlKey &&
+        !event.altKey &&
+        !event.shiftKey
+    );
+}
 
 export class CursorManager {
     constructor(editor, domUtils) {
         this.editor = editor;
         this.domUtils = domUtils;
         this._forwardImageStep = null;
-        this._pendingForwardInlineCodeEntry = null;
+        this._inlineCodeLeftBoundaryState = null;
     }
 
     _isRangeAtCodeBlockEnd(codeBlock, range) {
@@ -667,6 +681,43 @@ export class CursorManager {
         }
         const parent = code.parentElement;
         const prevSibling = code.previousSibling;
+
+        // When visible text is immediately before inline code, its end already
+        // *is* the outside-left caret requested by the editing model. Adding a
+        // separate FEFF node here creates two DOM positions at the same painted
+        // location (text end -> FEFF end), so users have to press an arrow twice
+        // before the caret visibly crosses the code padding.
+        const redundantAnchor = (
+            prevSibling &&
+            prevSibling.nodeType === Node.TEXT_NODE &&
+            this._isInlineCodeBoundaryPlaceholder(prevSibling)
+        ) ? prevSibling : null;
+        const visiblePreviousText = redundantAnchor
+            ? redundantAnchor.previousSibling
+            : prevSibling;
+        if (visiblePreviousText && visiblePreviousText.nodeType === Node.TEXT_NODE) {
+            const visibleText = visiblePreviousText.textContent || '';
+            const lastVisibleOffset = this._getLastNonZwspOffset(visibleText);
+            if (lastVisibleOffset !== null) {
+                if (redundantAnchor && redundantAnchor.parentNode) {
+                    redundantAnchor.remove();
+                }
+                const range = document.createRange();
+                range.setStart(
+                    visiblePreviousText,
+                    Math.min(lastVisibleOffset + 1, visibleText.length)
+                );
+                range.collapse(true);
+                selection.removeAllRanges();
+                selection.addRange(range);
+                this._setInlineCodeLeftBoundaryState(code, 'outside-left');
+                return true;
+            }
+        }
+
+        // A leading inline code has no visible text endpoint to reuse. Keep a
+        // physical anchor only for that case so Chromium cannot merge the line's
+        // outside-left and inside-left carets.
         let anchor = null;
         if (prevSibling &&
             prevSibling.nodeType === Node.TEXT_NODE &&
@@ -686,7 +737,7 @@ export class CursorManager {
         range.collapse(true);
         selection.removeAllRanges();
         selection.addRange(range);
-        this._setPendingForwardInlineCodeEntry(code, anchor, range.startOffset);
+        this._setInlineCodeLeftBoundaryState(code, 'outside-left');
         this._debugInlineNav('set-outside-left', {
             containerType: range.startContainer?.nodeType,
             offset: range.startOffset
@@ -1472,20 +1523,32 @@ export class CursorManager {
         this._forwardImageStep = null;
     }
 
-    _setPendingForwardInlineCodeEntry(code, container = null, offset = null) {
-        if (!code) {
-            this._pendingForwardInlineCodeEntry = null;
+    _setInlineCodeLeftBoundaryState(code, zone) {
+        // Chromium can expose outside-left and inside-left as the same DOM Range.
+        // Keep the logical side separately so one keypress always advances one step.
+        const isValidZone = zone === 'outside-left' || zone === 'inside-left';
+        if (!code || !isValidZone) {
+            this._inlineCodeLeftBoundaryState = null;
             return;
         }
-        this._pendingForwardInlineCodeEntry = {
-            code,
-            container,
-            offset: typeof offset === 'number' ? offset : null
-        };
+        this._inlineCodeLeftBoundaryState = { code, zone };
     }
 
-    _clearPendingForwardInlineCodeEntry() {
-        this._pendingForwardInlineCodeEntry = null;
+    clearInlineCodeBoundaryState() {
+        this._inlineCodeLeftBoundaryState = null;
+    }
+
+    hasActiveInlineCodeBoundaryState(selection = window.getSelection()) {
+        const code = this._inlineCodeLeftBoundaryState?.code || null;
+        if (!code || !code.isConnected || this.domUtils.getParentElement(code, 'PRE')) {
+            this.clearInlineCodeBoundaryState();
+            return false;
+        }
+        if (!this._isSelectionNearInlineCodeLeftBoundary(selection, code)) {
+            this.clearInlineCodeBoundaryState();
+            return false;
+        }
+        return true;
     }
 
     _getInlineCodeStartTextPosition(code) {
@@ -1528,27 +1591,95 @@ export class CursorManager {
             return false;
         }
 
-        let firstTextNode = this.domUtils.getFirstTextNode(code);
+        const rawCodeText = code.textContent || '';
+        const visibleCodeText = rawCodeText.replace(/[\u200B\u2060\uFEFF]/g, '');
+        const existingMarkers = Array.from(code.childNodes || []).filter(node => (
+            node &&
+            node.nodeType === Node.ELEMENT_NODE &&
+            node.getAttribute?.(INLINE_CODE_LEFT_CARET_MARKER_ATTRIBUTE) === 'true'
+        ));
+        let marker = existingMarkers.shift() || null;
+        existingMarkers.forEach(extraMarker => extraMarker.remove());
+        if (!marker) {
+            marker = document.createElement('span');
+            marker.setAttribute(INLINE_CODE_LEFT_CARET_MARKER_ATTRIBUTE, 'true');
+            marker.setAttribute('data-exclude-from-markdown', 'true');
+            marker.setAttribute('contenteditable', 'false');
+            marker.setAttribute('aria-hidden', 'true');
+            marker.className = 'md-inline-code-left-caret-anchor';
+        }
+
+        const contentNodes = Array.from(code.childNodes || []).filter(node => node !== marker);
+        const hasSingleTextNode = contentNodes.length === 1 &&
+            contentNodes[0].nodeType === Node.TEXT_NODE;
+        let firstTextNode = hasSingleTextNode ? contentNodes[0] : null;
         if (!firstTextNode) {
-            firstTextNode = document.createTextNode(INLINE_CODE_LEFT_CARET_ANCHOR);
-            code.insertBefore(firstTextNode, code.firstChild || null);
-        } else {
-            const raw = firstTextNode.textContent || '';
-            const content = raw.replace(/^[\u200B\u2060\uFEFF]+/, '');
-            firstTextNode.textContent = `${INLINE_CODE_LEFT_CARET_ANCHOR}${content}`;
+            contentNodes.forEach(node => node.remove());
+            firstTextNode = document.createTextNode(visibleCodeText);
+            code.appendChild(firstTextNode);
+        } else if ((firstTextNode.textContent || '') !== visibleCodeText) {
+            // Strip legacy FEFF/ZWSP text anchors without replacing the live text
+            // node that selection/history bookmarks may still reference.
+            firstTextNode.textContent = visibleCodeText;
+        }
+        if (code.firstChild !== marker) {
+            code.insertBefore(marker, code.firstChild || null);
         }
 
         const range = document.createRange();
-        range.setStart(firstTextNode, INLINE_CODE_LEFT_CARET_ANCHOR.length);
+        // The real child boundary after an atomic marker remains inside <code> in
+        // Chromium. Unlike a default-ignorable FEFF text offset, WebView cannot
+        // lift this boundary to the visually identical outside of the element.
+        range.setStart(code, 1);
         range.collapse(true);
         selection.removeAllRanges();
         selection.addRange(range);
         const appliedRange = selection.rangeCount ? selection.getRangeAt(0) : range;
+        const appliedCode = this.domUtils.getParentElement(appliedRange.startContainer, 'CODE');
+        const appliedCursorInfo = (appliedRange.startContainer === code || appliedCode === code)
+            ? this._getInlineCodeCursorInfo(appliedRange, code)
+            : null;
+        if (!appliedCursorInfo || appliedCursorInfo.offset !== 0) {
+            this.clearInlineCodeBoundaryState();
+            return false;
+        }
+        this._setInlineCodeLeftBoundaryState(code, 'inside-left');
         this._debugInlineNav('set-inside-left', {
             containerType: appliedRange.startContainer?.nodeType,
             offset: appliedRange.startOffset,
-            mode: 'zero-width-anchor'
+            mode: 'atomic-child-boundary'
         });
+        return true;
+    }
+
+    _isSelectionNearInlineCodeLeftBoundary(selection, code) {
+        if (!selection || !selection.rangeCount || !selection.isCollapsed || !code) {
+            return false;
+        }
+        const range = selection.getRangeAt(0);
+        if (this._isRangeOutsideLeftOfInlineCode(range, code)) {
+            return true;
+        }
+        const currentCode = this.domUtils.getParentElement(range.startContainer, 'CODE');
+        if (currentCode !== code) {
+            return false;
+        }
+        const cursorInfo = this._getInlineCodeCursorInfo(range, code);
+        return !!cursorInfo && cursorInfo.offset === 0;
+    }
+
+    _moveCursorAfterFirstInlineCodeCharacter(code, selection) {
+        const firstStepPos = this._getInlineCodeAfterFirstCharPosition(code);
+        if (!firstStepPos) {
+            this.clearInlineCodeBoundaryState();
+            return false;
+        }
+        const range = document.createRange();
+        range.setStart(firstStepPos.node, firstStepPos.offset);
+        range.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        this.clearInlineCodeBoundaryState();
         return true;
     }
 
@@ -1577,7 +1708,7 @@ export class CursorManager {
             ) ? nextSibling : null;
             if (container.nextSibling === code) {
                 // If the caret is inside trailing boundary chars (ZWSP/WJ/FEFF) just before code,
-                // treat it as outside-left so the pending step can enter inside-left reliably.
+                // treat it as outside-left so the logical boundary state can enter inside-left reliably.
                 let trailingBoundaryStart = text.length;
                 while (trailingBoundaryStart > 0 &&
                     this._isInlineBoundaryChar(text[trailingBoundaryStart - 1])) {
@@ -1609,6 +1740,13 @@ export class CursorManager {
             return true;
         }
         if (candidate &&
+            candidate.nodeType === Node.ELEMENT_NODE &&
+            this._getLeadingInlineCodeElement(candidate) === code) {
+            // A leading inline-code-only block can be exposed by WebView as the
+            // boundary before the entire block (for example editor:0).
+            return true;
+        }
+        if (candidate &&
             candidate.nodeType === Node.TEXT_NODE &&
             this._isInlineCodeBoundaryPlaceholder(candidate) &&
             candidate.nextSibling === code) {
@@ -1617,84 +1755,42 @@ export class CursorManager {
         return false;
     }
 
-    _consumePendingForwardInlineCodeEntry(selection) {
-        if (!selection || !selection.rangeCount) {
-            this._clearPendingForwardInlineCodeEntry();
-            return false;
-        }
-
-        const pending = this._pendingForwardInlineCodeEntry;
-        const code = pending?.code || null;
+    _consumeInlineCodeLeftBoundaryForward(selection) {
+        const state = this._inlineCodeLeftBoundaryState;
+        const code = state?.code || null;
         if (!code || !code.isConnected || this.domUtils.getParentElement(code, 'PRE')) {
-            this._clearPendingForwardInlineCodeEntry();
+            this.clearInlineCodeBoundaryState();
             return false;
         }
-
-        const range = selection.getRangeAt(0);
-        const hasExactAnchor = !!pending &&
-            pending.container &&
-            typeof pending.offset === 'number';
-        const matchesExactAnchor = hasExactAnchor &&
-            range.startContainer === pending.container &&
-            range.startOffset === pending.offset;
-        const isRangeOutsideLeft = this._isRangeOutsideLeftOfInlineCode(range, code);
-        const isPendingOutsideLeft = matchesExactAnchor || isRangeOutsideLeft;
-        this._debugInlineNav('consume-pending-check', {
-            hasExactAnchor,
-            matchesExactAnchor,
-            isRangeOutsideLeft,
-            isPendingOutsideLeft,
-            containerType: range.startContainer?.nodeType,
-            offset: range.startOffset
-        });
-        if (isPendingOutsideLeft) {
-            const placeholderAnchor = (
-                range.startContainer &&
-                range.startContainer.nodeType === Node.TEXT_NODE &&
-                this._isInlineCodeBoundaryPlaceholder(range.startContainer) &&
-                range.startContainer.nextSibling === code &&
-                range.startContainer.parentNode
-            ) ? range.startContainer : (
-                hasExactAnchor &&
-                pending.container &&
-                pending.container.nodeType === Node.TEXT_NODE &&
-                this._isInlineCodeBoundaryPlaceholder(pending.container) &&
-                pending.container.nextSibling === code &&
-                pending.container.parentNode
-            ) ? pending.container : null;
-            if (placeholderAnchor) {
-                placeholderAnchor.remove();
-            }
-            this._clearPendingForwardInlineCodeEntry();
-            this._debugInlineNav('consume-pending-enter-inside', {});
+        if (!this._isSelectionNearInlineCodeLeftBoundary(selection, code)) {
+            this.clearInlineCodeBoundaryState();
+            return false;
+        }
+        if (state.zone === 'outside-left') {
             return this._placeCursorInsideInlineCodeStart(code, selection);
         }
+        if (state.zone === 'inside-left') {
+            return this._moveCursorAfterFirstInlineCodeCharacter(code, selection);
+        }
+        this.clearInlineCodeBoundaryState();
+        return false;
+    }
 
-        const currentCode = this.domUtils.getParentElement(range.startContainer, 'CODE');
-        if (currentCode === code) {
-            const cursorInfo = this._getInlineCodeCursorInfo(range, code);
-            const isNearInlineStart = !cursorInfo ||
-                (typeof cursorInfo.offset === 'number' && cursorInfo.offset <= 1);
-            if (isNearInlineStart) {
-                this._clearPendingForwardInlineCodeEntry();
-                this._debugInlineNav('consume-pending-enter-inside-normalized', {
-                    offset: cursorInfo?.offset ?? null
-                });
-                // The WebView may normalize the outside-left anchor to the code's
-                // first DOM position. The pending boundary still represents a
-                // distinct caret step, so do not consume the first code character.
-                return this._placeCursorInsideInlineCodeStart(code, selection);
-            }
-            this._clearPendingForwardInlineCodeEntry();
-            this._debugInlineNav('consume-pending-inside-cleared', {
-                offset: cursorInfo?.offset ?? null
-            });
+    _consumeInlineCodeLeftBoundaryBackward(selection) {
+        const state = this._inlineCodeLeftBoundaryState;
+        const code = state?.code || null;
+        if (!code || !code.isConnected || this.domUtils.getParentElement(code, 'PRE')) {
+            this.clearInlineCodeBoundaryState();
             return false;
         }
-
-        // Pending boundary was abandoned by another movement path.
-        this._clearPendingForwardInlineCodeEntry();
-        this._debugInlineNav('consume-pending-cleared', {});
+        if (!this._isSelectionNearInlineCodeLeftBoundary(selection, code)) {
+            this.clearInlineCodeBoundaryState();
+            return false;
+        }
+        if (state.zone === 'inside-left') {
+            return this._placeCursorBeforeInlineCodeElement(code, selection);
+        }
+        this.clearInlineCodeBoundaryState();
         return false;
     }
 
@@ -1919,7 +2015,7 @@ export class CursorManager {
 
         // Forward movement should stop at outside-left first; the next keypress enters inside-left.
         if (direction === 'forward') {
-            this._setPendingForwardInlineCodeEntry(codeElement, container, offset);
+            this._setInlineCodeLeftBoundaryState(codeElement, 'outside-left');
             return false;
         }
 
@@ -7251,6 +7347,9 @@ export class CursorManager {
         let range = selection.getRangeAt(0);
         let node = range.startContainer;
         let offset = range.startOffset;
+        if (this._consumeInlineCodeLeftBoundaryForward(selection)) {
+            return true;
+        }
         const applyRange = (targetRange) => {
             this._adjustIntoInlineCodeBoundary(targetRange, 'forward');
             selection.removeAllRanges();
@@ -7370,9 +7469,6 @@ export class CursorManager {
             containerType: node?.nodeType,
             offset
         });
-        if (this._consumePendingForwardInlineCodeEntry(selection)) {
-            return true;
-        }
         const tryEnterInlineCodeFromOutsideLeft = () => {
             if (!selection || !selection.rangeCount || !selection.isCollapsed) {
                 return false;
@@ -7382,23 +7478,6 @@ export class CursorManager {
             const currentCode = this.domUtils.getParentElement(currentContainer, 'CODE');
             const currentPre = currentCode ? this.domUtils.getParentElement(currentCode, 'PRE') : null;
             if (currentCode && !currentPre) {
-                return false;
-            }
-
-            // A visible text node ending immediately before <code> is the caret
-            // after that text, not yet the outside-left edge of inline code. Only
-            // an explicit boundary anchor (or an element boundary) may enter code.
-            const hasExplicitOutsideLeftAnchor = !!(
-                currentContainer &&
-                (
-                    currentContainer.nodeType === Node.ELEMENT_NODE ||
-                    (
-                        currentContainer.nodeType === Node.TEXT_NODE &&
-                        this._isInlineCodeBoundaryPlaceholder(currentContainer)
-                    )
-                )
-            );
-            if (!hasExplicitOutsideLeftAnchor) {
                 return false;
             }
 
@@ -7430,6 +7509,8 @@ export class CursorManager {
                     candidate.tagName === 'CODE' &&
                     !this.domUtils.getParentElement(candidate, 'PRE')) {
                     targetInlineCode = candidate;
+                } else if (candidate && candidate.nodeType === Node.ELEMENT_NODE) {
+                    targetInlineCode = this._getLeadingInlineCodeElement(candidate);
                 } else if (candidate &&
                     candidate.nodeType === Node.TEXT_NODE &&
                     this._isInlineCodeBoundaryPlaceholder(candidate)) {
@@ -7450,7 +7531,7 @@ export class CursorManager {
                 return false;
             }
 
-            this._clearPendingForwardInlineCodeEntry();
+            this.clearInlineCodeBoundaryState();
             return this._placeCursorInsideInlineCodeStart(targetInlineCode, selection);
         };
         if (tryEnterInlineCodeFromOutsideLeft()) {
@@ -7758,23 +7839,10 @@ export class CursorManager {
                     immediateNext.tagName === 'CODE' &&
                     !this.domUtils.getParentElement(immediateNext, 'PRE'));
                 if (nextIsInlineCode) {
-                    // Consume the outside-left placeholder when entering inline code.
-                    // Keeping the placeholder can make the first move appear unchanged in WebView.
-                    const parent = currentNode.parentNode;
-                    if (parent && immediateNext.parentNode === parent) {
-                        currentNode.remove();
-                    }
-                    const firstTextNode = this.domUtils.getFirstTextNode(immediateNext);
-                    const directRange = document.createRange();
-                    if (firstTextNode) {
-                        const firstOffset = this._getFirstNonZwspOffset(firstTextNode.textContent || '');
-                        directRange.setStart(firstTextNode, firstOffset !== null ? firstOffset : 0);
-                    } else {
-                        directRange.setStart(immediateNext, 0);
-                    }
-                    directRange.collapse(true);
-                    applyRange(directRange);
-                    return true;
+                    // Keep the outside anchor connected. Removing the active
+                    // Selection container lets Chromium normalize inside-left
+                    // back to the element boundary.
+                    return this._placeCursorInsideInlineCodeStart(immediateNext, selection);
                 }
             }
 
@@ -8155,7 +8223,10 @@ export class CursorManager {
     moveCursorBackward(notifyCallback) {
         const selection = window.getSelection();
         if (!selection || !selection.rangeCount) return false;
-        this._clearPendingForwardInlineCodeEntry();
+        if (this._consumeInlineCodeLeftBoundaryBackward(selection)) {
+            return true;
+        }
+        this.clearInlineCodeBoundaryState();
         this._clearForwardImageStep();
         this._normalizeSelectionForNavigation(selection);
         let range = selection.getRangeAt(0);
@@ -8577,15 +8648,12 @@ export class CursorManager {
                             range.setStart(sibling, targetOffset);
                             range.collapse(true);
                             applyRange(range);
-                            if (nextIsInlineCode && currentNode.parentNode) {
-                                currentNode.remove();
-                            }
                             return true;
                         }
                     } else if (sibling.nodeType === Node.ELEMENT_NODE) {
                         if (setRangeToInlineCodeEnd(range, sibling)) {
                             applyRange(range);
-                            if (currentNode.parentNode) {
+                            if (!nextIsInlineCode && currentNode.parentNode) {
                                 currentNode.remove();
                             }
                             return true;
