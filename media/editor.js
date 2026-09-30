@@ -50,6 +50,9 @@ const {
     let notifyTimeout = null;
     let localUpdateRevision = 0;
     let acknowledgedUpdateRevision = 0;
+    // Latest revision the host could not convert to Markdown. Until a newer
+    // revision is acknowledged, that edit exists only in this Webview.
+    let failedUpdateRevision = 0;
     let pendingDeleteListItem = null;
     let pendingStrikeCleanup = false;
     let pendingEmptyListItemInsert = null;
@@ -6364,6 +6367,17 @@ const {
         };
     }
 
+    function syncConversionFailureWarning() {
+        const warning = document.getElementById('editor-sync-warning');
+        if (!warning) return;
+        const unsaved = failedUpdateRevision > acknowledgedUpdateRevision;
+        if (unsaved && warning.hidden) {
+            warning.textContent = 'Your latest edit could not be converted to Markdown and is not in the file yet. ' +
+                'Undo or change the last edit before closing this editor, or the edit will be lost.';
+        }
+        warning.hidden = !unsaved;
+    }
+
     function postUpdate(snapshot = createSyncSnapshot()) {
         vscode.postMessage({
             type: 'update',
@@ -6549,6 +6563,12 @@ const {
                     continue;
                 }
                 for (const removedNode of mutation.removedNodes || []) {
+                    // A node that is back in the document was moved, not
+                    // deleted (e.g. wrapTables() moving a table into its
+                    // wrapper after the document loads). Moving it is not an edit.
+                    if (removedNode.isConnected) {
+                        continue;
+                    }
                     if (nodeContainsImage(removedNode)) {
                         scheduleImmediateSyncForImageRemoval();
                         return;
@@ -17627,6 +17647,16 @@ const {
         // Ensure table cell range deletion works even if editor doesn't have focus
         document.addEventListener('keydown', (e) => {
             if (editor.contains(e.target)) return;
+            // Keys typed into the find/replace fields, the link popover and other
+            // text inputs belong to that field, never to a table selection.
+            const target = e.target;
+            if (
+                target &&
+                target.nodeType === Node.ELEMENT_NODE &&
+                (target.closest('input, textarea, select') || target.isContentEditable)
+            ) {
+                return;
+            }
             if (!tableManager.hasActiveTableSelection()) return;
             if (e.key === 'Escape' && !e.metaKey && !e.ctrlKey && !e.altKey) {
                 tableManager.handleKeydown(e);
@@ -23158,6 +23188,16 @@ const {
                         Math.floor(message.revision)
                     );
                 }
+                syncConversionFailureWarning();
+                break;
+            case 'updateFailed':
+                if (Number.isFinite(message.revision)) {
+                    failedUpdateRevision = Math.max(
+                        failedUpdateRevision,
+                        Math.floor(message.revision)
+                    );
+                }
+                syncConversionFailureWarning();
                 break;
             case 'update':
                 if (
@@ -23204,7 +23244,8 @@ const {
                 if (message.external === true) {
                     vscode.postMessage({
                         type: 'externalUpdateApplied',
-                        changeId: message.changeId
+                        changeId: message.changeId,
+                        revision: localUpdateRevision
                     });
                 }
                 break;
@@ -23232,11 +23273,13 @@ const {
                 stateManager.clearHistory();
                 stateManager.seedState();
                 acknowledgedUpdateRevision = localUpdateRevision;
+                syncConversionFailureWarning();
                 scheduleEditorOverflowStateUpdate();
                 if (message.external === true) {
                     vscode.postMessage({
                         type: 'externalUpdateApplied',
-                        changeId: message.changeId
+                        changeId: message.changeId,
+                        revision: localUpdateRevision
                     });
                 }
                 break;

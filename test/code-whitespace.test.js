@@ -1477,6 +1477,199 @@ test('a stale close request cannot close a replacement editor panel', async () =
     assert.equal(closeCalled, false);
 });
 
+test('an edit that cannot be converted leaves the document unchanged and tells the Webview', async (t) => {
+    t.mock.method(console, 'error', () => {});
+    const { provider, document, webview } = await createEditorSyncHarness();
+    provider.updateTextDocument = async (_document, markdown) => {
+        document.setText(markdown);
+        return true;
+    };
+    provider.htmlToMarkdown = (html) => {
+        if (html === 'unconvertible') {
+            throw new Error('Internal placeholder was not restored: test');
+        }
+        return String(html);
+    };
+    const failures = () => webview.postedMessages.filter((message) => message.type === 'updateFailed');
+
+    try {
+        await webview.sendMessage({ type: 'update', content: 'unconvertible', revision: 1 });
+        await waitFor(() => failures().length === 1, 'The Webview was not told about the failure');
+        assert.equal(document.getText(), 'before');
+        assert.deepEqual(failures(), [{ type: 'updateFailed', revision: 1 }]);
+        assert.equal(vscodeMockState.errors.length, 1);
+
+        // Further failing edits keep the Webview warning current without
+        // stacking notifications, and are not retried automatically.
+        await webview.sendMessage({ type: 'update', content: 'unconvertible', revision: 2 });
+        await waitFor(() => failures().length === 2, 'The second failure was not reported');
+        assert.equal(vscodeMockState.errors.length, 1);
+        assert.equal(
+            webview.postedMessages.some((message) => message.type === 'retryPendingUpdate'),
+            false
+        );
+
+        await webview.sendMessage({ type: 'update', content: 'after', revision: 3 });
+        await waitFor(
+            () => webview.postedMessages.some(
+                (message) => message.type === 'updateApplied' && message.revision === 3
+            ),
+            'A convertible edit was not applied after a failure'
+        );
+        assert.equal(document.getText(), 'after');
+    } finally {
+        webview.dispose();
+    }
+});
+
+test('will-save that cannot convert the snapshot keeps the file and tells the Webview', async (t) => {
+    t.mock.method(console, 'error', () => {});
+    const { provider, document, webview } = await createEditorSyncHarness('old text');
+    provider.htmlToMarkdown = () => {
+        throw new Error('Internal placeholder was not restored: test');
+    };
+
+    try {
+        const willSave = fireWillSaveDocument(document);
+        await waitFor(
+            () => webview.postedMessages.some((message) => message.type === 'prepareSyncSnapshot'),
+            'The Webview snapshot was not requested before save'
+        );
+        const request = webview.postedMessages.find(
+            (message) => message.type === 'prepareSyncSnapshot'
+        );
+        await webview.sendMessage({
+            type: 'syncSnapshot',
+            requestId: request.requestId,
+            content: 'unconvertible',
+            revision: 4,
+        });
+
+        assert.deepEqual(await willSave, []);
+        assert.equal(document.getText(), 'old text');
+        assert.deepEqual(
+            webview.postedMessages.filter((message) => message.type === 'updateFailed'),
+            [{ type: 'updateFailed', revision: 4 }]
+        );
+        assert.equal(vscodeMockState.errors.length, 1);
+    } finally {
+        webview.dispose();
+    }
+});
+
+async function answerWillSaveSnapshot(webview, content, revision) {
+    await waitFor(
+        () => webview.postedMessages.some((message) => message.type === 'prepareSyncSnapshot'),
+        'The Webview snapshot was not requested before save'
+    );
+    const request = webview.postedMessages.filter(
+        (message) => message.type === 'prepareSyncSnapshot'
+    ).pop();
+    await webview.sendMessage({
+        type: 'syncSnapshot',
+        requestId: request.requestId,
+        content,
+        revision,
+    });
+}
+
+test('saving without ManulDown edits keeps the document text as it is', async () => {
+    const { provider, document, webview } = await createEditorSyncHarness('original *text*');
+    let conversions = 0;
+    provider.htmlToMarkdown = () => {
+        conversions++;
+        return 'rewritten';
+    };
+
+    try {
+        // Revision 0: the Webview has only loaded the document.
+        const willSave = fireWillSaveDocument(document);
+        await answerWillSaveSnapshot(webview, '<p>original <em>text</em></p>', 0);
+        assert.deepEqual(await willSave, []);
+
+        // The Webview's own Cmd+S with no edit saves without converting.
+        await webview.sendMessage({ type: 'saveDocument', content: '<p>original</p>', revision: 0 });
+        await waitFor(() => document.savedTexts.length === 1, 'The document was not saved');
+
+        assert.equal(conversions, 0);
+        assert.deepEqual(document.savedTexts, ['original *text*']);
+    } finally {
+        webview.dispose();
+    }
+});
+
+test('saving after an applied edit does not convert the same revision again', async () => {
+    const { provider, document, webview } = await createEditorSyncHarness('before');
+    provider.updateTextDocument = async (_document, markdown) => {
+        document.setText(markdown);
+        return true;
+    };
+    let conversions = 0;
+    provider.htmlToMarkdown = (html) => {
+        conversions++;
+        return String(html);
+    };
+
+    try {
+        await webview.sendMessage({ type: 'update', content: 'after', revision: 1 });
+        await waitFor(
+            () => webview.postedMessages.some(
+                (message) => message.type === 'updateApplied' && message.revision === 1
+            ),
+            'The Webview update was not applied'
+        );
+        fireDocumentChange(document);
+        assert.equal(conversions, 1);
+
+        const willSave = fireWillSaveDocument(document);
+        await answerWillSaveSnapshot(webview, 'after, as normalized by the DOM', 1);
+        assert.deepEqual(await willSave, []);
+        assert.equal(conversions, 1);
+        assert.equal(document.getText(), 'after');
+
+        // A stale update must not revert the applied revision either.
+        await webview.sendMessage({ type: 'update', content: 'older', revision: 1 });
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(document.getText(), 'after');
+        assert.equal(conversions, 1);
+    } finally {
+        webview.dispose();
+    }
+});
+
+test('a save made after the Webview loaded an external change keeps that text', async () => {
+    const { provider, document, webview } = await createEditorSyncHarness('before');
+    let conversions = 0;
+    provider.htmlToMarkdown = () => {
+        conversions++;
+        return 'rewritten by ManulDown';
+    };
+
+    try {
+        // For example, typing in a text editor while this panel is open.
+        document.setText('typed in a text editor');
+        fireDocumentChange(document);
+        await waitFor(
+            () => webview.postedMessages.some((message) => message.external === true),
+            'The external change was not sent to the Webview'
+        );
+        const externalUpdate = webview.postedMessages.find((message) => message.external === true);
+        await webview.sendMessage({
+            type: 'externalUpdateApplied',
+            changeId: externalUpdate.changeId,
+            revision: 3,
+        });
+
+        const willSave = fireWillSaveDocument(document);
+        await answerWillSaveSnapshot(webview, '<p>typed in a text editor</p>', 3);
+        assert.deepEqual(await willSave, []);
+        assert.equal(conversions, 0);
+        assert.equal(document.getText(), 'typed in a text editor');
+    } finally {
+        webview.dispose();
+    }
+});
+
 test('will-save requests and applies the latest Webview snapshot', async () => {
     const { document, webview } = await createEditorSyncHarness('old text');
 
