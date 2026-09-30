@@ -464,6 +464,26 @@ test('editor routes a valid active inline-code boundary before competing arrow h
     assert.ok(activeRoute < inlineExitRoute);
 });
 
+test('clicks beside inline code are corrected on mouseup for table cells and gap clicks alike', () => {
+    const mouseDown = editorSource.indexOf('// mousedownイベント - 箇条書きでのカーソル位置を修正');
+    const recordClick = editorSource.indexOf('pendingInlineCodeSideClick = { startX:', mouseDown);
+    const tableRoute = editorSource.indexOf('if (tableManager.handleMouseDown(e)) {', mouseDown);
+    const gapRoute = editorSource.indexOf('if (!e.shiftKey && isEditorGapClick) {', mouseDown);
+    const mouseUp = editorSource.indexOf("document.addEventListener('mouseup', (e) => {", mouseDown);
+    const applyClick = editorSource.indexOf('placeCaretOutsideInlineCodeAfterClick(', mouseUp);
+
+    assert.notEqual(mouseDown, -1);
+    assert.notEqual(recordClick, -1);
+    assert.notEqual(tableRoute, -1);
+    assert.notEqual(gapRoute, -1);
+    assert.notEqual(applyClick, -1);
+    // Cell clicks return from mousedown at the table route, so recording must
+    // come first; the correction itself must not depend on the gap branch.
+    assert.ok(recordClick < tableRoute);
+    assert.ok(tableRoute < gapRoute);
+    assert.ok(mouseUp < applyClick);
+});
+
 test('the editor propagates its Webview cache key to CursorManager', () => {
     assert.match(
         editorSource,

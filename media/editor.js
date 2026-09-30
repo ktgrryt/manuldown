@@ -60,7 +60,7 @@ const {
     let pendingListStructureRestore = null;
     let pendingCtrlKDeleteSync = false;
     let pendingListMouseAdjustment = null;
-    let pendingInlineCodeRightClickAdjustment = null;
+    let pendingInlineCodeSideClick = null;
     let pendingMouseDriftCorrection = null;
     let manualPointerSelection = null;
     let lastPointerCaretIntentTs = 0;
@@ -1473,7 +1473,10 @@ const {
         enabled: settingsState.tocEnabled,
         scrollDuration: TOC_SCROLL_DURATION_MS
     });
-    const tableManager = new TableManager(editor, domUtils, stateManager);
+    const tableManager = new TableManager(editor, domUtils, stateManager, {
+        placeCaretBeforeInlineCode: (code, selection) =>
+            cursorManager._placeCursorBeforeInlineCodeElement(code, selection)
+    });
     const searchManager = new SearchManager(editor, {
         onWillReplace: (range) => {
             stateManager.beginChangeAtSelection(stateManager.saveRange(range));
@@ -11564,197 +11567,94 @@ const {
         return !domUtils.getParentElement(node, 'PRE');
     }
 
-    function isMeaningfulTextNodeOutsideInlineCode(node) {
-        if (!node || node.nodeType !== Node.TEXT_NODE) {
-            return false;
-        }
-        if (!hasMeaningfulTextContent(node.textContent || '')) {
-            return false;
-        }
-        return !isInlineCodeNode(domUtils.getParentElement(node, 'CODE'));
-    }
+    // The inline-code edge a collapsed range sits on: inside the code at its
+    // first/last character, or just outside it (the adjacent end of a text
+    // node, a caret anchor, or an element boundary next to the code).
+    function getInlineCodeEdgeAtRange(range) {
+        const container = range.startContainer;
+        const offset = range.startOffset;
+        const isBoundaryOnly = (text) => text.replace(/[\u200B\u2060\uFEFF]/g, '') === '';
+        const isBoundaryText = (node) => !!node && node.nodeType === Node.TEXT_NODE &&
+            isBoundaryOnly(node.textContent || '');
 
-    function isPointRangeClearlyOutsideInlineCode(pointRange) {
-        if (!pointRange || !pointRange.collapsed) {
-            return false;
-        }
-
-        const container = pointRange.startContainer;
-        if (!container) {
-            return false;
-        }
-
-        if (isMeaningfulTextNodeOutsideInlineCode(container)) {
-            return true;
-        }
-
-        if (container.nodeType !== Node.ELEMENT_NODE || !container.childNodes) {
-            return false;
-        }
-
-        const beforeNode = pointRange.startOffset > 0
-            ? container.childNodes[pointRange.startOffset - 1]
-            : null;
-        const afterNode = container.childNodes[pointRange.startOffset] || null;
-
-        return isMeaningfulTextNodeOutsideInlineCode(beforeNode) ||
-            isMeaningfulTextNodeOutsideInlineCode(afterNode);
-    }
-
-    function resolveInlineCodeFromClickContext(clickedElement, pointRange = null, x = null, y = null) {
-        if (!clickedElement) {
+        const code = domUtils.getParentElement(container, 'CODE');
+        if (isInlineCodeNode(code)) {
+            try {
+                const before = document.createRange();
+                before.selectNodeContents(code);
+                before.setEnd(container, offset);
+                const after = document.createRange();
+                after.selectNodeContents(code);
+                after.setStart(container, offset);
+                const atStart = isBoundaryOnly(before.toString());
+                const atEnd = isBoundaryOnly(after.toString());
+                if (atStart && !atEnd) return { code, side: 'start' };
+                if (atEnd && !atStart) return { code, side: 'end' };
+            } catch (_error) {
+                return null;
+            }
             return null;
         }
-        const directCode = isInlineCodeNode(clickedElement)
-            ? clickedElement
-            : (clickedElement.closest ? clickedElement.closest('code') : null);
-        if (isInlineCodeNode(directCode) && editor.contains(directCode)) {
-            return directCode;
-        }
 
-        const pointContainer = pointRange && pointRange.startContainer ? pointRange.startContainer : null;
-        const pointCode = pointContainer ? domUtils.getParentElement(pointContainer, 'CODE') : null;
-        if (isInlineCodeNode(pointCode) && editor.contains(pointCode)) {
-            return pointCode;
+        let prev = null;
+        let next = null;
+        if (container.nodeType === Node.TEXT_NODE) {
+            const text = container.textContent || '';
+            if (isBoundaryOnly(text.slice(0, offset))) prev = container.previousSibling;
+            if (isBoundaryOnly(text.slice(offset))) next = container.nextSibling;
+        } else if (container.nodeType === Node.ELEMENT_NODE) {
+            prev = container.childNodes[offset - 1] || null;
+            next = container.childNodes[offset] || null;
+            if (isBoundaryText(prev)) prev = prev.previousSibling;
+            if (isBoundaryText(next)) next = next.nextSibling;
         }
-
-        if (Number.isFinite(x) && Number.isFinite(y)) {
-            const blockElement =
-                resolveBlockForLooseSideTextClick(y, clickedElement, pointRange) ||
-                getClosestBlockElement(clickedElement);
-            if (blockElement && blockElement !== editor) {
-                const nearestTextMatch = getNearestTextRectForBlockClickByY(blockElement, y, x);
-                const nearestTextNode = nearestTextMatch && nearestTextMatch.textNode
-                    ? nearestTextMatch.textNode
-                    : null;
-                const nearestCode = nearestTextNode ? domUtils.getParentElement(nearestTextNode, 'CODE') : null;
-                if (isInlineCodeNode(nearestCode) && nearestTextMatch && nearestTextMatch.rect) {
-                    const rect = nearestTextMatch.rect;
-                    const width = Math.max(1, rect.right - rect.left);
-                    const rightEdgeTolerancePx = Math.max(2, Math.min(6, width * 0.16));
-                    if (x >= rect.right - rightEdgeTolerancePx) {
-                        return nearestCode;
-                    }
-                }
-            }
-        }
-
+        if (isInlineCodeNode(next)) return { code: next, side: 'start' };
+        if (isInlineCodeNode(prev)) return { code: prev, side: 'end' };
         return null;
     }
 
-    function createAfterInlineCodeCaretRange(codeElement, options = {}) {
-        if (!isInlineCodeNode(codeElement) || !editor.contains(codeElement) || !codeElement.parentNode) {
-            return null;
+    // A click beside inline code that the browser resolves to the code's own
+    // edge (e.g. the blank area right of a trailing code) puts the caret
+    // outside the code on that side, like the arrow keys do.
+    function placeCaretOutsideInlineCodeAfterClick(x, y) {
+        const selection = window.getSelection();
+        if (!selection || !selection.rangeCount || !selection.isCollapsed) {
+            return false;
+        }
+        const currentRange = selection.getRangeAt(0);
+        if (!editor.contains(currentRange.startContainer)) {
+            return false;
         }
 
-        const { createPlaceholder = true } = options;
-        const parent = codeElement.parentNode;
-        const nextSibling = codeElement.nextSibling;
-        let targetContainer = null;
-        let targetOffset = 0;
-
-        if (nextSibling && nextSibling.nodeType === Node.TEXT_NODE) {
-            const rawText = nextSibling.textContent || '';
-            const isBoundaryOnlyText = rawText === '' || rawText.replace(/[\u200B\u2060\uFEFF]/g, '') === '';
-            if (isBoundaryOnlyText) {
-                if (createPlaceholder && rawText !== INLINE_CODE_RIGHT_CARET_ANCHOR) {
-                    nextSibling.textContent = INLINE_CODE_RIGHT_CARET_ANCHOR;
-                }
-                targetContainer = nextSibling;
-                targetOffset = (nextSibling.textContent || '').length;
-            } else {
-                // Outside-right of inline code with following visible text means "before next text char".
-                targetContainer = nextSibling;
-                targetOffset = 0;
-            }
-        } else if (!nextSibling && createPlaceholder) {
-            const spacer = document.createTextNode(INLINE_CODE_RIGHT_CARET_ANCHOR);
-            parent.appendChild(spacer);
-            targetContainer = spacer;
-            targetOffset = (spacer.textContent || '').length;
-        } else {
-            const childNodes = parent.childNodes ? Array.from(parent.childNodes) : [];
-            const codeIndex = childNodes.indexOf(codeElement);
-            if (codeIndex < 0) {
-                return null;
-            }
-            targetContainer = parent;
-            targetOffset = codeIndex + 1;
+        const pointRange = getCaretRangeFromPoint(x, y);
+        const edge = pointRange && pointRange.collapsed ? getInlineCodeEdgeAtRange(pointRange) : null;
+        if (!edge || !editor.contains(edge.code)) {
+            return false;
+        }
+        const { code, side } = edge;
+        // Leave placements that other click handling moved to another block.
+        const lineBlock = code.closest('td, th') || getClosestBlockElement(code);
+        if (!lineBlock || !lineBlock.contains(currentRange.startContainer)) {
+            return false;
         }
 
-        if (!targetContainer) {
-            return null;
-        }
-        const range = document.createRange();
-        try {
-            range.setStart(targetContainer, targetOffset);
-            range.collapse(true);
-            return range;
-        } catch (_error) {
-            return null;
-        }
-    }
-
-    function getInlineCodeCaretRangeFromHorizontalClick(x, y, clickedElement, pointRange) {
-        if (!Number.isFinite(x) || !Number.isFinite(y) || !clickedElement) {
-            return null;
+        const contentsRange = document.createRange();
+        contentsRange.selectNodeContents(code);
+        const textRects = Array.from(contentsRange.getClientRects()).filter(rect => rect.width > 0);
+        if (!textRects.length) {
+            return false;
         }
 
-        const directCode = isInlineCodeNode(clickedElement)
-            ? clickedElement
-            : (clickedElement.closest ? clickedElement.closest('code') : null);
-        if (!isInlineCodeNode(directCode) || !editor.contains(directCode)) {
-            return null;
+        if (side === 'start' && x < textRects[0].left) {
+            return cursorManager._placeCursorBeforeInlineCodeElement(code, selection);
         }
-
-        // If browser already resolved to a non-code text node, keep native placement.
-        if (isPointRangeClearlyOutsideInlineCode(pointRange)) {
-            return null;
+        if (side === 'end' && x > textRects[textRects.length - 1].right) {
+            contentsRange.collapse(false);
+            selection.removeAllRanges();
+            selection.addRange(contentsRange);
+            return moveCursorOutOfInlineCodeRight();
         }
-
-        const rect = directCode.getBoundingClientRect ? directCode.getBoundingClientRect() : null;
-        if (!isRenderableRectLike(rect)) {
-            return null;
-        }
-
-        const verticalTolerancePx = Math.max(12, Math.min(48, (rect.height || 0) * 1.5));
-        const inVerticalBand = y >= rect.top - verticalTolerancePx && y <= rect.bottom + verticalTolerancePx;
-        if (!inVerticalBand) {
-            return null;
-        }
-
-        let textRightEdge = null;
-        const textNode = directCode.firstChild && directCode.firstChild.nodeType === Node.TEXT_NODE
-            ? directCode.firstChild
-            : null;
-        if (textNode) {
-            try {
-                const textRange = document.createRange();
-                textRange.selectNodeContents(textNode);
-                const textRects = textRange.getClientRects ? Array.from(textRange.getClientRects()) : [];
-                const textRect = textRects.find((candidateRect) => isRenderableRectLike(candidateRect)) ||
-                    (textRange.getBoundingClientRect && isRenderableRectLike(textRange.getBoundingClientRect())
-                        ? textRange.getBoundingClientRect()
-                        : null);
-                if (textRect && Number.isFinite(textRect.right)) {
-                    textRightEdge = textRect.right;
-                }
-            } catch (_error) {
-                textRightEdge = null;
-            }
-        }
-
-        const rectWidth = Math.max(1, rect.right - rect.left);
-        const insideRightEdgeSnapPx = Math.max(2, Math.min(6, rectWidth * 0.16));
-        const fallbackThreshold = rect.right - insideRightEdgeSnapPx;
-        const rightSideThreshold = Number.isFinite(textRightEdge)
-            ? textRightEdge + 0.5
-            : fallbackThreshold;
-        if (x < rightSideThreshold) {
-            return null;
-        }
-
-        return createAfterInlineCodeCaretRange(directCode, { createPlaceholder: true });
+        return false;
     }
 
     function isImageOnlyBlockElement(blockElement) {
@@ -21007,7 +20907,7 @@ const {
                 cursorManager.clearInlineCodeBoundaryState();
             }
             pendingListMouseAdjustment = null;
-            pendingInlineCodeRightClickAdjustment = null;
+            pendingInlineCodeSideClick = null;
             pendingMouseDriftCorrection = null;
             manualPointerSelection = null;
 
@@ -21023,6 +20923,10 @@ const {
             lastPointerCheckboxClickTs = (pointerCheckbox && editor.contains(pointerCheckbox))
                 ? Date.now()
                 : 0;
+            // Recorded before table handling so cell clicks are corrected too.
+            if (!e.shiftKey && e.detail <= 1) {
+                pendingInlineCodeSideClick = { startX: e.clientX, startY: e.clientY, moved: false };
+            }
 
             if (tableManager.handleMouseDown(e)) {
                 return;
@@ -21070,24 +20974,6 @@ const {
             const isEditorGapClick = clickedElement === editor;
 
             if (!e.shiftKey && isEditorGapClick) {
-                const inlineCodeRightRange = getInlineCodeCaretRangeFromHorizontalClick(x, y, clickedElement, pointRange);
-                if (inlineCodeRightRange) {
-                    e.preventDefault();
-                    focusEditorWithoutScroll();
-                    const selection = window.getSelection();
-                    if (!selection) return;
-                    selection.removeAllRanges();
-                    selection.addRange(inlineCodeRightRange);
-                    pendingInlineCodeRightClickAdjustment = {
-                        startX: x,
-                        startY: y,
-                        moved: false,
-                        range: inlineCodeRightRange.cloneRange()
-                    };
-                    beginManualPointerSelection(e, inlineCodeRightRange);
-                    return;
-                }
-
                 const looseLeftSideRange = getLooseLeftSideTextClickRange(x, y, clickedElement, pointRange);
                 if (looseLeftSideRange) {
                     e.preventDefault();
@@ -21352,10 +21238,10 @@ const {
                     pendingListMouseAdjustment.moved = true;
                 }
             }
-            if (pendingInlineCodeRightClickAdjustment) {
-                if (Math.abs(e.clientX - pendingInlineCodeRightClickAdjustment.startX) > 3 ||
-                    Math.abs(e.clientY - pendingInlineCodeRightClickAdjustment.startY) > 3) {
-                    pendingInlineCodeRightClickAdjustment.moved = true;
+            if (pendingInlineCodeSideClick) {
+                if (Math.abs(e.clientX - pendingInlineCodeSideClick.startX) > 3 ||
+                    Math.abs(e.clientY - pendingInlineCodeSideClick.startY) > 3) {
+                    pendingInlineCodeSideClick.moved = true;
                 }
             }
             if (pendingMouseDriftCorrection) {
@@ -21377,17 +21263,6 @@ const {
             if (e.button === 0) {
                 manualPointerSelection = null;
             }
-            const pendingInlineCodeRight = pendingInlineCodeRightClickAdjustment;
-            pendingInlineCodeRightClickAdjustment = null;
-            if (pendingInlineCodeRight) {
-                if (e.button === 0 && !pendingInlineCodeRight.moved && pendingInlineCodeRight.range) {
-                    const selection = window.getSelection();
-                    if (selection) {
-                        selection.removeAllRanges();
-                        selection.addRange(pendingInlineCodeRight.range.cloneRange());
-                    }
-                }
-            }
             const pendingList = pendingListMouseAdjustment;
             pendingListMouseAdjustment = null;
             if (pendingList) {
@@ -21407,6 +21282,12 @@ const {
                         }
                     }
                 }
+            }
+
+            const pendingInlineCodeSide = pendingInlineCodeSideClick;
+            pendingInlineCodeSideClick = null;
+            if (pendingInlineCodeSide && e.button === 0 && !pendingInlineCodeSide.moved) {
+                placeCaretOutsideInlineCodeAfterClick(pendingInlineCodeSide.startX, pendingInlineCodeSide.startY);
             }
 
             const pendingDrift = pendingMouseDriftCorrection;
