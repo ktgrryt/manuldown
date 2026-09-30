@@ -547,7 +547,12 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         }
 
         if (lines.length === 0) {
-            return '';
+            // A cell holding only an image (or an image link) has no text, but
+            // its Markdown must still be written.
+            const hasImage = typeof node?.querySelector === 'function' && node.querySelector('img') !== null;
+            if (!hasImage) {
+                return '';
+            }
         }
 
         const normalizedContent = String(convertedContent || '')
@@ -654,6 +659,14 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         let terminalActionQueue: Promise<void> = Promise.resolve();
         let saveSyncWarningShown = false;
         let synchronizedProgrammaticSaveInProgress = false;
+        // The Webview bumps its revision for every edit. Once a revision is in
+        // the TextDocument (or the Webview has loaded the document), content of
+        // that revision or older has nothing left to write. Converting it again
+        // would only rewrite the file through the lossy HTML round trip.
+        let lastAppliedWebviewRevision = 0;
+        const markWebviewRevisionApplied = (revision: number): void => {
+            lastAppliedWebviewRevision = Math.max(lastAppliedWebviewRevision, revision);
+        };
 
         const normalizeWebviewRevision = (value: unknown): number =>
             typeof value === 'number' && Number.isFinite(value)
@@ -912,6 +925,28 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             );
         };
 
+        // A conversion failure leaves the edit only in the Webview: the
+        // TextDocument is unchanged, so it is not marked dirty and closing the
+        // editor would not prompt. Keep the Webview's warning visible until a
+        // later update converts, and show the notification once per streak.
+        let conversionFailureReported = false;
+        const reportConversionFailure = (revision: number): void => {
+            if (
+                editorDisposed ||
+                this.webviewPanels.get(documentKey) !== webviewPanel
+            ) {
+                return;
+            }
+            void webviewPanel.webview.postMessage({ type: 'updateFailed', revision });
+            if (conversionFailureReported) {
+                return;
+            }
+            conversionFailureReported = true;
+            void vscode.window.showErrorMessage(
+                'ManulDown could not convert the latest edit to Markdown, so the file has not been updated. Keep this editor open and undo or change the last edit.'
+            );
+        };
+
         const postExternalDocumentUpdate = (force = false): void => {
             if (unresolvedExternalChangeId === 0) {
                 return;
@@ -984,10 +1019,30 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     while (pendingWebviewUpdate !== null && unresolvedExternalChangeId === 0) {
                         const updateToApply = pendingWebviewUpdate;
                         pendingWebviewUpdate = null;
-                        const markdown = this.normalizeLineEndingsForDocument(
-                            this.htmlToMarkdown(updateToApply.html, document),
-                            document
-                        );
+                        if (updateToApply.revision <= lastAppliedWebviewRevision) {
+                            // Already written, or older than what was written:
+                            // applying it would only rewrite or revert the file.
+                            void webviewPanel.webview.postMessage({
+                                type: 'updateApplied',
+                                revision: updateToApply.revision,
+                            });
+                            continue;
+                        }
+                        let markdown: string;
+                        try {
+                            markdown = this.normalizeLineEndingsForDocument(
+                                this.htmlToMarkdown(updateToApply.html, document),
+                                document
+                            );
+                        } catch (error) {
+                            // The same HTML would fail again, so do not retry it.
+                            // The Webview keeps the revision unacknowledged and
+                            // resends its content with the next edit or flush.
+                            console.error('[webview update] Failed to convert the editor update:', error);
+                            reportConversionFailure(updateToApply.revision);
+                            operationSucceeded = false;
+                            continue;
+                        }
                         activeWebviewUpdateTexts.add(markdown);
                         let applied = false;
                         try {
@@ -999,6 +1054,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                         if (appliedTextIsCurrent) {
                             lastObservedDocumentText = markdown;
                             lastAppliedWebviewText = markdown;
+                            markWebviewRevisionApplied(updateToApply.revision);
+                            conversionFailureReported = false;
                             void webviewPanel.webview.postMessage({
                                 type: 'updateApplied',
                                 revision: updateToApply.revision,
@@ -1136,6 +1193,9 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                             Math.floor(message.changeId) === unresolvedExternalChangeId
                         ) {
                             unresolvedExternalChangeId = 0;
+                            // The Webview now shows the current document, so its
+                            // revision has nothing left to write.
+                            markWebviewRevisionApplied(normalizeWebviewRevision(message.revision));
                         }
                         break;
                     case 'externalEditConflict':
@@ -1664,6 +1724,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 if (e.document.version >= expectedWillSaveUpdate.expectedDocumentVersion) {
                     clearExpectedWillSaveUpdates();
                     lastAppliedWebviewText = observedText;
+                    markWebviewRevisionApplied(expectedWillSaveUpdate.revision);
                     void webviewPanel.webview.postMessage({
                         type: 'updateApplied',
                         revision: expectedWillSaveUpdate.revision,
@@ -1757,6 +1818,12 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 }
 
                 const [flushSucceeded, snapshot] = syncResult;
+                if (snapshot && snapshot.revision <= lastAppliedWebviewRevision) {
+                    // No ManulDown edit is waiting to be written, so save the
+                    // document text as it is. This also keeps saves made from a
+                    // text editor (while this panel is open) from being rewritten.
+                    return [];
+                }
                 if (
                     !flushSucceeded ||
                     unresolvedExternalChangeId !== 0 ||
@@ -1800,10 +1867,9 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     );
                 } catch (error) {
                     console.error('[save sync] Failed to convert the latest Webview snapshot:', error);
-                    void vscode.window.showErrorMessage(
-                        'ManulDown could not synchronize the latest edit before saving.'
-                    );
-                    void webviewPanel.webview.postMessage({ type: 'retryPendingUpdate' });
+                    // Retrying the same snapshot would fail again; the Webview
+                    // keeps showing that its latest edit is not in the file.
+                    reportConversionFailure(snapshot.revision);
                     return [];
                 }
 
@@ -1822,8 +1888,10 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 }
 
                 saveSyncWarningShown = false;
+                conversionFailureReported = false;
 
                 if (markdown === event.document.getText()) {
+                    markWebviewRevisionApplied(snapshot.revision);
                     void webviewPanel.webview.postMessage({
                         type: 'updateApplied',
                         revision: snapshot.revision,
@@ -1853,6 +1921,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     // text/version so that the delayed event is not reported as external.
                     lastObservedDocumentText = savedText;
                     lastAppliedWebviewText = savedText;
+                    markWebviewRevisionApplied(expectedUpdate.revision);
                     void webviewPanel.webview.postMessage({
                         type: 'updateApplied',
                         revision: expectedUpdate.revision,
@@ -2604,10 +2673,16 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         // Internal markers are "MDW" + purpose + a 32-character nonce. Turndown
         // may have escaped their underscores. One that is not already part of
         // the document means a conversion step failed to restore content, so
-        // writing this Markdown would corrupt the file.
+        // writing this Markdown would corrupt the file. Requiring the nonce (32
+        // letters or digits in a row) keeps identifiers such as
+        // "MDW_SOME_SETTING_NAME" from being mistaken for a marker.
         const normalizedDocumentText = documentText.replace(/\\/g, '');
         const leakedMarker = (markdown.match(/(?<![A-Za-z0-9+/])MDW(?:\\?_)?[A-Z](?:[A-Za-z0-9-]|\\?_){31,}/g) ?? [])
-            .find((candidate) => !normalizedDocumentText.includes(candidate.replace(/\\/g, '')));
+            .map((candidate) => candidate.replace(/\\/g, ''))
+            .find((candidate) =>
+                /[A-Za-z0-9]{32}/.test(candidate) &&
+                !normalizedDocumentText.includes(candidate)
+            );
         if (leakedMarker) {
             throw new Error(`Internal placeholder was not restored: ${leakedMarker.slice(0, 48)}`);
         }
@@ -2961,8 +3036,12 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             // 3. Fix duplicate closing tags like </ul></ul>
             html = html.replace(/(<\/ul>|<\/ol>)\s*\1+/gi, '$1');
 
-            // Remove placeholder <br> in empty table cells to avoid broken GFM table output
-            html = html.replace(/<(td|th)([^>]*)>\s*(?:<br\b[^>]*>|\u00A0|&nbsp;|\s)*<\/\1>/gi, '<$1$2></$1>');
+            // Remove placeholder <br> (possibly inside empty paragraphs) in empty
+            // table cells to avoid broken GFM table output
+            html = html.replace(
+                /<(td|th)([^>]*)>\s*(?:<p\b[^>]*>(?:<br\b[^>]*>|\u00A0|&nbsp;|\s)*<\/p>|<br\b[^>]*>|\u00A0|&nbsp;|\s)*<\/\1>/gi,
+                '<$1$2></$1>'
+            );
 
             // Pre-process HTML to handle empty paragraphs and list items with <br>
             // Replace empty paragraphs with a conversion-specific marker.
@@ -3041,15 +3120,23 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 }
             }
             markdown = linesWithEmptyLineMarkers.join('\n');
+            // A marker that shares its line with other Markdown (an emptied list
+            // item "- <marker>", a table cell "| <marker> |", a quote inside a
+            // list item) stands for an empty paragraph there: drop it in place.
+            markdown = markdown.replace(new RegExp(this.escapeRegExp(emptyLineMarker), 'g'), '');
 
             // Remove temporary marker line while keeping preceding hard-break spaces.
+            // The line may be indented when the image is inside a list item.
+            // The trailing \s* also absorbs the blank lines that follow, so the
+            // round trip does not add a blank line each time.
             // Example:
             //   ![img](path)  \n<image-hard-break marker>
             // -> ![img](path)
             markdown = markdown.replace(
-                new RegExp(`(^|\\n)(?:\\s*>\\s*)?${this.escapeRegExp(imageHardBreakTailMarker)}\\s*(?=\\n|$)`, 'g'),
+                new RegExp(`(^|\\n)(?:\\s*>\\s*|[ \\t]*)${this.escapeRegExp(imageHardBreakTailMarker)}\\s*(?=\\n|$)`, 'g'),
                 '$1'
             );
+            markdown = markdown.replace(new RegExp(this.escapeRegExp(imageHardBreakTailMarker), 'g'), '');
 
             // 1. Fix list marker spacing: "<marker>   " -> "<marker> "
             markdown = markdown.replace(
@@ -4172,6 +4259,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         </button>
     </div>
     <div class="editor-container" data-editor-content inert aria-hidden="true" aria-busy="true">
+        <div id="editor-sync-warning" role="alert" hidden></div>
         <div id="editor" contenteditable="true" spellcheck="false"></div>
         <div id="editor-scrollbar-indicator" aria-hidden="true">
             <div id="editor-scrollbar-thumb"></div>

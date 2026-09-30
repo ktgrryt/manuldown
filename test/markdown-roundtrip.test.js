@@ -159,6 +159,18 @@ test('loose list round trips reach a fixed point', () => {
     }
 });
 
+test('table cells that hold only an image keep the image', () => {
+    const sources = [
+        '| icon | name |\n| --- | --- |\n| ![home](img/home.png) | Home |\n',
+        '| badge |\n| --- |\n| [![build](https://example.com/b.svg)](https://example.com) |\n',
+        '| a | b |\n| --- | --- |\n|  | 2 |\n',
+    ];
+
+    for (const source of sources) {
+        assert.equal(convert(source).markdown, source);
+    }
+});
+
 test('footnote references and definitions round-trip unchanged', () => {
     const sources = [
         'Text with note.[^1]\n\n[^1]: The note.\n',
@@ -191,6 +203,66 @@ test('a reference definition that continues a paragraph does not leak its marker
     assert.doesNotMatch(visibleText(html), /MDW/);
     assert.doesNotMatch(markdown, /MDW/);
     assert.ok(markdown.includes('Some text'));
+});
+
+test('emptied blocks inside lists, quotes and table cells convert without leftover markers', () => {
+    const provider = new MarkdownEditorProvider({});
+    const cases = [
+        {
+            html: '<ul><li data-mdw-source-indent="0"><p>a</p></li><li data-mdw-source-indent="0"><p><br></p></li></ul>',
+            source: '- a\n\n- b\n',
+            expected: /^- a\n- ?\n$/,
+        },
+        {
+            html: '<ol><li data-mdw-source-indent="0"><p>a</p></li><li data-mdw-source-indent="0"><p><br></p></li></ol>',
+            source: '1. a\n\n2. b\n',
+            expected: /^1\. a\n2\. ?\n$/,
+        },
+        {
+            html: '<ul><li>x<blockquote><p></p></blockquote></li></ul>',
+            source: '- x\n',
+            expected: /^- x\n\n {2}>\n$/,
+        },
+        {
+            html: '<table><thead><tr><th>a</th><th>b</th></tr></thead><tbody><tr><td><p><br></p></td><td>2</td></tr></tbody></table>',
+            source: '| a | b |\n| --- | --- |\n| x | 2 |\n',
+            expected: /^\| a \| b \|\n\| --- \| --- \|\n\| +\| 2 \|\n$/,
+        },
+    ];
+
+    for (const { html, source, expected } of cases) {
+        const markdown = provider.htmlToMarkdown(html, createTextDocument(source));
+        assert.match(markdown, expected);
+        assert.doesNotMatch(markdown, /MDW/);
+    }
+});
+
+test('an image hard break inside a list item converts without leftover markers', () => {
+    const sources = [
+        '- ![img](a.png)  \n  text\n',
+        '1. ![img](a.png)  \n   caption\n',
+        '> - ![img](a.png)  \n>   text\n',
+    ];
+
+    for (const source of sources) {
+        assert.equal(convert(source).markdown, source);
+    }
+});
+
+test('an image hard break followed by a blank line does not grow on each round trip', () => {
+    const source = '# Title\n\n![image](images/a.png)  \n\n## Features\n';
+    const first = convert(source).markdown;
+    assert.equal(convert(first).markdown, first);
+    assert.doesNotMatch(first, /\n\n\n/);
+});
+
+test('newly typed identifiers that start with MDW_ are not mistaken for markers', () => {
+    const provider = new MarkdownEditorProvider({});
+    const markdown = provider.htmlToMarkdown(
+        '<p>MDW_CONFIGURATION_SETTING_FOR_PRODUCTION_ENV</p>',
+        createTextDocument('')
+    );
+    assert.equal(markdown, 'MDW\\_CONFIGURATION\\_SETTING\\_FOR\\_PRODUCTION\\_ENV\n');
 });
 
 test('htmlToMarkdown refuses output that contains an unrestored internal marker', (t) => {
