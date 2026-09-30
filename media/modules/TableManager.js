@@ -4,12 +4,18 @@
  * テーブル作成/ラップ、セル選択、カーソル移動、行列挿入、削除を担当
  */
 
+// Must match the outside-right caret anchor used by CursorManager / editor.js.
+const INLINE_CODE_RIGHT_CARET_ANCHOR = '\u200B';
+
 export class TableManager {
-    constructor(editor, domUtils, stateManager) {
+    constructor(editor, domUtils, stateManager, options = {}) {
         this.editor = editor;
         this.domUtils = domUtils;
         this.stateManager = stateManager;
         this.notifyChange = null;
+        // (code, selection) => boolean. Places the caret outside-left of inline
+        // code with the same boundary state as paragraph navigation.
+        this.placeCaretBeforeInlineCode = options.placeCaretBeforeInlineCode || null;
 
         this.selectedCells = [];
         this.selectionRange = null;
@@ -2585,7 +2591,11 @@ export class TableManager {
             if (direction === 'right' || direction === 'next' || direction === 'down') {
                 const firstCell = table.querySelector('td, th');
                 if (firstCell) {
-                    this._setCursorToCellStart(firstCell);
+                    if (direction === 'right') {
+                        this._setCursorToCellStartFromLeft(firstCell);
+                    } else {
+                        this._setCursorToCellStart(firstCell);
+                    }
                     return true;
                 }
             }
@@ -2603,7 +2613,11 @@ export class TableManager {
             if (direction === 'left' || direction === 'prev') {
                 const lastCell = this._getLastCell(table);
                 if (lastCell) {
-                    this._setCursorToCellEnd(lastCell);
+                    if (direction === 'left') {
+                        this._setCursorToCellEndFromRight(lastCell);
+                    } else {
+                        this._setCursorToCellEnd(lastCell);
+                    }
                     return true;
                 }
             }
@@ -2635,6 +2649,11 @@ export class TableManager {
         const totalCols = table.rows[0] ? table.rows[0].cells.length : 0;
 
         if (direction === 'left') {
+            // Let the editor's inline-code navigation step out to the code's
+            // outside-left first, as it does in paragraphs.
+            if (this._isCaretAtInlineCodeStart(cell, range)) {
+                return false;
+            }
             if (this._moveAcrossVisualLineBoundaryInCell(cell, range, 'left')) {
                 this._snapCaretToCheckboxIfOnEmptyCheckboxTextStart(cell);
                 return true;
@@ -2651,7 +2670,7 @@ export class TableManager {
             if (colIndex > 0) {
                 const target = table.rows[rowIndex].cells[colIndex - 1];
                 if (target) {
-                    this._setCursorToCellEnd(target);
+                    this._setCursorToCellEndFromRight(target);
                     return true;
                 }
             }
@@ -2660,7 +2679,7 @@ export class TableManager {
                 if (prevRow && prevRow.cells.length) {
                     const target = prevRow.cells[prevRow.cells.length - 1];
                     if (target) {
-                        this._setCursorToCellEnd(target);
+                        this._setCursorToCellEndFromRight(target);
                         return true;
                     }
                 }
@@ -2673,6 +2692,11 @@ export class TableManager {
         }
 
         if (direction === 'right') {
+            // Let the editor's inline-code navigation step out to the code's
+            // outside-right first, as it does in paragraphs.
+            if (this._isCaretAtInlineCodeEnd(cell, range)) {
+                return false;
+            }
             if (this._moveAcrossVisualLineBoundaryInCell(cell, range, 'right')) {
                 this._snapCaretToCheckboxIfOnEmptyCheckboxTextStart(cell);
                 return true;
@@ -2689,7 +2713,7 @@ export class TableManager {
             if (colIndex < totalCols - 1) {
                 const target = table.rows[rowIndex].cells[colIndex + 1];
                 if (target) {
-                    this._setCursorToCellStart(target);
+                    this._setCursorToCellStartFromLeft(target);
                     return true;
                 }
             }
@@ -2698,7 +2722,7 @@ export class TableManager {
                 if (nextRow && nextRow.cells.length) {
                     const target = nextRow.cells[0];
                     if (target) {
-                        this._setCursorToCellStart(target);
+                        this._setCursorToCellStartFromLeft(target);
                         return true;
                     }
                 }
@@ -3453,6 +3477,92 @@ export class TableManager {
         range.collapse(true);
         selection.removeAllRanges();
         selection.addRange(range);
+    }
+
+    // ArrowLeft into a cell mirrors paragraph navigation: stop outside a
+    // trailing inline code first so the next ArrowLeft steps into it.
+    _setCursorToCellEndFromRight(cell) {
+        const code = this._getEdgeInlineCodeInCell(cell, true);
+        if (!code) {
+            this._setCursorToCellEnd(cell);
+            return;
+        }
+        const selection = window.getSelection();
+        if (!selection) return;
+
+        let anchor = code.nextSibling;
+        if (!anchor ||
+            anchor.nodeType !== Node.TEXT_NODE ||
+            (anchor.textContent || '').replace(/[\u200B\u2060\uFEFF]/g, '') !== '') {
+            anchor = document.createTextNode(INLINE_CODE_RIGHT_CARET_ANCHOR);
+            cell.insertBefore(anchor, code.nextSibling);
+        } else if (anchor.textContent !== INLINE_CODE_RIGHT_CARET_ANCHOR) {
+            anchor.textContent = INLINE_CODE_RIGHT_CARET_ANCHOR;
+        }
+
+        const range = document.createRange();
+        range.setStart(anchor, anchor.textContent.length);
+        range.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(range);
+    }
+
+    // ArrowRight into a cell mirrors paragraph navigation: stop outside a
+    // leading inline code first so the next ArrowRight steps into it.
+    _setCursorToCellStartFromLeft(cell) {
+        const code = this._getEdgeInlineCodeInCell(cell, false);
+        const selection = window.getSelection();
+        if (code && selection && this.placeCaretBeforeInlineCode &&
+            this.placeCaretBeforeInlineCode(code, selection)) {
+            return;
+        }
+        this._setCursorToCellStart(cell);
+    }
+
+    // Inline code that is the first (or last) content of the cell.
+    _getEdgeInlineCodeInCell(cell, atEnd) {
+        if (!cell) return null;
+        const nodes = Array.from(cell.childNodes || []);
+        if (atEnd) nodes.reverse();
+        for (const node of nodes) {
+            if (node.nodeType === Node.ELEMENT_NODE && node.tagName === 'CODE') {
+                return node;
+            }
+            if (!this._isPlaceholderOnlyCellNode(node)) {
+                return null;
+            }
+        }
+        return null;
+    }
+
+    // Visible text of the caret's inline code on one side of the caret, or
+    // null when the caret is not inside inline code in this cell.
+    _getInlineCodeTextBesideCaret(cell, range, side) {
+        if (!cell || !range || !range.collapsed) return null;
+        const code = this._getParentElementByTag(range.startContainer, 'CODE');
+        if (!code || !cell.contains(code) || this._getParentElementByTag(code, 'PRE')) {
+            return null;
+        }
+        try {
+            const part = document.createRange();
+            part.selectNodeContents(code);
+            if (side === 'before') {
+                part.setEnd(range.startContainer, range.startOffset);
+            } else {
+                part.setStart(range.startContainer, range.startOffset);
+            }
+            return part.toString().replace(/[\u200B\u2060\uFEFF]/g, '');
+        } catch (_e) {
+            return null;
+        }
+    }
+
+    _isCaretAtInlineCodeStart(cell, range) {
+        return this._getInlineCodeTextBesideCaret(cell, range, 'before') === '';
+    }
+
+    _isCaretAtInlineCodeEnd(cell, range) {
+        return this._getInlineCodeTextBesideCaret(cell, range, 'after') === '';
     }
 
     _setCursorToCellOffset(cell, offset) {
