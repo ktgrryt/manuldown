@@ -1724,6 +1724,28 @@ const {
         return directTextContent;
     }
 
+    // Re-highlight a code block once typing pauses rather than after every
+    // keystroke: each pass rebuilds the whole block, which is slow for long
+    // blocks. The DOM belongs to the IME during a composition, so wait for it.
+    const pendingCodeBlockHighlights = new Map();
+    function scheduleCodeBlockHighlight(codeBlock) {
+        const pending = pendingCodeBlockHighlights.get(codeBlock);
+        if (pending) {
+            clearTimeout(pending);
+        }
+        pendingCodeBlockHighlights.set(codeBlock, setTimeout(() => {
+            pendingCodeBlockHighlights.delete(codeBlock);
+            if (!codeBlock.isConnected) {
+                return;
+            }
+            if (isComposing) {
+                scheduleCodeBlockHighlight(codeBlock);
+                return;
+            }
+            codeBlockManager.highlightSingleCodeBlock(codeBlock);
+        }, 150));
+    }
+
     // An image has no text, but an item holding one is not empty.
     function listItemHasDirectImage(listItem) {
         return Array.from(listItem.querySelectorAll('img')).some(
@@ -4126,24 +4148,6 @@ const {
         return !hasDirectContent && rangeIntersectsNodeSafely(range, listItem);
     }
 
-    function filterRootSelectedListItems(listItems) {
-        if (!Array.isArray(listItems) || listItems.length <= 1) {
-            return Array.isArray(listItems) ? listItems : [];
-        }
-
-        const selectedSet = new Set(listItems);
-        return listItems.filter((item) => {
-            let current = item.parentElement;
-            while (current && current !== editor) {
-                if (current.tagName === 'LI' && selectedSet.has(current)) {
-                    return false;
-                }
-                current = current.parentElement;
-            }
-            return true;
-        });
-    }
-
     function getTabOperationTargetListItems(range, fallbackListItem) {
         const selectedListItems = getSelectedListItemsFromRange(range);
         if (selectedListItems.length === 0) {
@@ -4153,10 +4157,14 @@ const {
         const directSelectedListItems = selectedListItems.filter((item) =>
             rangeIntersectsListItemDirectContent(range, item)
         );
-        const baseItems = directSelectedListItems.length > 0
+        // Keep selected children as targets too. Tab moves each item on its own
+        // (ListManager leaves an item's children at their depth), so a selected
+        // parent and child must both move: parents first for indent and, as
+        // the caller reverses the order, children first for outdent. That
+        // keeps the child under its parent.
+        return directSelectedListItems.length > 0
             ? directSelectedListItems
             : selectedListItems;
-        return filterRootSelectedListItems(baseItems);
     }
 
     function restoreRangeSelectionAroundListItems(listItems) {
@@ -8246,6 +8254,11 @@ const {
 
     function syncUiAfterHistoryRestore() {
         tocManager.cancelScrollAnimation();
+        // A snapshot can carry a table cell selection, and the selected cells
+        // it refers to are gone. Without this the next Backspace or paste
+        // would act on cells the user no longer sees as selected.
+        tableManager.clearCellSelection();
+        tableManager.clearStructureSelection();
         normalizeCheckboxListItems();
         domUtils.ensureInlineCodeSpaces();
         domUtils.cleanupGhostStyles();
@@ -17760,7 +17773,12 @@ const {
             }
         }, true);
         editor.addEventListener('mousedown', () => typingUndoGroup.break(), true);
-        editor.addEventListener('compositionstart', () => typingUndoGroup.break(), true);
+        editor.addEventListener('compositionstart', () => {
+            typingUndoGroup.break();
+            // Record the committed text before the composition changes the DOM,
+            // so undo never lands on half-typed (uncommitted) IME text.
+            stateManager.flushDebouncedState();
+        }, true);
 
         editor.addEventListener('beforeinput', (e) => {
             if (cursorManager && typeof cursorManager.clearInlineCodeBoundaryState === 'function') {
@@ -18138,9 +18156,7 @@ const {
                                 }
                             }
                         } else if (codeBlock.className.match(/language-\w+/)) {
-                            setTimeout(() => {
-                                codeBlockManager.highlightSingleCodeBlock(codeBlock);
-                            }, 50);
+                            scheduleCodeBlockHighlight(codeBlock);
                         }
                     }
                 }
@@ -19641,10 +19657,11 @@ const {
             if (working.startsWith('|')) {
                 working = working.slice(1);
             }
-            if (working.endsWith('|')) {
+            if (working.endsWith('|') && !working.endsWith('\\|')) {
                 working = working.slice(0, -1);
             }
-            const cells = working.split('|').map(cell => cell.trim().replace(/\\\|/g, '|'));
+            // "\|" is a pipe inside a cell, not a cell boundary.
+            const cells = working.split(/(?<!\\)\|/).map(cell => cell.trim().replace(/\\\|/g, '|'));
             if (cells.length < 2) return null;
             return cells;
         };
@@ -23701,8 +23718,12 @@ const {
                 }
                 break;
             case 'retryPendingUpdate':
-                if (localUpdateRevision > acknowledgedUpdateRevision) {
-                    scheduleUpdate(5000);
+                // An update that is already scheduled goes out sooner; pushing it
+                // back would leave the document stale (and clean) for longer.
+                if (localUpdateRevision > acknowledgedUpdateRevision && !notifyTimeout) {
+                    scheduleUpdate(
+                        Number.isFinite(message.delayMs) ? Math.max(0, message.delayMs) : 5000
+                    );
                 }
                 break;
             case 'tableCommand':

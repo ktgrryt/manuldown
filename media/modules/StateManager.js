@@ -510,6 +510,22 @@ export class StateManager {
     /**
      * デバウンス付きで状態を保存（テキスト入力用）
      */
+    /**
+     * Push now the state that a pending saveStateDebounced() would push later.
+     * Call it when IME composition starts: from then on the DOM holds
+     * uncommitted text, which the timer would otherwise record as an undo step.
+     * @returns {boolean} Whether a state was pushed.
+     */
+    flushDebouncedState() {
+        if (!this.saveStateTimeout || this.isRestoringState) return false;
+        const pendingSelection = this.takePendingSaveSelection();
+        const pushed = this.pushUndoState(this.createState(pendingSelection));
+        if (pushed) {
+            this.pendingChangeSelection = null;
+        }
+        return pushed;
+    }
+
     saveStateDebounced() {
         if (this.isRestoringState) return;
 

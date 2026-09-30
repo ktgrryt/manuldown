@@ -996,3 +996,29 @@ test('StateManager clearHistory releases stacks and byte accounting', async () =
     assert.equal(manager.undoHistoryBytes, 0);
     assert.equal(manager.redoHistoryBytes, 0);
 });
+
+test('StateManager records committed text when an IME composition starts', async () => {
+    const { editor, manager } = await createStateManager({ maxHistorySize: 10 });
+    editor.innerHTML = '';
+    manager.seedState();
+
+    // An IME commit schedules its post-edit snapshot.
+    manager.saveState();
+    editor.innerHTML = '今日は';
+    manager.saveStateDebounced();
+
+    // The next composition starts before that timer fires: record the
+    // committed text now, so the timer cannot capture uncommitted text later.
+    assert.equal(manager.flushDebouncedState(), true);
+    assert.equal(manager.saveStateTimeout, null);
+    assert.equal(manager.flushDebouncedState(), false);
+    editor.innerHTML = '今日は天気がい';
+    editor.innerHTML = '今日は天気がいい';
+    manager.saveState();
+
+    assert.equal(manager.performUndo(), true);
+    assert.equal(editor.innerHTML, '今日は');
+    assert.equal(manager.performUndo(), true);
+    assert.equal(editor.innerHTML, '');
+    manager.clearHistory();
+});

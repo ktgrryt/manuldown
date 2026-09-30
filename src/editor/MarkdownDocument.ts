@@ -144,7 +144,8 @@ export class MarkdownDocument {
         try {
             const opaqueBlockProtection = this.protectNonRenderedMarkdown(markdown);
             // After the opaque pass, so code inside preserved raw HTML stays as it is.
-            const codeTabProtection = this.protectFencedCodeTabs(opaqueBlockProtection.markdown);
+            const codeInfoProtection = this.protectFencedCodeInfoStrings(opaqueBlockProtection.markdown);
+            const codeTabProtection = this.protectFencedCodeTabs(codeInfoProtection.markdown);
             const blanklineMarker = this.createPlaceholderMarker(
                 opaqueBlockProtection.markdown,
                 'BLANK_LINE'
@@ -180,6 +181,7 @@ export class MarkdownDocument {
             );
             let html = marked.parse(sourceIndentAnnotatedMarkdown) as string;
             html = codeTabProtection.restore(html);
+            html = codeInfoProtection.restore(html);
             html = opaqueBlockProtection.restore(html);
             html = html.replace(
                 new RegExp(`<p>\\s*${blanklineMarker}\\s*<\\/p>`, 'gi'),
@@ -942,6 +944,62 @@ export class MarkdownDocument {
         return {
             markdown: output.join(''),
             restore: (html) => html.split(tabMarker).join('\t'),
+        };
+    }
+
+    /**
+     * Marked keeps only the first word of a fence's info string (the
+     * language), so "```js title=\"a.js\"" would lose `title="a.js"` on save.
+     * Put a marker in place of such an info string while Marked parses, then
+     * turn the marker back into the language and keep the whole info string
+     * in data-mdw-code-info. Only top-level fences are handled.
+     */
+    private protectFencedCodeInfoStrings(markdown: string): {
+        markdown: string;
+        restore: (html: string) => string;
+    } {
+        const segments = markdown.match(/[^\n]*\n|[^\n]+$/g) ?? [];
+        const infoMarker = this.createPlaceholderMarker(markdown, 'CODE_INFO');
+        const infoStrings: string[] = [];
+        let fenceMarker: '`' | '~' | null = null;
+        let fenceLength = 0;
+        const output = segments.map((segment) => {
+            const lineEnding = segment.endsWith('\n') ? (segment.endsWith('\r\n') ? '\r\n' : '\n') : '';
+            const line = segment.slice(0, segment.length - lineEnding.length);
+            if (fenceMarker !== null) {
+                if (this.isFenceClosingLine(line, fenceMarker, fenceLength)) {
+                    fenceMarker = null;
+                    fenceLength = 0;
+                }
+                return segment;
+            }
+            const openingFence = this.parseFenceOpeningLine(line);
+            if (!openingFence) {
+                return segment;
+            }
+            fenceMarker = openingFence.marker;
+            fenceLength = openingFence.length;
+            const match = line.match(/^( {0,3}(?:`{3,}|~{3,}))[ \t]*(\S+)[ \t]+(\S.*?)[ \t]*$/);
+            if (!match || match[2].startsWith('{')) {
+                return segment;
+            }
+            infoStrings.push(`${match[2]} ${match[3]}`);
+            return `${match[1]}${infoMarker}${infoStrings.length - 1}END${lineEnding}`;
+        });
+        if (infoStrings.length === 0) {
+            return { markdown, restore: (html) => html };
+        }
+        const escapedMarker = infoMarker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        return {
+            markdown: output.join(''),
+            restore: (html) => html.replace(
+                new RegExp(`class="language-${escapedMarker}(\\d+)END"`, 'g'),
+                (_match, index: string) => {
+                    const info = infoStrings[Number(index)] ?? '';
+                    const language = info.split(/\s+/)[0] ?? '';
+                    return `class="language-${escapeAttribute(language)}" data-mdw-code-info="${escapeAttribute(info)}"`;
+                }
+            ),
         };
     }
 
