@@ -113,7 +113,7 @@ test('editor finalizes the local IME revision before replaying an external updat
     );
     assert.match(
         editorSource,
-        /markdownConverter\.convertMarkdownSyntax\(notifyChange\)[\s\S]*?compositionUpdateGate\.finish\(finalizationToken\)[\s\S]*?handleHostMessage\(pendingExternalMessage\)/,
+        /markdownConverter\.convertMarkdownSyntax\(notifyChange\b[\s\S]*?compositionUpdateGate\.finish\(finalizationToken\)[\s\S]*?handleHostMessage\(pendingExternalMessage\)/,
         'The local revision must advance before a deferred host message is replayed'
     );
     assert.match(

@@ -1323,12 +1323,13 @@ export class TableManager {
                 if (startCell && endCell && startCell !== endCell) {
                     const startInfo = this._getCellInfo(startCell);
                     const endInfo = this._getCellInfo(endCell);
-                    if (startInfo && endInfo && startInfo.table === endInfo.table) {
+                    if (
+                        startInfo &&
+                        endInfo &&
+                        startInfo.table === endInfo.table &&
+                        this._deleteTextSelectionAcrossCells(range, startCell, endCell, startInfo.table)
+                    ) {
                         e.preventDefault();
-                        this.stateManager.saveState();
-                        this.selectCellRange(startCell, endCell);
-                        this.selectedCells.forEach(cell => this._clearCellContent(cell));
-                        this.clearCellSelection();
                         if (this.notifyChange) this.notifyChange();
                         return true;
                     }
@@ -4779,6 +4780,67 @@ export class TableManager {
     _clearCellContent(cell) {
         if (!cell) return;
         this._setCellPlainText(cell, '');
+    }
+
+    _isStructureHandle(node) {
+        return !!(
+            node &&
+            node.nodeType === Node.ELEMENT_NODE &&
+            node.classList &&
+            node.classList.contains('md-table-structure-handle')
+        );
+    }
+
+    /**
+     * Delete a text selection that runs from one cell into another. Like the
+     * browser's highlight, it follows document order: the rest of the first
+     * cell, every cell in between, and the start of the last cell. Cells the
+     * selection does not reach keep their content, and the table keeps its
+     * UI handles.
+     */
+    _deleteTextSelectionAcrossCells(range, startCell, endCell, table) {
+        const cells = Array.from(table.querySelectorAll('th, td'));
+        const startIndex = cells.indexOf(startCell);
+        const endIndex = cells.indexOf(endCell);
+        if (startIndex === -1 || endIndex === -1 || startIndex >= endIndex) {
+            return false;
+        }
+
+        this.stateManager.saveState();
+        this.clearCellSelection();
+
+        const startChildren = Array.from(startCell.childNodes);
+        const firstHandleIndex = startChildren.findIndex((node) => this._isStructureHandle(node));
+        const tail = document.createRange();
+        tail.setStart(range.startContainer, range.startOffset);
+        tail.setEnd(startCell, firstHandleIndex === -1 ? startChildren.length : firstHandleIndex);
+
+        const endChildren = Array.from(endCell.childNodes);
+        let leadingHandleCount = 0;
+        while (leadingHandleCount < endChildren.length && this._isStructureHandle(endChildren[leadingHandleCount])) {
+            leadingHandleCount++;
+        }
+        const head = document.createRange();
+        head.setStart(endCell, leadingHandleCount);
+        head.setEnd(range.endContainer, range.endOffset);
+
+        head.deleteContents();
+        tail.deleteContents();
+        for (let index = startIndex + 1; index < endIndex; index++) {
+            this._clearCellContent(cells[index]);
+        }
+        this._ensureCellNotEmpty(startCell);
+        this._ensureCellNotEmpty(endCell);
+
+        const selection = window.getSelection();
+        if (selection) {
+            const caret = document.createRange();
+            caret.setStart(tail.startContainer, tail.startOffset);
+            caret.collapse(true);
+            selection.removeAllRanges();
+            selection.addRange(caret);
+        }
+        return true;
     }
 
     _setCellPlainText(cell, text) {

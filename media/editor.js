@@ -9,6 +9,7 @@ import { ToolbarManager } from './modules/ToolbarManager.js';
 import { TableManager } from './modules/TableManager.js';
 import { SearchManager } from './modules/SearchManager.js';
 import { CompositionUpdateGate } from './modules/CompositionUpdateGate.js';
+import { TypingUndoGroup } from './modules/TypingUndoGroup.js';
 import { assignStableHeadingIds } from './modules/MarkdownHeadingSlug.js';
 import {
     getWorkspaceLinkSuggestionQuery,
@@ -1451,8 +1452,12 @@ const {
     const stateManager = new StateManager(editor, vscode, {
         // History must ignore syntax spans, table wrappers, selection classes and
         // other reconstructed UI. Treat only Markdown-relevant HTML as an edit.
-        getComparableHtml: () => domUtils.getCleanedHTML({ historyComparable: true })
+        getComparableHtml: () => domUtils.getCleanedHTML({ historyComparable: true }),
+        // Typing is grouped into word-sized steps (TypingUndoGroup), so allow
+        // more of them; the byte cap still bounds memory on large documents.
+        maxHistorySize: 500
     });
+    const typingUndoGroup = new TypingUndoGroup();
     const cursorManager = new CursorManager(editor, domUtils);
     const listManager = new ListManager(editor, domUtils);
     const markdownConverter = new MarkdownConverter(editor, domUtils, {
@@ -1717,6 +1722,13 @@ const {
             }
         }
         return directTextContent;
+    }
+
+    // An image has no text, but an item holding one is not empty.
+    function listItemHasDirectImage(listItem) {
+        return Array.from(listItem.querySelectorAll('img')).some(
+            (image) => image.closest('li') === listItem
+        );
     }
 
     function hasDirectTextContent(listItem) {
@@ -8251,6 +8263,7 @@ const {
         if (performAuxiliaryHistoryCommand(direction)) {
             return true;
         }
+        typingUndoGroup.break();
         const hadPendingViewportAnchor = Number.isFinite(historyCaretViewportOffsetPending);
         if (!hadPendingViewportAnchor) {
             captureHistoryCaretViewportOffset();
@@ -8564,7 +8577,7 @@ const {
 
         // Check if the list item is empty (ignore caret placeholders)
         const directTextForEnter = getDirectTextContent(activeListItem).replace(/[\u00A0\u200B\u2060]/g, '').trim();
-        const isEmpty = directTextForEnter === '';
+        const isEmpty = directTextForEnter === '' && !listItemHasDirectImage(activeListItem);
         const isCheckboxItem = hasCheckbox(activeListItem);
 
         if (isEmpty && !isCheckboxItem) {
@@ -17696,7 +17709,9 @@ const {
                     if (compositionUpdateGate.shouldCommitLocalChange(finalizationToken)) {
                         stripEditorControlCharacters(editor);
                         stateManager.saveStateDebounced();
-                        const converted = markdownConverter.convertMarkdownSyntax(notifyChange);
+                        const converted = markdownConverter.convertMarkdownSyntax(notifyChange, {
+                            insertedText: e.data
+                        });
                         if (!converted) {
                             notifyChange();
                         }
@@ -17731,6 +17746,21 @@ const {
             }
             finalizeComposition();
         });
+
+        // Caret moves, shortcuts, clicks and IME input end the current typing
+        // run, so the next keystroke starts its own undo step.
+        editor.addEventListener('keydown', (e) => {
+            if (
+                e.metaKey ||
+                e.ctrlKey ||
+                e.altKey ||
+                /^(?:Arrow|Page|Home$|End$|Tab$|Enter$|Escape$)/.test(e.key || '')
+            ) {
+                typingUndoGroup.break();
+            }
+        }, true);
+        editor.addEventListener('mousedown', () => typingUndoGroup.break(), true);
+        editor.addEventListener('compositionstart', () => typingUndoGroup.break(), true);
 
         editor.addEventListener('beforeinput', (e) => {
             if (cursorManager && typeof cursorManager.clearInlineCodeBoundaryState === 'function') {
@@ -17770,14 +17800,28 @@ const {
                 return;
             }
 
-            // Checkpoint the pre-edit DOM for every native keystroke. The input
-            // handler still debounces the post-edit snapshot, but the next
-            // beforeinput flushes that pending state. Without this checkpoint a
-            // fast `12345` followed by five Backspaces ends where it started and
-            // the whole burst is deduplicated, so Undo jumps to much older edits.
+            // Checkpoint the pre-edit DOM when a native edit starts a new undo
+            // step. A run of typed characters (up to a word boundary) or of
+            // deletions is one step; see TypingUndoGroup. The input handler
+            // still debounces the post-edit snapshot. Checkpointing where the
+            // kind of edit changes keeps a fast `12345` followed by five
+            // Backspaces as two steps, so it is never deduplicated away and
+            // Undo does not jump to much older edits.
             const nativeInputType = typeof e.inputType === 'string' ? e.inputType : '';
             if (!e.defaultPrevented && /^(?:insert|delete)/.test(nativeInputType)) {
-                stateManager.saveState();
+                const undoSelection = window.getSelection();
+                const selectionIsCaret = !!(
+                    undoSelection &&
+                    undoSelection.rangeCount &&
+                    undoSelection.getRangeAt(0).collapsed
+                );
+                if (typingUndoGroup.shouldCheckpoint({
+                    inputType: nativeInputType,
+                    data: e.data,
+                    collapsed: selectionIsCaret
+                })) {
+                    stateManager.saveState();
+                }
             }
 
             if (typeof e.inputType === 'string' && e.inputType.startsWith('delete')) {
@@ -17856,7 +17900,9 @@ const {
                             });
                             updateListItemClasses();
                             scheduleMarkdownConversion(() => {
-                                const converted = markdownConverter.convertMarkdownSyntax(notifyChange);
+                                const converted = markdownConverter.convertMarkdownSyntax(notifyChange, {
+                                    insertedText: e.data
+                                });
                                 if (!converted) {
                                     notifyChange();
                                 }
@@ -17889,7 +17935,9 @@ const {
 
                         if (!isInCodeBlock) {
                             scheduleMarkdownConversion(() => {
-                                const converted = markdownConverter.convertMarkdownSyntax(notifyChange);
+                                const converted = markdownConverter.convertMarkdownSyntax(notifyChange, {
+                                    insertedText: e.data || ''
+                                });
                                 if (!converted) {
                                     notifyChange();
                                 }
@@ -18012,7 +18060,9 @@ const {
                         }
                         // 変換を早めに実行（入力後のラグを減らす）
                         scheduleMarkdownConversion(() => {
-                            const converted = markdownConverter.convertMarkdownSyntax(notifyChange);
+                            const converted = markdownConverter.convertMarkdownSyntax(notifyChange, {
+                                insertedText: e.inputType === 'insertText' ? e.data : null
+                            });
                             if (converted) {
                                 // 変換が行われた場合はnotifyChangeがコールバックで呼ばれる
                             } else {
@@ -18485,6 +18535,14 @@ const {
             return !!(codeElement && preElement);
         };
 
+        // Both ends of the range are inside the same inline (non-PRE) code.
+        const isRangeInsideInlineCode = (range) => {
+            if (!range) return false;
+            const startCode = domUtils.getParentElement(range.startContainer, 'CODE');
+            if (!startCode || domUtils.getParentElement(startCode, 'PRE')) return false;
+            return domUtils.getParentElement(range.endContainer, 'CODE') === startCode;
+        };
+
         const findMarkdownClosingBracket = (source, startIndex) => {
             let nestedDepth = 0;
             for (let i = startIndex; i < source.length; i++) {
@@ -18663,9 +18721,51 @@ const {
                 }
             };
             const hasClosing = (value) => typeof value === 'number' && value > -1;
+            // Emphasis follows CommonMark's delimiter rules (simplified) so that
+            // text such as my_variable_name or "5 * 3 * 2" stays literal:
+            // a delimiter opens only before non-space text and closes only after
+            // it, and "_" never opens or closes inside a word.
+            const isWhitespaceAt = (index) => index < 0 || index >= source.length || /\s/.test(source[index]);
+            const isPunctuationAt = (index) =>
+                index >= 0 && index < source.length && /[\p{P}\p{S}]/u.test(source[index]);
+            const isWordCharAt = (index) =>
+                index >= 0 && index < source.length && /[\p{L}\p{N}]/u.test(source[index]);
+            const canOpenAt = (index, length, intrawordForbidden) => {
+                const before = index - 1;
+                const after = index + length;
+                if (isWhitespaceAt(after)) return false;
+                if (isPunctuationAt(after) && !isWhitespaceAt(before) && !isPunctuationAt(before)) return false;
+                return !intrawordForbidden || !isWordCharAt(before);
+            };
+            const canCloseAt = (index, length, intrawordForbidden) => {
+                const before = index - 1;
+                const after = index + length;
+                if (isWhitespaceAt(before)) return false;
+                if (isPunctuationAt(before) && !isWhitespaceAt(after) && !isPunctuationAt(after)) return false;
+                return !intrawordForbidden || !isWordCharAt(after);
+            };
+            const findClosingDelimiter = (delimiter, from, intrawordForbidden) => {
+                const single = delimiter.length === 1;
+                for (let index = source.indexOf(delimiter, from); index !== -1; index = source.indexOf(delimiter, index + 1)) {
+                    if (source[index - 1] === '\\') continue;
+                    if (single && (source[index - 1] === delimiter || source[index + 1] === delimiter)) continue;
+                    if (canCloseAt(index, delimiter.length, intrawordForbidden)) return index;
+                }
+                return -1;
+            };
 
             while (cursor < source.length) {
                 let matched = false;
+
+                // A backslash escape keeps the next Markdown character literal.
+                // (A backslash before other characters, e.g. in C:\Users or
+                // \\server, is kept as it is.)
+                if (source[cursor] === '\\' && /[*_~`[\]!()]/.test(source[cursor + 1] || '')) {
+                    flushText(cursor);
+                    textStart = cursor + 1;
+                    cursor += 2;
+                    continue;
+                }
 
                 if (source[cursor] === '!' && source[cursor + 1] === '[') {
                     const altEnd = findMarkdownClosingBracket(source, cursor + 2);
@@ -18733,8 +18833,8 @@ const {
                     }
                 }
 
-                if (!matched && source.startsWith('**', cursor) && !isInsideUrlLikeText(cursor)) {
-                    const end = source.indexOf('**', cursor + 2);
+                if (!matched && source.startsWith('**', cursor) && !isInsideUrlLikeText(cursor) && canOpenAt(cursor, 2, false)) {
+                    const end = findClosingDelimiter('**', cursor + 2, false);
                     if (hasClosing(end) && end > cursor + 2) {
                         const content = source.slice(cursor + 2, end);
                         if (content.trim() !== '') {
@@ -18750,8 +18850,8 @@ const {
                     }
                 }
 
-                if (!matched && source.startsWith('~~', cursor) && !isInsideUrlLikeText(cursor)) {
-                    const end = source.indexOf('~~', cursor + 2);
+                if (!matched && source.startsWith('~~', cursor) && !isInsideUrlLikeText(cursor) && canOpenAt(cursor, 2, false)) {
+                    const end = findClosingDelimiter('~~', cursor + 2, false);
                     if (hasClosing(end) && end > cursor + 2) {
                         const content = source.slice(cursor + 2, end);
                         if (content.trim() !== '') {
@@ -18767,8 +18867,8 @@ const {
                     }
                 }
 
-                if (!matched && source[cursor] === '*' && source[cursor + 1] !== '*' && !isInsideUrlLikeText(cursor)) {
-                    const end = source.indexOf('*', cursor + 1);
+                if (!matched && source[cursor] === '*' && source[cursor + 1] !== '*' && !isInsideUrlLikeText(cursor) && canOpenAt(cursor, 1, false)) {
+                    const end = findClosingDelimiter('*', cursor + 1, false);
                     if (hasClosing(end) && end > cursor + 1) {
                         const content = source.slice(cursor + 1, end);
                         if (content.trim() !== '') {
@@ -18784,8 +18884,8 @@ const {
                     }
                 }
 
-                if (!matched && source[cursor] === '_' && source[cursor + 1] !== '_' && !isInsideUrlLikeText(cursor)) {
-                    const end = source.indexOf('_', cursor + 1);
+                if (!matched && source[cursor] === '_' && source[cursor + 1] !== '_' && !isInsideUrlLikeText(cursor) && canOpenAt(cursor, 1, true)) {
+                    const end = findClosingDelimiter('_', cursor + 1, true);
                     if (hasClosing(end) && end > cursor + 1) {
                         const content = source.slice(cursor + 1, end);
                         if (content.trim() !== '') {
@@ -20570,6 +20670,21 @@ const {
                 const rawExternalPastedText = clipboardData.getData('text/plain');
                 const externalPastedText = normalizeExternalClipboardPlainText(rawExternalPastedText);
                 const pastedText = internalPastedText || externalPastedText;
+
+                // Inline code holds literal text: paste only the plain text there,
+                // without Markdown, links, formatting or line breaks.
+                const pasteRange = selection && selection.rangeCount ? selection.getRangeAt(0) : null;
+                if (isRangeInsideInlineCode(pasteRange)) {
+                    e.preventDefault();
+                    const inlineCodeText = (pastedText || '').replace(/\r\n?|\n/g, ' ');
+                    if (inlineCodeText) {
+                        stateManager.saveState();
+                        insertPlainTextAtSelection(inlineCodeText);
+                        notifyChange();
+                    }
+                    return;
+                }
+
                 const trustedInternalPayload = internalPastedHtml
                     ? getTrustedClipboardPayload(internalPastedHtml, pastedText)
                     : null;
@@ -20577,9 +20692,16 @@ const {
                 const directLinkTarget = resolveDirectLinkTarget(pastedText);
                 const pastedAbsolutePath = getPastedAbsolutePathCandidate(rawExternalPastedText);
                 const hasListLikeText = !!(pastedText && pastedTextLooksLikeList(pastedText));
+                // A copy made in this editor keeps its formatting in the HTML
+                // payload. The plain-text list path below would drop bold, links
+                // and inline code, so leave structured internal HTML to the
+                // internal HTML path.
+                const internalHtmlHasStructure = !!internalPastedHtml &&
+                    !internalHtmlIsListlessPlainText(internalPastedHtml);
 
                 if (
                     hasListLikeText &&
+                    !internalHtmlHasStructure &&
                     selection &&
                     insertTextWithPasteBehavior(pastedText, { allowPlainTextFallback: false })
                 ) {
@@ -20774,28 +20896,51 @@ const {
             const payload = createClipboardPayloadFromSelection(selection);
             if (!payload) return;
 
-            const payloadPlainText = normalizeClipboardPlainText(payload.text || '');
             const fallbackText = normalizeClipboardPlainText(selection.toString());
-            const hasImage = selectionContainsImage(selection);
-            const hasListStructure = selectionContainsListStructure(selection);
-            const plainText = payloadPlainText || fallbackText;
-            const isMultiLineSelection = plainText.includes('\n');
-            const hasBlockStructure = typeof payload.html === 'string' &&
-                /<\/(?:p|div|blockquote|pre|h[1-6]|li|ul|ol|table)>\s*</i.test(payload.html);
-            if (!hasImage && !hasListStructure && !isMultiLineSelection && !hasBlockStructure) return;
+            const plainText = normalizeClipboardPlainText(payload.text || '') || fallbackText;
+            if (!selectionContainsImage(selection) && !clipboardPayloadHasStructure(selection, payload, plainText)) return;
 
             e.preventDefault();
             writeClipboardPayload(e.clipboardData, payload, fallbackText, plainText);
         };
+        // Lists, several lines or blocks need the editor's own clipboard format
+        // so that pasting them keeps their structure and formatting.
+        const clipboardPayloadHasStructure = (selection, payload, plainText) => (
+            selectionContainsListStructure(selection) ||
+            plainText.includes('\n') ||
+            (
+                typeof payload.html === 'string' &&
+                /<\/(?:p|div|blockquote|pre|h[1-6]|li|ul|ol|table)>\s*</i.test(payload.html)
+            )
+        );
         editor.addEventListener('copy', handleEditorCopy);
         document.addEventListener('copy', handleEditorCopy, true);
 
-        // 画像を含む選択のカットを補助（右クリックカット・範囲選択カット対応）
+        // カットを補助: 画像や、リスト・複数行・ブロックを含む選択はエディタ形式で
+        // クリップボードへ書く（右クリックカット・範囲選択カット対応）
         editor.addEventListener('cut', (e) => {
             if (isUpdating || e.defaultPrevented) return;
             const selection = window.getSelection();
             if (!selection || !selection.rangeCount) return;
-            if (!selectionContainsImage(selection)) return;
+            if (!selectionContainsImage(selection)) {
+                if (selection.isCollapsed || !e.clipboardData) return;
+                const structuredPayload = createClipboardPayloadFromSelection(selection);
+                if (!structuredPayload) return;
+                const structuredFallbackText = normalizeClipboardPlainText(selection.toString());
+                const structuredPlainText = normalizeClipboardPlainText(structuredPayload.text || '') ||
+                    structuredFallbackText;
+                if (!clipboardPayloadHasStructure(selection, structuredPayload, structuredPlainText)) return;
+
+                e.preventDefault();
+                writeClipboardPayload(e.clipboardData, structuredPayload, structuredFallbackText, structuredPlainText);
+                stateManager.saveState();
+                typingUndoGroup.break();
+                // Delete the way a native cut would, so list items and blocks
+                // around the selection merge as they do for Backspace.
+                document.execCommand('delete', false, null);
+                notifyChange();
+                return;
+            }
 
             const payload = createClipboardPayloadFromSelection(selection);
             if (!payload || !e.clipboardData) return;

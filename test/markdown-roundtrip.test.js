@@ -159,6 +159,20 @@ test('loose list round trips reach a fixed point', () => {
     }
 });
 
+test('tabs inside fenced code blocks survive the round trip', () => {
+    const sources = [
+        '```make\nall:\n\tgo build ./...\n```\n',
+        '```go\nfunc main() {\n\tif ok {\n\t\treturn\n\t}\n}\n```\n',
+        '<div>\n\n```\n\tinside raw html\n```\n\n</div>\n',
+    ];
+
+    for (const source of sources) {
+        const { html, markdown } = convert(source);
+        assert.doesNotMatch(visibleText(html), /MDW/);
+        assert.equal(markdown, source);
+    }
+});
+
 test('table cells that hold only an image keep the image', () => {
     const sources = [
         '| icon | name |\n| --- | --- |\n| ![home](img/home.png) | Home |\n',
