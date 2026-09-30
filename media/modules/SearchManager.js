@@ -178,6 +178,11 @@ export class SearchManager {
         const matchOffset = this.matchOffsets[matchIndex] || 0;
         const replacementText = this.replaceInput.value;
         const range = this.matches[matchIndex].cloneRange();
+        if (this._isReadOnlyMatch(range)) {
+            // Leave read-only content as it is and move on to the next match.
+            this.goToNext();
+            return false;
+        }
 
         this._notifyWillReplace(range);
         const caretRange = this._replaceRange(range, replacementText);
@@ -202,6 +207,10 @@ export class SearchManager {
 
         const replacementText = this.replaceInput.value;
         const ranges = this.matches.map(range => range.cloneRange());
+        const replaceable = ranges.map(range => !this._isReadOnlyMatch(range));
+        if (!replaceable.includes(true)) {
+            return 0;
+        }
         const anchorIndex = this.currentMatchIndex >= 0 ? this.currentMatchIndex : 0;
         this._notifyWillReplace(ranges[anchorIndex]);
 
@@ -209,6 +218,9 @@ export class SearchManager {
         let caretRange = null;
         // Replace from the end so earlier Range boundaries remain stable.
         for (let index = ranges.length - 1; index >= 0; index--) {
+            if (!replaceable[index]) {
+                continue;
+            }
             const replacedRange = this._replaceRange(ranges[index], replacementText);
             if (replacedRange) {
                 replacedCount++;
@@ -569,6 +581,7 @@ export class SearchManager {
         this.matches = [];
         this.matchOffsets = [];
         this.currentMatchIndex = -1;
+        this.matchLimitReached = false;
 
         if (!this.query || this.query.length === 0) {
             this._updateMatchCountLabel();
@@ -597,9 +610,14 @@ export class SearchManager {
 
         const searchText = this.caseSensitive ? cleanText : cleanText.toLowerCase();
 
-        // Find all occurrences
+        // Find all occurrences, up to a limit (as VS Code's find widget does) so a
+        // one-character query in a large document cannot freeze the editor.
         let searchStart = 0;
         while (searchStart < searchText.length) {
+            if (this.matches.length >= SearchManager.MAX_MATCHES) {
+                this.matchLimitReached = true;
+                break;
+            }
             const index = searchText.indexOf(searchQuery, searchStart);
             if (index === -1) break;
 
@@ -756,7 +774,10 @@ export class SearchManager {
         });
 
         if (allRanges.length > 0) {
-            const highlight = new Highlight(...allRanges);
+            // Add one by one: spreading tens of thousands of ranges into the
+            // constructor exceeds the engine's argument limit (RangeError).
+            const highlight = new Highlight();
+            allRanges.forEach((range) => highlight.add(range));
             CSS.highlights.set('search-matches', highlight);
         }
     }
@@ -816,7 +837,7 @@ export class SearchManager {
             this.matchCountLabel.classList.toggle('no-results', !!this.query);
         } else {
             this.matchCountLabel.textContent =
-                `${this.currentMatchIndex + 1}/${this.matches.length}`;
+                `${this.currentMatchIndex + 1}/${this.matches.length}${this.matchLimitReached ? '+' : ''}`;
             this.matchCountLabel.classList.remove('no-results');
         }
 
@@ -824,4 +845,33 @@ export class SearchManager {
         this.replaceButton.disabled = !hasMatches;
         this.replaceAllButton.disabled = !hasMatches;
     }
+
+    /**
+     * Whether a match touches content shown read-only (front matter, raw HTML,
+     * footnote and reference definitions). The file keeps that content's
+     * original source, so replacing its visible text would only make the view
+     * disagree with the file.
+     */
+    _isReadOnlyMatch(range) {
+        const readOnlySelector = '[contenteditable="false"], .mdw-opaque-source';
+        const isInsideReadOnly = (node) => {
+            const element = node && node.nodeType === 1 ? node : node?.parentElement;
+            return !!element?.closest?.(readOnlySelector);
+        };
+        if (isInsideReadOnly(range.startContainer) || isInsideReadOnly(range.endContainer)) {
+            return true;
+        }
+        if (typeof range.cloneContents !== 'function') {
+            return false;
+        }
+        try {
+            const fragment = range.cloneContents();
+            return !!(fragment && typeof fragment.querySelector === 'function' && fragment.querySelector(readOnlySelector));
+        } catch (_) {
+            return false;
+        }
+    }
 }
+
+// Matches beyond this are not collected (VS Code's find widget uses a similar limit).
+SearchManager.MAX_MATCHES = 20000;

@@ -63,6 +63,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     private customSlashCommandCache: { loadedAt: number; items: CustomSlashCommandTemplate[] } | null = null;
     private tocPanelWidthPx = MarkdownEditorProvider.defaultTocPanelWidthPx;
     private currentEmptyListItemMarker: string | null = null;
+    // Text of the document being converted by htmlToMarkdown (see escapeHtmlLikeText).
+    private currentConversionDocumentText: string | null = null;
     private readonly workspaceLinkPicker = new WorkspaceLinkPicker();
     public explicitlyRequested = false;
 
@@ -76,7 +78,21 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             emDelimiter: '*',
             strongDelimiter: '**',
             // Default nested-list indentation (updated per document on save).
-            blankReplacement: (content: string, node: any) => {
+            blankReplacement: (content: string, node: any, options: any) => {
+                // An empty list item is still an item. Keep its marker so the
+                // list neither loses the item nor, when ordered, splits in two.
+                if (node.nodeName === 'LI') {
+                    const parent = node.parentNode;
+                    let prefix = (options?.bulletListMarker || '-') + ' ';
+                    if (parent && parent.nodeName === 'OL') {
+                        const start = parent.getAttribute('start');
+                        const index = Array.prototype.indexOf.call(parent.children, node);
+                        prefix = (start ? Number(start) + index : index + 1) + '. ';
+                    }
+                    // As in the listItem rule, a nested empty item keeps "&nbsp;".
+                    const isNested = !!(parent && parent.parentNode && parent.parentNode.nodeName === 'LI');
+                    return prefix + (isNested ? '&nbsp;' : '') + (node.nextSibling ? '\n' : '');
+                }
                 return node.isBlock ? '\n\n' : '';
             }
         });
@@ -99,10 +115,10 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         (this.turndownService as any).escape = function (text: string) {
             // Call original escape first, then normalize selected sequences.
             const escaped = originalEscape.call(this, text);
-            return escaped
+            return provider.escapeHtmlLikeText(escaped
                 .replace(redundantEscapedMarkerPattern, '\\$1')
                 .replace(/\\`/g, '`')
-                .replace(/\\-/g, '-');
+                .replace(/\\-/g, '-'));
         };
 
         // Override nested-list indentation width (updated dynamically on save).
@@ -514,9 +530,18 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     ...Array.from(codeContent.matchAll(/`+/g), (match) => match[0].length)
                 );
                 const fence = '`'.repeat(Math.max(3, longestBacktickRun + 1));
+                // Keep the rest of the fence's info string (e.g. title="a.js")
+                // while the language is unchanged. A backtick fence's info
+                // string cannot hold backticks or line breaks.
+                const codeInfo = String(codeNode.getAttribute('data-mdw-code-info') || '')
+                    .replace(/[`\r\n]/g, '')
+                    .trim();
+                const infoString = language && codeInfo.split(/\s+/)[0] === language
+                    ? codeInfo
+                    : language;
                 // Format: \n\n```language\ncodeContent```\n\n
                 // The codeContent already ends with \n, so closing fence will be on its own line
-                const result = '\n\n' + fence + language + '\n' + codeContent + fence + '\n\n';
+                const result = '\n\n' + fence + infoString + '\n' + codeContent + fence + '\n\n';
 
                 return result;
             }
@@ -908,15 +933,25 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             await queuedAction;
         };
 
-        const reportSaveSyncFailure = (detail: string): void => {
+        const reportSaveSyncFailure = (
+            detail: string,
+            options: { manual?: boolean; retryDelayMs?: number } = {}
+        ): void => {
             if (
                 editorDisposed ||
                 this.webviewPanels.get(documentKey) !== webviewPanel
             ) {
                 return;
             }
-            void webviewPanel.webview.postMessage({ type: 'retryPendingUpdate' });
-            if (saveSyncWarningShown) {
+            // The Webview resends its edit after the delay, which puts it back
+            // into the TextDocument (and marks it dirty) once this save is done.
+            void webviewPanel.webview.postMessage({
+                type: 'retryPendingUpdate',
+                delayMs: options.retryDelayMs,
+            });
+            // Tell the user about every save they asked for; auto-save failures
+            // are reported once until a save succeeds again.
+            if (saveSyncWarningShown && !options.manual) {
                 return;
             }
             saveSyncWarningShown = true;
@@ -1160,7 +1195,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                             }
                             if (unresolvedExternalChangeId !== 0) {
                                 postExternalDocumentUpdate();
-                                reportSaveSyncFailure('an external edit conflict is unresolved');
+                                reportSaveSyncFailure('an external edit conflict is unresolved', { manual: true });
                                 return;
                             }
                             pendingWebviewUpdate = {
@@ -1775,6 +1810,12 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 return;
             }
 
+            // Failures of a save the user asked for are always reported;
+            // auto-save failures once per streak (see reportSaveSyncFailure).
+            const manual = event.reason === vscode.TextDocumentSaveReason?.Manual;
+            // A deadline miss keeps the edit only in the Webview; resend it right
+            // after this save so the document becomes dirty again.
+            const deadlineFailure = { manual, retryDelayMs: 300 };
             event.waitUntil((async (): Promise<vscode.TextEdit[]> => {
                 // VS Code shares a short time budget among all will-save listeners.
                 // Fetch the Webview snapshot alongside any in-flight host update,
@@ -1813,7 +1854,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 ]));
                 if (syncResult === timeoutMarker) {
                     console.warn('[save sync] Timed out while preparing the ManulDown save snapshot.');
-                    reportSaveSyncFailure('the Webview did not respond in time');
+                    reportSaveSyncFailure('the Webview did not respond in time', deadlineFailure);
                     return [];
                 }
 
@@ -1837,7 +1878,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                         reportSaveSyncFailure(
                             unresolvedExternalChangeId !== 0
                                 ? 'an external edit conflict is unresolved'
-                                : 'a pending editor update failed'
+                                : 'a pending editor update failed',
+                            { manual }
                         );
                     }
                     return [];
@@ -1854,7 +1896,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                         this.webviewPanels.get(documentKey) === webviewPanel
                     ) {
                         console.warn('[save sync] Timed out waiting for the ManulDown Webview snapshot.');
-                        reportSaveSyncFailure('the Webview snapshot was unavailable');
+                        reportSaveSyncFailure('the Webview snapshot was unavailable', deadlineFailure);
                     }
                     return [];
                 }
@@ -1882,7 +1924,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                         !editorDisposed &&
                         this.webviewPanels.get(documentKey) === webviewPanel
                     ) {
-                        reportSaveSyncFailure('snapshot conversion exceeded the save deadline');
+                        reportSaveSyncFailure('snapshot conversion exceeded the save deadline', deadlineFailure);
                     }
                     return [];
                 }
@@ -1927,7 +1969,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                         revision: expectedUpdate.revision,
                     });
                 } else if (expectedWillSaveUpdates.size > 0) {
-                    reportSaveSyncFailure('the pre-save edit was not applied');
+                    reportSaveSyncFailure('the pre-save edit was not applied', { manual: true });
                 }
                 clearExpectedWillSaveUpdates();
             }
@@ -2646,6 +2688,59 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         }).join('\n');
     }
 
+    /**
+     * Text shown literally in the editor must stay literal in the saved
+     * Markdown. "&copy;" as text (written "&amp;copy;" in the file) would
+     * otherwise render as ©, and "<T>" (written "&lt;T&gt;") would become an
+     * HTML tag that other renderers hide. A tag-like "<...>" that the document
+     * already writes as it is stays unchanged.
+     */
+    private escapeHtmlLikeText(text: string): string {
+        const documentText = this.currentConversionDocumentText ?? '';
+        return text
+            .replace(/&(?=(?:[A-Za-z][A-Za-z0-9]{1,31}|#[0-9]{1,7}|#[xX][0-9A-Fa-f]{1,6});)/g, '&amp;')
+            .replace(/<(?=[A-Za-z/!?])[^<>\n]*>?/g, (match) => {
+                if (documentText.includes(match)) {
+                    return match;
+                }
+                const inner = match.slice(1, match.endsWith('>') ? -1 : undefined);
+                // Keep the document's own "&lt;...&gt;" spelling when it has one.
+                return match.endsWith('>') && documentText.includes(`&lt;${inner}&gt;`)
+                    ? `&lt;${inner}&gt;`
+                    : `&lt;${match.slice(1)}`;
+            });
+    }
+
+    /**
+     * Marked percent-encodes non-ASCII link targets, which would rewrite
+     * [wiki](https://ja.wikipedia.org/wiki/日本) as .../%E6%97%A5%E6%9C%AC.
+     * Give a link back its decoded target when the document spells it that way.
+     */
+    private restoreDocumentSpelledLinkTargets(html: string, documentText: string): string {
+        return html.replace(
+            /(<a\b[^>]*?\shref=")([^"]*)(")/gi,
+            (match: string, before: string, href: string, after: string) => {
+                if (!/%[0-9A-Fa-f]{2}/.test(href)) {
+                    return match;
+                }
+                let decoded: string;
+                try {
+                    decoded = decodeURI(href.replace(/&amp;/g, '&'));
+                } catch {
+                    return match;
+                }
+                if (
+                    !/[^\x00-\x7F]/.test(decoded) ||
+                    /["<>\s]/.test(decoded) ||
+                    !documentText.includes(decoded)
+                ) {
+                    return match;
+                }
+                return `${before}${decoded.replace(/&/g, '&amp;')}${after}`;
+            }
+        );
+    }
+
     private restoreEscapedFootnoteReferences(markdown: string, documentText: string): string {
         const lines = markdown.split('\n');
         const fencedLines = this.getFencedCodeLineMask(lines);
@@ -2805,7 +2900,9 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         const emptyCodeMarkerPrefix = `${placeholderNamespace}EMPTYCODE`;
         const emptyCodeMarkerSuffix = 'END';
         const previousEmptyListItemMarker = this.currentEmptyListItemMarker;
+        const previousConversionDocumentText = this.currentConversionDocumentText;
         this.currentEmptyListItemMarker = emptyListItemMarker;
+        this.currentConversionDocumentText = document.getText();
         try {
             const unorderedListMarker = this.getPreferredUnorderedListMarker(document);
             const escapedUnorderedListMarker = this.escapeRegExp(unorderedListMarker);
@@ -2833,6 +2930,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
 
             // Pre-process HTML to convert webview URIs back to relative paths
             html = this.convertWebviewUrisToRelativePaths(html, document);
+            html = this.restoreDocumentSpelledLinkTargets(html, document.getText());
 
             // Raw HTML, front matter, comments, and reference definitions cannot
             // be represented faithfully by the editable DOM. MarkdownDocument
@@ -3139,8 +3237,10 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             markdown = markdown.replace(new RegExp(this.escapeRegExp(imageHardBreakTailMarker), 'g'), '');
 
             // 1. Fix list marker spacing: "<marker>   " -> "<marker> "
+            // Spaces and tabs only: the line break after an empty item must not
+            // be absorbed, which would join the next item onto its line.
             markdown = markdown.replace(
-                new RegExp(`^(\\s*)${escapedUnorderedListMarker}\\s{2,}`, 'gm'),
+                new RegExp(`^([ \\t]*)${escapedUnorderedListMarker}[ \\t]{2,}`, 'gm'),
                 `$1${unorderedListMarker} `
             );
 
@@ -3214,8 +3314,10 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
 
             // 4. Fix pattern "<marker> <marker> " (empty list item followed by nested list on same line)
             // Convert to "<marker> \n<indent><marker> " (empty parent item + nested child item)
+            // Only spaces and tabs may separate the markers: an empty item on its
+            // own line followed by the next item must not nest that item.
             markdown = markdown.replace(
-                new RegExp(`^(\\s*)${escapedUnorderedListMarker}\\s+${escapedUnorderedListMarker}\\s+`, 'gm'),
+                new RegExp(`^([ \\t]*)${escapedUnorderedListMarker}[ \\t]+${escapedUnorderedListMarker}[ \\t]+`, 'gm'),
                 (_match, indent: string) => {
                     // Calculate the indentation for the nested list.
                     const nestedIndent = indent + listIndent;
@@ -3265,6 +3367,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             throw error;
         } finally {
             this.currentEmptyListItemMarker = previousEmptyListItemMarker;
+            this.currentConversionDocumentText = previousConversionDocumentText;
         }
     }
 

@@ -159,6 +159,61 @@ test('loose list round trips reach a fixed point', () => {
     }
 });
 
+test('text shown literally stays literal: entities and tag-like text', () => {
+    const cases = [
+        { source: 'Generic &lt;T&gt; type\n' },
+        { source: 'Write &amp;copy; to show the code\n' },
+        // Tag-like text the document writes as it is stays as it is.
+        { source: 'Replace <your-token> and a < b > c\n' },
+        { source: '`&copy; <T>` in code\n' },
+        { source: 'Use <kbd>Ctrl</kbd>\n' },
+    ];
+    for (const { source } of cases) {
+        assert.equal(convert(source).markdown, source);
+    }
+
+    // Text typed in the editor that looks like HTML or an entity.
+    const provider = new MarkdownEditorProvider({});
+    assert.equal(
+        provider.htmlToMarkdown('<p>&lt;div&gt; and &amp;copy;</p>', createTextDocument('')),
+        '&lt;div> and &amp;copy;\n'
+    );
+});
+
+test('fence info strings and non-ASCII link targets keep their spelling', () => {
+    const sources = [
+        '```js title="a.js"\nx\n```\n',
+        '```ts {1,3}\ny\n```\n',
+        '[wiki](https://ja.wikipedia.org/wiki/日本)\n',
+        '[encoded](https://ja.wikipedia.org/wiki/%E6%97%A5%E6%9C%AC)\n',
+    ];
+    for (const source of sources) {
+        assert.equal(convert(source).markdown, source);
+    }
+
+    // After the language is changed in the editor, the old info string is dropped.
+    const provider = new MarkdownEditorProvider({});
+    assert.equal(
+        provider.htmlToMarkdown(
+            '<pre><code class="language-ts" data-mdw-code-info="js title=&quot;a.js&quot;">x\n</code></pre>',
+            createTextDocument('')
+        ),
+        '```ts\nx\n```\n'
+    );
+});
+
+test('empty list items keep their place in the list', () => {
+    assert.equal(convert('- a\n- \n- c\n').markdown, '- a\n- \n- c\n');
+    assert.equal(convert('1. a\n2.\n3. c\n').markdown, '1. a\n2. \n3. c\n');
+
+    // An empty item made in the editor does not pull the next item under it.
+    const provider = new MarkdownEditorProvider({});
+    assert.equal(
+        provider.htmlToMarkdown('<ul><li>a</li><li><br></li><li>c</li></ul>', createTextDocument('- a\n- c\n')),
+        '- a\n- \n- c\n'
+    );
+});
+
 test('tabs inside fenced code blocks survive the round trip', () => {
     const sources = [
         '```make\nall:\n\tgo build ./...\n```\n',

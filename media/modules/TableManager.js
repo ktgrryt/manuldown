@@ -2349,6 +2349,10 @@ export class TableManager {
             let targetCell = cell;
             if (cell.tagName !== tagName) {
                 const replacement = document.createElement(tagName);
+                // Keep the cell's attributes, in particular the column alignment.
+                Array.from(cell.attributes).forEach(({ name, value }) => {
+                    replacement.setAttribute(name, value);
+                });
                 replacement.contentEditable = 'true';
                 while (cell.firstChild) {
                     replacement.appendChild(cell.firstChild);

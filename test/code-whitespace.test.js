@@ -1670,6 +1670,25 @@ test('a save made after the Webview loaded an external change keeps that text', 
     }
 });
 
+test('a save that misses its deadline is reported every time and resent soon', async (t) => {
+    t.mock.method(console, 'warn', () => {});
+    const { document, webview } = await createEditorSyncHarness('old text');
+
+    try {
+        // The Webview never answers, so both saves miss the will-save deadline.
+        assert.deepEqual(await fireWillSaveDocument(document), []);
+        assert.deepEqual(await fireWillSaveDocument(document), []);
+
+        assert.equal(vscodeMockState.errors.length, 2);
+        const retries = webview.postedMessages.filter((message) => message.type === 'retryPendingUpdate');
+        assert.equal(retries.length, 2);
+        assert.ok(retries.every((message) => message.delayMs === 300));
+        assert.equal(document.getText(), 'old text');
+    } finally {
+        webview.dispose();
+    }
+});
+
 test('will-save requests and applies the latest Webview snapshot', async () => {
     const { document, webview } = await createEditorSyncHarness('old text');
 
