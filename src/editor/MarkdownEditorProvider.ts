@@ -371,12 +371,6 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 } else if (isCompletelyEmpty) {
                     // Completely empty list item - use &nbsp; for nested items to avoid heading parse
                     content = isNestedListItem ? '&nbsp;' : '';
-                } else {
-                    // Normal list item processing
-                    content = content
-                        .replace(/^\n+/, '') // remove leading newlines
-                        .replace(/\n+$/, '\n') // replace trailing newlines with just a single one
-                        .replace(/\n/gm, `\n${provider.currentListIndent}`); // indent
                 }
 
                 let prefix = options.bulletListMarker + ' ';
@@ -385,6 +379,22 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     const start = parent.getAttribute('start');
                     const index = Array.prototype.indexOf.call(parent.children, node);
                     prefix = (start ? Number(start) + index : index + 1) + '. ';
+                }
+
+                if (!isCompletelyEmpty) {
+                    // Normal list item processing
+                    // Continuation lines (nested lists, further paragraphs) must reach
+                    // the item's content column, which is wider than the indent unit
+                    // for ordered markers such as "1. " or "10. ".
+                    const continuationIndent = provider.getVisualIndentWidth(provider.currentListIndent) >= prefix.length
+                        ? provider.currentListIndent
+                        : ' '.repeat(prefix.length);
+                    content = content
+                        .replace(/^\n+/, '') // remove leading newlines
+                        .replace(/\n+$/, '\n') // replace trailing newlines with just a single one
+                        // Indent only non-empty lines. An indentation-only line after
+                        // a paragraph would be read back as an extra blank line.
+                        .replace(/\n(?=[^\n])/g, `\n${continuationIndent}`);
                 }
 
                 return prefix + content + (node.nextSibling && !/\n$/.test(content) ? '\n' : '');
@@ -2567,6 +2577,42 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         }).join('\n');
     }
 
+    private restoreEscapedFootnoteReferences(markdown: string, documentText: string): string {
+        const lines = markdown.split('\n');
+        const fencedLines = this.getFencedCodeLineMask(lines);
+
+        return lines.map((line, index) => {
+            if (fencedLines[index]) {
+                return line;
+            }
+
+            // Only undo Turndown's escaping for references that the document
+            // already writes unescaped. Code spans are kept as they are.
+            return line.replace(
+                /(`+)[^`]*?\1|\\\[\^([^\]\s\\]+)\\\]/g,
+                (match: string, codeFence: string | undefined, label: string | undefined) => {
+                    if (codeFence || !label || !documentText.includes(`[^${label}]`)) {
+                        return match;
+                    }
+                    return `[^${label}]`;
+                }
+            );
+        }).join('\n');
+    }
+
+    private assertNoLeakedPlaceholderMarkers(markdown: string, documentText: string): void {
+        // Internal markers are "MDW" + purpose + a 32-character nonce. Turndown
+        // may have escaped their underscores. One that is not already part of
+        // the document means a conversion step failed to restore content, so
+        // writing this Markdown would corrupt the file.
+        const normalizedDocumentText = documentText.replace(/\\/g, '');
+        const leakedMarker = (markdown.match(/(?<![A-Za-z0-9+/])MDW(?:\\?_)?[A-Z](?:[A-Za-z0-9-]|\\?_){31,}/g) ?? [])
+            .find((candidate) => !normalizedDocumentText.includes(candidate.replace(/\\/g, '')));
+        if (leakedMarker) {
+            throw new Error(`Internal placeholder was not restored: ${leakedMarker.slice(0, 48)}`);
+        }
+    }
+
     private protectOpaqueMarkdownSources(
         html: string,
         document: vscode.TextDocument
@@ -2579,6 +2625,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         );
         const preservedSources: Array<{ marker: string; source: string; block: boolean }> = [];
         const allowedKinds = new Set([
+            'footnote-definition',
             'front-matter',
             'raw-html-block',
             'raw-html-inline',
@@ -2943,6 +2990,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
 
             let markdown = this.turndownService.turndown(html);
             markdown = this.restoreEscapedMarkdownLinks(markdown);
+            markdown = this.restoreEscapedFootnoteReferences(markdown, document.getText());
 
             // Resolve the temporary empty-code marker before protecting fenced
             // blocks from the remaining document-level post-processing.
@@ -3120,9 +3168,11 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             if (!markdown.endsWith('\n')) {
                 markdown += '\n';
             }
-            return protectedOpaqueSources.restore(
+            const restoredMarkdown = protectedOpaqueSources.restore(
                 protectedFencedMarkdown.restore(markdown)
             );
+            this.assertNoLeakedPlaceholderMarkers(restoredMarkdown, document.getText());
+            return restoredMarkdown;
         } catch (error) {
             console.error('Error converting HTML to Markdown:', error);
             throw error;

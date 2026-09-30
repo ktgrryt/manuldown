@@ -402,7 +402,14 @@ export class MarkdownDocument {
         const output: string[] = [];
         let activeFenceChar: '`' | '~' | null = null;
         let activeFenceLength = 0;
-        const activeListStacks = new Map<string, Array<{ sourceIndent: number; depth: number }>>();
+        const activeListStacks = new Map<string, Array<{
+            sourceIndent: number;
+            depth: number;
+            // Column where the item's content starts, in the source and in the
+            // re-indented Markdown that is given to Marked.
+            sourceContentColumn: number;
+            parserContentColumn: number;
+        }>>();
         const parserNestedIndent = this.detectListIndentSize(markdown) ?? 2;
 
         for (const segment of segments) {
@@ -480,7 +487,12 @@ export class MarkdownDocument {
 
                 if (parentIndex >= 0) {
                     const sourceIndentDelta = sourceIndent - stack[parentIndex].sourceIndent;
-                    const depthDelta = Math.max(1, Math.round(sourceIndentDelta / parserNestedIndent));
+                    // A child that starts exactly at its parent's content column is
+                    // one level deeper, even when that column is not a multiple of
+                    // the indent unit (e.g. three spaces under "1. ").
+                    const depthDelta = sourceIndent === stack[parentIndex].sourceContentColumn
+                        ? 1
+                        : Math.max(1, Math.round(sourceIndentDelta / parserNestedIndent));
                     sourceDepth = stack[parentIndex].depth + depthDelta;
                     stack = stack.slice(0, parentIndex + 1);
                 } else {
@@ -498,13 +510,32 @@ export class MarkdownDocument {
                 output.push(`${wrapperPrefix}${indentWrapperMarker}${lineEnding}`);
             }
 
-            const parserIndent = sourceDepth > 0
+            let parserIndent = sourceDepth > 0
                 ? sourceDepth * parserNestedIndent
                 : Math.min(sourceIndent, 3);
+            // Marked nests an item only when it starts at or after its parent's
+            // content column, which is wider than the indent unit for markers
+            // such as "1. ".
+            const parentEntry = stack.length > 0 ? stack[stack.length - 1] : null;
+            if (parentEntry && parentEntry.depth === sourceDepth - 1) {
+                parserIndent = Math.max(parserIndent, parentEntry.parserContentColumn);
+            }
             const parserIndentText = ' '.repeat(Math.max(0, parserIndent));
             const markerPrefix = `${blockquotePrefix}${parserIndentText}${marker}${spacing}${taskPrefix}`;
-            output.push(`${markerPrefix}${sourceIndentMarkerPrefix}${sourceIndent}END${rest}${lineEnding}`);
-            stack.push({ sourceIndent, depth: sourceDepth });
+            // The space keeps the marker from changing how the item's leading
+            // inline delimiters parse: "**(note)**" or "_text_" directly after
+            // an alphanumeric marker would no longer open emphasis.
+            output.push(`${markerPrefix}${sourceIndentMarkerPrefix}${sourceIndent}END ${rest}${lineEnding}`);
+            // Five or more spaces after the marker make the content an indented
+            // code block that starts one space after the marker.
+            const spacingWidth = this.getVisualIndentWidth(spacing);
+            const contentOffset = marker.length + (spacingWidth >= 5 ? 1 : spacingWidth);
+            stack.push({
+                sourceIndent,
+                depth: sourceDepth,
+                sourceContentColumn: sourceIndent + contentOffset,
+                parserContentColumn: parserIndent + contentOffset,
+            });
             activeListStacks.set(stackKey, stack);
         }
 
@@ -518,16 +549,18 @@ export class MarkdownDocument {
     ): string {
         const escapedWrapperMarker = indentWrapperMarker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         const escapedIndentMarkerPrefix = sourceIndentMarkerPrefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        // Items of a loose list wrap their content in <p>.
+        const itemContentPrefix = '((?:\\s|<p\\b[^>]*>|<input\\b[^>]*>\\s*)*)';
         return html
             .replace(
-                new RegExp(`(<li\\b[^>]*>)((?:\\s|<input\\b[^>]*>\\s*)*)${escapedWrapperMarker}`, 'gi'),
+                new RegExp(`(<li\\b[^>]*>)${itemContentPrefix}${escapedWrapperMarker}`, 'gi'),
                 (_match, openingTag, prefix) => openingTag.replace(
                     /<li\b/i,
                     '<li data-mdw-indent-wrapper="true" class="nested-list-only"'
                 ) + prefix
             )
             .replace(
-                new RegExp(`(<li\\b[^>]*>)((?:\\s|<input\\b[^>]*>\\s*)*)${escapedIndentMarkerPrefix}(\\d+)END`, 'gi'),
+                new RegExp(`(<li\\b[^>]*>)${itemContentPrefix}${escapedIndentMarkerPrefix}(\\d+)END ?`, 'gi'),
                 (_match, openingTag, prefix, indent) => openingTag.replace(
                     /<li\b/i,
                     `<li data-mdw-source-indent="${indent}"`
@@ -570,6 +603,11 @@ export class MarkdownDocument {
             protectedBlocks.push({ marker, source, kind });
             return marker;
         };
+        // A block marker must be its own paragraph to be restored. When the
+        // protected source directly follows paragraph text, Marked would join
+        // the marker to that paragraph and the source would be lost.
+        const endsWithBlankLine = (value: string | undefined): boolean =>
+            value === undefined || value.trim() === '' || /\r?\n[ \t]*\r?\n$/.test(value);
 
         // Marked interprets YAML front matter as a horizontal rule followed by a
         // Setext heading. Keep it as source instead of exposing a lossy DOM form.
@@ -671,10 +709,91 @@ export class MarkdownDocument {
             const lineEnding = source.includes('\r\n')
                 ? '\r\n'
                 : '\n';
+            if (!endsWithBlankLine(rawHtmlOutput[rawHtmlOutput.length - 1])) {
+                rawHtmlOutput.push(lineEnding);
+            }
             rawHtmlOutput.push(`${marker}${lineEnding}${lineEnding}`);
             index = boundaryEndIndex;
         }
         protectedMarkdown = rawHtmlOutput.join('');
+
+        // Marked does not support footnotes, so a definition such as
+        // "[^1]: text" would become an ordinary paragraph that Turndown escapes.
+        // Keep each definition (with its continuation lines) as read-only source.
+        const footnoteDefinitionPattern = /^ {0,3}\[\^[^\]\s]+\]:/;
+        const footnoteInterruptingBlockPattern = /^ {0,3}(?:#{1,6}(?:[ \t]|$)|>|[*+-][ \t]|\d+[.)][ \t]|`{3,}|~{3,}|<)/;
+        const isBlankSegment = (segment: string): boolean => segment.replace(/\r?\n$/, '').trim() === '';
+        const footnoteSegments = protectedMarkdown.match(/[^\n]*\n|[^\n]+$/g) ?? [];
+        const footnoteOutput: string[] = [];
+        let footnoteFenceMarker: '`' | '~' | null = null;
+        let footnoteFenceLength = 0;
+        for (let index = 0; index < footnoteSegments.length; index++) {
+            const segment = footnoteSegments[index];
+            const line = segment.replace(/\r?\n$/, '');
+            const fenceMatch = line.match(/^ {0,3}(`{3,}|~{3,})/);
+            if (fenceMatch) {
+                const run = fenceMatch[1];
+                const marker = run[0] as '`' | '~';
+                if (footnoteFenceMarker === null) {
+                    footnoteFenceMarker = marker;
+                    footnoteFenceLength = run.length;
+                } else if (footnoteFenceMarker === marker && run.length >= footnoteFenceLength) {
+                    footnoteFenceMarker = null;
+                    footnoteFenceLength = 0;
+                }
+                footnoteOutput.push(segment);
+                continue;
+            }
+
+            // Like a reference definition, a footnote definition cannot
+            // interrupt a paragraph.
+            if (
+                footnoteFenceMarker !== null ||
+                !footnoteDefinitionPattern.test(line) ||
+                !endsWithBlankLine(footnoteOutput[footnoteOutput.length - 1])
+            ) {
+                footnoteOutput.push(segment);
+                continue;
+            }
+
+            let endIndex = index;
+            while (endIndex + 1 < footnoteSegments.length) {
+                const nextSegment = footnoteSegments[endIndex + 1];
+                const nextLine = nextSegment.replace(/\r?\n$/, '');
+                if (!isBlankSegment(nextSegment)) {
+                    if (
+                        footnoteDefinitionPattern.test(nextLine) ||
+                        footnoteInterruptingBlockPattern.test(nextLine)
+                    ) {
+                        break;
+                    }
+                    endIndex++;
+                    continue;
+                }
+                // After a blank line, only indented lines continue the footnote.
+                let lookahead = endIndex + 1;
+                while (lookahead < footnoteSegments.length && isBlankSegment(footnoteSegments[lookahead])) {
+                    lookahead++;
+                }
+                if (lookahead < footnoteSegments.length && /^(?: {4}|\t)/.test(footnoteSegments[lookahead])) {
+                    endIndex = lookahead;
+                    continue;
+                }
+                break;
+            }
+            while (endIndex + 1 < footnoteSegments.length && isBlankSegment(footnoteSegments[endIndex + 1])) {
+                endIndex++;
+            }
+
+            const source = footnoteSegments.slice(index, endIndex + 1).join('');
+            const marker = addProtectedBlock(source, 'footnote-definition');
+            const lineEnding = source.includes('\r\n')
+                ? '\r\n'
+                : '\n';
+            footnoteOutput.push(`${marker}${lineEnding}${lineEnding}`);
+            index = endIndex;
+        }
+        protectedMarkdown = footnoteOutput.join('');
 
         // Reference definitions are consumed by Marked and would otherwise
         // disappear. Leave the definition in place so references still resolve,
@@ -754,10 +873,21 @@ export class MarkdownDocument {
                 for (const block of protectedBlocks) {
                     const escapedMarker = block.marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
                     const opaqueHtml = renderOpaqueSource(block.source, block.kind, true);
-                    restoredHtml = restoredHtml.replace(
-                        new RegExp(`<p>\\s*${escapedMarker}\\s*<\\/p>\\s*`, 'i'),
-                        opaqueHtml
-                    );
+                    const standaloneMarkerPattern = new RegExp(`<p>\\s*${escapedMarker}\\s*<\\/p>\\s*`, 'i');
+                    if (standaloneMarkerPattern.test(restoredHtml)) {
+                        restoredHtml = restoredHtml.replace(standaloneMarkerPattern, () => opaqueHtml);
+                        continue;
+                    }
+                    if (block.kind === 'reference-definition') {
+                        // Marked did not treat the lines as a definition (for
+                        // example, they continue a paragraph), so the source is
+                        // still rendered as text. Drop the extra marker and the
+                        // soft break that joined it to that text.
+                        restoredHtml = restoredHtml.replace(
+                            new RegExp(`(?:<br\\b[^>]*>\\s*)?${escapedMarker}`, 'g'),
+                            ''
+                        );
+                    }
                 }
                 return restoredHtml;
             }
