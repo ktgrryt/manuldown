@@ -63,6 +63,132 @@ export class MarkdownConverter {
         });
     }
 
+    isInsideCode(node) {
+        let current = node && node.nodeType === Node.ELEMENT_NODE ? node : node && node.parentNode;
+        while (current && current !== this.editor) {
+            if (current.tagName === 'CODE' || current.tagName === 'PRE') {
+                return true;
+            }
+            current = current.parentNode;
+        }
+        return false;
+    }
+
+    /**
+     * Whether textNode starts a line of its block: only ignorable text, or a
+     * <br> that ends the previous line, precedes it in a block-level parent.
+     * Text inside inline formatting, or after other content, never does.
+     */
+    isAtLineStart(textNode) {
+        const parent = textNode && textNode.parentNode;
+        if (!parent) return false;
+        if (parent !== this.editor && !/^(?:P|DIV|LI|H[1-6]|BLOCKQUOTE|TD|TH)$/.test(parent.tagName || '')) {
+            return false;
+        }
+        for (let sibling = textNode.previousSibling; sibling; sibling = sibling.previousSibling) {
+            if (sibling.nodeType === Node.TEXT_NODE) {
+                if (!this.isIgnorableText(sibling.textContent || '')) return false;
+                continue;
+            }
+            if (sibling.nodeType === Node.ELEMENT_NODE) {
+                return sibling.tagName === 'BR';
+            }
+        }
+        return true;
+    }
+
+    /** Like isAtLineStart, but also no <br> may precede textNode. */
+    isAtBlockStart(textNode) {
+        if (!this.isAtLineStart(textNode)) return false;
+        for (let sibling = textNode.previousSibling; sibling; sibling = sibling.previousSibling) {
+            if (sibling.nodeType === Node.ELEMENT_NODE) return false;
+        }
+        return true;
+    }
+
+    /**
+     * Replace the line that textNode starts with blockElement without touching
+     * the rest of its parent: other lines of a paragraph become paragraphs of
+     * their own, and a parent is only replaced when textNode is all it holds.
+     */
+    replaceLineWithBlock(textNode, blockElement) {
+        const parent = textNode.parentElement;
+        if (!parent || parent === this.editor) {
+            textNode.parentNode.replaceChild(blockElement, textNode);
+            return;
+        }
+        if (this.splitParagraphAndInsertBlock(textNode, blockElement)) {
+            return;
+        }
+        const otherNodes = Array.from(parent.childNodes).filter((node) => node !== textNode);
+        if (/^(?:P|DIV|H[1-6])$/.test(parent.tagName) && !this.hasMeaningfulNodes(otherNodes)) {
+            parent.replaceWith(blockElement);
+            return;
+        }
+        textNode.parentNode.replaceChild(blockElement, textNode);
+    }
+
+    /** Move the nodes that follow textNode in its parent to the end of target. */
+    moveContentAfter(textNode, target) {
+        let node = textNode.nextSibling;
+        while (node) {
+            const next = node.nextSibling;
+            target.appendChild(node);
+            node = next;
+        }
+    }
+
+    /**
+     * A marker typed at the start of an existing list item only removes the
+     * marker (and adds a checkbox for "[ ]"): the item keeps its other inline
+     * content and nested lists. Returns the text node that holds the item text.
+     */
+    stripItemStartMarker(textNode, itemText, isTaskItem = false, taskChecked = false) {
+        const listItem = textNode.parentNode;
+        const replacement = document.createTextNode(itemText);
+        textNode.replaceWith(replacement);
+        if (isTaskItem) {
+            const hasCheckbox = Array.from(listItem.children).some(
+                (child) => child.tagName === 'INPUT' && child.type === 'checkbox'
+            );
+            if (!hasCheckbox) {
+                const checkbox = document.createElement('input');
+                checkbox.type = 'checkbox';
+                if (taskChecked) {
+                    checkbox.checked = true;
+                    checkbox.setAttribute('checked', '');
+                }
+                listItem.insertBefore(checkbox, replacement);
+            }
+        }
+        return replacement;
+    }
+
+    /**
+     * Offset in rawText of the character at normalizedOffset, where the
+     * normalized text drops caret controls and no-break spaces.
+     */
+    toRawOffset(rawText, normalizedOffset) {
+        let kept = 0;
+        for (let i = 0; i < rawText.length; i++) {
+            if (/[​⁠ ]/.test(rawText[i])) continue;
+            if (kept === normalizedOffset) return i;
+            kept++;
+        }
+        return rawText.length;
+    }
+
+    /**
+     * The raw text between two normalized offsets with only the caret controls
+     * removed: no-break spaces are user text (Chromium inserts them for
+     * consecutive spaces) and must survive a conversion.
+     */
+    rawSlice(rawText, normalizedStart, normalizedEnd) {
+        const start = this.toRawOffset(rawText, normalizedStart);
+        const end = normalizedEnd === undefined ? rawText.length : this.toRawOffset(rawText, normalizedEnd);
+        return rawText.slice(start, end).replace(/[​⁠]/g, '');
+    }
+
     splitParagraphAndInsertBlock(textNode, blockElement) {
         const parent = textNode && textNode.parentElement;
         if (!parent || parent.tagName !== 'P') return false;
@@ -225,7 +351,13 @@ export class MarkdownConverter {
      * @param {Function} notifyCallback - 変更を通知するコールバック
      * @returns {boolean} 変換が実行された場合true、それ以外はfalse
      */
-    convertMarkdownSyntax(notifyCallback) {
+    /**
+     * @param {Function} notifyCallback
+     * @param {Object} [options]
+     * @param {string|null} [options.insertedText] - Text the triggering input
+     *   (keystroke or IME commit) inserted before the caret, when known.
+     */
+    convertMarkdownSyntax(notifyCallback, options = {}) {
         const selection = window.getSelection();
         if (!selection || !selection.rangeCount) return false;
 
@@ -298,6 +430,9 @@ export class MarkdownConverter {
 
         if (!textNode || textNode.nodeType !== 3 || cursorOffset === null) return false;
 
+        // Code holds literal text; what is typed there is never formatting.
+        if (this.isInsideCode(textNode)) return false;
+
         const rawText = textNode.textContent || '';
         if (this.applySingleCharacterEscapeAtCursor(textNode, cursorOffset, selection, notifyCallback)) {
             return true;
@@ -318,9 +453,31 @@ export class MarkdownConverter {
             this.domUtils.getParentElement(textNode, 'H6')
         );
 
+        // Block shortcuts ("# ", "- ", "1. ", "> ", "---") apply only to a
+        // marker at the start of a line that the user has just typed: removing
+        // the inserted text must leave the marker alone before the caret. Text
+        // such as an escaped "\# title", or " - " later in a line, stays text.
+        const toMarkerText = (value) => String(value || '')
+            .replace(/[​⁠]/g, '')
+            .replace(/ /g, ' ');
+        const textBeforeCaret = toMarkerText(rawText.slice(0, cursorOffset));
+        const insertedText = typeof options.insertedText === 'string'
+            ? toMarkerText(options.insertedText)
+            : null;
+        const blockMarkerTyped = (markerOnlyPattern, { requireBlockStart = false } = {}) => {
+            const atStart = requireBlockStart
+                ? this.isAtBlockStart(textNode)
+                : this.isAtLineStart(textNode);
+            if (!atStart) return false;
+            if (insertedText === null) return true;
+            if (!textBeforeCaret.endsWith(insertedText)) return false;
+            return markerOnlyPattern.test(textBeforeCaret) ||
+                markerOnlyPattern.test(textBeforeCaret.slice(0, textBeforeCaret.length - insertedText.length));
+        };
+
         // 見出し構文をチェック（行頭）
         const headingMatch = normalizedText.match(/^\s*(#{1,6})\s+(.+)$/);
-        if (!isInTableCell && !isInListItem && headingMatch) {
+        if (!isInTableCell && !isInListItem && headingMatch && blockMarkerTyped(/^\s*#{1,6}\s+$/)) {
             const level = headingMatch[1].length;
             const content = headingMatch[2];
             const headingTag = 'h' + level;
@@ -328,17 +485,7 @@ export class MarkdownConverter {
             const heading = document.createElement(headingTag);
             heading.textContent = content;
 
-            const parent = textNode.parentElement;
-            if (parent && parent !== this.editor) {
-                const splitInserted = this.splitParagraphAndInsertBlock(textNode, heading);
-                if (splitInserted) {
-                    // inserted as sibling blocks around the original paragraph
-                } else {
-                    parent.replaceWith(heading);
-                }
-            } else {
-                textNode.parentNode.replaceChild(heading, textNode);
-            }
+            this.replaceLineWithBlock(textNode, heading);
 
             // カーソル位置を復元
             const newRange = document.createRange();
@@ -356,7 +503,9 @@ export class MarkdownConverter {
         }
 
         // 太字構文をチェック **text**
-        const boldMatch = normalizedText.match(/\*\*([^*]+)\*\*$/);
+        // As in CommonMark, the text inside the delimiters must not start or
+        // end with whitespace ("5 * 3 *" stays text).
+        const boldMatch = normalizedText.match(/\*\*([^*\s](?:[^*]*[^*\s])?)\*\*$/);
         if (boldMatch && normalizedCursorOffset === normalizedText.length) {
             const boldStart = normalizedText.length - boldMatch[0].length;
             const boldClosingStart = normalizedText.length - 2;
@@ -366,10 +515,9 @@ export class MarkdownConverter {
             if (boldIsEscaped) {
                 // 明示的にエスケープされた "**" は装飾へ変換しない
             } else {
-                const beforeText = normalizedText.substring(0, normalizedText.length - boldMatch[0].length);
-                const boldText = boldMatch[1];
+                const beforeText = this.rawSlice(rawText, 0, boldStart);
+                const boldText = this.rawSlice(rawText, boldStart + 2, boldClosingStart);
 
-                const parent = textNode.parentElement;
                 const fragment = document.createDocumentFragment();
 
                 if (beforeText) {
@@ -381,14 +529,15 @@ export class MarkdownConverter {
                 fragment.appendChild(strong);
 
                 // 後ろにスペースを追加
-                fragment.appendChild(document.createTextNode(' '));
+                const spacer = document.createTextNode(' ');
+                fragment.appendChild(spacer);
 
                 textNode.parentNode.replaceChild(fragment, textNode);
 
                 // 太字テキストの後にカーソルを設定
+                // (the fragment is empty once inserted, so keep the spacer node)
                 const newRange = document.createRange();
-                const lastNode = fragment.lastChild;
-                newRange.setStart(lastNode, 1);
+                newRange.setStart(spacer, 1);
                 newRange.collapse(true);
                 selection.removeAllRanges();
                 selection.addRange(newRange);
@@ -399,7 +548,7 @@ export class MarkdownConverter {
         }
 
         // イタリック構文をチェック *text*
-        const italicMatch = normalizedText.match(/(?<!\*)\*([^*]+)\*(?!\*)$/);
+        const italicMatch = normalizedText.match(/(?<!\*)\*([^*\s](?:[^*]*[^*\s])?)\*(?!\*)$/);
         if (italicMatch && normalizedCursorOffset === normalizedText.length) {
             const italicStart = normalizedText.length - italicMatch[0].length;
             const italicClosingStart = normalizedText.length - 1;
@@ -409,10 +558,9 @@ export class MarkdownConverter {
             if (italicIsEscaped) {
                 // 明示的にエスケープされた "*" は装飾へ変換しない
             } else {
-                const beforeText = normalizedText.substring(0, normalizedText.length - italicMatch[0].length);
-                const italicText = italicMatch[1];
+                const beforeText = this.rawSlice(rawText, 0, italicStart);
+                const italicText = this.rawSlice(rawText, italicStart + 1, italicClosingStart);
 
-                const parent = textNode.parentElement;
                 const fragment = document.createDocumentFragment();
 
                 if (beforeText) {
@@ -424,14 +572,15 @@ export class MarkdownConverter {
                 fragment.appendChild(em);
 
                 // 後ろにスペースを追加
-                fragment.appendChild(document.createTextNode(' '));
+                const spacer = document.createTextNode(' ');
+                fragment.appendChild(spacer);
 
                 textNode.parentNode.replaceChild(fragment, textNode);
 
                 // イタリックテキストの後にカーソルを設定
+                // (the fragment is empty once inserted, so keep the spacer node)
                 const newRange = document.createRange();
-                const lastNode = fragment.lastChild;
-                newRange.setStart(lastNode, 1);
+                newRange.setStart(spacer, 1);
                 newRange.collapse(true);
                 selection.removeAllRanges();
                 selection.addRange(newRange);
@@ -455,9 +604,9 @@ export class MarkdownConverter {
             if (strikeIsEscaped) {
                 // 明示的にエスケープされた "~~" は装飾へ変換しない
             } else {
-                const strikeText = strikeMatch[1];
-                const beforeText = beforeCursorText.substring(0, beforeCursorText.length - matchedText.length);
-                const afterText = normalizedText.slice(normalizedCursorOffset);
+                const strikeText = this.rawSlice(rawText, strikeStart + 2, strikeClosingStart);
+                const beforeText = this.rawSlice(rawText, 0, strikeStart);
+                const afterText = this.rawSlice(rawText, normalizedCursorOffset);
 
                 const fragment = document.createDocumentFragment();
 
@@ -498,9 +647,12 @@ export class MarkdownConverter {
 
         if (codeMatch && !parentIsCode) {
             const matchedText = codeMatch[0];
-            const beforeText = beforeCursorText.substring(0, beforeCursorText.length - matchedText.length);
-            const codeText = codeMatch[1];
-            const afterText = normalizedText.slice(normalizedCursorOffset);
+            const codeStart = beforeCursorText.length - matchedText.length;
+            const beforeText = this.rawSlice(rawText, 0, codeStart);
+            // Code keeps its spaces as ordinary spaces, not no-break spaces.
+            const codeText = this.rawSlice(rawText, codeStart + 1, beforeCursorText.length - 1)
+                .replace(/ /g, ' ');
+            const afterText = this.rawSlice(rawText, normalizedCursorOffset);
 
             const parent = textNode.parentElement;
             const fragment = document.createDocumentFragment();
@@ -536,15 +688,11 @@ export class MarkdownConverter {
 
         // 水平線構文をチェック --- (3つ以上のハイフンのみ)
         const hrMatch = normalizedText.match(/^-{3,}$/);
-        if (!isInTableCell && hrMatch) {
+        // An <hr> cannot live inside a list item or heading; there "---" stays text.
+        if (!isInTableCell && !isInListItem && !isInHeading && hrMatch && blockMarkerTyped(/^-{3,}$/)) {
             const hr = document.createElement('hr');
 
-            const parent = textNode.parentElement;
-            if (parent && parent !== this.editor) {
-                parent.replaceWith(hr);
-            } else {
-                textNode.parentNode.replaceChild(hr, textNode);
-            }
+            this.replaceLineWithBlock(textNode, hr);
 
             // 水平線の後に新しい段落を作成してカーソルを移動
             const newParagraph = document.createElement('p');
@@ -567,7 +715,12 @@ export class MarkdownConverter {
 
         // 順序なしリスト構文をチェック - item / - [ ] task
         const ulMatch = normalizedText.match(/^\s*[-*]\s+(.*)$/);
-        if (!isInTableCell && !isInHeading && ulMatch) {
+        if (
+            !isInTableCell &&
+            !isInHeading &&
+            ulMatch &&
+            blockMarkerTyped(/^\s*[-*]\s+(?:\[( |x|X)\]\s*)?$/, { requireBlockStart: isInListItem })
+        ) {
             const rawContent = ulMatch[1] ?? '';
             const content = rawContent.trim() === '' ? '' : rawContent;
             const taskMatch = rawContent.match(/^\[( |x|X)\](.*)$/);
@@ -602,9 +755,6 @@ export class MarkdownConverter {
             }
 
             const parent = textNode.parentElement;
-            const parentIsTableCell = !!(
-                parent && (parent.tagName === 'TD' || parent.tagName === 'TH')
-            );
             let ul = this.domUtils.getParentElement(textNode, 'UL');
 
             if (!ul) {
@@ -627,6 +777,7 @@ export class MarkdownConverter {
                         ul.after(newOl);
                     }
 
+                    this.moveContentAfter(textNode, li);
                     currentLi.remove();
                     ul.appendChild(li);
 
@@ -635,19 +786,12 @@ export class MarkdownConverter {
                     }
                 } else {
                     ul = document.createElement('ul');
-                    const splitInserted = this.splitParagraphAndInsertBlock(textNode, ul);
-                    if (splitInserted) {
-                        // inserted as sibling blocks around the original paragraph
-                    } else if (parent && parent !== this.editor && !parentIsTableCell) {
-                        parent.replaceWith(ul);
-                    } else {
-                        textNode.parentNode.replaceChild(ul, textNode);
-                    }
+                    this.replaceLineWithBlock(textNode, ul);
                     ul.appendChild(li);
                 }
             } else {
                 if (parent && parent.tagName === 'LI') {
-                    parent.replaceWith(li);
+                    textContentNode = this.stripItemStartMarker(textNode, listText, isTaskItem, taskChecked);
                 } else {
                     textNode.parentNode.replaceChild(li, textNode);
                 }
@@ -673,7 +817,12 @@ export class MarkdownConverter {
 
         // 順序付きリスト構文をチェック 1. item
         const olMatch = normalizedText.match(/^\s*\d+\.\s+(.*)$/);
-        if (!isInTableCell && !isInHeading && olMatch) {
+        if (
+            !isInTableCell &&
+            !isInHeading &&
+            olMatch &&
+            blockMarkerTyped(/^\s*\d+\.\s+$/, { requireBlockStart: isInListItem })
+        ) {
             const rawContent = olMatch[1] ?? '';
             const content = rawContent.trim() === '' ? '' : rawContent;
 
@@ -688,9 +837,6 @@ export class MarkdownConverter {
             }
 
             const parent = textNode.parentElement;
-            const parentIsTableCell = !!(
-                parent && (parent.tagName === 'TD' || parent.tagName === 'TH')
-            );
             let ol = this.domUtils.getParentElement(textNode, 'OL');
 
             if (!ol) {
@@ -713,6 +859,7 @@ export class MarkdownConverter {
                         ol.after(newUl);
                     }
 
+                    this.moveContentAfter(textNode, li);
                     currentLi.remove();
                     ol.appendChild(li);
 
@@ -721,19 +868,12 @@ export class MarkdownConverter {
                     }
                 } else {
                     ol = document.createElement('ol');
-                    const splitInserted = this.splitParagraphAndInsertBlock(textNode, ol);
-                    if (splitInserted) {
-                        // inserted as sibling blocks around the original paragraph
-                    } else if (parent && parent !== this.editor && !parentIsTableCell) {
-                        parent.replaceWith(ol);
-                    } else {
-                        textNode.parentNode.replaceChild(ol, textNode);
-                    }
+                    this.replaceLineWithBlock(textNode, ol);
                     ol.appendChild(li);
                 }
             } else {
                 if (parent && parent.tagName === 'LI') {
-                    parent.replaceWith(li);
+                    textContentNode = this.stripItemStartMarker(textNode, content);
                 } else {
                     textNode.parentNode.replaceChild(li, textNode);
                 }
@@ -759,7 +899,7 @@ export class MarkdownConverter {
 
         // 引用構文をチェック > text（テキストが必要）
         const blockquoteMatch = normalizedText.match(/^\s*>\s+(.+)$/);
-        if (!isInTableCell && !isInListItem && blockquoteMatch) {
+        if (!isInTableCell && !isInListItem && blockquoteMatch && blockMarkerTyped(/^\s*>\s+$/)) {
             const content = blockquoteMatch[1];
 
             const blockquote = document.createElement('blockquote');
@@ -768,22 +908,7 @@ export class MarkdownConverter {
             const textContentNode = p.firstChild;
             blockquote.appendChild(p);
 
-            const parent = textNode.parentElement;
-            const parentIsTableCell = !!(
-                parent && (parent.tagName === 'TD' || parent.tagName === 'TH')
-            );
-            if (parent && parent !== this.editor) {
-                const splitInserted = this.splitParagraphAndInsertBlock(textNode, blockquote);
-                if (splitInserted) {
-                    // inserted as sibling blocks around the original paragraph
-                } else if (!parentIsTableCell) {
-                    parent.replaceWith(blockquote);
-                } else {
-                    textNode.parentNode.replaceChild(blockquote, textNode);
-                }
-            } else {
-                textNode.parentNode.replaceChild(blockquote, textNode);
-            }
+            this.replaceLineWithBlock(textNode, blockquote);
 
             // カーソル位置を復元
             const newRange = document.createRange();

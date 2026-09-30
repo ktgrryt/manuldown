@@ -143,6 +143,8 @@ export class MarkdownDocument {
         const markdown = this.normalizeIgnoredLineWhitespace(this.document.getText());
         try {
             const opaqueBlockProtection = this.protectNonRenderedMarkdown(markdown);
+            // After the opaque pass, so code inside preserved raw HTML stays as it is.
+            const codeTabProtection = this.protectFencedCodeTabs(opaqueBlockProtection.markdown);
             const blanklineMarker = this.createPlaceholderMarker(
                 opaqueBlockProtection.markdown,
                 'BLANK_LINE'
@@ -160,7 +162,7 @@ export class MarkdownDocument {
                 'BLOCKQUOTE_EMPTY_LINE'
             );
             const escapedPlaceholderMarkdown = this.escapePlaceholderAngleBrackets(
-                opaqueBlockProtection.markdown
+                codeTabProtection.markdown
             );
             const explicitBlockquoteMarkdown = this.breakLazyBlockquoteContinuations(escapedPlaceholderMarkdown);
             const blockquoteBlankPreservedMarkdown = this.preserveEmptyBlockquoteLines(
@@ -177,6 +179,7 @@ export class MarkdownDocument {
                 listIndentMarkerPrefix
             );
             let html = marked.parse(sourceIndentAnnotatedMarkdown) as string;
+            html = codeTabProtection.restore(html);
             html = opaqueBlockProtection.restore(html);
             html = html.replace(
                 new RegExp(`<p>\\s*${blanklineMarker}\\s*<\\/p>`, 'gi'),
@@ -891,6 +894,54 @@ export class MarkdownDocument {
                 }
                 return restoredHtml;
             }
+        };
+    }
+
+    /**
+     * Marked expands tabs to spaces, so tab-indented code (Makefiles, Go)
+     * would be rewritten with spaces on save. Hide the tabs inside top-level
+     * fenced code blocks behind a marker while Marked parses, then put them
+     * back. (Fences nested in lists or quotes are left to Marked.)
+     */
+    private protectFencedCodeTabs(markdown: string): {
+        markdown: string;
+        restore: (html: string) => string;
+    } {
+        if (!markdown.includes('\t')) {
+            return { markdown, restore: (html) => html };
+        }
+        const segments = markdown.match(/[^\n]*\n|[^\n]+$/g) ?? [];
+        const tabMarker = this.createPlaceholderMarker(markdown, 'CODE_TAB');
+        let fenceMarker: '`' | '~' | null = null;
+        let fenceLength = 0;
+        let protectedAny = false;
+        const output = segments.map((segment) => {
+            const line = this.stripTrailingCarriageReturn(segment.replace(/\n$/, ''));
+            if (fenceMarker === null) {
+                const openingFence = this.parseFenceOpeningLine(line);
+                if (openingFence) {
+                    fenceMarker = openingFence.marker;
+                    fenceLength = openingFence.length;
+                }
+                return segment;
+            }
+            if (this.isFenceClosingLine(line, fenceMarker, fenceLength)) {
+                fenceMarker = null;
+                fenceLength = 0;
+                return segment;
+            }
+            if (!segment.includes('\t')) {
+                return segment;
+            }
+            protectedAny = true;
+            return segment.replace(/\t/g, tabMarker);
+        });
+        if (!protectedAny) {
+            return { markdown, restore: (html) => html };
+        }
+        return {
+            markdown: output.join(''),
+            restore: (html) => html.split(tabMarker).join('\t'),
         };
     }
 
