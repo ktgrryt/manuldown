@@ -229,6 +229,7 @@ function loadMoveCursorDownBelowTrailingImageBlock(fixture) {
         'getNextNavigableNodeAfter',
         'isEffectivelyEmptyBlock',
         'placeCaretInEmptyParagraph',
+        'placeCollapsedCaret',
     ].map(extractEditorFunction);
     const notifications = [];
     const factory = new Function(

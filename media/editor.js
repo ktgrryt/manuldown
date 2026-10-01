@@ -1239,11 +1239,7 @@ const {
         if (!editor) return false;
         const selection = window.getSelection();
         if (!selection) return false;
-        const range = document.createRange();
-        range.setStart(editor, 0);
-        range.collapse(true);
-        selection.removeAllRanges();
-        selection.addRange(range);
+        placeCollapsedCaret(selection, editor, 0);
         return true;
     }
 
@@ -1254,11 +1250,7 @@ const {
         }
         const selection = selectionOverride || window.getSelection();
         if (!selection) return true;
-        const range = document.createRange();
-        range.setStart(editor, 0);
-        range.collapse(true);
-        selection.removeAllRanges();
-        selection.addRange(range);
+        placeCollapsedCaret(selection, editor, 0);
         return true;
     }
 
@@ -1658,11 +1650,7 @@ const {
 
         if (shouldMoveSelection && selection) {
             focusEditorWithoutScroll();
-            const nextRange = document.createRange();
-            nextRange.setStartAfter(insertedNode);
-            nextRange.collapse(true);
-            selection.removeAllRanges();
-            selection.addRange(nextRange);
+            placeCollapsedCaretAfter(selection, insertedNode);
         }
 
         stateManager.commitStateAfterChange({
@@ -1902,11 +1890,7 @@ const {
         listItem.setAttribute('data-preserve-empty', 'true');
 
         if (selection) {
-            const nextRange = document.createRange();
-            nextRange.setStart(nbspNode, 0);
-            nextRange.collapse(true);
-            selection.removeAllRanges();
-            selection.addRange(nextRange);
+            placeCollapsedCaret(selection, nbspNode, 0);
         }
 
         normalizeListRenderingAfterStructureChange(listItem);
@@ -2008,11 +1992,7 @@ const {
                 domUtils.getFirstTextNode(firstChildItem) ||
                 firstChildItem;
             try {
-                const nextRange = document.createRange();
-                nextRange.setStart(targetNode, targetNode.nodeType === Node.TEXT_NODE ? 0 : 0);
-                nextRange.collapse(true);
-                selection.removeAllRanges();
-                selection.addRange(nextRange);
+                placeCollapsedCaret(selection, targetNode, targetNode.nodeType === Node.TEXT_NODE ? 0 : 0);
             } catch (e) {
                 // Keep the structural edit even if caret placement fails.
             }
@@ -2024,11 +2004,7 @@ const {
     function placeSelectionAtEmptyParagraphStart(paragraph, selection) {
         if (!paragraph || !selection) return false;
         try {
-            const nextRange = document.createRange();
-            nextRange.setStart(paragraph, 0);
-            nextRange.collapse(true);
-            selection.removeAllRanges();
-            selection.addRange(nextRange);
+            placeCollapsedCaret(selection, paragraph, 0);
             return true;
         } catch (e) {
             return false;
@@ -2321,11 +2297,7 @@ const {
         }
         if (!shouldFix) return false;
 
-        const newRange = document.createRange();
-        newRange.setStart(firstTextNode, targetOffset);
-        newRange.collapse(true);
-        selection.removeAllRanges();
-        selection.addRange(newRange);
+        placeCollapsedCaret(selection, firstTextNode, targetOffset);
         return true;
     }
 
@@ -3839,11 +3811,7 @@ const {
             targetOffset = Math.max(minOffset, targetOffset);
         }
 
-        const range = document.createRange();
-        range.setStart(targetNode, Math.max(0, Math.min(targetOffset, (targetNode.textContent || '').length)));
-        range.collapse(true);
-        selection.removeAllRanges();
-        selection.addRange(range);
+        placeCollapsedCaret(selection, targetNode, Math.max(0, Math.min(targetOffset, (targetNode.textContent || '').length)));
         return true;
     }
 
@@ -3862,11 +3830,7 @@ const {
             lastNode = node;
             const length = (node.textContent || '').length;
             if (remaining <= length) {
-                const range = document.createRange();
-                range.setStart(node, remaining);
-                range.collapse(true);
-                selection.removeAllRanges();
-                selection.addRange(range);
+                placeCollapsedCaret(selection, node, remaining);
                 return true;
             }
             remaining -= length;
@@ -4401,11 +4365,7 @@ const {
         p.appendChild(document.createElement('br'));
         anchor.parent.insertBefore(p, insertBeforeNode);
 
-        const range = document.createRange();
-        range.setStart(p, 0);
-        range.collapse(true);
-        selection.removeAllRanges();
-        selection.addRange(range);
+        placeCollapsedCaret(selection, p, 0);
         return true;
     }
 
@@ -4715,11 +4675,7 @@ const {
 
         if (!targetNode) return false;
 
-        const newRange = document.createRange();
-        newRange.setStart(targetNode, Math.max(0, targetOffset));
-        newRange.collapse(true);
-        selection.removeAllRanges();
-        selection.addRange(newRange);
+        placeCollapsedCaret(selection, targetNode, Math.max(0, targetOffset));
         return true;
     }
 
@@ -4828,11 +4784,7 @@ const {
         requestAnimationFrame(() => {
             const sel = window.getSelection();
             if (!sel) return;
-            const newRange = document.createRange();
-            newRange.setStart(p, 0);
-            newRange.collapse(true);
-            sel.removeAllRanges();
-            sel.addRange(newRange);
+            placeCollapsedCaret(sel, p, 0);
             editor.focus();
             notifyChange();
         });
@@ -5905,11 +5857,7 @@ const {
 
         const selection = window.getSelection();
         if (selection) {
-            const newRange = document.createRange();
-            newRange.setStart(match.textNode, match.slashIndex);
-            newRange.collapse(true);
-            selection.removeAllRanges();
-            selection.addRange(newRange);
+            placeCollapsedCaret(selection, match.textNode, match.slashIndex);
         }
     }
 
@@ -6055,11 +6003,7 @@ const {
             const minOffset = getCheckboxTextMinOffset(li);
             const maxOffset = (textNode.textContent || '').length;
             const safeOffset = Math.max(0, Math.min(minOffset, maxOffset));
-            const newRange = document.createRange();
-            newRange.setStart(textNode, safeOffset);
-            newRange.collapse(true);
-            sel.removeAllRanges();
-            sel.addRange(newRange);
+            placeCollapsedCaret(sel, textNode, safeOffset);
             return true;
         };
 
@@ -6077,11 +6021,7 @@ const {
         if (container.nodeType === Node.ELEMENT_NODE && container.tagName === 'INPUT') {
             const li = container.parentElement;
             if (li && li.tagName === 'LI' && hasCheckboxAtStart(li)) {
-                const newRange = document.createRange();
-                newRange.setStart(li, 0);
-                newRange.collapse(true);
-                sel.removeAllRanges();
-                sel.addRange(newRange);
+                placeCollapsedCaret(sel, li, 0);
                 return;
             }
         }
@@ -6098,11 +6038,7 @@ const {
                 const textNode = getFirstDirectTextNodeAfterCheckbox(container);
                 if (textNode) {
                     const minOffset = getCheckboxTextMinOffset(container);
-                    const newRange = document.createRange();
-                    newRange.setStart(textNode, minOffset);
-                    newRange.collapse(true);
-                    sel.removeAllRanges();
-                    sel.addRange(newRange);
+                    placeCollapsedCaret(sel, textNode, minOffset);
                     return;
                 }
             }
@@ -6116,11 +6052,7 @@ const {
                 if (container === firstTN) {
                     const minOffset = getCheckboxTextMinOffset(li);
                     if (offset < minOffset) {
-                        const newRange = document.createRange();
-                        newRange.setStart(firstTN, minOffset);
-                        newRange.collapse(true);
-                        sel.removeAllRanges();
-                        sel.addRange(newRange);
+                        placeCollapsedCaret(sel, firstTN, minOffset);
                         return;
                     }
                 }
@@ -6325,11 +6257,7 @@ const {
 
             if (shouldMoveCursor) {
                 try {
-                    const newRange = document.createRange();
-                    newRange.setStart(nbspNode, 0);
-                    newRange.collapse(true);
-                    selection.removeAllRanges();
-                    selection.addRange(newRange);
+                    placeCollapsedCaret(selection, nbspNode, 0);
                 } catch (e) {
                     console.error('Failed to restore cursor after delete:', e);
                 }
@@ -7040,11 +6968,7 @@ const {
         const textNode = document.createTextNode(text);
         range.insertNode(textNode);
 
-        const newRange = document.createRange();
-        newRange.setStart(textNode, textNode.textContent.length);
-        newRange.collapse(true);
-        selection.removeAllRanges();
-        selection.addRange(newRange);
+        placeCollapsedCaret(selection, textNode, textNode.textContent.length);
         return true;
     }
 
@@ -7092,11 +7016,7 @@ const {
         fragment.appendChild(caretMarker);
         range.insertNode(fragment);
 
-        const newRange = document.createRange();
-        newRange.setStartAfter(caretMarker);
-        newRange.collapse(true);
-        selection.removeAllRanges();
-        selection.addRange(newRange);
+        placeCollapsedCaretAfter(selection, caretMarker);
         caretMarker.remove();
         return true;
     }
@@ -7276,11 +7196,7 @@ const {
                         firstGapTextNode.remove();
                     }
 
-                    const gapRange = document.createRange();
-                    gapRange.setStart(gapParagraph, 0);
-                    gapRange.collapse(true);
-                    selection.removeAllRanges();
-                    selection.addRange(gapRange);
+                    placeCollapsedCaret(selection, gapParagraph, 0);
                     return true;
                 }
             }
@@ -7446,11 +7362,7 @@ const {
                 if (!prevBlock) {
                     return true;
                 }
-                const blockStartRange = document.createRange();
-                blockStartRange.setStart(currentBlock, 0);
-                blockStartRange.collapse(true);
-                selection.removeAllRanges();
-                selection.addRange(blockStartRange);
+                placeCollapsedCaret(selection, currentBlock, 0);
                 document.execCommand('delete', false, null);
                 notifyChange();
                 return true;
@@ -7473,11 +7385,7 @@ const {
             }
 
             if (deletedZWSP && currentOffset > 0) {
-                const newRange = document.createRange();
-                newRange.setStart(currentNode, currentOffset);
-                newRange.collapse(true);
-                selection.removeAllRanges();
-                selection.addRange(newRange);
+                placeCollapsedCaret(selection, currentNode, currentOffset);
 
                 document.execCommand('delete', false, null);
                 notifyChange();
@@ -7510,11 +7418,7 @@ const {
                 p.innerHTML = '<br>';
                 heading.replaceWith(p);
 
-                const newRange = document.createRange();
-                newRange.setStart(p, 0);
-                newRange.collapse(true);
-                selection.removeAllRanges();
-                selection.addRange(newRange);
+                placeCollapsedCaret(selection, p, 0);
 
                 notifyChange();
                 return true;
@@ -8265,11 +8169,7 @@ const {
             // カーソルを空のリストアイテムに戻す
             if (shouldRestoreCursorToEmptyItem && emptyListItemForCursor && cursorTextNode && selection) {
                 try {
-                    const range = document.createRange();
-                    range.setStart(cursorTextNode, 0);
-                    range.collapse(true);
-                    selection.removeAllRanges();
-                    selection.addRange(range);
+                    placeCollapsedCaret(selection, cursorTextNode, 0);
                 } catch (e) {
                     console.error('Failed to restore cursor:', e);
                 }
@@ -8696,11 +8596,7 @@ const {
                 }
 
                 // Set cursor in the new paragraph
-                const newRange = document.createRange();
-                newRange.setStart(p, 0);
-                newRange.collapse(true);
-                selection.removeAllRanges();
-                selection.addRange(newRange);
+                placeCollapsedCaret(selection, p, 0);
             }
         } else if (isEmpty && isCheckboxItem) {
             // 空のチェックボックスアイテムでEnter → アウトデントまたはパラグラフに変換
@@ -8735,11 +8631,7 @@ const {
                 }
 
                 // カーソルを新しいパラグラフに設定
-                const newRange = document.createRange();
-                newRange.setStart(p, 0);
-                newRange.collapse(true);
-                selection.removeAllRanges();
-                selection.addRange(newRange);
+                placeCollapsedCaret(selection, p, 0);
                 editor.focus();
                 updateListItemClasses();
             };
@@ -9213,11 +9105,7 @@ const {
                 e.preventDefault();
                 stateManager.saveState();
 
-                const newRange = document.createRange();
-                newRange.setStartAfter(strikeElement);
-                newRange.collapse(true);
-                selection.removeAllRanges();
-                selection.addRange(newRange);
+                placeCollapsedCaretAfter(selection, strikeElement);
 
                 document.execCommand('insertParagraph', false, null);
                 clearStrikeThroughState();
@@ -9578,11 +9466,7 @@ const {
             return false;
         }
 
-        const newRange = document.createRange();
-        newRange.setStart(anchor, anchor.textContent.length);
-        newRange.collapse(true);
-        selection.removeAllRanges();
-        selection.addRange(newRange);
+        placeCollapsedCaret(selection, anchor, anchor.textContent.length);
         return true;
     }
 
@@ -9786,11 +9670,7 @@ const {
 
         const activeSelection = selection || window.getSelection();
         if (activeSelection) {
-            const newRange = document.createRange();
-            newRange.setStart(p, 0);
-            newRange.collapse(true);
-            activeSelection.removeAllRanges();
-            activeSelection.addRange(newRange);
+            placeCollapsedCaret(activeSelection, p, 0);
         }
 
         return true;
@@ -9960,11 +9840,7 @@ const {
                 } else {
                     const selection = window.getSelection();
                     if (selection) {
-                        const newRange = document.createRange();
-                        newRange.setStart(wrapper, 0);
-                        newRange.collapse(true);
-                        selection.removeAllRanges();
-                        selection.addRange(newRange);
+                        placeCollapsedCaret(selection, wrapper, 0);
                     }
                 }
             } else {
@@ -10003,11 +9879,7 @@ const {
             p.appendChild(document.createElement('br'));
             editor.appendChild(p);
             if (selection) {
-                const newRange = document.createRange();
-                newRange.setStart(p, 0);
-                newRange.collapse(true);
-                selection.removeAllRanges();
-                selection.addRange(newRange);
+                placeCollapsedCaret(selection, p, 0);
             }
         }
 
@@ -10414,11 +10286,7 @@ const {
             }
         }
 
-        const newRange = document.createRange();
-        newRange.setStart(p, 0);
-        newRange.collapse(true);
-        selection.removeAllRanges();
-        selection.addRange(newRange);
+        placeCollapsedCaret(selection, p, 0);
 
         if (immediate) {
             notifyChangeImmediate();
@@ -10595,11 +10463,7 @@ const {
         const newP = document.createElement('p');
         newP.appendChild(document.createElement('br'));
         parent.insertBefore(newP, pre);
-        const newRange = document.createRange();
-        newRange.setStart(newP, 0);
-        newRange.collapse(true);
-        selection.removeAllRanges();
-        selection.addRange(newRange);
+        placeCollapsedCaret(selection, newP, 0);
         editor.focus();
         notifyChange();
         return true;
@@ -10654,11 +10518,7 @@ const {
         const newP = document.createElement('p');
         newP.appendChild(document.createElement('br'));
         parent.insertBefore(newP, pre);
-        const newRange = document.createRange();
-        newRange.setStart(newP, newP.childNodes.length);
-        newRange.collapse(true);
-        selection.removeAllRanges();
-        selection.addRange(newRange);
+        placeCollapsedCaret(selection, newP, newP.childNodes.length);
         setCodeBlockLanguageNavSelection(null);
         editor.focus();
         notifyChange();
@@ -11816,11 +11676,7 @@ const {
 
     function setCaretAfterNode(selection, node) {
         if (!selection || !node || !node.parentNode) return;
-        const newRange = document.createRange();
-        newRange.setStartAfter(node);
-        newRange.collapse(true);
-        selection.removeAllRanges();
-        selection.addRange(newRange);
+        placeCollapsedCaretAfter(selection, node);
     }
 
     function setCaretToImageRightEdge(selection, image) {
@@ -12518,11 +12374,7 @@ const {
             while (startOffset < text.length && /[\u200B\u2060\u00A0\s]/.test(text[startOffset])) {
                 startOffset++;
             }
-            const newRange = document.createRange();
-            newRange.setStart(nextNode, Math.min(startOffset, text.length));
-            newRange.collapse(true);
-            selection.removeAllRanges();
-            selection.addRange(newRange);
+            placeCollapsedCaret(selection, nextNode, Math.min(startOffset, text.length));
             editor.focus();
             return true;
         }
@@ -13415,11 +13267,7 @@ const {
                         if (prevLi && hasCheckboxAtStart(prevLi)) {
                             e.preventDefault();
                             const sel = window.getSelection();
-                            const nr = document.createRange();
-                            nr.setStart(prevLi, 0);
-                            nr.collapse(true);
-                            sel.removeAllRanges();
-                            sel.addRange(nr);
+                            placeCollapsedCaret(sel, prevLi, 0);
                             return true;
                         }
                     }
@@ -13595,11 +13443,7 @@ const {
                         if (nextLi && hasCheckboxAtStart(nextLi)) {
                             e.preventDefault();
                             const sel = window.getSelection();
-                            const nr = document.createRange();
-                            nr.setStart(nextLi, 0);
-                            nr.collapse(true);
-                            sel.removeAllRanges();
-                            sel.addRange(nr);
+                            placeCollapsedCaret(sel, nextLi, 0);
                             return true;
                         }
                     }
@@ -14082,11 +13926,7 @@ const {
                         // テキスト先頭 or offset=1 → チェックボックス位置へ移動
                         if (isAtTextStart || isAtElementPos1) {
                             e.preventDefault();
-                            const nr = document.createRange();
-                            nr.setStart(li, 0);
-                            nr.collapse(true);
-                            sel.removeAllRanges();
-                            sel.addRange(nr);
+                            placeCollapsedCaret(sel, li, 0);
                             return true;
                         }
 
@@ -14116,11 +13956,7 @@ const {
                                 const lastTN = getLastDirectTextNode(targetLi);
                                 if (lastTN) {
                                     e.preventDefault();
-                                    const nr = document.createRange();
-                                    nr.setStart(lastTN, lastTN.textContent.length);
-                                    nr.collapse(true);
-                                    sel.removeAllRanges();
-                                    sel.addRange(nr);
+                                    placeCollapsedCaret(sel, lastTN, lastTN.textContent.length);
                                     return true;
                                 }
                             }
@@ -14132,11 +13968,7 @@ const {
                                     const lastTN = getLastDirectTextNode(parentLi);
                                     if (lastTN) {
                                         e.preventDefault();
-                                        const nr = document.createRange();
-                                        nr.setStart(lastTN, lastTN.textContent.length);
-                                        nr.collapse(true);
-                                        sel.removeAllRanges();
-                                        sel.addRange(nr);
+                                        placeCollapsedCaret(sel, lastTN, lastTN.textContent.length);
                                         return true;
                                     }
                                 }
@@ -14147,11 +13979,7 @@ const {
                                 const lastTN = domUtils.getLastTextNode(prevEl);
                                 if (lastTN) {
                                     e.preventDefault();
-                                    const nr = document.createRange();
-                                    nr.setStart(lastTN, lastTN.textContent.length);
-                                    nr.collapse(true);
-                                    sel.removeAllRanges();
-                                    sel.addRange(nr);
+                                    placeCollapsedCaret(sel, lastTN, lastTN.textContent.length);
                                     return true;
                                 }
                             }
@@ -14218,11 +14046,7 @@ const {
                             const minOffset = getCheckboxTextMinOffset(li);
                             e.preventDefault();
                             const sel = window.getSelection();
-                            const nr = document.createRange();
-                            nr.setStart(textNode, minOffset);
-                            nr.collapse(true);
-                            sel.removeAllRanges();
-                            sel.addRange(nr);
+                            placeCollapsedCaret(sel, textNode, minOffset);
                             return true;
                         }
                     }
@@ -14683,6 +14507,22 @@ const {
         } catch (e) {
             return false;
         }
+    }
+
+    function placeCollapsedCaret(selection, node, offset) {
+        const range = document.createRange();
+        range.setStart(node, offset);
+        range.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(range);
+    }
+
+    function placeCollapsedCaretAfter(selection, node) {
+        const range = document.createRange();
+        range.setStartAfter(node);
+        range.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(range);
     }
 
     function applySelectionRange(selection, range) {
@@ -16202,11 +16042,7 @@ const {
                         e.preventDefault();
                         e.stopPropagation();
                         const sel = window.getSelection();
-                        const nr = document.createRange();
-                        nr.setStart(prevLi, 0);
-                        nr.collapse(true);
-                        sel.removeAllRanges();
-                        sel.addRange(nr);
+                        placeCollapsedCaret(sel, prevLi, 0);
                         recordCtrlNavHandled('up', fromCommand);
                         return true;
                     }
@@ -16300,11 +16136,7 @@ const {
                         e.preventDefault();
                         e.stopPropagation();
                         const sel = window.getSelection();
-                        const nr = document.createRange();
-                        nr.setStart(nextLi, 0);
-                        nr.collapse(true);
-                        sel.removeAllRanges();
-                        sel.addRange(nr);
+                        placeCollapsedCaret(sel, nextLi, 0);
                         recordCtrlNavHandled('down', fromCommand);
                         return true;
                     }
@@ -16487,11 +16319,7 @@ const {
                                 const lastTN = getLastDirectTextNode(targetLi);
                                 if (lastTN) {
                                     e.preventDefault();
-                                    const nr = document.createRange();
-                                    nr.setStart(lastTN, lastTN.textContent.length);
-                                    nr.collapse(true);
-                                    sel.removeAllRanges();
-                                    sel.addRange(nr);
+                                    placeCollapsedCaret(sel, lastTN, lastTN.textContent.length);
                                     return true;
                                 }
                             }
@@ -16503,11 +16331,7 @@ const {
                                     const lastTN = getLastDirectTextNode(parentLi);
                                     if (lastTN) {
                                         e.preventDefault();
-                                        const nr = document.createRange();
-                                        nr.setStart(lastTN, lastTN.textContent.length);
-                                        nr.collapse(true);
-                                        sel.removeAllRanges();
-                                        sel.addRange(nr);
+                                        placeCollapsedCaret(sel, lastTN, lastTN.textContent.length);
                                         return true;
                                     }
                                 }
@@ -16518,11 +16342,7 @@ const {
                                 const lastTN = domUtils.getLastTextNode(prevEl);
                                 if (lastTN) {
                                     e.preventDefault();
-                                    const nr = document.createRange();
-                                    nr.setStart(lastTN, lastTN.textContent.length);
-                                    nr.collapse(true);
-                                    sel.removeAllRanges();
-                                    sel.addRange(nr);
+                                    placeCollapsedCaret(sel, lastTN, lastTN.textContent.length);
                                     return true;
                                 }
                             }
@@ -16591,11 +16411,7 @@ const {
                         e.preventDefault();
                         e.stopPropagation();
                         const sel = window.getSelection();
-                        const nr = document.createRange();
-                        nr.setStart(nextLi, 0);
-                        nr.collapse(true);
-                        sel.removeAllRanges();
-                        sel.addRange(nr);
+                        placeCollapsedCaret(sel, nextLi, 0);
                         return true;
                     }
                 }
@@ -16833,11 +16649,7 @@ const {
             const checkboxTextStartLi = isCursorAtCheckboxTextStart();
             if (checkboxTextStartLi) {
                 const sel = window.getSelection();
-                const nr = document.createRange();
-                nr.setStart(checkboxTextStartLi, 0);
-                nr.collapse(true);
-                sel.removeAllRanges();
-                sel.addRange(nr);
+                placeCollapsedCaret(sel, checkboxTextStartLi, 0);
                 return true;
             }
             cursorManager.moveCursorToLineStart();
@@ -16855,11 +16667,7 @@ const {
                     const lastTN = getLastDirectTextNode(li);
                     if (lastTN) {
                         const sel = window.getSelection();
-                        const nr = document.createRange();
-                        nr.setStart(lastTN, lastTN.textContent.length);
-                        nr.collapse(true);
-                        sel.removeAllRanges();
-                        sel.addRange(nr);
+                        placeCollapsedCaret(sel, lastTN, lastTN.textContent.length);
                         return true;
                     }
                 }
@@ -16902,11 +16710,7 @@ const {
 
         const selection = window.getSelection();
         if (!selection) return null;
-        const range = document.createRange();
-        range.setStart(listItem, 0);
-        range.collapse(true);
-        selection.removeAllRanges();
-        selection.addRange(range);
+        placeCollapsedCaret(selection, listItem, 0);
         return selection;
     }
 
@@ -17326,11 +17130,7 @@ const {
                     } else {
                         parentList.replaceWith(p);
                     }
-                    const newRange = document.createRange();
-                    newRange.setStart(p, 0);
-                    newRange.collapse(true);
-                    selection.removeAllRanges();
-                    selection.addRange(newRange);
+                    placeCollapsedCaret(selection, p, 0);
                 }
                 notifyChangeImmediate();
                 finalizeCtrlKDeleteTurn();
@@ -19226,11 +19026,7 @@ const {
         const setCaretToEndOfInsertedNode = (selection, node) => {
             if (!selection || !node) return;
             if (node.nodeType === Node.TEXT_NODE) {
-                const range = document.createRange();
-                range.setStart(node, (node.textContent || '').length);
-                range.collapse(true);
-                selection.removeAllRanges();
-                selection.addRange(range);
+                placeCollapsedCaret(selection, node, (node.textContent || '').length);
                 return;
             }
 
@@ -19241,11 +19037,7 @@ const {
 
             const lastTextNode = domUtils.getLastTextNode(node);
             if (lastTextNode) {
-                const range = document.createRange();
-                range.setStart(lastTextNode, (lastTextNode.textContent || '').length);
-                range.collapse(true);
-                selection.removeAllRanges();
-                selection.addRange(range);
+                placeCollapsedCaret(selection, lastTextNode, (lastTextNode.textContent || '').length);
                 return;
             }
 
@@ -19679,11 +19471,7 @@ const {
             fragment.appendChild(paragraph);
             tableManager._insertNodeAsBlock(range, fragment);
 
-            const newRange = document.createRange();
-            newRange.setStart(paragraph, 0);
-            newRange.collapse(true);
-            selection.removeAllRanges();
-            selection.addRange(newRange);
+            placeCollapsedCaret(selection, paragraph, 0);
             notifyChange();
             return true;
         };
@@ -19717,11 +19505,7 @@ const {
 
             const textNode = code.firstChild;
             if (textNode && textNode.nodeType === Node.TEXT_NODE) {
-                const newRange = document.createRange();
-                newRange.setStart(textNode, textNode.textContent.length);
-                newRange.collapse(true);
-                selection.removeAllRanges();
-                selection.addRange(newRange);
+                placeCollapsedCaret(selection, textNode, textNode.textContent.length);
             } else {
                 setCaretAfterNode(selection, pre);
             }
@@ -19926,11 +19710,7 @@ const {
             tableManager._insertNodeAsBlock(range, blockquote);
             const lastTextNode = domUtils.getLastTextNode(blockquote);
             if (lastTextNode) {
-                const newRange = document.createRange();
-                newRange.setStart(lastTextNode, lastTextNode.textContent.length);
-                newRange.collapse(true);
-                selection.removeAllRanges();
-                selection.addRange(newRange);
+                placeCollapsedCaret(selection, lastTextNode, lastTextNode.textContent.length);
             } else {
                 setCaretAfterNode(selection, blockquote);
             }
@@ -19993,11 +19773,7 @@ const {
                 if (/^H[1-6]$/.test(lastInsertedNode.tagName)) {
                     const textNode = lastInsertedNode.firstChild;
                     if (textNode && textNode.nodeType === Node.TEXT_NODE) {
-                        const newRange = document.createRange();
-                        newRange.setStart(textNode, textNode.textContent.length);
-                        newRange.collapse(true);
-                        selection.removeAllRanges();
-                        selection.addRange(newRange);
+                        placeCollapsedCaret(selection, textNode, textNode.textContent.length);
                     } else {
                         const newRange = document.createRange();
                         newRange.selectNodeContents(lastInsertedNode);
@@ -20006,11 +19782,7 @@ const {
                         selection.addRange(newRange);
                     }
                 } else {
-                    const newRange = document.createRange();
-                    newRange.setStart(lastInsertedNode, 0);
-                    newRange.collapse(true);
-                    selection.removeAllRanges();
-                    selection.addRange(newRange);
+                    placeCollapsedCaret(selection, lastInsertedNode, 0);
                 }
             }
 
@@ -20283,11 +20055,7 @@ const {
                 selection.removeAllRanges();
                 selection.addRange(newRange);
             } else {
-                const fallbackRange = document.createRange();
-                fallbackRange.setStartAfter(rootList);
-                fallbackRange.collapse(true);
-                selection.removeAllRanges();
-                selection.addRange(fallbackRange);
+                placeCollapsedCaretAfter(selection, rootList);
             }
 
             normalizeCheckboxListItems(rootList);
@@ -20654,11 +20422,7 @@ const {
                 } else {
                     const lastTextNode = domUtils.getLastTextNode(lastInsertedNode);
                     if (lastTextNode) {
-                        const newRange = document.createRange();
-                        newRange.setStart(lastTextNode, lastTextNode.textContent.length);
-                        newRange.collapse(true);
-                        selection.removeAllRanges();
-                        selection.addRange(newRange);
+                        placeCollapsedCaret(selection, lastTextNode, lastTextNode.textContent.length);
                     } else if (lastInsertedNode.nodeType === Node.ELEMENT_NODE) {
                         const newRange = document.createRange();
                         newRange.selectNodeContents(lastInsertedNode);
@@ -20887,11 +20651,7 @@ const {
                     range.insertNode(link);
 
                     // カーソルをリンクの後ろに移動
-                    const newRange = document.createRange();
-                    newRange.setStartAfter(link);
-                    newRange.collapse(true);
-                    selection.removeAllRanges();
-                    selection.addRange(newRange);
+                    placeCollapsedCaretAfter(selection, link);
 
                     stateManager.saveStateDebounced();
                     notifyChange();
@@ -22513,11 +22273,7 @@ const {
                 focusEditorWithoutScroll();
                 const selection = window.getSelection();
                 if (selection) {
-                    const range = document.createRange();
-                    range.setStart(textNode, text.length);
-                    range.collapse(true);
-                    selection.removeAllRanges();
-                    selection.addRange(range);
+                    placeCollapsedCaret(selection, textNode, text.length);
                 }
 
                 // Save immediately so unlink is always undoable/redoable.
@@ -23189,11 +22945,7 @@ const {
 
                 const minOffset = getCheckboxTextMinOffset(li);
                 isCorrectingCheckboxCursor = true;
-                const newRange = document.createRange();
-                newRange.setStart(textNode, minOffset);
-                newRange.collapse(true);
-                sel.removeAllRanges();
-                sel.addRange(newRange);
+                placeCollapsedCaret(sel, textNode, minOffset);
                 setTimeout(() => { isCorrectingCheckboxCursor = false; }, 0);
                 return true;
             };
@@ -23207,11 +22959,7 @@ const {
                         return;
                     }
                     isCorrectingCheckboxCursor = true;
-                    const newRange = document.createRange();
-                    newRange.setStart(li, 0);
-                    newRange.collapse(true);
-                    sel.removeAllRanges();
-                    sel.addRange(newRange);
+                    placeCollapsedCaret(sel, li, 0);
                     setTimeout(() => { isCorrectingCheckboxCursor = false; }, 0);
                     return;
                 }
@@ -23237,11 +22985,7 @@ const {
                     if (textNode) {
                         const minOffset = getCheckboxTextMinOffset(container);
                         isCorrectingCheckboxCursor = true;
-                        const newRange = document.createRange();
-                        newRange.setStart(textNode, minOffset);
-                        newRange.collapse(true);
-                        sel.removeAllRanges();
-                        sel.addRange(newRange);
+                        placeCollapsedCaret(sel, textNode, minOffset);
                         setTimeout(() => { isCorrectingCheckboxCursor = false; }, 0);
                         return;
                     }
@@ -23257,11 +23001,7 @@ const {
                         const minOffset = getCheckboxTextMinOffset(li);
                         if (offset < minOffset) {
                             isCorrectingCheckboxCursor = true;
-                            const newRange = document.createRange();
-                            newRange.setStart(firstTN, minOffset);
-                            newRange.collapse(true);
-                            sel.removeAllRanges();
-                            sel.addRange(newRange);
+                            placeCollapsedCaret(sel, firstTN, minOffset);
                             setTimeout(() => { isCorrectingCheckboxCursor = false; }, 0);
                             return;
                         }
