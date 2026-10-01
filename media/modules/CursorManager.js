@@ -33,6 +33,14 @@ export class CursorManager {
         this._inlineCodeLeftBoundaryState = null;
     }
 
+    _placeCollapsedCaret(selection, node, offset) {
+        const range = document.createRange();
+        range.setStart(node, offset);
+        range.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(range);
+    }
+
     _isRangeAtCodeBlockEnd(codeBlock, range) {
         if (!codeBlock || !range) {
             return false;
@@ -670,14 +678,7 @@ export class CursorManager {
                 if (redundantAnchor && redundantAnchor.parentNode) {
                     redundantAnchor.remove();
                 }
-                const range = document.createRange();
-                range.setStart(
-                    visiblePreviousText,
-                    Math.min(lastVisibleOffset + 1, visibleText.length)
-                );
-                range.collapse(true);
-                selection.removeAllRanges();
-                selection.addRange(range);
+                this._placeCollapsedCaret(selection, visiblePreviousText, Math.min(lastVisibleOffset + 1, visibleText.length));
                 this._setInlineCodeLeftBoundaryState(code, 'outside-left');
                 return true;
             }
@@ -700,11 +701,7 @@ export class CursorManager {
             anchor = document.createTextNode(INLINE_CODE_LEFT_CARET_ANCHOR);
             parent.insertBefore(anchor, code);
         }
-        const range = document.createRange();
-        range.setStart(anchor, (anchor.textContent || '').length);
-        range.collapse(true);
-        selection.removeAllRanges();
-        selection.addRange(range);
+        this._placeCollapsedCaret(selection, anchor, (anchor.textContent || '').length);
         this._setInlineCodeLeftBoundaryState(code, 'outside-left');
         return true;
     }
@@ -772,11 +769,7 @@ export class CursorManager {
             }
         }
 
-        const range = document.createRange();
-        range.setStart(anchor, (anchor.textContent || '').length);
-        range.collapse(true);
-        selection.removeAllRanges();
-        selection.addRange(range);
+        this._placeCollapsedCaret(selection, anchor, (anchor.textContent || '').length);
         return true;
     }
 
@@ -1011,11 +1004,7 @@ export class CursorManager {
             targetText = this._getLastNavigableTextNode(this.editor);
         }
         if (targetText) {
-            const newRange = document.createRange();
-            newRange.setStart(targetText, targetText.textContent.length);
-            newRange.collapse(true);
-            selection.removeAllRanges();
-            selection.addRange(newRange);
+            this._placeCollapsedCaret(selection, targetText, targetText.textContent.length);
         }
     }
 
@@ -1633,11 +1622,7 @@ export class CursorManager {
             this.clearInlineCodeBoundaryState();
             return false;
         }
-        const range = document.createRange();
-        range.setStart(firstStepPos.node, firstStepPos.offset);
-        range.collapse(true);
-        selection.removeAllRanges();
-        selection.addRange(range);
+        this._placeCollapsedCaret(selection, firstStepPos.node, firstStepPos.offset);
         this.clearInlineCodeBoundaryState();
         return true;
     }
@@ -2589,11 +2574,7 @@ export class CursorManager {
             targetOffset = lastNode.textContent.length;
         }
 
-        const newRange = document.createRange();
-        newRange.setStart(targetNode, targetOffset);
-        newRange.collapse(true);
-        selection.removeAllRanges();
-        selection.addRange(newRange);
+        this._placeCollapsedCaret(selection, targetNode, targetOffset);
         return true;
     }
 
@@ -3212,20 +3193,12 @@ export class CursorManager {
 
         const lastTextNode = this.domUtils.getLastTextNode(codeBlock);
         if (lastTextNode) {
-            const newRange = document.createRange();
-            newRange.setStart(lastTextNode, lastTextNode.textContent.length);
-            newRange.collapse(true);
-            selection.removeAllRanges();
-            selection.addRange(newRange);
+            this._placeCollapsedCaret(selection, lastTextNode, lastTextNode.textContent.length);
             return true;
         }
 
         if (codeBlock) {
-            const newRange = document.createRange();
-            newRange.setStart(codeBlock, codeBlock.childNodes.length);
-            newRange.collapse(true);
-            selection.removeAllRanges();
-            selection.addRange(newRange);
+            this._placeCollapsedCaret(selection, codeBlock, codeBlock.childNodes.length);
             return true;
         }
 
@@ -3283,11 +3256,7 @@ export class CursorManager {
             return false;
         }
 
-        const newRange = document.createRange();
-        newRange.setStart(anchor, anchor.textContent.length);
-        newRange.collapse(true);
-        selection.removeAllRanges();
-        selection.addRange(newRange);
+        this._placeCollapsedCaret(selection, anchor, anchor.textContent.length);
         return true;
     }
 
@@ -3391,6 +3360,326 @@ export class CursorManager {
         return cursorOffset === null && this._isCaretNearBlockBottom(range, preBlock);
     }
 
+    // Helpers shared by moveCursorUp and moveCursorDown.
+    _getBlockFromContainer(node, offset = null) {
+        if (node === this.editor) {
+            const children = Array.from(this.editor.childNodes || []);
+            if (children.length === 0) {
+                return null;
+            }
+            const safeOffset = Math.max(0, Math.min(
+                Number.isInteger(offset) ? offset : 0,
+                children.length - 1
+            ));
+            const directChild = children[safeOffset] || children[children.length - 1];
+            if (directChild && directChild.nodeType === Node.ELEMENT_NODE && this.domUtils.isBlockElement(directChild)) {
+                return directChild;
+            }
+            if (directChild && directChild.nodeType === Node.TEXT_NODE) {
+                return directChild.parentElement && directChild.parentElement !== this.editor
+                    ? directChild.parentElement
+                    : null;
+            }
+        }
+        let block = node && node.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
+        while (block && block !== this.editor && !this.domUtils.isBlockElement(block)) {
+            block = block.parentElement;
+        }
+        return block && block !== this.editor ? block : null;
+    }
+
+    _getEstimatedLineHeight(node, fallbackRect = null) {
+        const block = this._getBlockFromContainer(node);
+        let lineHeight = NaN;
+        if (block && window.getComputedStyle) {
+            const style = window.getComputedStyle(block);
+            if (style) {
+                lineHeight = Number.parseFloat(style.lineHeight);
+                if (!Number.isFinite(lineHeight) || lineHeight <= 0) {
+                    const fontSize = Number.parseFloat(style.fontSize);
+                    if (Number.isFinite(fontSize) && fontSize > 0) {
+                        lineHeight = fontSize * 1.6;
+                    }
+                }
+            }
+        }
+        if ((!Number.isFinite(lineHeight) || lineHeight <= 0) && fallbackRect) {
+            const rectHeight = Number.parseFloat(fallbackRect.height);
+            if (Number.isFinite(rectHeight) && rectHeight > 0) {
+                lineHeight = rectHeight;
+            }
+        }
+        if (!Number.isFinite(lineHeight) || lineHeight <= 0) {
+            lineHeight = 18;
+        }
+        return Math.max(14, Math.min(lineHeight, 72));
+    }
+
+    _getVisualCaretRectForRange(targetRange) {
+        if (!targetRange) {
+            return null;
+        }
+        const baseRect = this._getCaretRect(targetRange);
+        if (!baseRect || !targetRange.collapsed) {
+            return baseRect;
+        }
+        const containerNode = targetRange.startContainer;
+        if (!containerNode || containerNode.nodeType !== Node.TEXT_NODE) {
+            return baseRect;
+        }
+        const text = containerNode.textContent || '';
+        const offset = Math.max(0, Math.min(targetRange.startOffset, text.length));
+        if (offset <= 0 || offset >= text.length) {
+            return baseRect;
+        }
+        try {
+            const prevRange = document.createRange();
+            prevRange.setStart(containerNode, offset - 1);
+            prevRange.setEnd(containerNode, offset);
+            const prevRect = prevRange.getBoundingClientRect();
+
+            const nextRange = document.createRange();
+            nextRange.setStart(containerNode, offset);
+            nextRange.setEnd(containerNode, offset + 1);
+            const nextRect = nextRange.getBoundingClientRect();
+
+            if (!prevRect || !nextRect) {
+                return baseRect;
+            }
+
+            const prevTop = prevRect.top || prevRect.y || 0;
+            const nextTop = nextRect.top || nextRect.y || 0;
+            if (nextTop > prevTop + 2) {
+                // 折り返し行の先頭では、前文字（前行末）ではなく次文字の行を現在行として扱う。
+                return {
+                    left: nextRect.left,
+                    right: nextRect.left,
+                    top: nextRect.top,
+                    bottom: nextRect.bottom,
+                    width: 0,
+                    height: nextRect.height,
+                    x: nextRect.left,
+                    y: nextRect.y
+                };
+            }
+        } catch (e) {
+            // ignore and use base rect
+        }
+        return baseRect;
+    }
+
+    _getVisualLinesForBlock(block) {
+        if (!block || block === this.editor) {
+            return [];
+        }
+        try {
+            const probeRange = document.createRange();
+            probeRange.selectNodeContents(block);
+            const rawRects = Array.from(probeRange.getClientRects ? probeRange.getClientRects() : []);
+            const rects = rawRects
+                .filter(rect => rect &&
+                    Number.isFinite(rect.top) &&
+                    Number.isFinite(rect.bottom) &&
+                    Number.isFinite(rect.left) &&
+                    Number.isFinite(rect.right) &&
+                    (rect.width || rect.height))
+                .sort((a, b) => {
+                    if (Math.abs(a.top - b.top) <= 1.5) {
+                        return a.left - b.left;
+                    }
+                    return a.top - b.top;
+                });
+            if (rects.length === 0) {
+                return [];
+            }
+
+            const lines = [];
+            for (const rect of rects) {
+                this._appendRectToVisualLines(lines, rect);
+            }
+            return lines;
+        } catch (e) {
+            return [];
+        }
+    }
+
+    _getVisualLinesForListItemText(listItem) {
+        if (!listItem) {
+            return [];
+        }
+        const textNodes = this._getDirectTextNodes(listItem);
+        if (textNodes.length === 0) {
+            return [];
+        }
+        const firstNode = textNodes[0];
+        const lastNode = textNodes[textNodes.length - 1];
+        try {
+            const probeRange = document.createRange();
+            probeRange.setStart(firstNode, 0);
+            probeRange.setEnd(lastNode, (lastNode.textContent || '').length);
+            const rawRects = Array.from(probeRange.getClientRects ? probeRange.getClientRects() : []);
+            const rects = rawRects
+                .filter(r => r &&
+                    Number.isFinite(r.top) &&
+                    Number.isFinite(r.bottom) &&
+                    Number.isFinite(r.left) &&
+                    Number.isFinite(r.right) &&
+                    (r.width || r.height))
+                .sort((a, b) => {
+                    if (Math.abs(a.top - b.top) <= 1.5) {
+                        return a.left - b.left;
+                    }
+                    return a.top - b.top;
+                });
+            if (rects.length === 0) {
+                return [];
+            }
+            const lines = [];
+            for (const rect of rects) {
+                this._appendRectToVisualLines(lines, rect);
+            }
+            return lines;
+        } catch (e) {
+            return [];
+        }
+    }
+
+    _isRangeInsideDirectListText(probeRange, listItem, textNodes) {
+        if (!probeRange || !listItem || !textNodes || textNodes.length === 0) {
+            return false;
+        }
+        const startContainer = probeRange.startContainer;
+        if (!startContainer || !listItem.contains(startContainer)) {
+            return false;
+        }
+        if (startContainer.nodeType === Node.TEXT_NODE && textNodes.includes(startContainer)) {
+            return true;
+        }
+        let current = startContainer.nodeType === Node.ELEMENT_NODE
+            ? startContainer
+            : startContainer.parentElement;
+        while (current && current !== listItem) {
+            if (current.tagName === 'UL' || current.tagName === 'OL') {
+                return false;
+            }
+            current = current.parentElement;
+        }
+        return current === listItem;
+    }
+
+    _findLineStartCaretInListItem(listItem, textNodes, line) {
+        if (!listItem || !textNodes || textNodes.length === 0 || !line) {
+            return null;
+        }
+        const pickCandidate = (skipWhitespace) => {
+            let best = null;
+            let guard = 0;
+            for (const textNode of textNodes) {
+                const text = textNode.textContent || '';
+                if (text.length === 0) continue;
+                for (let i = 0; i < text.length; i++) {
+                    guard++;
+                    if (guard > 12000) {
+                        return best;
+                    }
+                    const ch = text[i];
+                    if (ch === '\n' || ch === '\r' || ch === '\u200B' || ch === '\u2060' || ch === '\uFEFF') {
+                        continue;
+                    }
+                    if (skipWhitespace && /\s/.test(ch)) {
+                        continue;
+                    }
+                    let charRect = null;
+                    try {
+                        const charRange = document.createRange();
+                        charRange.setStart(textNode, i);
+                        charRange.setEnd(textNode, i + 1);
+                        charRect = charRange.getBoundingClientRect();
+                    } catch (e) {
+                        continue;
+                    }
+                    if (!charRect || !(charRect.width || charRect.height)) {
+                        continue;
+                    }
+                    const charTop = charRect.top || charRect.y || 0;
+                    const charBottom = charRect.bottom || (charRect.y + charRect.height) || charTop;
+                    const overlapsTargetLine = charBottom >= line.top - 2 && charTop <= line.bottom + 2;
+                    if (!overlapsTargetLine) {
+                        continue;
+                    }
+                    const charLeft = charRect.left || charRect.x || 0;
+                    if (!best || charLeft < best.left - 0.5 ||
+                        (Math.abs(charLeft - best.left) <= 0.5 && charTop < best.top)) {
+                        best = {
+                            node: textNode,
+                            offset: i,
+                            left: charLeft,
+                            top: charTop
+                        };
+                    }
+                }
+            }
+            return best;
+        };
+        return pickCandidate(true) || pickCandidate(false);
+    }
+
+    _isListItemSingleVisualLine(listItem) {
+        if (!listItem) return false;
+        const firstDirectText = this._getFirstDirectTextNode(listItem);
+        const lastDirectText = this._getLastDirectTextNode(listItem);
+        if (!firstDirectText || !lastDirectText) return true;
+        try {
+            const probeRange = document.createRange();
+            const firstText = firstDirectText.textContent || '';
+            const startOffset = this._getFirstNonZwspOffset(firstText);
+            probeRange.setStart(firstDirectText, startOffset !== null ? startOffset : 0);
+            probeRange.setEnd(lastDirectText, (lastDirectText.textContent || '').length);
+            const rects = Array.from(probeRange.getClientRects ? probeRange.getClientRects() : []);
+            if (rects.length <= 1) {
+                return true;
+            }
+            const normalizedTops = [];
+            for (const r of rects) {
+                if (!r || !Number.isFinite(r.top)) continue;
+                const isNewLine = normalizedTops.every(t => Math.abs(t - r.top) > 3);
+                if (isNewLine) {
+                    normalizedTops.push(r.top);
+                    if (normalizedTops.length > 1) {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _restoreOriginalCaret(selection, originContainer, originOffset) {
+        if (!originContainer || !this.editor || !this.editor.contains(originContainer)) {
+            return false;
+        }
+        try {
+            const restoreRange = document.createRange();
+            if (originContainer.nodeType === Node.TEXT_NODE) {
+                const textLength = (originContainer.textContent || '').length;
+                restoreRange.setStart(originContainer, Math.max(0, Math.min(originOffset, textLength)));
+            } else if (originContainer.nodeType === Node.ELEMENT_NODE) {
+                const childCount = originContainer.childNodes ? originContainer.childNodes.length : 0;
+                restoreRange.setStart(originContainer, Math.max(0, Math.min(originOffset, childCount)));
+            } else {
+                return false;
+            }
+            restoreRange.collapse(true);
+            selection.removeAllRanges();
+            selection.addRange(restoreRange);
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
     /**
      * カーソルを上に1行移動
      * @param {Function} notifyCallback - 変更を通知するコールバック
@@ -3410,166 +3699,6 @@ export class CursorManager {
         }
         const originContainer = range.startContainer;
         const originOffset = range.startOffset;
-        const restoreOriginalCaret = () => {
-            if (!originContainer || !this.editor || !this.editor.contains(originContainer)) {
-                return false;
-            }
-            try {
-                const restoreRange = document.createRange();
-                if (originContainer.nodeType === Node.TEXT_NODE) {
-                    const textLength = (originContainer.textContent || '').length;
-                    restoreRange.setStart(originContainer, Math.max(0, Math.min(originOffset, textLength)));
-                } else if (originContainer.nodeType === Node.ELEMENT_NODE) {
-                    const childCount = originContainer.childNodes ? originContainer.childNodes.length : 0;
-                    restoreRange.setStart(originContainer, Math.max(0, Math.min(originOffset, childCount)));
-                } else {
-                    return false;
-                }
-                restoreRange.collapse(true);
-                selection.removeAllRanges();
-                selection.addRange(restoreRange);
-                return true;
-            } catch (e) {
-                return false;
-            }
-        };
-        const getBlockFromContainer = (node, offset = null) => {
-            if (node === this.editor) {
-                const children = Array.from(this.editor.childNodes || []);
-                if (children.length === 0) {
-                    return null;
-                }
-                const safeOffset = Math.max(0, Math.min(
-                    Number.isInteger(offset) ? offset : 0,
-                    children.length - 1
-                ));
-                const directChild = children[safeOffset] || children[children.length - 1];
-                if (directChild && directChild.nodeType === Node.ELEMENT_NODE && this.domUtils.isBlockElement(directChild)) {
-                    return directChild;
-                }
-                if (directChild && directChild.nodeType === Node.TEXT_NODE) {
-                    return directChild.parentElement && directChild.parentElement !== this.editor
-                        ? directChild.parentElement
-                        : null;
-                }
-            }
-            let block = node && node.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
-            while (block && block !== this.editor && !this.domUtils.isBlockElement(block)) {
-                block = block.parentElement;
-            }
-            return block && block !== this.editor ? block : null;
-        };
-        const getEstimatedLineHeight = (node, fallbackRect = null) => {
-            const block = getBlockFromContainer(node);
-            let lineHeight = NaN;
-            if (block && window.getComputedStyle) {
-                const style = window.getComputedStyle(block);
-                if (style) {
-                    lineHeight = Number.parseFloat(style.lineHeight);
-                    if (!Number.isFinite(lineHeight) || lineHeight <= 0) {
-                        const fontSize = Number.parseFloat(style.fontSize);
-                        if (Number.isFinite(fontSize) && fontSize > 0) {
-                            lineHeight = fontSize * 1.6;
-                        }
-                    }
-                }
-            }
-            if ((!Number.isFinite(lineHeight) || lineHeight <= 0) && fallbackRect) {
-                const rectHeight = Number.parseFloat(fallbackRect.height);
-                if (Number.isFinite(rectHeight) && rectHeight > 0) {
-                    lineHeight = rectHeight;
-                }
-            }
-            if (!Number.isFinite(lineHeight) || lineHeight <= 0) {
-                lineHeight = 18;
-            }
-            return Math.max(14, Math.min(lineHeight, 72));
-        };
-        const getVisualCaretRectForRange = (targetRange) => {
-            if (!targetRange) {
-                return null;
-            }
-            const baseRect = this._getCaretRect(targetRange);
-            if (!baseRect || !targetRange.collapsed) {
-                return baseRect;
-            }
-            const containerNode = targetRange.startContainer;
-            if (!containerNode || containerNode.nodeType !== Node.TEXT_NODE) {
-                return baseRect;
-            }
-            const text = containerNode.textContent || '';
-            const offset = Math.max(0, Math.min(targetRange.startOffset, text.length));
-            if (offset <= 0 || offset >= text.length) {
-                return baseRect;
-            }
-            try {
-                const prevRange = document.createRange();
-                prevRange.setStart(containerNode, offset - 1);
-                prevRange.setEnd(containerNode, offset);
-                const prevRect = prevRange.getBoundingClientRect();
-
-                const nextRange = document.createRange();
-                nextRange.setStart(containerNode, offset);
-                nextRange.setEnd(containerNode, offset + 1);
-                const nextRect = nextRange.getBoundingClientRect();
-
-                if (!prevRect || !nextRect) {
-                    return baseRect;
-                }
-
-                const prevTop = prevRect.top || prevRect.y || 0;
-                const nextTop = nextRect.top || nextRect.y || 0;
-                if (nextTop > prevTop + 2) {
-                    return {
-                        left: nextRect.left,
-                        right: nextRect.left,
-                        top: nextRect.top,
-                        bottom: nextRect.bottom,
-                        width: 0,
-                        height: nextRect.height,
-                        x: nextRect.left,
-                        y: nextRect.y
-                    };
-                }
-            } catch (e) {
-                // ignore and use base rect
-            }
-            return baseRect;
-        };
-        const getVisualLinesForBlock = (block) => {
-            if (!block || block === this.editor) {
-                return [];
-            }
-            try {
-                const probeRange = document.createRange();
-                probeRange.selectNodeContents(block);
-                const rawRects = Array.from(probeRange.getClientRects ? probeRange.getClientRects() : []);
-                const rects = rawRects
-                    .filter(rect => rect &&
-                        Number.isFinite(rect.top) &&
-                        Number.isFinite(rect.bottom) &&
-                        Number.isFinite(rect.left) &&
-                        Number.isFinite(rect.right) &&
-                        (rect.width || rect.height))
-                    .sort((a, b) => {
-                        if (Math.abs(a.top - b.top) <= 1.5) {
-                            return a.left - b.left;
-                        }
-                        return a.top - b.top;
-                    });
-                if (rects.length === 0) {
-                    return [];
-                }
-
-                const lines = [];
-                for (const rect of rects) {
-                    this._appendRectToVisualLines(lines, rect);
-                }
-                return lines;
-            } catch (e) {
-                return [];
-            }
-        };
         const findLineStartCaretInBlock = (block, line) => {
             if (!block || !line) {
                 return null;
@@ -3683,11 +3812,7 @@ export class CursorManager {
 
                         preBlock.parentElement.insertBefore(newP, preBlock);
 
-                        const newRange = document.createRange();
-                        newRange.setStart(newP, 0);
-                        newRange.collapse(true);
-                        selection.removeAllRanges();
-                        selection.addRange(newRange);
+                        this._placeCollapsedCaret(selection, newP, 0);
 
                         if (notifyCallback) notifyCallback();
                     }
@@ -3712,7 +3837,7 @@ export class CursorManager {
                 return false;
             }
 
-            const currentBlock = getBlockFromContainer(range.startContainer, range.startOffset);
+            const currentBlock = this._getBlockFromContainer(range.startContainer, range.startOffset);
             if (!currentBlock || currentBlock === this.editor) {
                 return false;
             }
@@ -3723,12 +3848,12 @@ export class CursorManager {
                 return false;
             }
 
-            const lines = getVisualLinesForBlock(currentBlock);
+            const lines = this._getVisualLinesForBlock(currentBlock);
             if (lines.length < 2) {
                 return false;
             }
 
-            const currentRect = getVisualCaretRectForRange(range);
+            const currentRect = this._getVisualCaretRectForRange(range);
             if (!currentRect) {
                 return false;
             }
@@ -3757,11 +3882,7 @@ export class CursorManager {
             if (atCurrentLineStart) {
                 const lineStartCaret = findLineStartCaretInBlock(currentBlock, targetLine);
                 if (lineStartCaret) {
-                    const startRange = document.createRange();
-                    startRange.setStart(lineStartCaret.node, lineStartCaret.offset);
-                    startRange.collapse(true);
-                    selection.removeAllRanges();
-                    selection.addRange(startRange);
+                    this._placeCollapsedCaret(selection, lineStartCaret.node, lineStartCaret.offset);
                     return true;
                 }
             }
@@ -3792,7 +3913,7 @@ export class CursorManager {
                 if (!currentBlock.contains(probeRange.startContainer)) {
                     return false;
                 }
-                const probeRect = getVisualCaretRectForRange(probeRange);
+                const probeRect = this._getVisualCaretRectForRange(probeRange);
                 if (!probeRect) {
                     return false;
                 }
@@ -3905,7 +4026,7 @@ export class CursorManager {
                         const boundaryRect = boundaryNode.getBoundingClientRect
                             ? boundaryNode.getBoundingClientRect()
                             : null;
-                        const rangeRect = getVisualCaretRectForRange(range);
+                        const rangeRect = this._getVisualCaretRectForRange(range);
                         const baseX = boundaryRect && Number.isFinite(boundaryRect.left)
                             ? boundaryRect.left + 1
                             : ((rangeRect ? (rangeRect.left || rangeRect.x || 0) : 0) + 1);
@@ -3930,7 +4051,7 @@ export class CursorManager {
                             return;
                         }
 
-                        const prevLines = getVisualLinesForBlock(prevElement);
+                        const prevLines = this._getVisualLinesForBlock(prevElement);
                         if (prevLines.length > 0 && document.caretRangeFromPoint) {
                             const targetLine = prevLines[prevLines.length - 1];
                             const targetHeight = Math.max(1, targetLine.bottom - targetLine.top);
@@ -3951,7 +4072,7 @@ export class CursorManager {
                                 if (!probeRange || !prevElement.contains(probeRange.startContainer)) {
                                     continue;
                                 }
-                                const probeRect = getVisualCaretRectForRange(probeRange);
+                                const probeRect = this._getVisualCaretRectForRange(probeRange);
                                 if (!probeRect) {
                                     continue;
                                 }
@@ -3975,11 +4096,7 @@ export class CursorManager {
 
                             const lineStartCaret = findLineStartCaretInBlock(prevElement, targetLine);
                             if (lineStartCaret) {
-                                const startRange = document.createRange();
-                                startRange.setStart(lineStartCaret.node, lineStartCaret.offset);
-                                startRange.collapse(true);
-                                selection.removeAllRanges();
-                                selection.addRange(startRange);
+                                this._placeCollapsedCaret(selection, lineStartCaret.node, lineStartCaret.offset);
                                 return;
                             }
                         }
@@ -4078,7 +4195,7 @@ export class CursorManager {
                     prevElement = this._getPrevNavigableElementInDocument(currentBlock);
                 }
                 if (prevElement) {
-                    const currentRectForEmptyUp = getVisualCaretRectForRange(range);
+                    const currentRectForEmptyUp = this._getVisualCaretRectForRange(range);
                     const baseXForEmptyUp = currentRectForEmptyUp
                         ? (currentRectForEmptyUp.left || currentRectForEmptyUp.x || 0)
                         : 0;
@@ -4095,11 +4212,7 @@ export class CursorManager {
                                 this._placeCursorInEmptyListItem(targetLi, selection, 'up');
                                 return;
                             }
-                            const newRange = document.createRange();
-                            newRange.setStart(targetNode, 0);
-                            newRange.collapse(true);
-                            selection.removeAllRanges();
-                            selection.addRange(newRange);
+                            this._placeCollapsedCaret(selection, targetNode, 0);
                             return;
                         }
                     }
@@ -4132,7 +4245,7 @@ export class CursorManager {
                     }
 
                     // 空行から上移動する場合は、前ブロックの先頭ではなく最終表示行へ移動する。
-                    const prevLines = getVisualLinesForBlock(prevElement);
+                    const prevLines = this._getVisualLinesForBlock(prevElement);
                     if (prevLines.length > 0 && document.caretRangeFromPoint) {
                         const targetLine = prevLines[prevLines.length - 1];
                         const targetHeight = Math.max(1, targetLine.bottom - targetLine.top);
@@ -4167,7 +4280,7 @@ export class CursorManager {
                             if (!probeRange || !prevElement.contains(probeRange.startContainer)) {
                                 continue;
                             }
-                            const probeRect = getVisualCaretRectForRange(probeRange);
+                            const probeRect = this._getVisualCaretRectForRange(probeRange);
                             if (!probeRect) {
                                 continue;
                             }
@@ -4186,11 +4299,7 @@ export class CursorManager {
                         if (atTargetLineStart) {
                             const lineStartCaret = findLineStartCaretInBlock(prevElement, targetLine);
                             if (lineStartCaret) {
-                                const startRange = document.createRange();
-                                startRange.setStart(lineStartCaret.node, lineStartCaret.offset);
-                                startRange.collapse(true);
-                                selection.removeAllRanges();
-                                selection.addRange(startRange);
+                                this._placeCollapsedCaret(selection, lineStartCaret.node, lineStartCaret.offset);
                                 return;
                             }
                         }
@@ -4218,12 +4327,12 @@ export class CursorManager {
         }
 
         // デフォルトの動作：カーソルを上に移動
-        let rect = getVisualCaretRectForRange(range);
+        let rect = this._getVisualCaretRectForRange(range);
         if (!rect) {
             return;
         }
 
-        const estimatedLineHeight = getEstimatedLineHeight(range.startContainer, rect);
+        const estimatedLineHeight = this._getEstimatedLineHeight(range.startContainer, rect);
         const currentX = rect.left || rect.x || 0;
         const currentY = rect.top || rect.y || 0;
         const lineStep = estimatedLineHeight;
@@ -4282,124 +4391,6 @@ export class CursorManager {
             }
         }
 
-        const getVisualLinesForListItemText = (listItem) => {
-            if (!listItem) {
-                return [];
-            }
-            const textNodes = this._getDirectTextNodes(listItem);
-            if (textNodes.length === 0) {
-                return [];
-            }
-            const firstNode = textNodes[0];
-            const lastNode = textNodes[textNodes.length - 1];
-            try {
-                const probeRange = document.createRange();
-                probeRange.setStart(firstNode, 0);
-                probeRange.setEnd(lastNode, (lastNode.textContent || '').length);
-                const rawRects = Array.from(probeRange.getClientRects ? probeRange.getClientRects() : []);
-                const rects = rawRects
-                    .filter(r => r &&
-                        Number.isFinite(r.top) &&
-                        Number.isFinite(r.bottom) &&
-                        Number.isFinite(r.left) &&
-                        Number.isFinite(r.right) &&
-                        (r.width || r.height))
-                    .sort((a, b) => {
-                        if (Math.abs(a.top - b.top) <= 1.5) {
-                            return a.left - b.left;
-                        }
-                        return a.top - b.top;
-                    });
-                if (rects.length === 0) {
-                    return [];
-                }
-                const lines = [];
-                for (const rect of rects) {
-                    this._appendRectToVisualLines(lines, rect);
-                }
-                return lines;
-            } catch (e) {
-                return [];
-            }
-        };
-        const isRangeInsideDirectListText = (probeRange, listItem, textNodes) => {
-            if (!probeRange || !listItem || !textNodes || textNodes.length === 0) {
-                return false;
-            }
-            const startContainer = probeRange.startContainer;
-            if (!startContainer || !listItem.contains(startContainer)) {
-                return false;
-            }
-            if (startContainer.nodeType === Node.TEXT_NODE && textNodes.includes(startContainer)) {
-                return true;
-            }
-            let current = startContainer.nodeType === Node.ELEMENT_NODE
-                ? startContainer
-                : startContainer.parentElement;
-            while (current && current !== listItem) {
-                if (current.tagName === 'UL' || current.tagName === 'OL') {
-                    return false;
-                }
-                current = current.parentElement;
-            }
-            return current === listItem;
-        };
-        const findLineStartCaretInListItem = (listItem, textNodes, line) => {
-            if (!listItem || !textNodes || textNodes.length === 0 || !line) {
-                return null;
-            }
-            const pickCandidate = (skipWhitespace) => {
-                let best = null;
-                let guard = 0;
-                for (const textNode of textNodes) {
-                    const text = textNode.textContent || '';
-                    if (text.length === 0) continue;
-                    for (let i = 0; i < text.length; i++) {
-                        guard++;
-                        if (guard > 12000) {
-                            return best;
-                        }
-                        const ch = text[i];
-                        if (ch === '\n' || ch === '\r' || ch === '\u200B' || ch === '\u2060' || ch === '\uFEFF') {
-                            continue;
-                        }
-                        if (skipWhitespace && /\s/.test(ch)) {
-                            continue;
-                        }
-                        let charRect = null;
-                        try {
-                            const charRange = document.createRange();
-                            charRange.setStart(textNode, i);
-                            charRange.setEnd(textNode, i + 1);
-                            charRect = charRange.getBoundingClientRect();
-                        } catch (e) {
-                            continue;
-                        }
-                        if (!charRect || !(charRect.width || charRect.height)) {
-                            continue;
-                        }
-                        const charTop = charRect.top || charRect.y || 0;
-                        const charBottom = charRect.bottom || (charRect.y + charRect.height) || charTop;
-                        const overlapsTargetLine = charBottom >= line.top - 2 && charTop <= line.bottom + 2;
-                        if (!overlapsTargetLine) {
-                            continue;
-                        }
-                        const charLeft = charRect.left || charRect.x || 0;
-                        if (!best || charLeft < best.left - 0.5 ||
-                            (Math.abs(charLeft - best.left) <= 0.5 && charTop < best.top)) {
-                            best = {
-                                node: textNode,
-                                offset: i,
-                                left: charLeft,
-                                top: charTop
-                            };
-                        }
-                    }
-                }
-                return best;
-            };
-            return pickCandidate(true) || pickCandidate(false);
-        };
         const tryMoveWithinCurrentListItemByVisualLine = () => {
             if (!range || !range.collapsed || !currentListItem || !document.caretRangeFromPoint) {
                 return false;
@@ -4408,11 +4399,11 @@ export class CursorManager {
             if (textNodes.length === 0) {
                 return false;
             }
-            const lines = getVisualLinesForListItemText(currentListItem);
+            const lines = this._getVisualLinesForListItemText(currentListItem);
             if (lines.length < 2) {
                 return false;
             }
-            const currentRect = getVisualCaretRectForRange(range);
+            const currentRect = this._getVisualCaretRectForRange(range);
             if (!currentRect) {
                 return false;
             }
@@ -4437,13 +4428,9 @@ export class CursorManager {
             }
             const atCurrentLineStart = (currentRect.left || currentRect.x || 0) <= (currentLine.left + 2);
             if (atCurrentLineStart) {
-                const lineStartCaret = findLineStartCaretInListItem(currentListItem, textNodes, targetLine);
+                const lineStartCaret = this._findLineStartCaretInListItem(currentListItem, textNodes, targetLine);
                 if (lineStartCaret) {
-                    const startRange = document.createRange();
-                    startRange.setStart(lineStartCaret.node, lineStartCaret.offset);
-                    startRange.collapse(true);
-                    selection.removeAllRanges();
-                    selection.addRange(startRange);
+                    this._placeCollapsedCaret(selection, lineStartCaret.node, lineStartCaret.offset);
                     return true;
                 }
             }
@@ -4472,10 +4459,10 @@ export class CursorManager {
                 if (!probeRange || !this.editor.contains(probeRange.startContainer)) {
                     return false;
                 }
-                if (!isRangeInsideDirectListText(probeRange, currentListItem, textNodes)) {
+                if (!this._isRangeInsideDirectListText(probeRange, currentListItem, textNodes)) {
                     return false;
                 }
-                const probeRect = getVisualCaretRectForRange(probeRange);
+                const probeRect = this._getVisualCaretRectForRange(probeRange);
                 if (!probeRect) {
                     return false;
                 }
@@ -4518,39 +4505,7 @@ export class CursorManager {
             return;
         }
 
-        const isListItemSingleVisualLine = (listItem) => {
-            if (!listItem) return false;
-            const firstDirectText = this._getFirstDirectTextNode(listItem);
-            const lastDirectText = this._getLastDirectTextNode(listItem);
-            if (!firstDirectText || !lastDirectText) return true;
-            try {
-                const probeRange = document.createRange();
-                const firstText = firstDirectText.textContent || '';
-                const startOffset = this._getFirstNonZwspOffset(firstText);
-                probeRange.setStart(firstDirectText, startOffset !== null ? startOffset : 0);
-                probeRange.setEnd(lastDirectText, (lastDirectText.textContent || '').length);
-                const rects = Array.from(probeRange.getClientRects ? probeRange.getClientRects() : []);
-                if (rects.length <= 1) {
-                    return true;
-                }
-                const normalizedTops = [];
-                for (const r of rects) {
-                    if (!r || !Number.isFinite(r.top)) continue;
-                    const isNewLine = normalizedTops.every(t => Math.abs(t - r.top) > 3);
-                    if (isNewLine) {
-                        normalizedTops.push(r.top);
-                        if (normalizedTops.length > 1) {
-                            return false;
-                        }
-                    }
-                }
-                return true;
-            } catch (e) {
-                return false;
-            }
-        };
-
-        if (currentListItem && range.collapsed && isListItemSingleVisualLine(currentListItem)) {
+        if (currentListItem && range.collapsed && this._isListItemSingleVisualLine(currentListItem)) {
             const prevListItem = this._getAdjacentListItem(currentListItem, 'prev');
             if (prevListItem && this._placeCursorInListItemAtX(prevListItem, currentX, 'up', selection)) {
                 return;
@@ -4746,7 +4701,7 @@ export class CursorManager {
                     afterRange.endContainer !== originContainer ||
                     afterRange.endOffset !== originOffset);
                 if (movedByModify && this.editor.contains(afterRange.startContainer)) {
-                    const afterRect = getVisualCaretRectForRange(afterRange);
+                    const afterRect = this._getVisualCaretRectForRange(afterRange);
                     const afterY = afterRect ? (afterRect.top || afterRect.y || 0) : null;
                     const movedUpByModify = Number.isFinite(afterY) && afterY < (currentY - 2);
                     const movedIntoExcludedElement =
@@ -4754,7 +4709,7 @@ export class CursorManager {
                     if (movedUpByModify && !movedIntoExcludedElement) {
                         return;
                     }
-                    restoreOriginalCaret();
+                    this._restoreOriginalCaret(selection, originContainer, originOffset);
                 }
             }
         }
@@ -4817,11 +4772,7 @@ export class CursorManager {
                                 const lineCenterY = lastCharRect.top + lastCharRect.height / 2;
                                 const caretRange = document.caretRangeFromPoint(currentX, lineCenterY);
                                 if (caretRange && prevElement.contains(caretRange.startContainer)) {
-                                    const newRange = document.createRange();
-                                    newRange.setStart(caretRange.startContainer, caretRange.startOffset);
-                                    newRange.collapse(true);
-                                    selection.removeAllRanges();
-                                    selection.addRange(newRange);
+                                    this._placeCollapsedCaret(selection, caretRange.startContainer, caretRange.startOffset);
                                     placed = true;
                                 }
                             }
@@ -4877,11 +4828,7 @@ export class CursorManager {
                             const lineCenterY = lastCharRect.top + lastCharRect.height / 2;
                             const caretRange = document.caretRangeFromPoint(currentX, lineCenterY);
                             if (caretRange && prevElement.contains(caretRange.startContainer)) {
-                                const newRange = document.createRange();
-                                newRange.setStart(caretRange.startContainer, caretRange.startOffset);
-                                newRange.collapse(true);
-                                selection.removeAllRanges();
-                                selection.addRange(newRange);
+                                this._placeCollapsedCaret(selection, caretRange.startContainer, caretRange.startOffset);
                                 placed = true;
                             }
                         }
@@ -4934,11 +4881,7 @@ export class CursorManager {
                     const targetOffset = placeAtEnd
                         ? (targetTextNode.textContent || '').length
                         : 0;
-                    const newRange = document.createRange();
-                    newRange.setStart(targetTextNode, targetOffset);
-                    newRange.collapse(true);
-                    selection.removeAllRanges();
-                    selection.addRange(newRange);
+                    this._placeCollapsedCaret(selection, targetTextNode, targetOffset);
                     return;
                 }
             }
@@ -4961,11 +4904,7 @@ export class CursorManager {
                 newP.appendChild(document.createElement('br'));
                 outerList.parentElement.insertBefore(newP, outerList);
 
-                const newRange = document.createRange();
-                newRange.setStart(newP, 0);
-                newRange.collapse(true);
-                selection.removeAllRanges();
-                selection.addRange(newRange);
+                this._placeCollapsedCaret(selection, newP, 0);
                 if (notifyCallback) notifyCallback();
                 return;
             }
@@ -4984,29 +4923,6 @@ export class CursorManager {
         let container = range.startContainer;
         let originContainer = range.startContainer;
         let originOffset = range.startOffset;
-        const restoreOriginalCaret = () => {
-            if (!originContainer || !this.editor || !this.editor.contains(originContainer)) {
-                return false;
-            }
-            try {
-                const restoreRange = document.createRange();
-                if (originContainer.nodeType === Node.TEXT_NODE) {
-                    const textLength = (originContainer.textContent || '').length;
-                    restoreRange.setStart(originContainer, Math.max(0, Math.min(originOffset, textLength)));
-                } else if (originContainer.nodeType === Node.ELEMENT_NODE) {
-                    const childCount = originContainer.childNodes ? originContainer.childNodes.length : 0;
-                    restoreRange.setStart(originContainer, Math.max(0, Math.min(originOffset, childCount)));
-                } else {
-                    return false;
-                }
-                restoreRange.collapse(true);
-                selection.removeAllRanges();
-                selection.addRange(restoreRange);
-                return true;
-            } catch (e) {
-                return false;
-            }
-        };
         const isEffectivelyEmptyBlock = (block) => {
             if (!block) return false;
             const text = (block.textContent || '').replace(/[\u200B\u2060\uFEFF\u00A0]/g, '').trim();
@@ -5023,110 +4939,6 @@ export class CursorManager {
                 return false;
             });
             return !meaningfulChild;
-        };
-        const getBlockFromContainer = (node, offset = null) => {
-            if (node === this.editor) {
-                const children = Array.from(this.editor.childNodes || []);
-                if (children.length === 0) {
-                    return null;
-                }
-                const safeOffset = Math.max(0, Math.min(
-                    Number.isInteger(offset) ? offset : 0,
-                    children.length - 1
-                ));
-                const directChild = children[safeOffset] || children[children.length - 1];
-                if (directChild && directChild.nodeType === Node.ELEMENT_NODE && this.domUtils.isBlockElement(directChild)) {
-                    return directChild;
-                }
-                if (directChild && directChild.nodeType === Node.TEXT_NODE) {
-                    return directChild.parentElement && directChild.parentElement !== this.editor
-                        ? directChild.parentElement
-                        : null;
-                }
-            }
-            let block = node && node.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
-            while (block && block !== this.editor && !this.domUtils.isBlockElement(block)) {
-                block = block.parentElement;
-            }
-            return block && block !== this.editor ? block : null;
-        };
-        const getEstimatedLineHeight = (node, fallbackRect = null) => {
-            const block = getBlockFromContainer(node);
-            let lineHeight = NaN;
-            if (block && window.getComputedStyle) {
-                const style = window.getComputedStyle(block);
-                if (style) {
-                    lineHeight = Number.parseFloat(style.lineHeight);
-                    if (!Number.isFinite(lineHeight) || lineHeight <= 0) {
-                        const fontSize = Number.parseFloat(style.fontSize);
-                        if (Number.isFinite(fontSize) && fontSize > 0) {
-                            lineHeight = fontSize * 1.6;
-                        }
-                    }
-                }
-            }
-            if ((!Number.isFinite(lineHeight) || lineHeight <= 0) && fallbackRect) {
-                const rectHeight = Number.parseFloat(fallbackRect.height);
-                if (Number.isFinite(rectHeight) && rectHeight > 0) {
-                    lineHeight = rectHeight;
-                }
-            }
-            if (!Number.isFinite(lineHeight) || lineHeight <= 0) {
-                lineHeight = 18;
-            }
-            return Math.max(14, Math.min(lineHeight, 72));
-        };
-        const getVisualCaretRectForRange = (targetRange) => {
-            if (!targetRange) {
-                return null;
-            }
-            const baseRect = this._getCaretRect(targetRange);
-            if (!baseRect || !targetRange.collapsed) {
-                return baseRect;
-            }
-            const containerNode = targetRange.startContainer;
-            if (!containerNode || containerNode.nodeType !== Node.TEXT_NODE) {
-                return baseRect;
-            }
-            const text = containerNode.textContent || '';
-            const offset = Math.max(0, Math.min(targetRange.startOffset, text.length));
-            if (offset <= 0 || offset >= text.length) {
-                return baseRect;
-            }
-            try {
-                const prevRange = document.createRange();
-                prevRange.setStart(containerNode, offset - 1);
-                prevRange.setEnd(containerNode, offset);
-                const prevRect = prevRange.getBoundingClientRect();
-
-                const nextRange = document.createRange();
-                nextRange.setStart(containerNode, offset);
-                nextRange.setEnd(containerNode, offset + 1);
-                const nextRect = nextRange.getBoundingClientRect();
-
-                if (!prevRect || !nextRect) {
-                    return baseRect;
-                }
-
-                const prevTop = prevRect.top || prevRect.y || 0;
-                const nextTop = nextRect.top || nextRect.y || 0;
-                if (nextTop > prevTop + 2) {
-                    // 折り返し行の先頭では、前文字（前行末）ではなく次文字の行を現在行として扱う。
-                    return {
-                        left: nextRect.left,
-                        right: nextRect.left,
-                        top: nextRect.top,
-                        bottom: nextRect.bottom,
-                        width: 0,
-                        height: nextRect.height,
-                        x: nextRect.left,
-                        y: nextRect.y
-                    };
-                }
-            } catch (e) {
-                // ignore and use base rect
-            }
-            return baseRect;
         };
         const getTopLevelBlockForNavigation = (node, offset = null) => {
             if (!this.editor) {
@@ -5209,15 +5021,11 @@ export class CursorManager {
                 targetOffset = lastOffset !== null ? Math.min(text.length, lastOffset + 1) : 0;
             }
 
-            const normalizedRange = document.createRange();
-            normalizedRange.setStart(targetTextNode, targetOffset);
-            normalizedRange.collapse(true);
-            selection.removeAllRanges();
-            selection.addRange(normalizedRange);
+            this._placeCollapsedCaret(selection, targetTextNode, targetOffset);
             return true;
         };
         const resolveTrailingEmptyBlock = () => {
-            let block = getBlockFromContainer(range.startContainer);
+            let block = this._getBlockFromContainer(range.startContainer);
             if (!block && range.startContainer === this.editor) {
                 const children = Array.from(this.editor.childNodes || []);
                 let index = Math.min(range.startOffset, children.length) - 1;
@@ -5318,11 +5126,7 @@ export class CursorManager {
                     if (firstLi) {
                         const textNode = this._getFirstDirectTextNode(firstLi) || this._getLastDirectTextNode(firstLi);
                         if (textNode) {
-                            const newRange = document.createRange();
-                            newRange.setStart(textNode, 0);
-                            newRange.collapse(true);
-                            selection.removeAllRanges();
-                            selection.addRange(newRange);
+                            this._placeCollapsedCaret(selection, textNode, 0);
                             return;
                         }
                         this._placeCursorInEmptyListItem(firstLi, selection, 'down');
@@ -5379,11 +5183,7 @@ export class CursorManager {
                 if (!child) continue;
                 if (child.nodeType === Node.TEXT_NODE) {
                     if (!this._isIgnorableTextNode(child)) {
-                        const newRange = document.createRange();
-                        newRange.setStart(child, 0);
-                        newRange.collapse(true);
-                        selection.removeAllRanges();
-                        selection.addRange(newRange);
+                        this._placeCollapsedCaret(selection, child, 0);
                         return;
                     }
                     continue;
@@ -5655,11 +5455,7 @@ export class CursorManager {
                             selection.addRange(lineRange);
                             return true;
                         }
-                        const fallbackRange = document.createRange();
-                        fallbackRange.setStart(blockNode, blockNode.childNodes.length);
-                        fallbackRange.collapse(true);
-                        selection.removeAllRanges();
-                        selection.addRange(fallbackRange);
+                        this._placeCollapsedCaret(selection, blockNode, blockNode.childNodes.length);
                         return true;
                     }
                     return false;
@@ -5685,7 +5481,7 @@ export class CursorManager {
         if (range.collapsed) {
             const imageBehind = this._getImageBehindFromCollapsedRange(range);
             if (imageBehind && this._isCollapsedRangeAtNodeBoundary(range, imageBehind, 'after')) {
-                const imageBlock = getBlockFromContainer(imageBehind);
+                const imageBlock = this._getBlockFromContainer(imageBehind);
                 const trailingImage = imageBlock
                     ? this._getTrailingImageInBlock(imageBlock)
                     : (imageBehind.parentElement === this.editor ? imageBehind : null);
@@ -5713,7 +5509,7 @@ export class CursorManager {
         if (range.collapsed) {
             const imageAhead = this._getImageAheadFromCollapsedRange(range);
             if (imageAhead) {
-                const imageBlock = getBlockFromContainer(imageAhead);
+                const imageBlock = this._getBlockFromContainer(imageAhead);
                 const leadingImage = imageBlock
                     ? this._getLeadingImageInBlock(imageBlock)
                     : (imageAhead.parentElement === this.editor ? imageAhead : null);
@@ -5761,11 +5557,7 @@ export class CursorManager {
                 }
                 const fallbackNode = this._getFirstDirectTextNode(nextListItem) || this._getLastDirectTextNode(nextListItem);
                 if (fallbackNode) {
-                    const fallbackRange = document.createRange();
-                    fallbackRange.setStart(fallbackNode, 0);
-                    fallbackRange.collapse(true);
-                    selection.removeAllRanges();
-                    selection.addRange(fallbackRange);
+                    this._placeCollapsedCaret(selection, fallbackNode, 0);
                     return true;
                 }
                 return false;
@@ -5796,48 +5588,12 @@ export class CursorManager {
                 } else {
                     listBoundary.parentElement.appendChild(newP);
                 }
-                const newRange = document.createRange();
-                newRange.setStart(newP, 0);
-                newRange.collapse(true);
-                selection.removeAllRanges();
-                selection.addRange(newRange);
+                this._placeCollapsedCaret(selection, newP, 0);
                 if (notifyCallback) notifyCallback();
                 return true;
             }
 
             return false;
-        };
-
-        const isListItemSingleVisualLine = (listItem) => {
-            if (!listItem) return false;
-            const firstDirectText = this._getFirstDirectTextNode(listItem);
-            const lastDirectText = this._getLastDirectTextNode(listItem);
-            if (!firstDirectText || !lastDirectText) return true;
-            try {
-                const probeRange = document.createRange();
-                const firstText = firstDirectText.textContent || '';
-                const startOffset = this._getFirstNonZwspOffset(firstText);
-                probeRange.setStart(firstDirectText, startOffset !== null ? startOffset : 0);
-                probeRange.setEnd(lastDirectText, (lastDirectText.textContent || '').length);
-                const rects = Array.from(probeRange.getClientRects ? probeRange.getClientRects() : []);
-                if (rects.length <= 1) {
-                    return true;
-                }
-                const normalizedTops = [];
-                for (const r of rects) {
-                    if (!r || !Number.isFinite(r.top)) continue;
-                    const isNewLine = normalizedTops.every(t => Math.abs(t - r.top) > 3);
-                    if (isNewLine) {
-                        normalizedTops.push(r.top);
-                        if (normalizedTops.length > 1) {
-                            return false;
-                        }
-                    }
-                }
-                return true;
-            } catch (e) {
-                return false;
-            }
         };
 
         // 空のリストアイテムでは視覚ナビゲーションが不安定なため、構造ベースで移動する
@@ -5859,124 +5615,6 @@ export class CursorManager {
             }
         }
 
-        const getVisualLinesForListItemText = (listItem) => {
-            if (!listItem) {
-                return [];
-            }
-            const textNodes = this._getDirectTextNodes(listItem);
-            if (textNodes.length === 0) {
-                return [];
-            }
-            const firstNode = textNodes[0];
-            const lastNode = textNodes[textNodes.length - 1];
-            try {
-                const probeRange = document.createRange();
-                probeRange.setStart(firstNode, 0);
-                probeRange.setEnd(lastNode, (lastNode.textContent || '').length);
-                const rawRects = Array.from(probeRange.getClientRects ? probeRange.getClientRects() : []);
-                const rects = rawRects
-                    .filter(r => r &&
-                        Number.isFinite(r.top) &&
-                        Number.isFinite(r.bottom) &&
-                        Number.isFinite(r.left) &&
-                        Number.isFinite(r.right) &&
-                        (r.width || r.height))
-                    .sort((a, b) => {
-                        if (Math.abs(a.top - b.top) <= 1.5) {
-                            return a.left - b.left;
-                        }
-                        return a.top - b.top;
-                    });
-                if (rects.length === 0) {
-                    return [];
-                }
-                const lines = [];
-                for (const rect of rects) {
-                    this._appendRectToVisualLines(lines, rect);
-                }
-                return lines;
-            } catch (e) {
-                return [];
-            }
-        };
-        const isRangeInsideDirectListText = (probeRange, listItem, textNodes) => {
-            if (!probeRange || !listItem || !textNodes || textNodes.length === 0) {
-                return false;
-            }
-            const startContainer = probeRange.startContainer;
-            if (!startContainer || !listItem.contains(startContainer)) {
-                return false;
-            }
-            if (startContainer.nodeType === Node.TEXT_NODE && textNodes.includes(startContainer)) {
-                return true;
-            }
-            let current = startContainer.nodeType === Node.ELEMENT_NODE
-                ? startContainer
-                : startContainer.parentElement;
-            while (current && current !== listItem) {
-                if (current.tagName === 'UL' || current.tagName === 'OL') {
-                    return false;
-                }
-                current = current.parentElement;
-            }
-            return current === listItem;
-        };
-        const findLineStartCaretInListItem = (listItem, textNodes, line) => {
-            if (!listItem || !textNodes || textNodes.length === 0 || !line) {
-                return null;
-            }
-            const pickCandidate = (skipWhitespace) => {
-                let best = null;
-                let guard = 0;
-                for (const textNode of textNodes) {
-                    const text = textNode.textContent || '';
-                    if (text.length === 0) continue;
-                    for (let i = 0; i < text.length; i++) {
-                        guard++;
-                        if (guard > 12000) {
-                            return best;
-                        }
-                        const ch = text[i];
-                        if (ch === '\n' || ch === '\r' || ch === '\u200B' || ch === '\u2060' || ch === '\uFEFF') {
-                            continue;
-                        }
-                        if (skipWhitespace && /\s/.test(ch)) {
-                            continue;
-                        }
-                        let charRect = null;
-                        try {
-                            const charRange = document.createRange();
-                            charRange.setStart(textNode, i);
-                            charRange.setEnd(textNode, i + 1);
-                            charRect = charRange.getBoundingClientRect();
-                        } catch (e) {
-                            continue;
-                        }
-                        if (!charRect || !(charRect.width || charRect.height)) {
-                            continue;
-                        }
-                        const charTop = charRect.top || charRect.y || 0;
-                        const charBottom = charRect.bottom || (charRect.y + charRect.height) || charTop;
-                        const overlapsTargetLine = charBottom >= line.top - 2 && charTop <= line.bottom + 2;
-                        if (!overlapsTargetLine) {
-                            continue;
-                        }
-                        const charLeft = charRect.left || charRect.x || 0;
-                        if (!best || charLeft < best.left - 0.5 ||
-                            (Math.abs(charLeft - best.left) <= 0.5 && charTop < best.top)) {
-                            best = {
-                                node: textNode,
-                                offset: i,
-                                left: charLeft,
-                                top: charTop
-                            };
-                        }
-                    }
-                }
-                return best;
-            };
-            return pickCandidate(true) || pickCandidate(false);
-        };
         const getNearestVisualLineIndex = (lines, caretRect) => {
             if (!lines || lines.length === 0 || !caretRect) {
                 return 0;
@@ -6045,11 +5683,11 @@ export class CursorManager {
             if (textNodes.length === 0) {
                 return false;
             }
-            const lines = getVisualLinesForListItemText(activeListItem);
+            const lines = this._getVisualLinesForListItemText(activeListItem);
             if (lines.length < 2) {
                 return false;
             }
-            const currentRect = getVisualCaretRectForRange(range);
+            const currentRect = this._getVisualCaretRectForRange(range);
             const currentIndex = currentRect ? getNearestVisualLineIndex(lines, currentRect) : 0;
             if (currentIndex >= lines.length - 1) {
                 return false;
@@ -6065,15 +5703,11 @@ export class CursorManager {
                 }
             }
 
-            const lineStartCaret = findLineStartCaretInListItem(activeListItem, textNodes, targetLine);
+            const lineStartCaret = this._findLineStartCaretInListItem(activeListItem, textNodes, targetLine);
             if (lineStartCaret &&
                 !(lineStartCaret.node === range.startContainer &&
                     lineStartCaret.offset === range.startOffset)) {
-                const startRange = document.createRange();
-                startRange.setStart(lineStartCaret.node, lineStartCaret.offset);
-                startRange.collapse(true);
-                selection.removeAllRanges();
-                selection.addRange(startRange);
+                this._placeCollapsedCaret(selection, lineStartCaret.node, lineStartCaret.offset);
                 return true;
             }
 
@@ -6090,10 +5724,10 @@ export class CursorManager {
                     !textNodes.includes(probeRange.startContainer)) {
                     continue;
                 }
-                if (!isRangeInsideDirectListText(probeRange, activeListItem, textNodes)) {
+                if (!this._isRangeInsideDirectListText(probeRange, activeListItem, textNodes)) {
                     continue;
                 }
-                const probeRect = getVisualCaretRectForRange(probeRange);
+                const probeRect = this._getVisualCaretRectForRange(probeRange);
                 if (!probeRect) {
                     continue;
                 }
@@ -6123,7 +5757,7 @@ export class CursorManager {
                 this._getListItemFromContainer(range.startContainer, range.startOffset, 'down') ||
                 this.domUtils.getParentElement(range.startContainer, 'LI');
             if (!activeListItem) {
-                const caretRect = getVisualCaretRectForRange(range);
+                const caretRect = this._getVisualCaretRectForRange(range);
                 if (caretRect && document.elementFromPoint) {
                     const visualNode = document.elementFromPoint(
                         (caretRect.left || caretRect.x || 0) + 1,
@@ -6143,11 +5777,11 @@ export class CursorManager {
             if (textNodes.length === 0) {
                 return false;
             }
-            const lines = getVisualLinesForListItemText(activeListItem);
+            const lines = this._getVisualLinesForListItemText(activeListItem);
             if (lines.length < 2) {
                 return false;
             }
-            const currentRect = getVisualCaretRectForRange(range);
+            const currentRect = this._getVisualCaretRectForRange(range);
             if (!currentRect) {
                 return false;
             }
@@ -6166,15 +5800,11 @@ export class CursorManager {
             }
             const atCurrentLineStart = (currentRect.left || currentRect.x || 0) <= (currentLine.left + 2);
             if (atCurrentLineStart) {
-                const lineStartCaret = findLineStartCaretInListItem(activeListItem, textNodes, targetLine);
+                const lineStartCaret = this._findLineStartCaretInListItem(activeListItem, textNodes, targetLine);
                 if (lineStartCaret &&
                     !(lineStartCaret.node === range.startContainer &&
                         lineStartCaret.offset === range.startOffset)) {
-                    const startRange = document.createRange();
-                    startRange.setStart(lineStartCaret.node, lineStartCaret.offset);
-                    startRange.collapse(true);
-                    selection.removeAllRanges();
-                    selection.addRange(startRange);
+                    this._placeCollapsedCaret(selection, lineStartCaret.node, lineStartCaret.offset);
                     return true;
                 }
             }
@@ -6208,10 +5838,10 @@ export class CursorManager {
                         !textNodes.includes(probeRange.startContainer))) {
                     return false;
                 }
-                if (!isRangeInsideDirectListText(probeRange, activeListItem, textNodes)) {
+                if (!this._isRangeInsideDirectListText(probeRange, activeListItem, textNodes)) {
                     return false;
                 }
-                const probeRect = getVisualCaretRectForRange(probeRange);
+                const probeRect = this._getVisualCaretRectForRange(probeRange);
                 if (!probeRect) {
                     return false;
                 }
@@ -6260,11 +5890,11 @@ export class CursorManager {
             if (!originListItem || !range || !range.collapsed) {
                 return false;
             }
-            const lines = getVisualLinesForListItemText(originListItem);
+            const lines = this._getVisualLinesForListItemText(originListItem);
             if (lines.length < 2) {
                 return false;
             }
-            const currentRect = getVisualCaretRectForRange(range);
+            const currentRect = this._getVisualCaretRectForRange(range);
             if (!currentRect) {
                 return true;
             }
@@ -6279,7 +5909,7 @@ export class CursorManager {
             const beforeRange = range.cloneRange();
             const beforeContainer = beforeRange.startContainer;
             const beforeOffset = beforeRange.startOffset;
-            const beforeRect = getVisualCaretRectForRange(beforeRange);
+            const beforeRect = this._getVisualCaretRectForRange(beforeRange);
             const beforeTop = beforeRect ? (beforeRect.top || beforeRect.y || 0) : null;
 
             try {
@@ -6290,7 +5920,7 @@ export class CursorManager {
 
             const afterSelection = window.getSelection();
             if (!afterSelection || !afterSelection.rangeCount) {
-                restoreOriginalCaret();
+                this._restoreOriginalCaret(selection, originContainer, originOffset);
                 return false;
             }
 
@@ -6298,32 +5928,32 @@ export class CursorManager {
             const movedByNative = afterRange.startContainer !== beforeContainer ||
                 afterRange.startOffset !== beforeOffset;
             if (!movedByNative || !this.editor.contains(afterRange.startContainer)) {
-                restoreOriginalCaret();
+                this._restoreOriginalCaret(selection, originContainer, originOffset);
                 return false;
             }
 
             const afterListItem = this._getListItemFromContainer(afterRange.startContainer, afterRange.startOffset, 'down') ||
                 this.domUtils.getParentElement(afterRange.startContainer, 'LI');
             if (afterListItem !== originListItem) {
-                restoreOriginalCaret();
+                this._restoreOriginalCaret(selection, originContainer, originOffset);
                 return false;
             }
 
-            const afterRect = getVisualCaretRectForRange(afterRange);
+            const afterRect = this._getVisualCaretRectForRange(afterRange);
             const afterTop = afterRect ? (afterRect.top || afterRect.y || 0) : null;
             const movedDown = Number.isFinite(beforeTop) &&
                 Number.isFinite(afterTop) &&
                 afterTop > beforeTop + 2;
             if (!movedDown) {
-                restoreOriginalCaret();
+                this._restoreOriginalCaret(selection, originContainer, originOffset);
                 return false;
             }
 
             if (beforeRect && afterRect) {
-                const beforeLineHeight = getEstimatedLineHeight(beforeRange.startContainer, beforeRect);
+                const beforeLineHeight = this._getEstimatedLineHeight(beforeRange.startContainer, beforeRect);
                 const deltaY = (afterTop || 0) - (beforeTop || 0);
                 if (deltaY > beforeLineHeight * 1.65) {
-                    restoreOriginalCaret();
+                    this._restoreOriginalCaret(selection, originContainer, originOffset);
                     return false;
                 }
             }
@@ -6364,7 +5994,7 @@ export class CursorManager {
         const boundaryListItemForDown = originListItem ||
             this._getListItemFromContainer(range.startContainer, range.startOffset, 'down') ||
             this.domUtils.getParentElement(range.startContainer, 'LI');
-        if (boundaryListItemForDown && range.collapsed && isListItemSingleVisualLine(boundaryListItemForDown)) {
+        if (boundaryListItemForDown && range.collapsed && this._isListItemSingleVisualLine(boundaryListItemForDown)) {
             const nextListItem = this._getAdjacentListItem(boundaryListItemForDown, 'next');
             if (!nextListItem) {
                 const caretRectInList = this._getCaretRect(range);
@@ -6375,50 +6005,16 @@ export class CursorManager {
             }
         }
 
-        const getVisualLinesForBlock = (block) => {
-            if (!block || block === this.editor) {
-                return [];
-            }
-            try {
-                const probeRange = document.createRange();
-                probeRange.selectNodeContents(block);
-                const rawRects = Array.from(probeRange.getClientRects ? probeRange.getClientRects() : []);
-                const rects = rawRects
-                    .filter(rect => rect &&
-                        Number.isFinite(rect.top) &&
-                        Number.isFinite(rect.bottom) &&
-                        Number.isFinite(rect.left) &&
-                        Number.isFinite(rect.right) &&
-                        (rect.width || rect.height))
-                    .sort((a, b) => {
-                        if (Math.abs(a.top - b.top) <= 1.5) {
-                            return a.left - b.left;
-                        }
-                        return a.top - b.top;
-                    });
-                if (rects.length === 0) {
-                    return [];
-                }
-
-                const lines = [];
-                for (const rect of rects) {
-                    this._appendRectToVisualLines(lines, rect);
-                }
-                return lines;
-            } catch (e) {
-                return [];
-            }
-        };
         const hasVisualLineBelowInBlock = (block, referenceRange = range) => {
             if (!block || block === this.editor || !referenceRange) {
                 return false;
             }
-            const currentRect = getVisualCaretRectForRange(referenceRange);
+            const currentRect = this._getVisualCaretRectForRange(referenceRange);
             if (!currentRect) {
                 return false;
             }
             const currentTop = currentRect.top || currentRect.y || 0;
-            const lines = getVisualLinesForBlock(block);
+            const lines = this._getVisualLinesForBlock(block);
             if (lines.length === 0) {
                 return false;
             }
@@ -6441,7 +6037,7 @@ export class CursorManager {
                 return false;
             }
 
-            const currentBlock = getBlockFromContainer(range.startContainer, range.startOffset);
+            const currentBlock = this._getBlockFromContainer(range.startContainer, range.startOffset);
             if (!currentBlock || currentBlock === this.editor) {
                 return false;
             }
@@ -6451,12 +6047,12 @@ export class CursorManager {
                 currentBlock.tagName === 'TH') {
                 return false;
             }
-            const lines = getVisualLinesForBlock(currentBlock);
+            const lines = this._getVisualLinesForBlock(currentBlock);
             if (lines.length < 2) {
                 return false;
             }
 
-            const currentRect = getVisualCaretRectForRange(range);
+            const currentRect = this._getVisualCaretRectForRange(range);
             if (!currentRect) {
                 return false;
             }
@@ -6551,11 +6147,7 @@ export class CursorManager {
                 if (lineStartCaret &&
                     !(lineStartCaret.node === range.startContainer &&
                         lineStartCaret.offset === range.startOffset)) {
-                    const startRange = document.createRange();
-                    startRange.setStart(lineStartCaret.node, lineStartCaret.offset);
-                    startRange.collapse(true);
-                    selection.removeAllRanges();
-                    selection.addRange(startRange);
+                    this._placeCollapsedCaret(selection, lineStartCaret.node, lineStartCaret.offset);
                     return true;
                 }
             }
@@ -6583,7 +6175,7 @@ export class CursorManager {
                 if (!currentBlock.contains(probeRange.startContainer)) {
                     return false;
                 }
-                const probeRect = getVisualCaretRectForRange(probeRange);
+                const probeRect = this._getVisualCaretRectForRange(probeRange);
                 if (!probeRect) {
                     return false;
                 }
@@ -6682,12 +6274,12 @@ export class CursorManager {
         // 直下が空行ブロックの場合は、次のテキスト行へ飛ばさず空行に入る
         // LI 末尾などで親要素をまたぐケースもあるため、同一親の sibling ではなく
         // 文書順で次のナビゲーション要素を解決する。
-        const originBlock = getBlockFromContainer(container, range.startOffset);
+        const originBlock = this._getBlockFromContainer(container, range.startOffset);
         if (originBlock) {
             const nextBlock = this._getNextNavigableElementInDocument(originBlock);
-            const caretRect = getVisualCaretRectForRange(range);
+            const caretRect = this._getVisualCaretRectForRange(range);
             const blockRect = originBlock.getBoundingClientRect ? originBlock.getBoundingClientRect() : null;
-            const lineHeightForBottom = caretRect ? getEstimatedLineHeight(range.startContainer, caretRect) : 18;
+            const lineHeightForBottom = caretRect ? this._getEstimatedLineHeight(range.startContainer, caretRect) : 18;
             const effectiveCaretBottom = !caretRect
                 ? null
                 : (() => {
@@ -6725,7 +6317,7 @@ export class CursorManager {
             this._getListItemFromContainer(range.startContainer, range.startOffset, 'down') ||
             this.domUtils.getParentElement(range.startContainer, 'LI');
         const startNavLines = activeListItemForStartNav
-            ? getVisualLinesForListItemText(activeListItemForStartNav)
+            ? this._getVisualLinesForListItemText(activeListItemForStartNav)
             : [];
         if (activeListItemForStartNav &&
             range.collapsed &&
@@ -6740,11 +6332,7 @@ export class CursorManager {
                 }
                 const fallbackNode = this._getFirstDirectTextNode(nextListItem) || this._getLastDirectTextNode(nextListItem);
                 if (fallbackNode) {
-                    const fallbackRange = document.createRange();
-                    fallbackRange.setStart(fallbackNode, 0);
-                    fallbackRange.collapse(true);
-                    selection.removeAllRanges();
-                    selection.addRange(fallbackRange);
+                    this._placeCollapsedCaret(selection, fallbackNode, 0);
                     return;
                 }
             } else if (moveDownFromListBoundary(activeListItemForStartNav, xAtStart)) {
@@ -6763,7 +6351,7 @@ export class CursorManager {
             const beforeRange = range.cloneRange();
             const beforeContainer = beforeRange.startContainer;
             const beforeOffset = beforeRange.startOffset;
-            const beforeRect = getVisualCaretRectForRange(beforeRange);
+            const beforeRect = this._getVisualCaretRectForRange(beforeRange);
             const beforeTop = beforeRect ? (beforeRect.top || beforeRect.y || 0) : null;
             const beforeScrollTop = this.editor.scrollTop;
             const beforeEditorRect = this.editor.getBoundingClientRect
@@ -6773,7 +6361,7 @@ export class CursorManager {
                 ? beforeTop - beforeEditorRect.top + beforeScrollTop
                 : null;
             const rejectNativeMove = () => {
-                restoreOriginalCaret();
+                this._restoreOriginalCaret(selection, originContainer, originOffset);
                 // Selection.modify() can reveal its probe target synchronously. A rejected
                 // probe must not leave that browser-generated scroll behind.
                 if (Math.abs(this.editor.scrollTop - beforeScrollTop) >= 1) {
@@ -6802,7 +6390,7 @@ export class CursorManager {
                 return rejectNativeMove();
             }
 
-            const afterRect = getVisualCaretRectForRange(afterRange);
+            const afterRect = this._getVisualCaretRectForRange(afterRange);
             const afterTop = afterRect ? (afterRect.top || afterRect.y || 0) : null;
             const afterEditorRect = this.editor.getBoundingClientRect
                 ? this.editor.getBoundingClientRect()
@@ -6820,7 +6408,7 @@ export class CursorManager {
             // Compare editor-content coordinates. Viewport coordinates can look only one
             // line apart after the browser scrolls a far-away probe target into view.
             if (beforeRect && afterRect) {
-                const beforeLineHeight = getEstimatedLineHeight(beforeRange.startContainer, beforeRect);
+                const beforeLineHeight = this._getEstimatedLineHeight(beforeRange.startContainer, beforeRect);
                 const deltaY = afterContentTop - beforeContentTop;
                 if (deltaY > beforeLineHeight * 1.65) {
                     return rejectNativeMove();
@@ -6870,12 +6458,12 @@ export class CursorManager {
         container = range.startContainer;
 
         // デフォルトの動作：カーソルを下に移動
-        let rect = getVisualCaretRectForRange(range);
+        let rect = this._getVisualCaretRectForRange(range);
         if (!rect) {
             return;
         }
 
-        const estimatedLineHeight = getEstimatedLineHeight(range.startContainer, rect);
+        const estimatedLineHeight = this._getEstimatedLineHeight(range.startContainer, rect);
         const currentX = rect.left || rect.x || 0;
         const rectTop = rect.top || rect.y || 0;
         const rectBottom = rect.bottom || (rect.y + rect.height) || 0;
@@ -7185,11 +6773,7 @@ export class CursorManager {
                                 const lineCenterY = firstCharRect.top + firstCharRect.height / 2;
                                 const caretRange = document.caretRangeFromPoint(currentX, lineCenterY);
                                 if (caretRange && nextElement.contains(caretRange.startContainer)) {
-                                    const newRange = document.createRange();
-                                    newRange.setStart(caretRange.startContainer, caretRange.startOffset);
-                                    newRange.collapse(true);
-                                    selection.removeAllRanges();
-                                    selection.addRange(newRange);
+                                    this._placeCollapsedCaret(selection, caretRange.startContainer, caretRange.startOffset);
                                     placed = true;
                                 }
                             }
@@ -7229,7 +6813,7 @@ export class CursorManager {
         if (!moved) {
             const anchor = container === this.editor
                 ? getBlockBeforeTopLevelCaret()
-                : getBlockFromContainer(container) ||
+                : this._getBlockFromContainer(container) ||
                     (container.nodeType === Node.ELEMENT_NODE ? container : container.parentElement);
             const nextElement = anchor ? this._getNextNavigableElementInDocument(anchor) : null;
             if (nextElement) {
@@ -7250,11 +6834,7 @@ export class CursorManager {
                             const lineCenterY = firstCharRect.top + firstCharRect.height / 2;
                             const caretRange = document.caretRangeFromPoint(currentX, lineCenterY);
                             if (caretRange && nextElement.contains(caretRange.startContainer)) {
-                                const newRange = document.createRange();
-                                newRange.setStart(caretRange.startContainer, caretRange.startOffset);
-                                newRange.collapse(true);
-                                selection.removeAllRanges();
-                                selection.addRange(newRange);
+                                this._placeCollapsedCaret(selection, caretRange.startContainer, caretRange.startOffset);
                                 placed = true;
                             }
                         }
@@ -7296,11 +6876,7 @@ export class CursorManager {
                     outerList.parentElement.appendChild(newP);
                 }
 
-                const newRange = document.createRange();
-                newRange.setStart(newP, 0);
-                newRange.collapse(true);
-                selection.removeAllRanges();
-                selection.addRange(newRange);
+                this._placeCollapsedCaret(selection, newP, 0);
                 if (notifyCallback) notifyCallback();
                 return;
             }
@@ -9065,11 +8641,7 @@ export class CursorManager {
                     const nodeLength = textNode.textContent.length;
                     if (currentOffset + nodeLength >= lineStartOffset) {
                         const offsetInNode = lineStartOffset - currentOffset;
-                        const newRange = document.createRange();
-                        newRange.setStart(textNode, offsetInNode);
-                        newRange.collapse(true);
-                        selection.removeAllRanges();
-                        selection.addRange(newRange);
+                        this._placeCollapsedCaret(selection, textNode, offsetInNode);
                         return;
                     }
                     currentOffset += nodeLength;
@@ -9245,11 +8817,7 @@ export class CursorManager {
                     const nodeLength = textNode.textContent.length;
                     if (currentOffset + nodeLength >= lineEndOffset) {
                         const offsetInNode = lineEndOffset - currentOffset;
-                        const newRange = document.createRange();
-                        newRange.setStart(textNode, offsetInNode);
-                        newRange.collapse(true);
-                        selection.removeAllRanges();
-                        selection.addRange(newRange);
+                        this._placeCollapsedCaret(selection, textNode, offsetInNode);
                         return;
                     }
                     currentOffset += nodeLength;
