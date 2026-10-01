@@ -281,7 +281,6 @@ export class MarkdownDocument {
             // Fix empty list items that only contain nested lists
             // Pattern: <li><ul>...</ul></li> or <li><ol>...</ol></li>
             // Don't add &nbsp; - let Turndown handle the empty parent item correctly
-            // html = html.replace(/<li>(\s*)(<ul>|<ol>)/gi, '<li>&nbsp;$2');
 
             // Enable checkboxes: Remove disabled attribute from task list checkboxes
             // marked generates <input disabled="" type="checkbox"> which prevents interaction
@@ -1520,10 +1519,6 @@ export class MarkdownDocument {
                 return cleanedImageTag;
             }
         });
-    }
-
-    public getText(): string {
-        return this.document.getText();
     }
 }
 

@@ -12,6 +12,10 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 - Inline workspace file suggestions while typing in the URL/path field, with keyboard navigation and relative-path completion.
 - Turn an absolute in-workspace file path pasted over selected text into a relative link.
 
+### Changed
+- Bundle the extension and its dependencies instead of shipping `node_modules`, which shrinks the package.
+- Load Prism as one script, and load Mermaid only when a document has a Mermaid code block.
+
 ### Fixed
 - Keep the selected link text intact when editor DOM normalization runs while a pasted path is being validated.
 
@@ -24,6 +28,9 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 - Canonically validate local link and image targets to block workspace escapes through symbolic links.
 - Revalidate links before opening, reject encoded custom schemes, and ignore requests from inactive editor panels.
 - Reject symbolic links in each visible path component when validating remote workspace targets.
+- Refuse remote images in the Webview CSP unless `manulDown.security.allowRemoteImages` is enabled, closing several paths that loaded blocked images anyway. Changing the setting applies to editors opened afterwards.
+- Make the `manulDown.security.*` settings configurable only in user settings, so a workspace's `.vscode/settings.json` cannot enable them.
+- Ignore non-boolean setting values and escape the settings embedded in the Webview page.
 
 ## [0.1.0] - 2026-02-11
 

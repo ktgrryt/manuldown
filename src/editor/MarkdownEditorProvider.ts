@@ -5,6 +5,7 @@ import { MarkdownDocument } from './MarkdownDocument';
 import { WorkspaceLinkPicker } from './WorkspaceLinkPicker';
 import { getNonce } from '../utils/getNonce';
 import {
+    isUriLexicallyWithinDirectory,
     isUriSecurelyWithinDirectory,
     normalizeExternalLinkHref,
 } from '../utils/workspaceLinks';
@@ -124,9 +125,6 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         // Override nested-list indentation width (updated dynamically on save).
         (this.turndownService as any).options.indent = this.currentListIndent;
 
-        // Keep default list handling - Turndown handles nested lists correctly by default
-        // Just ensure proper indentation
-        this.turndownService.keep(['br']);
         this.turndownService.addRule('lineBreak', {
             filter: 'br',
             replacement: function (_content: string, node: any) {
@@ -472,10 +470,6 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             },
             replacement: function (content: string, node: any, options: any) {
                 const codeNode = node.querySelector('code');
-                if (!codeNode) {
-                    const fence = options.fence || '```';
-                    return '\n\n' + fence + '\n\n' + fence + '\n\n';
-                }
                 const className = codeNode.getAttribute('class') || '';
                 const matches = className.match(/(?:^|\s)language-([^\s]+)/);
                 const language = matches ? matches[1] : '';
@@ -704,16 +698,6 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             typeof value === 'number' && Number.isFinite(value)
                 ? Math.max(0, Math.floor(value))
                 : 0;
-
-        const getFullDocumentRange = (targetDocument: vscode.TextDocument): vscode.Range => {
-            const lastLine = targetDocument.lineAt(targetDocument.lineCount - 1);
-            return new vscode.Range(
-                0,
-                0,
-                targetDocument.lineCount - 1,
-                lastLine.text.length
-            );
-        };
 
         const settleSyncSnapshotRequest = (
             requestId: string,
@@ -1628,9 +1612,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                             if (unsafeDecodedLinkTextPattern.test(decodedUrl)) {
                                 break;
                             }
-                            const allowFileLinks = vscode.workspace
-                                .getConfiguration('manulDown')
-                                .get<boolean>('security.allowFileLinks', false);
+                            const allowFileLinks = this.getBooleanSetting('security.allowFileLinks', false);
                             const externalHref = normalizeExternalLinkHref(rawUrl);
                             if (externalHref) {
                                 await vscode.env.openExternal(vscode.Uri.parse(externalHref));
@@ -1744,7 +1726,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         // Start loading the Webview only after its inbound message handler is
         // registered. Cached assets can otherwise post `ready` before the
         // extension host is listening, leaving the initial loader in place.
-        webviewPanel.webview.html = this.getHtmlForWebview(webviewPanel.webview, document);
+        webviewPanel.webview.html = this.getHtmlForWebview(webviewPanel.webview);
 
         // Handle document changes (external edits)
         const changeDocumentSubscription = vscode.workspace.onDidChangeTextDocument((e) => {
@@ -1953,7 +1935,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     snapshot.revision,
                     event.document.version + 1
                 );
-                return [vscode.TextEdit.replace(getFullDocumentRange(event.document), markdown)];
+                return [vscode.TextEdit.replace(this.getFullDocumentRange(event.document), markdown)];
             })());
         });
 
@@ -2304,6 +2286,11 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         }
     }
 
+    private getFullDocumentRange(document: vscode.TextDocument): vscode.Range {
+        const lastLine = document.lineAt(document.lineCount - 1);
+        return new vscode.Range(0, 0, document.lineCount - 1, lastLine.text.length);
+    }
+
     private async updateTextDocument(
         document: vscode.TextDocument,
         markdown: string
@@ -2313,21 +2300,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         }
 
         const edit = new vscode.WorkspaceEdit();
-
-        // Replace entire document - use proper range to cover all content
-        const lastLine = document.lineAt(document.lineCount - 1);
-        const fullRange = new vscode.Range(
-            0,
-            0,
-            document.lineCount - 1,
-            lastLine.text.length
-        );
-
-        edit.replace(
-            document.uri,
-            fullRange,
-            markdown
-        );
+        edit.replace(document.uri, this.getFullDocumentRange(document), markdown);
 
         const applied = await vscode.workspace.applyEdit(edit);
         if (!applied) {
@@ -2653,13 +2626,13 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         return changed ? lines.join('\n') : markdown;
     }
 
-    private getPreferredUnorderedListMarker(document: vscode.TextDocument): UnorderedListMarker {
-        const detected = this.detectUnorderedListMarker(document.getText());
+    private getPreferredUnorderedListMarker(documentText: string): UnorderedListMarker {
+        const detected = this.detectUnorderedListMarker(documentText);
         return detected ?? this.getDefaultUnorderedListMarker();
     }
 
-    private getPreferredListIndent(document: vscode.TextDocument): string {
-        const detected = this.detectListIndentSize(document.getText());
+    private getPreferredListIndent(documentText: string): string {
+        const detected = this.detectListIndentSize(documentText);
         const indentSize = detected ?? this.getDefaultListIndentSize();
         return ' '.repeat(indentSize);
     }
@@ -2792,9 +2765,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
 
     private protectOpaqueMarkdownSources(
         html: string,
-        document: vscode.TextDocument
+        documentText: string
     ): { html: string; restore: (markdown: string) => string } {
-        const documentText = document.getText();
         const normalizedDocumentText = documentText.replace(/^[ \t]+(?=\r?$)/gm, '');
         const placeholderNamespace = this.createPlaceholderNamespace(
             `${html}\n${documentText}`,
@@ -2908,12 +2880,15 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         const emptyCodeMarkerSuffix = 'END';
         const previousEmptyListItemMarker = this.currentEmptyListItemMarker;
         const previousConversionDocumentText = this.currentConversionDocumentText;
+        // The conversion is synchronous, so the document cannot change while it
+        // runs. Read its text once; getText() joins every line on each call.
+        const documentText = document.getText();
         this.currentEmptyListItemMarker = emptyListItemMarker;
-        this.currentConversionDocumentText = document.getText();
+        this.currentConversionDocumentText = documentText;
         try {
-            const unorderedListMarker = this.getPreferredUnorderedListMarker(document);
+            const unorderedListMarker = this.getPreferredUnorderedListMarker(documentText);
             const escapedUnorderedListMarker = this.escapeRegExp(unorderedListMarker);
-            const listIndent = this.getPreferredListIndent(document);
+            const listIndent = this.getPreferredListIndent(documentText);
             const isEffectivelyEmptyHtmlSegment = (value: string): boolean => {
                 const stripped = String(value || '')
                     .replace(/<br\b[^>]*>/gi, '')
@@ -2937,13 +2912,13 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
 
             // Pre-process HTML to convert webview URIs back to relative paths
             html = this.convertWebviewUrisToRelativePaths(html, document);
-            html = this.restoreDocumentSpelledLinkTargets(html, document.getText());
+            html = this.restoreDocumentSpelledLinkTargets(html, documentText);
 
             // Raw HTML, front matter, comments, and reference definitions cannot
             // be represented faithfully by the editable DOM. MarkdownDocument
             // renders them as source-backed opaque nodes. Only restore a marker
             // when its decoded source still exists in the current document.
-            const protectedOpaqueSources = this.protectOpaqueMarkdownSources(html, document);
+            const protectedOpaqueSources = this.protectOpaqueMarkdownSources(html, documentText);
             html = protectedOpaqueSources.html;
 
             // Remove zero-width markers used for caret placement
@@ -3174,7 +3149,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
 
             let markdown = this.turndownService.turndown(html);
             markdown = this.restoreEscapedMarkdownLinks(markdown);
-            markdown = this.restoreEscapedFootnoteReferences(markdown, document.getText());
+            markdown = this.restoreEscapedFootnoteReferences(markdown, documentText);
 
             // Resolve the temporary empty-code marker before protecting fenced
             // blocks from the remaining document-level post-processing.
@@ -3357,7 +3332,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
 
             // Join lines
             markdown = processedLines.join('\n');
-            markdown = this.restorePreservedEmptyListChildIndents(markdown, document.getText());
+            markdown = this.restorePreservedEmptyListChildIndents(markdown, documentText);
 
             // Don't trim trailing whitespace - it may be part of code blocks
             // Just ensure we end with a single newline
@@ -3367,7 +3342,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             const restoredMarkdown = protectedOpaqueSources.restore(
                 protectedFencedMarkdown.restore(markdown)
             );
-            this.assertNoLeakedPlaceholderMarkers(restoredMarkdown, document.getText());
+            this.assertNoLeakedPlaceholderMarkers(restoredMarkdown, documentText);
             return restoredMarkdown;
         } catch (error) {
             console.error('Error converting HTML to Markdown:', error);
@@ -3665,18 +3640,6 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         return document.uri.with({ path: path.posix.dirname(document.uri.path) });
     }
 
-    private isUriWithinDirectory(candidate: vscode.Uri, directory: vscode.Uri): boolean {
-        if (candidate.scheme !== directory.scheme || candidate.authority !== directory.authority) {
-            return false;
-        }
-        const relativePath = path.posix.relative(directory.path, candidate.path);
-        return relativePath === '' || (
-            relativePath !== '..' &&
-            !relativePath.startsWith('../') &&
-            !path.posix.isAbsolute(relativePath)
-        );
-    }
-
     private resolveImageSourceUri(sourceText: string, document: vscode.TextDocument): vscode.Uri {
         const normalized = sourceText.trim();
 
@@ -3689,10 +3652,6 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         }
 
         return vscode.Uri.joinPath(this.getDocumentDirectoryUri(document), normalized);
-    }
-
-    private resolveReadableImageSourceUri(sourceText: string, document: vscode.TextDocument): vscode.Uri {
-        return this.resolveImageSourceUri(sourceText, document);
     }
 
     private async fetchRemoteImage(
@@ -3847,9 +3806,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             const importSource = options.source ?? 'unknown';
             const looksLikeAbsolutePath = path.win32.isAbsolute(raw) || path.posix.isAbsolute(raw);
             const looksLikeExplicitScheme = /^[a-z][a-z0-9+.-]*:/i.test(raw);
-            const allowRemoteImageImport = vscode.workspace
-                .getConfiguration('manulDown')
-                .get<boolean>('security.allowRemoteImageImport', false);
+            const allowRemoteImageImport = this.getBooleanSetting('security.allowRemoteImageImport', false);
 
             if (
                 importSource === 'paste' &&
@@ -3858,10 +3815,10 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 throw new Error('Pasted local image URIs are blocked for security reasons.');
             }
 
-            const sourceUri = this.resolveReadableImageSourceUri(raw, document);
+            const sourceUri = this.resolveImageSourceUri(raw, document);
             if (
                 importSource === 'internal' &&
-                !this.isUriWithinDirectory(sourceUri, this.getDocumentDirectoryUri(document))
+                !isUriLexicallyWithinDirectory(sourceUri, this.getDocumentDirectoryUri(document))
             ) {
                 throw new Error('Internal image URI is outside the Markdown document directory.');
             }
@@ -3939,9 +3896,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 imageUri = this.resolveImageSourceUri(imageSrc, document);
             }
 
-            const allowFileLinks = vscode.workspace
-                .getConfiguration('manulDown')
-                .get<boolean>('security.allowFileLinks', false);
+            const allowFileLinks = this.getBooleanSetting('security.allowFileLinks', false);
             const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
             const isInsideWorkspace = !!workspaceFolder &&
                 await isUriSecurelyWithinDirectory(
@@ -4086,6 +4041,14 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         });
     }
 
+    // config.get<boolean> does not check the stored type. A non-boolean value
+    // (for example a string in settings.json) must not enable a security option
+    // or reach the inline settings script.
+    private getBooleanSetting(key: string, defaultValue: boolean): boolean {
+        const value = vscode.workspace.getConfiguration('manulDown').get<unknown>(key);
+        return typeof value === 'boolean' ? value : defaultValue;
+    }
+
     private getWebviewSettings(): {
         toolbarVisible: boolean;
         tocEnabled: boolean;
@@ -4105,22 +4068,40 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 ? 'dark'
                 : 'vscode';
         return {
-            toolbarVisible: config.get<boolean>('toolbar.visible', true),
-            tocEnabled: config.get<boolean>('toc.enabled', true),
+            toolbarVisible: this.getBooleanSetting('toolbar.visible', true),
+            tocEnabled: this.getBooleanSetting('toc.enabled', true),
             tocPanelWidth: this.tocPanelWidthPx,
             useVsCodeCtrlP: true,
-            listDashStyle: config.get<boolean>('list.dashStyle', false),
+            listDashStyle: this.getBooleanSetting('list.dashStyle', false),
             editorThemeMode,
-            allowRemoteImages: config.get<boolean>('security.allowRemoteImages', false),
-            allowRemoteImageImport: config.get<boolean>('security.allowRemoteImageImport', false),
-            allowFileLinks: config.get<boolean>('security.allowFileLinks', false),
+            allowRemoteImages: this.getBooleanSetting('security.allowRemoteImages', false),
+            allowRemoteImageImport: this.getBooleanSetting('security.allowRemoteImageImport', false),
+            allowFileLinks: this.getBooleanSetting('security.allowFileLinks', false),
         };
     }
 
-    private getHtmlForWebview(webview: vscode.Webview, document: vscode.TextDocument): string {
+    public notifyRemoteImageSettingChanged(): void {
+        if (this.webviewPanels.size === 0) {
+            return;
+        }
+        // The image CSP is fixed when an editor loads; see getHtmlForWebview.
+        void vscode.window.showInformationMessage(
+            'Reopen ManulDown editors that are already open to fully apply the remote image setting.'
+        );
+    }
+
+    private getHtmlForWebview(webview: vscode.Webview): string {
         const nonce = getNonce();
         const settings = this.getWebviewSettings();
-        const settingsJson = JSON.stringify(settings);
+        // JSON.stringify leaves "</script>" intact. Escape "<" so no setting value
+        // can close the inline script and inject markup into the page.
+        const settingsJson = JSON.stringify(settings).replace(/</g, '\\u003c');
+        // The JS image policy is not the only guard: unless remote images are
+        // enabled, the CSP itself refuses every http(s) image request, including
+        // ones from Mermaid SVG, CSS url() and detached DOM clones.
+        const imageSources = settings.allowRemoteImages
+            ? `${webview.cspSource} https: data:`
+            : `${webview.cspSource} data:`;
         const toolbarVisibleAttr = settings.toolbarVisible ? 'true' : 'false';
         const tocEnabledAttr = settings.tocEnabled ? 'true' : 'false';
         const themeModeAttr = settings.editorThemeMode;
@@ -4144,71 +4125,16 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             vscode.Uri.joinPath(this.context.extensionUri, 'media', 'editor.css')
         ).toString() + `?v=${assetVersion}`;
 
-        // Prism.js for syntax highlighting
+        // Prism.js for syntax highlighting, with the grammars exposed in the
+        // code-block language picker (built by scripts/bundle-prism.js).
         const prismCssUri = webview.asWebviewUri(
-            vscode.Uri.joinPath(this.context.extensionUri, 'node_modules', 'prismjs', 'themes', 'prism-tomorrow.css')
+            vscode.Uri.joinPath(this.context.extensionUri, 'media', 'vendor', 'prism-tomorrow.css')
         );
         const prismJsUri = webview.asWebviewUri(
-            vscode.Uri.joinPath(this.context.extensionUri, 'node_modules', 'prismjs', 'prism.js')
+            vscode.Uri.joinPath(this.context.extensionUri, 'media', 'vendor', 'prism.bundle.js')
         );
-
-        // Load the Prism grammars exposed in the code-block language picker.
-        // Keep dependency order: shared helpers first, then languages that extend them.
-        const prismComponentNames = [
-            'markup-templating',
-            'c',
-            'cpp',
-            'csharp',
-            'python',
-            'typescript',
-            'java',
-            'php',
-            'ruby',
-            'go',
-            'rust',
-            'swift',
-            'kotlin',
-            'scala',
-            'scss',
-            'sass',
-            'less',
-            'json',
-            'yaml',
-            'toml',
-            'markdown',
-            'latex',
-            'sql',
-            'graphql',
-            'bash',
-            'powershell',
-            'docker',
-            'makefile',
-            'r',
-            'matlab',
-            'julia',
-            'perl',
-            'lua',
-            'haskell',
-            'elixir',
-            'erlang',
-            'clojure',
-            'scheme',
-            'lisp',
-            'dart',
-            'objectivec',
-        ];
-        const prismComponentScriptTags = prismComponentNames.map((componentName) => {
-            const componentUri = webview.asWebviewUri(
-                vscode.Uri.joinPath(
-                    this.context.extensionUri,
-                    'node_modules',
-                    'prismjs',
-                    'components',
-                    `prism-${componentName}.min.js`
-                )
-            );
-            return `    <script nonce="${nonce}" src="${componentUri}"></script>`;
-        }).join('\n');
+        // Mermaid is 3 MB of script. CodeBlockManager loads it only when the
+        // document has a mermaid code block.
         const mermaidUri = webview.asWebviewUri(
             vscode.Uri.joinPath(this.context.extensionUri, 'media', 'vendor', 'mermaid.bundle.js')
         );
@@ -4218,7 +4144,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src 'none'; frame-src 'none'; object-src 'none'; media-src 'none'; worker-src 'none'; child-src 'none'; form-action 'none'; base-uri 'none'; style-src ${webview.cspSource} 'unsafe-inline'; style-src-attr 'unsafe-inline'; script-src 'nonce-${nonce}'; script-src-elem 'nonce-${nonce}'; script-src-attr 'none'; img-src ${webview.cspSource} https: data:;">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src 'none'; frame-src 'none'; object-src 'none'; media-src 'none'; worker-src 'none'; child-src 'none'; form-action 'none'; base-uri 'none'; style-src ${webview.cspSource} 'unsafe-inline'; style-src-attr 'unsafe-inline'; script-src 'nonce-${nonce}'; script-src-elem 'nonce-${nonce}'; script-src-attr 'none'; img-src ${imageSources};">
     <style nonce="${nonce}">
         html,
         body {
@@ -4325,7 +4251,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     <link href="${prismCssUri}" rel="stylesheet">
     <title>ManulDown</title>
 </head>
-<body data-toolbar-visible="${toolbarVisibleAttr}" data-toc-enabled="${tocEnabledAttr}" data-theme-mode="${themeModeAttr}" data-editor-state="loading">
+<body data-toolbar-visible="${toolbarVisibleAttr}" data-toc-enabled="${tocEnabledAttr}" data-theme-mode="${themeModeAttr}" data-mermaid-script-src="${mermaidUri}" data-editor-state="loading">
     <div id="editor-loading" role="status" aria-live="polite" aria-atomic="true">
         <div class="editor-loading-spinner" aria-hidden="true"></div>
         <div class="editor-loading-label">Loading ManulDown&hellip;</div>
@@ -4384,8 +4310,6 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     </div>
     <script nonce="${nonce}">window.__manulDownSettings = ${settingsJson};</script>
     <script nonce="${nonce}" src="${prismJsUri}"></script>
-${prismComponentScriptTags}
-    <script nonce="${nonce}" src="${mermaidUri}"></script>
     <script type="module" nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;

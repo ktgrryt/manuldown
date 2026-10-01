@@ -190,6 +190,9 @@ export function activate(context: vscode.ExtensionContext) {
         if (event.affectsConfiguration(`${MANULDOWN_CONFIGURATION_SECTION}.${OPEN_BY_DEFAULT_SETTING_KEY}`)) {
             void syncDefaultMarkdownAssociationWithSetting(context, true);
         }
+        if (event.affectsConfiguration(`${MANULDOWN_CONFIGURATION_SECTION}.security.allowRemoteImages`)) {
+            provider.notifyRemoteImageSettingChanged();
+        }
     });
     context.subscriptions.push(configurationListener);
 }

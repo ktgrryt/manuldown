@@ -1,12 +1,22 @@
+# Development files
 .claude/**
 .vscode/**
 .vscode-test/**
 src/**
 test/**
-test.md
-media/editor.js.original
-package-lock.json
+scripts/**
+.gitignore
+eslint.config.cjs
 tsconfig.json
-.eslintrc.json
-*.vsix
-**/.DS_Store
+package-lock.json
+media/vendor/*-entry.js
+
+# Runtime dependencies are bundled into out/extension.js (scripts/bundle-host.js)
+# and media/vendor/ (npm run bundle:webview). The rest of out/ is the unbundled
+# tsc output used by the tests and `npm run watch`.
+node_modules/**
+out/**
+!out/extension.js
+
+# vsce links README images to the repository.
+images/README/**

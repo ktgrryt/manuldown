@@ -7,14 +7,12 @@ const test = require('node:test');
 const {
     buildWorkspaceRelativeHref,
     encodeMarkdownRelativePath,
-    extractMarkdownHeadings,
     isNativePathWithinDirectory,
     isUriLexicallyWithinDirectory,
     isUriSecurelyWithinDirectory,
     normalizeExternalLinkHref,
     normalizeNativeAbsolutePathForLink,
     sanitizeWorkspaceLinkDisplayText,
-    slugifyMarkdownHeading,
 } = require('../out/utils/workspaceLinks.js');
 
 const providerSource = fs.readFileSync(
@@ -211,43 +209,12 @@ test('remote workspace checks reject symbolic links in any path component', asyn
     );
 });
 
-test('bounded heading extraction skips front matter and fences and creates stable duplicates', () => {
-    const markdown = [
-        '---',
-        'title: "# not a heading"',
-        '---',
-        '# Hello *world*',
-        '# Hello world',
-        '',
-        '```md',
-        '# hidden',
-        '```',
-        '',
-        '> ## 日本語 [リンク](./x.md)',
-        '',
-        'Setext `code`',
-        '---',
-    ].join('\n');
-
-    assert.deepEqual(extractMarkdownHeadings(markdown), [
-        { level: 1, label: 'Hello world', slug: 'hello-world' },
-        { level: 1, label: 'Hello world', slug: 'hello-world-1' },
-        { level: 2, label: '日本語 リンク', slug: '日本語-リンク' },
-        { level: 2, label: 'Setext code', slug: 'setext-code' },
-    ]);
-    assert.equal(extractMarkdownHeadings('# one\n# two\n# three\n', 2).length, 2);
-});
-
-test('host and Webview heading sluggers stay aligned', async () => {
+test('Webview heading slugs keep letters, numbers, underscores, and dashes', async () => {
     const browserSlug = await browserSlugModulePromise;
-    for (const value of [
-        'Hello, World!',
-        '日本語 見出し',
-        'under_score and-dash',
-        'Crème brûlée',
-    ]) {
-        assert.equal(browserSlug.slugifyMarkdownHeading(value), slugifyMarkdownHeading(value));
-    }
+    assert.equal(browserSlug.slugifyMarkdownHeading('Hello, World!'), 'hello-world');
+    assert.equal(browserSlug.slugifyMarkdownHeading('日本語 見出し'), '日本語-見出し');
+    assert.equal(browserSlug.slugifyMarkdownHeading('under_score and-dash'), 'under_score-and-dash');
+    assert.equal(browserSlug.slugifyMarkdownHeading('Crème brûlée'), 'crème-brûlée');
 });
 
 test('picker labels remove controls, bidi overrides, and codicon impersonation', () => {

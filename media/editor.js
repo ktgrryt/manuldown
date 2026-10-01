@@ -65,7 +65,6 @@ const {
     let manualPointerSelection = null;
     let lastPointerCaretIntentTs = 0;
     let lastCaretIntentSource = null;
-    let lastPointerCheckboxClickTs = 0;
     let lastCtrlNavKeydownTs = 0;
     let lastCtrlNavCommandTs = 0;
     let lastCtrlNavDirection = null;
@@ -134,6 +133,10 @@ const {
         allowRemoteImageImport: initialSettings.allowRemoteImageImport === true,
         allowFileLinks: initialSettings.allowFileLinks === true
     };
+    // The host adds https: to the page CSP only when remote images were allowed
+    // at load time. Enabling the setting later takes effect after reopening;
+    // until then keep showing the blocked placeholder instead of a broken image.
+    const remoteImagesPermittedByCsp = settingsState.allowRemoteImages;
     const imageRenderMaxWidthPx = 820;
     let imageResolveRequestSeq = 0;
     let imageInsertionRequestSeq = 0;
@@ -703,7 +706,7 @@ const {
             return { kind: 'direct', src, original: src };
         }
         if (/^https?:\/\//i.test(src)) {
-            if (settingsState.allowRemoteImages) {
+            if (settingsState.allowRemoteImages && remoteImagesPermittedByCsp) {
                 return { kind: 'direct', src, original: src };
             }
             return { kind: 'blocked-remote', original: src };
@@ -4064,20 +4067,10 @@ const {
             const fallbackIndex = direction === 'up'
                 ? Math.max(0, Math.min(offset, children.length - 1))
                 : Math.max(0, Math.min(offset - 1, children.length - 1));
-            const indices = direction === 'up'
-                ? [primaryIndex, fallbackIndex]
-                : [primaryIndex, fallbackIndex];
-
-            for (const idx of indices) {
+            for (const idx of [primaryIndex, fallbackIndex]) {
                 const node = children[idx];
                 if (!node || node.nodeType !== Node.ELEMENT_NODE) continue;
                 if (node.tagName === 'LI') return node;
-                if (node.tagName === 'UL' || node.tagName === 'OL') {
-                    const items = node.querySelectorAll('li');
-                    if (items.length > 0) {
-                        return direction === 'up' ? items[items.length - 1] : items[0];
-                    }
-                }
                 const items = node.querySelectorAll ? node.querySelectorAll('li') : [];
                 if (items.length > 0) {
                     return direction === 'up' ? items[items.length - 1] : items[0];
@@ -6722,11 +6715,6 @@ const {
         }
     }
 
-    function selectionCoversRange(outerRange, innerRange) {
-        return outerRange.compareBoundaryPoints(Range.START_TO_START, innerRange) <= 0 &&
-            outerRange.compareBoundaryPoints(Range.END_TO_END, innerRange) >= 0;
-    }
-
     function getCodeBlockCursorOffset(codeBlock, range) {
         const offset = cursorManager.getCodeBlockCursorOffset(codeBlock, range);
         if (offset !== null) {
@@ -6790,32 +6778,6 @@ const {
         } catch (e) {
             return false;
         }
-    }
-
-    function findSelectedCodeBlock(range) {
-        const startCode = domUtils.getParentElement(range.startContainer, 'CODE');
-        const endCode = domUtils.getParentElement(range.endContainer, 'CODE');
-        if (startCode && startCode === endCode) {
-            const pre = domUtils.getParentElement(startCode, 'PRE');
-            if (pre) {
-                const codeRange = document.createRange();
-                codeRange.selectNodeContents(startCode);
-                if (selectionCoversRange(range, codeRange)) {
-                    return pre;
-                }
-            }
-        }
-
-        const preBlocks = editor.querySelectorAll('pre');
-        for (const pre of preBlocks) {
-            const preRange = document.createRange();
-            preRange.selectNode(pre);
-            if (selectionCoversRange(range, preRange)) {
-                return pre;
-            }
-        }
-
-        return null;
     }
 
     function getNextElementSibling(node) {
@@ -7137,14 +7099,6 @@ const {
         selection.addRange(newRange);
         caretMarker.remove();
         return true;
-    }
-
-    function isSelectionInStrike() {
-        const selection = window.getSelection();
-        if (!selection || !selection.rangeCount) return false;
-        const range = selection.getRangeAt(0);
-        const container = range.commonAncestorContainer;
-        return !!getOutermostStrikeElement(container) || !!getStrikeSiblingAtCaret(range);
     }
 
     function shouldFlagStrikeCleanupForDelete(range) {
@@ -9768,7 +9722,6 @@ const {
                         tableManager._setCursorToEdge(leftEdge, false);
                         if (typeof tableManager._lastEdgeNavTs === 'number') {
                             tableManager._lastEdgeNavTs = Date.now();
-                            tableManager._lastEdgeNavDirection = 'up';
                         }
                         return true;
                     }
@@ -9787,7 +9740,6 @@ const {
         tableManager._setCursorToEdge(leftEdge, false);
         if (typeof tableManager._lastEdgeNavTs === 'number') {
             tableManager._lastEdgeNavTs = Date.now();
-            tableManager._lastEdgeNavDirection = 'up';
         }
         return true;
     }
@@ -11797,7 +11749,6 @@ const {
             return null;
         }
         const { create = false } = options;
-        const useZwspAnchor = shouldUseZwspImageRightTextAnchor(image);
         const preferredAnchorText = '';
         const caretAnchor = getImageCaretAnchorNode(image) || image;
         if (!caretAnchor || !caretAnchor.parentNode) {
@@ -11839,18 +11790,6 @@ const {
             return false;
         }
         return true;
-    }
-
-    function shouldUseZwspImageRightTextAnchor(image) {
-        if (!image || image.tagName !== 'IMG' || !editor.contains(image)) {
-            return true;
-        }
-        const blockElement = getClosestBlockElement(image);
-        if (!blockElement || blockElement === editor) {
-            return true;
-        }
-        const singleImage = getSingleImageFromImageOnlyBlock(blockElement);
-        return singleImage !== image;
     }
 
     function createAfterImageCaretRange(image, options = {}) {
@@ -12894,7 +12833,7 @@ const {
                 const r = sel.getRangeAt(0);
                 const stillInPre = pre.contains(r.startContainer) || pre.contains(r.endContainer);
                 if (stillInPre) {
-                    const forced = exitEmptyCodeBlockDownFromPre(pre, sel, true, true);
+                    exitEmptyCodeBlockDownFromPre(pre, sel, true, true);
                 }
             }, 0);
         };
@@ -13490,9 +13429,7 @@ const {
             if (selectedLabel) {
                 e.preventDefault();
                 e.stopPropagation();
-                if (moveCursorAboveCodeBlockFromLabel(selectedLabel)) {
-                    return true;
-                }
+                moveCursorAboveCodeBlockFromLabel(selectedLabel);
                 return true;
             } else {
                 const selection = window.getSelection();
@@ -14101,9 +14038,7 @@ const {
             if (selectedLabel) {
                 e.preventDefault();
                 e.stopPropagation();
-                if (moveCursorAboveCodeBlockFromLabelToLineEnd(selectedLabel)) {
-                    return true;
-                }
+                moveCursorAboveCodeBlockFromLabelToLineEnd(selectedLabel);
                 return true;
             }
             {
@@ -14297,9 +14232,7 @@ const {
             if (selectedLabel) {
                 e.preventDefault();
                 e.stopPropagation();
-                if (moveCursorIntoCodeBlockFromLabel(selectedLabel)) {
-                    return true;
-                }
+                moveCursorIntoCodeBlockFromLabel(selectedLabel);
                 return true;
             }
             {
@@ -15546,58 +15479,6 @@ const {
         }
     }
 
-    function deleteForwardCharacterInSameTableCell(selection, range) {
-        if (!selection || !range || !range.collapsed) return false;
-
-        const cell =
-            domUtils.getParentElement(range.startContainer, 'TD') ||
-            domUtils.getParentElement(range.startContainer, 'TH');
-        if (!cell) return false;
-        if (typeof selection.modify !== 'function') return false;
-
-        const startRange = range.cloneRange();
-        startRange.collapse(true);
-        applySelectionRange(selection, startRange.cloneRange());
-
-        let endRange = startRange.cloneRange();
-        try {
-            selection.modify('move', 'forward', 'character');
-            if (!selection.rangeCount) {
-                applySelectionRange(selection, startRange);
-                return false;
-            }
-            endRange = selection.getRangeAt(0).cloneRange();
-            endRange.collapse(true);
-        } catch (e) {
-            applySelectionRange(selection, startRange);
-            return false;
-        }
-
-        const moved =
-            endRange.startContainer !== startRange.startContainer ||
-            endRange.startOffset !== startRange.startOffset;
-        if (!moved || !cell.contains(endRange.startContainer)) {
-            applySelectionRange(selection, startRange);
-            return false;
-        }
-
-        try {
-            const deleteRange = document.createRange();
-            deleteRange.setStart(startRange.startContainer, startRange.startOffset);
-            deleteRange.setEnd(endRange.startContainer, endRange.startOffset);
-            deleteRange.deleteContents();
-
-            const caretRange = document.createRange();
-            caretRange.setStart(deleteRange.startContainer, deleteRange.startOffset);
-            caretRange.collapse(true);
-            applySelectionRange(selection, caretRange);
-            return true;
-        } catch (e) {
-            applySelectionRange(selection, startRange);
-            return false;
-        }
-    }
-
     function performCtrlKDeleteFromRange(selection, range) {
         if (!selection || !range || !editor.contains(range.commonAncestorContainer)) {
             return false;
@@ -16541,9 +16422,7 @@ const {
             if (selectedLabel) {
                 e.preventDefault();
                 e.stopPropagation();
-                if (moveCursorAboveCodeBlockFromLabelToLineEnd(selectedLabel)) {
-                    return true;
-                }
+                moveCursorAboveCodeBlockFromLabelToLineEnd(selectedLabel);
                 return true;
             }
             {
@@ -16730,9 +16609,7 @@ const {
             if (selectedLabel) {
                 e.preventDefault();
                 e.stopPropagation();
-                if (moveCursorIntoCodeBlockFromLabel(selectedLabel)) {
-                    return true;
-                }
+                moveCursorIntoCodeBlockFromLabel(selectedLabel);
                 return true;
             }
             {
@@ -17581,8 +17458,15 @@ const {
                 clearInterval(focusCheckInterval);
             }
             focusCheckInterval = setInterval(() => {
+                // Focus is only recovered shortly after the editor gained it, and
+                // lastFocusTime changes only on the next focus, which restarts
+                // this interval. Stop polling once the window has passed.
+                if (Date.now() - lastFocusTime >= 2000) {
+                    clearInterval(focusCheckInterval);
+                    focusCheckInterval = null;
+                    return;
+                }
                 if (!editor.contains(document.activeElement) &&
-                    Date.now() - lastFocusTime < 2000 &&
                     !isUpdating &&
                     canRecoverEditorFocus()) {
                     const activeElement = document.activeElement;
@@ -20511,7 +20395,6 @@ const {
 
                 if (isTableStartAt(i)) {
                     const headerCells = splitMarkdownTableRow(lines[i]);
-                    const separatorCells = splitMarkdownTableRow(lines[i + 1]);
                     const colCount = headerCells.length;
                     const bodyRows = [];
                     let j = i + 2;
@@ -21212,12 +21095,6 @@ const {
             lastCaretIntentSource = 'pointer';
             caretScrollForcePending = false;
             const pointerTarget = e.target;
-            const pointerCheckbox = pointerTarget && pointerTarget.closest
-                ? pointerTarget.closest('input[type="checkbox"]')
-                : null;
-            lastPointerCheckboxClickTs = (pointerCheckbox && editor.contains(pointerCheckbox))
-                ? Date.now()
-                : 0;
             // Recorded before table handling so cell clicks are corrected too.
             if (!e.shiftKey && e.detail <= 1) {
                 pendingInlineCodeSideClick = { startX: e.clientX, startY: e.clientY, moved: false };

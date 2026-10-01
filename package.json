@@ -288,16 +288,19 @@
         },
         "manulDown.security.allowRemoteImages": {
           "type": "boolean",
+          "scope": "application",
           "default": false,
           "description": "Allow ManulDown to load remote http/https images inside the editor. Disabled by default to avoid automatic outbound requests when a document is opened."
         },
         "manulDown.security.allowRemoteImageImport": {
           "type": "boolean",
+          "scope": "application",
           "default": false,
           "description": "Allow pasted or dropped remote http/https image URLs to be downloaded into the workspace."
         },
         "manulDown.security.allowFileLinks": {
           "type": "boolean",
+          "scope": "application",
           "default": false,
           "description": "Allow file:// links in Markdown documents to be opened from ManulDown. Disabled by default because file links can open local files, applications, or network shares."
         }
@@ -305,9 +308,10 @@
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
-    "bundle:webview": "esbuild media/vendor/mermaid-entry.js --bundle --platform=browser --format=iife --minify --legal-comments=inline --outfile=media/vendor/mermaid.bundle.js",
-    "compile": "npm run bundle:webview && tsc -p ./",
+    "vscode:prepublish": "npm run bundle:webview && tsc -p ./ && node scripts/bundle-host.js --minify",
+    "bundle:webview": "esbuild media/vendor/mermaid-entry.js --bundle --platform=browser --format=iife --minify --legal-comments=inline --outfile=media/vendor/mermaid.bundle.js && node scripts/bundle-prism.js",
+    "bundle:host": "node scripts/bundle-host.js",
+    "compile": "npm run bundle:webview && tsc -p ./ && npm run bundle:host",
     "watch": "npm run bundle:webview && tsc -watch -p ./",
     "pretest": "npm run compile",
     "test": "node --test test/*.test.js",
@@ -319,7 +323,6 @@
     "@types/vscode": "^1.85.0",
     "@typescript-eslint/eslint-plugin": "^8.56.0",
     "@typescript-eslint/parser": "^8.56.0",
-    "@vscode/test-electron": "^2.3.8",
     "esbuild": "^0.28.1",
     "eslint": "^10.0.0",
     "mermaid": "^11.16.0",

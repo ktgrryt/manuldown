@@ -38,6 +38,7 @@ export class CodeBlockManager {
         this.mermaidCache = new WeakMap();
         this.mermaidIdCounter = 0;
         this.mermaidThemeKey = null;
+        this.mermaidLoadState = 'idle';
         this.editorThemeMode = this._normalizeThemeMode(themeMode);
         this.clipboardWriteRequestSeq = 0;
         this.copyButtonStateReconcilerHandle = null;
@@ -219,6 +220,41 @@ export class CodeBlockManager {
         }
     }
 
+    // Loads the Mermaid bundle on first use instead of on every editor open.
+    // Returns true while the library is on its way; every mermaid block is
+    // rendered again once it arrives (or fails to).
+    _requestMermaidLibrary() {
+        if (this.mermaidLoadState === 'loading') {
+            return true;
+        }
+        if (this.mermaidLoadState === 'failed' || typeof document === 'undefined') {
+            return false;
+        }
+        const scriptSource = document.body ? document.body.dataset.mermaidScriptSrc : '';
+        // Document content lives inside #editor, so a direct child of <body>
+        // is one of the page's own nonce-carrying scripts.
+        const nonceScript = document.querySelector('body > script[nonce]');
+        if (!scriptSource || !nonceScript || !nonceScript.nonce) {
+            this.mermaidLoadState = 'failed';
+            return false;
+        }
+
+        this.mermaidLoadState = 'loading';
+        const script = document.createElement('script');
+        script.nonce = nonceScript.nonce;
+        script.src = scriptSource;
+        script.addEventListener('load', () => {
+            this.mermaidLoadState = window.mermaid ? 'loaded' : 'failed';
+            this._rerenderMermaidBlocks();
+        });
+        script.addEventListener('error', () => {
+            this.mermaidLoadState = 'failed';
+            this._rerenderMermaidBlocks();
+        });
+        document.head.appendChild(script);
+        return true;
+    }
+
     _isMermaidLanguage(language) {
         return (language || '').toLowerCase() === 'mermaid';
     }
@@ -325,6 +361,9 @@ export class CodeBlockManager {
     _renderMermaid(pre, codeBlock) {
         this._initMermaid();
         if (typeof window === 'undefined' || !window.mermaid) {
+            if (this._requestMermaidLibrary()) {
+                return;
+            }
             const preview = this._ensureMermaidPreview(pre);
             preview.classList.add('mermaid-error');
             preview.textContent = 'Mermaid library is not available.';
