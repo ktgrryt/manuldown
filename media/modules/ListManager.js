@@ -67,15 +67,17 @@ export class ListManager {
         return { wrapper, sublist };
     }
 
+    // Items appended here must come after everything already nested in
+    // listItem, so only its last nested list can take them. Joining an earlier
+    // list of the same type put them above the children of the other type.
     _ensureDirectSublist(listItem, tagName) {
         if (!listItem || listItem.tagName !== 'LI') {
             return null;
         }
         const normalizedTagName = tagName === 'OL' ? 'OL' : 'UL';
-        let sublist = Array.from(listItem.children || []).find(
-            (child) => child.tagName === normalizedTagName
-        );
-        if (!sublist) {
+        const nestedLists = this._getDirectNestedLists(listItem);
+        let sublist = nestedLists[nestedLists.length - 1];
+        if (!sublist || sublist.tagName !== normalizedTagName) {
             sublist = document.createElement(normalizedTagName);
             listItem.appendChild(sublist);
         }
@@ -209,14 +211,18 @@ export class ListManager {
         const detachedNestedLists = this._detachDirectNestedLists(listItem);
         sublist.appendChild(listItem);
 
+        // Children stay at their depth: a list of the same type joins the
+        // sublist after the item, others follow it in order.
+        let lastPlacedList = sublist;
         detachedNestedLists.forEach((nestedList) => {
-            if (nestedList.tagName === sublist.tagName) {
+            if (lastPlacedList === sublist && nestedList.tagName === sublist.tagName) {
                 while (nestedList.firstElementChild) {
                     sublist.appendChild(nestedList.firstElementChild);
                 }
                 nestedList.remove();
             } else if (targetParentItem) {
-                targetParentItem.insertBefore(nestedList, sublist.nextSibling);
+                targetParentItem.insertBefore(nestedList, lastPlacedList.nextSibling);
+                lastPlacedList = nestedList;
             }
         });
 
@@ -253,6 +259,14 @@ export class ListManager {
 
         const detachedNestedLists = this._detachDirectNestedLists(listItem);
         const followingSiblings = this._collectFollowingListItems(listItem);
+        // Lists after parentList in the parent item (of another list type)
+        // also come after listItem, so they move with the following siblings.
+        const followingLists = [];
+        for (let node = parentList.nextSibling; node; node = node.nextSibling) {
+            if (this._isListElement(node)) {
+                followingLists.push(node);
+            }
+        }
         const insertBeforeNode = grandParentItem.nextSibling;
 
         grandParentList.insertBefore(listItem, insertBeforeNode);
@@ -274,6 +288,18 @@ export class ListManager {
 
         followingSiblings.forEach((sibling) => {
             ensureContinuationSublist().appendChild(sibling);
+        });
+
+        followingLists.forEach((followingList) => {
+            const lastList = this._getDirectNestedLists(listItem).pop();
+            if (lastList && lastList.tagName === followingList.tagName) {
+                while (followingList.firstElementChild) {
+                    lastList.appendChild(followingList.firstElementChild);
+                }
+                followingList.remove();
+            } else {
+                listItem.appendChild(followingList);
+            }
         });
 
         if (parentList.children.length === 0) {

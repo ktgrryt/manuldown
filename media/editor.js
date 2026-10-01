@@ -4151,23 +4151,123 @@ const {
         return !hasDirectContent && rangeIntersectsNodeSafely(range, listItem);
     }
 
+    // Whether anything a reader sees lies between the start of the list item
+    // and the boundary point. Checkboxes, whitespace and placeholders do not count.
+    function hasListLineContentBefore(listItem, container, offset) {
+        try {
+            const probe = document.createRange();
+            probe.setStart(listItem, 0);
+            probe.setEnd(container, offset);
+            const fragment = probe.cloneContents();
+            if ((fragment.textContent || '').replace(/[\s\u00A0\u200B\u2060\uFEFF]/g, '') !== '') {
+                return true;
+            }
+            return !!fragment.querySelector('img, video, audio, iframe, svg, canvas, hr, table');
+        } catch (_e) {
+            return true;
+        }
+    }
+
+    // The list item whose line holds a boundary point, and whether the point
+    // is at the start of that line. An item's line runs from its start to its
+    // first nested list. A point between items starts the next item's line, and
+    // a point after a nested list ends the last line in it. The answer depends
+    // on content, not on how the browser wrote the point: (text, 0) and (li, 0)
+    // at the start of a line are the same.
+    function getListLineAtBoundary(container, offset) {
+        if (!container || !editor.contains(container)) return null;
+
+        const isListElement = (node) => !!(node && node.nodeType === Node.ELEMENT_NODE &&
+            (node.tagName === 'UL' || node.tagName === 'OL'));
+        const getLastLineIn = (element) => {
+            const items = element.querySelectorAll('li');
+            if (items.length > 0) return items[items.length - 1];
+            return element.tagName === 'LI' ? element : null;
+        };
+
+        let list = null;
+        let index = 0;
+        if (isListElement(container)) {
+            list = container;
+            index = offset;
+        } else if (container.nodeName !== 'LI' && isListElement(container.parentNode)) {
+            // A node directly in a list (such as whitespace) sits between items.
+            list = container.parentNode;
+            index = Array.prototype.indexOf.call(list.childNodes, container) + (offset > 0 ? 1 : 0);
+        }
+        if (list) {
+            const nextItem = Array.from(list.childNodes).slice(index).find((child) =>
+                child.nodeType === Node.ELEMENT_NODE && child.tagName === 'LI'
+            );
+            if (nextItem) return { item: nextItem, atLineStart: true };
+            const lastItem = getLastLineIn(list);
+            return lastItem ? { item: lastItem, atLineStart: false } : null;
+        }
+
+        const listItem = domUtils.getParentElement(container, 'LI');
+        if (!listItem || !editor.contains(listItem)) return null;
+
+        if (container === listItem) {
+            const firstNestedListIndex = Array.from(listItem.childNodes).findIndex(isListElement);
+            if (firstNestedListIndex !== -1 && offset > firstNestedListIndex) {
+                return { item: getLastLineIn(listItem), atLineStart: false };
+            }
+        }
+        return {
+            item: listItem,
+            atLineStart: !hasListLineContentBefore(listItem, container, offset)
+        };
+    }
+
+    // An item with nested lists and nothing else, such as the wrapper that
+    // indenting a first item creates, has no line of its own on screen.
+    function isLineLessListItem(listItem) {
+        let hasNestedList = false;
+        for (const child of Array.from(listItem.childNodes)) {
+            if (child.nodeType === Node.ELEMENT_NODE &&
+                (child.tagName === 'UL' || child.tagName === 'OL')) {
+                hasNestedList = true;
+            } else if (child.nodeType === Node.ELEMENT_NODE ||
+                (child.nodeType === Node.TEXT_NODE &&
+                    /[^ \t\n\r\u200B\u2060\uFEFF]/.test(child.textContent || ''))) {
+                return false;
+            }
+        }
+        return hasNestedList;
+    }
+
     function getTabOperationTargetListItems(range, fallbackListItem) {
         const selectedListItems = getSelectedListItemsFromRange(range);
         if (selectedListItems.length === 0) {
             return fallbackListItem ? [fallbackListItem] : [];
         }
 
-        const directSelectedListItems = selectedListItems.filter((item) =>
-            rangeIntersectsListItemDirectContent(range, item)
-        );
-        // Keep selected children as targets too. Tab moves each item on its own
+        // Move the lines from the start line to the end line, as a text editor
+        // does: a selection that ends at the start of a line leaves that line
+        // out. Items with no line of their own never move. Their children are
+        // moved one by one, and moving a wrapper without its first child left
+        // an empty item behind.
+        // Selected children are targets too. Tab moves each item on its own
         // (ListManager leaves an item's children at their depth), so a selected
         // parent and child must both move: parents first for indent and, as
         // the caller reverses the order, children first for outdent. That
         // keeps the child under its parent.
-        return directSelectedListItems.length > 0
-            ? directSelectedListItems
-            : selectedListItems;
+        const allListItems = Array.from(editor.querySelectorAll('li'));
+        const startLine = getListLineAtBoundary(range.startContainer, range.startOffset);
+        const endLine = getListLineAtBoundary(range.endContainer, range.endOffset);
+        const from = allListItems.indexOf(startLine ? startLine.item : selectedListItems[0]);
+        let to = allListItems.indexOf(endLine ? endLine.item : selectedListItems[selectedListItems.length - 1]);
+        if (endLine && endLine.atLineStart && to > from) {
+            to -= 1;
+        }
+        const lineItems = from === -1 || to === -1 || from > to
+            ? selectedListItems
+            : allListItems.slice(from, to + 1);
+        const targets = lineItems.filter((item) => !isLineLessListItem(item));
+        if (targets.length > 0) {
+            return targets;
+        }
+        return fallbackListItem ? [fallbackListItem] : [];
     }
 
     function restoreRangeSelectionAroundListItems(listItems) {
