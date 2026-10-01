@@ -3,7 +3,7 @@ const tsPlugin = require("@typescript-eslint/eslint-plugin");
 
 module.exports = [
   {
-    ignores: ["out/**", "dist/**", "**/*.d.ts", "media/vendor/mermaid.bundle.js"],
+    ignores: ["out/**", "dist/**", "**/*.d.ts", "media/vendor/*.bundle.js"],
   },
   {
     files: ["src/**/*.ts"],

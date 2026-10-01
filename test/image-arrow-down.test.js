@@ -483,7 +483,6 @@ function loadMoveCaretBelowImageForTextInput(fixture) {
         'createAfterImageCaretRange',
         'shouldCreateImageRightTextAnchor',
         'getImageRightCaretTextAnchor',
-        'shouldUseZwspImageRightTextAnchor',
         'getSingleImageFromImageOnlyBlock',
         'rangesShareSameCaretPosition',
         'getClosestBlockElement',

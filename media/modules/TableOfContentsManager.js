@@ -89,10 +89,6 @@ export class TableOfContentsManager {
         this.update();
     }
 
-    setScrollDuration(duration) {
-        this.scrollDuration = this.normalizeScrollDuration(duration);
-    }
-
     /**
      * 目次を非表示にする
      */
@@ -205,16 +201,6 @@ export class TableOfContentsManager {
                 heading.style.transition = '';
             }, 300);
         }, 500);
-    }
-
-    /**
-     * 目次アイテムをハイライト
-     * @param {HTMLElement} tocItem - ハイライトする目次アイテム
-     */
-    highlightTocItem(tocItem) {
-        const index = Number(tocItem.dataset.index);
-        if (Number.isNaN(index)) return;
-        this.setActiveIndex(index, { scrollIntoView: true });
     }
 
     refreshHeadingPositions() {

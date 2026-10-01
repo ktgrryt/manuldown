@@ -414,42 +414,6 @@ export class StateManager {
     }
 
     /**
-     * デフォルトのカーソル位置を設定（エディタの最初）
-     */
-    setDefaultCursorPosition() {
-        try {
-            const selection = window.getSelection();
-            if (!selection) return;
-
-            // エディタの最初の要素を探す
-            let firstElement = this.editor.firstChild;
-            
-            // 最初のテキストノードまたは要素を見つける
-            while (firstElement && firstElement.nodeType !== 3 && firstElement.nodeType !== 1) {
-                firstElement = firstElement.nextSibling;
-            }
-
-            if (firstElement) {
-                const range = document.createRange();
-                
-                if (firstElement.nodeType === 3) {
-                    // テキストノードの場合
-                    range.setStart(firstElement, 0);
-                } else {
-                    // 要素ノードの場合
-                    range.setStart(firstElement, 0);
-                }
-                
-                range.collapse(true);
-                selection.removeAllRanges();
-                selection.addRange(range);
-            }
-        } catch (error) {
-            console.error('Error setting default cursor position:', error);
-        }
-    }
-
-    /**
      * 現在のエディタ状態をUndoスタックに保存
      */
     saveState() {
@@ -634,14 +598,6 @@ export class StateManager {
             preservedScrollTop
         );
         return true;
-    }
-
-    /**
-     * 状態復元中かどうかを取得
-     * @returns {boolean} 状態復元中の場合true
-     */
-    isRestoring() {
-        return this.isRestoringState;
     }
 
     /**

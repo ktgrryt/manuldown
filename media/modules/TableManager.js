@@ -40,7 +40,6 @@ export class TableManager {
         this.dialog = null;
 
         this._lastEdgeNavTs = 0;
-        this._lastEdgeNavDirection = null;
         this._compositionBlockedEdge = null;
     }
 
@@ -2758,7 +2757,6 @@ export class TableManager {
             if (leftEdge) {
                 this._setCursorToEdge(leftEdge, false);
                 this._lastEdgeNavTs = Date.now();
-                this._lastEdgeNavDirection = 'up';
                 return true;
             }
             return false;
@@ -3196,7 +3194,6 @@ export class TableManager {
             if (edge) {
                 this._setCursorToEdge(edge, false);
                 this._lastEdgeNavTs = Date.now();
-                this._lastEdgeNavDirection = 'up';
                 return true;
             }
             return false;
@@ -3680,46 +3677,6 @@ export class TableManager {
         selection.removeAllRanges();
         selection.addRange(range);
         return true;
-    }
-
-    _moveWithinCellByNativeCharacter(cell, range, direction, dryRun = false) {
-        if (!cell || !range || !range.collapsed) return false;
-        if (!cell.contains(range.startContainer)) return false;
-        if (direction !== 'left' && direction !== 'right') return false;
-
-        const selection = window.getSelection();
-        if (!selection || typeof selection.modify !== 'function') return false;
-
-        const restore = range.cloneRange();
-        selection.removeAllRanges();
-        selection.addRange(restore.cloneRange());
-
-        try {
-            selection.modify('move', direction === 'left' ? 'backward' : 'forward', 'character');
-            if (!selection.rangeCount) {
-                selection.removeAllRanges();
-                selection.addRange(restore);
-                return false;
-            }
-
-            const movedRange = selection.getRangeAt(0);
-            const movedInsideCell = cell.contains(movedRange.startContainer) &&
-                !this._isExcludedCaretTarget(movedRange.startContainer, cell);
-            const movedPosition =
-                movedRange.startContainer !== restore.startContainer ||
-                movedRange.startOffset !== restore.startOffset;
-            const moved = movedInsideCell && movedPosition;
-
-            if (dryRun || !moved) {
-                selection.removeAllRanges();
-                selection.addRange(restore);
-            }
-            return moved;
-        } catch (_e) {
-            selection.removeAllRanges();
-            selection.addRange(restore);
-            return false;
-        }
     }
 
     _findVisualLineEdgeCaretInCell(cell, targetLine, side) {

@@ -73,21 +73,6 @@ export class CursorManager {
         return childEndsWithNewline;
     }
 
-    _debugInlineNav(_event, _detail = {}) {
-        // no-op: inline navigation debug telemetry disabled
-    }
-
-    _getTrailingNewlineCount(text) {
-        if (!text) {
-            return 0;
-        }
-        let count = 0;
-        for (let i = text.length - 1; i >= 0 && text[i] === '\n'; i--) {
-            count++;
-        }
-        return count;
-    }
-
     _getInlineCodeCursorInfo(range, codeElement) {
         if (!range || !codeElement) {
             return null;
@@ -158,7 +143,6 @@ export class CursorManager {
         }
 
         const { create = false } = options;
-        const useZwspAnchor = this._shouldUseZwspImageRightEdgeTextAnchor(image);
         const preferredAnchorText = '';
         const caretAnchor = this._getImageCaretAnchorNode(image) || image;
         if (!caretAnchor || !caretAnchor.parentNode) {
@@ -201,22 +185,6 @@ export class CursorManager {
             return false;
         }
         return true;
-    }
-
-    _shouldUseZwspImageRightEdgeTextAnchor(image) {
-        if (!image || image.nodeType !== Node.ELEMENT_NODE || image.tagName !== 'IMG') {
-            return true;
-        }
-        let block = image.parentElement;
-        while (block && block !== this.editor && !this.domUtils.isBlockElement(block)) {
-            block = block.parentElement;
-        }
-        if (!block || block === this.editor) {
-            return true;
-        }
-        const leadingImage = this._getLeadingImageInBlock(block);
-        const trailingImage = this._getTrailingImageInBlock(block);
-        return !(leadingImage === image && trailingImage === image);
     }
 
     _isIgnorableTextNode(node) {
@@ -738,10 +706,6 @@ export class CursorManager {
         selection.removeAllRanges();
         selection.addRange(range);
         this._setInlineCodeLeftBoundaryState(code, 'outside-left');
-        this._debugInlineNav('set-outside-left', {
-            containerType: range.startContainer?.nodeType,
-            offset: range.startOffset
-        });
         return true;
     }
 
@@ -1644,11 +1608,6 @@ export class CursorManager {
             return false;
         }
         this._setInlineCodeLeftBoundaryState(code, 'inside-left');
-        this._debugInlineNav('set-inside-left', {
-            containerType: appliedRange.startContainer?.nodeType,
-            offset: appliedRange.startOffset,
-            mode: 'atomic-child-boundary'
-        });
         return true;
     }
 
@@ -7477,10 +7436,6 @@ export class CursorManager {
         range = selection.getRangeAt(0);
         node = range.startContainer;
         offset = range.startOffset;
-        this._debugInlineNav('forward-start', {
-            containerType: node?.nodeType,
-            offset
-        });
         const tryEnterInlineCodeFromOutsideLeft = () => {
             if (!selection || !selection.rangeCount || !selection.isCollapsed) {
                 return false;
@@ -8088,10 +8043,6 @@ export class CursorManager {
                         )
                     );
                     if (movingIntoDifferentInlineCode) {
-                        this._debugInlineNav('forward-cross-textnode-to-inline-outside-left', {
-                            fromContainerType: currentNode?.nodeType,
-                            fromOffset: currentOffset
-                        });
                         if (this._placeCursorBeforeInlineCodeElement(nextInlineCode, selection)) {
                             return true;
                         }
@@ -8501,7 +8452,6 @@ export class CursorManager {
             startedAtInlineCodeStart = (cursorInfo && cursorInfo.offset <= 0) ||
                 this._isRangeAtInlineCodeStart(range, codeElement);
             if (startedAtInlineCodeStart) {
-                this._debugInlineNav('backward-inside-left-to-outside-left', {});
                 if (this._placeCursorBeforeInlineCodeElement(codeElement, selection)) {
                     return true;
                 }

@@ -622,63 +622,6 @@ export class ListManager {
             this.editor.focus();
         }
     }
-
-    /**
-     * リストアイテム内のカーソル位置を復元
-     * @param {HTMLElement} listItem - リストアイテム
-     * @param {Text} originalTextNode - 元のテキストノード
-     * @param {number} originalOffset - 元のオフセット
-     */
-    restoreCursorInListItem(listItem, originalTextNode, originalOffset) {
-        const selection = window.getSelection();
-        if (!selection) return;
-
-        // リストアイテムが空または空白のみかチェック
-        const normalizedText = (listItem.textContent || '').replace(/[\u00A0\u200B\u2060]/g, '').trim();
-        const isEmpty = normalizedText === '';
-        
-        if (isEmpty) {
-            // 空のリストアイテムの場合、カーソル配置用のテキストノードを確保
-            // 既存の内容をまず削除
-            while (listItem.firstChild) {
-                listItem.removeChild(listItem.firstChild);
-            }
-            
-            // 空のテキストノードを作成
-            const emptyTextNode = document.createTextNode('');
-            listItem.appendChild(emptyTextNode);
-            
-            // 空のテキストノードの先頭にカーソルを設定
-            const range = document.createRange();
-            range.setStart(emptyTextNode, 0);
-            range.collapse(true);
-            selection.removeAllRanges();
-            selection.addRange(range);
-            return;
-        }
-
-        // 移動したリストアイテム内のテキストノードを見つける
-        const textNodes = this.domUtils.getTextNodes(listItem);
-        let targetNode = textNodes[0];
-        let targetOffset = 0;
-
-        // 同じテキストノードを見つけるか、最初のものを使用
-        for (let node of textNodes) {
-            if (node.textContent === originalTextNode.textContent) {
-                targetNode = node;
-                targetOffset = Math.min(originalOffset, node.textContent.length);
-                break;
-            }
-        }
-
-        if (targetNode) {
-            const range = document.createRange();
-            range.setStart(targetNode, targetOffset);
-            range.collapse(true);
-            selection.removeAllRanges();
-            selection.addRange(range);
-        }
-    }
 }
 
 // Made with Bob
