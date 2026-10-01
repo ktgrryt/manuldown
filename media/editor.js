@@ -9021,6 +9021,17 @@ const {
                 return true;
             }
 
+            // Enter at an image's right edge opens a new line right below the
+            // image, where typing there would also go.
+            if (range && range.collapsed && getImageAtCaretRightEdge(range)) {
+                e.preventDefault();
+                stateManager.saveState();
+                if (moveCaretToParagraphAfterImageRightEdgeForTextInput({ newLine: true })) {
+                    notifyChange();
+                    return true;
+                }
+            }
+
             // 見出し行頭でEnterされた場合は、空の見出しを作らず空段落を見出しの前に挿入
             if (range && range.collapsed) {
                 let heading = container.nodeType === Node.ELEMENT_NODE
@@ -9432,7 +9443,7 @@ const {
                     return true;
                 }
 
-                const imageAtRightEdge = getBackspaceTargetImageAtRightEdge(range);
+                const imageAtRightEdge = getImageAtCaretRightEdge(range);
                 if (imageAtRightEdge) {
                     e.preventDefault();
                     const activeSelection = selection || window.getSelection();
@@ -13479,6 +13490,11 @@ const {
                             return true;
                         }
                     }
+                    if (moveCursorDownBelowTrailingImageBlock(range, selection)) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        return true;
+                    }
                 }
             }
             // 空のチェックボックス行では、隣接する次行へ1ステップずつ移動する
@@ -14128,7 +14144,7 @@ const {
                         }
                     }
                     if (range.collapsed) {
-                        const imageAtRightEdge = getBackspaceTargetImageAtRightEdge(range);
+                        const imageAtRightEdge = getImageAtCaretRightEdge(range);
                         if (imageAtRightEdge) {
                             e.preventDefault();
                             if (selectImageNode(imageAtRightEdge)) {
@@ -14870,14 +14886,31 @@ const {
         return applySelectionRange(selection, edgeRange);
     }
 
-    function moveCaretToParagraphAfterImageRightEdgeForTextInput() {
+    // The image whose right edge the caret is at. A pasted image leaves the
+    // caret right after its block, between top-level blocks, where the browser
+    // would otherwise treat input as the start of the next line.
+    function getImageAtCaretRightEdge(range) {
+        const image = getBackspaceTargetImageAtRightEdge(range);
+        if (image || !range || !range.collapsed || range.startContainer !== editor) {
+            return image;
+        }
+        const imageBehind = cursorManager._getImageBehindFromCollapsedRange(range);
+        const imageBlock = imageBehind ? getClosestBlockElement(imageBehind) : null;
+        return imageBlock && isImageOnlyBlockElement(imageBlock) ? imageBehind : null;
+    }
+
+    // Text typed at an image's right edge goes on a line of its own right
+    // below the image: nothing sits beside a block-level image, and the line
+    // after it may hold unrelated text. An empty line there is reused unless
+    // `newLine` asks for a fresh one, as Enter does.
+    function moveCaretToParagraphAfterImageRightEdgeForTextInput(options = {}) {
         const selection = window.getSelection();
         if (!selection || !selection.rangeCount || !selection.isCollapsed) {
             return false;
         }
 
         const range = selection.getRangeAt(0);
-        const imageAtRightEdge = getBackspaceTargetImageAtRightEdge(range);
+        const imageAtRightEdge = getImageAtCaretRightEdge(range);
         if (!imageAtRightEdge) {
             return false;
         }
@@ -14888,14 +14921,8 @@ const {
         }
 
         let targetParagraph = imageBlock.nextElementSibling;
-        if (targetParagraph && targetParagraph.tagName === 'P' && !isImageOnlyBlockElement(targetParagraph)) {
-            const existingParagraphRange = createCollapsedRangeAtElementBoundary(targetParagraph, 'start');
-            if (existingParagraphRange) {
-                return applySelectionRange(selection, existingParagraphRange);
-            }
-        }
-
         const canReuseExistingEmptyParagraph =
+            options.newLine !== true &&
             targetParagraph &&
             targetParagraph.tagName === 'P' &&
             isEffectivelyEmptyBlock(targetParagraph);
@@ -14911,6 +14938,155 @@ const {
             return false;
         }
         return applySelectionRange(selection, targetRange);
+    }
+
+    // An empty line keeps a <br> (or ZWSP) placeholder. Left beside a
+    // block-level image inserted there, it shows as a blank line inside the
+    // image's paragraph, which ArrowDown skips, and it saves as a trailing hard
+    // break.
+    function removeEmptyLinePlaceholderAtRange(range) {
+        const block = getClosestBlockElement(range.startContainer);
+        if (!block || block.tagName === 'PRE' || !isEffectivelyEmptyBlock(block)) {
+            return;
+        }
+        Array.from(block.childNodes).forEach((child) => {
+            if (child.nodeType === Node.TEXT_NODE || child.nodeName === 'BR') {
+                child.remove();
+            }
+        });
+        range.setStart(block, 0);
+        range.collapse(true);
+    }
+
+    function isNodeBeforeCollapsedRange(node, range) {
+        const container = range.startContainer;
+        if (container.nodeType === Node.TEXT_NODE) {
+            return !!(container.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_PRECEDING);
+        }
+        const nodeAfterCaret = container.childNodes[range.startOffset] || null;
+        if (!nodeAfterCaret) {
+            return container.contains(node) ||
+                !!(container.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_PRECEDING);
+        }
+        if (nodeAfterCaret.contains(node)) {
+            return false;
+        }
+        return !!(nodeAfterCaret.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_PRECEDING);
+    }
+
+    // Moves everything after a line break of a paragraph into a new paragraph
+    // right after it, dropping the break. Inline elements the break sits in
+    // (bold, links, ...) continue in the new paragraph.
+    function splitParagraphAtLineBreak(paragraph, lineBreak) {
+        const tail = document.createElement(paragraph.tagName);
+        let node = lineBreak;
+        let continuedInline = null;
+        while (node !== paragraph) {
+            const parent = node.parentNode;
+            const target = parent === paragraph ? tail : parent.cloneNode(false);
+            if (continuedInline && continuedInline.childNodes.length > 0) {
+                target.appendChild(continuedInline);
+            }
+            while (node.nextSibling) {
+                target.appendChild(node.nextSibling);
+            }
+            continuedInline = target;
+            node = parent;
+        }
+        lineBreak.remove();
+        paragraph.parentNode.insertBefore(tail, paragraph.nextSibling);
+    }
+
+    // A pasted image is block-level, so one pasted into text gets a line of
+    // its own beside the caret's line: below it, or above it when the caret
+    // starts that line. Lines a paragraph continues with only a line break
+    // are split apart there, and a list item keeps the image inside it, below
+    // its own text, rather than as a sibling of the item.
+    function insertImageBlockBesideTextLine(imageBlock, block, range) {
+        if (block.tagName === 'LI') {
+            const isItemBlockChild = (node) => node.nodeType === Node.ELEMENT_NODE &&
+                (domUtils.isBlockElement(node) || ['UL', 'OL', 'TABLE'].includes(node.tagName));
+            let lineEnd = range.startContainer === block
+                ? block.childNodes[Math.max(0, range.startOffset - 1)] || null
+                : range.startContainer;
+            while (lineEnd && lineEnd.parentNode !== block) {
+                lineEnd = lineEnd.parentNode;
+            }
+            while (lineEnd && lineEnd.nextSibling && !isItemBlockChild(lineEnd.nextSibling)) {
+                lineEnd = lineEnd.nextSibling;
+            }
+            block.insertBefore(imageBlock, lineEnd ? lineEnd.nextSibling : block.firstChild);
+            return;
+        }
+        if (block.tagName !== 'P' && !/^H[1-6]$/.test(block.tagName)) {
+            block.parentNode.insertBefore(imageBlock, block.nextSibling);
+            return;
+        }
+
+        const lineBreaks = block.tagName === 'P' ? Array.from(block.querySelectorAll('br')) : [];
+        const lineStart = lineBreaks.filter((br) => isNodeBeforeCollapsedRange(br, range)).pop() || null;
+        const lineEnd = lineBreaks.find((br) => !isNodeBeforeCollapsedRange(br, range)) || null;
+        const lineTextBeforeCaret = domUtils.getTextNodes(block)
+            .filter((text) => !lineStart ||
+                !!(lineStart.compareDocumentPosition(text) & Node.DOCUMENT_POSITION_FOLLOWING))
+            .map((text) => {
+                if (text === range.startContainer) {
+                    return (text.textContent || '').slice(0, range.startOffset);
+                }
+                return isNodeBeforeCollapsedRange(text, range) ? (text.textContent || '') : '';
+            })
+            .join('');
+        const atLineStart = !hasMeaningfulTextContent(lineTextBeforeCaret);
+        const splitAt = atLineStart ? lineStart : lineEnd;
+        if (splitAt) {
+            splitParagraphAtLineBreak(block, splitAt);
+            block.parentNode.insertBefore(imageBlock, block.nextSibling);
+            return;
+        }
+        block.parentNode.insertBefore(imageBlock, atLineStart ? block : block.nextSibling);
+    }
+
+    // An image-only block at the end of the document has no line below it, so
+    // ArrowDown from either edge of the image opens one, as leaving a trailing
+    // code block or list does.
+    function moveCursorDownBelowTrailingImageBlock(range, selection) {
+        if (!range || !range.collapsed || !selection) {
+            return false;
+        }
+        let imageBlock = null;
+        if (range.startContainer === editor) {
+            // Right after a paste the caret sits between top-level blocks,
+            // just after the image block, rather than inside it.
+            const imageBehind = cursorManager._getImageBehindFromCollapsedRange(range);
+            imageBlock = imageBehind ? getClosestBlockElement(imageBehind) : null;
+        } else {
+            imageBlock = getClosestBlockElement(range.startContainer);
+        }
+        if (!imageBlock ||
+            !imageBlock.querySelector('img') ||
+            !isImageOnlyBlockElement(imageBlock) ||
+            imageBlock.closest('td, th, pre')) {
+            return false;
+        }
+        if (getNextNavigableNodeAfter(imageBlock)) {
+            return false;
+        }
+
+        // An image at the end of a list item or quote opens the line after
+        // that list or quote, as leaving them with ArrowDown does.
+        let topLevelBlock = imageBlock;
+        while (topLevelBlock.parentNode && topLevelBlock.parentNode !== editor) {
+            topLevelBlock = topLevelBlock.parentNode;
+        }
+        const paragraph = document.createElement('p');
+        editor.insertBefore(paragraph, topLevelBlock.nextSibling);
+        if (!placeCaretInEmptyParagraph(paragraph, selection)) {
+            paragraph.remove();
+            return false;
+        }
+        syncImageCaretEdgeIndicatorsNow(selection);
+        notifyChange();
+        return true;
     }
 
     function getCtrlKTargetImageAtLeftEdge(range) {
@@ -16769,6 +16945,19 @@ const {
         return !!(e && (e.isComposing || isComposing || keyCode === 229));
     }
 
+    // A key that types a character, or starts IME input, rather than a
+    // shortcut or a navigation key.
+    function isTextInputKeydown(e) {
+        if (!e || e.metaKey || e.ctrlKey || e.altKey) {
+            return false;
+        }
+        const key = typeof e.key === 'string' ? e.key : '';
+        if (key.length === 1) {
+            return true;
+        }
+        return getKeyboardEventKeyCode(e) === 229 && (key === 'Process' || key === 'Unidentified' || key === '');
+    }
+
     function handleKeydown(e) {
         const isPlainHorizontalArrow =
             (e.key === 'ArrowLeft' || e.key === 'ArrowRight') &&
@@ -16782,6 +16971,12 @@ const {
             e,
             isActiveComposition
         );
+        // Text typed at an image's right edge goes below the image. IME input
+        // has to move there before its composition starts: moving the caret
+        // under an active composition leaves the uncommitted text behind.
+        if (!isActiveComposition && isTextInputKeydown(e)) {
+            moveCaretToParagraphAfterImageRightEdgeForTextInput();
+        }
         if ((isImeInteractionKeydown(e) || isActiveComposition) && !shouldRoutePostCompositionArrow) {
             hideSlashCommandMenu();
             return;
@@ -23529,16 +23724,17 @@ const {
                         if (block && block !== editor && block.parentNode) {
                             const imageParagraph = document.createElement('p');
                             imageParagraph.appendChild(img);
-
-                            if (block.nextSibling) {
-                                block.parentNode.insertBefore(imageParagraph, block.nextSibling);
-                            } else {
-                                block.parentNode.appendChild(imageParagraph);
-                            }
+                            insertImageBlockBesideTextLine(imageParagraph, block, range);
 
                             getImageRightCaretTextAnchor(img, { create: true });
                             if (insertionSelection) {
-                                setCaretAfterNode(insertionSelection, imageParagraph);
+                                // Inside a list item or quote, a caret between the
+                                // blocks of that container is lost by ArrowDown, so
+                                // it stays at the image's right edge instead.
+                                if (imageParagraph.parentNode === editor ||
+                                    !setCaretToImageRightEdge(insertionSelection, img)) {
+                                    setCaretAfterNode(insertionSelection, imageParagraph);
+                                }
                             }
 
                             commitInsertedImageState(true);
@@ -23548,6 +23744,7 @@ const {
                     }
 
                     range.deleteContents();
+                    removeEmptyLinePlaceholderAtRange(range);
                     range.insertNode(img);
 
                     let insertedImageBlock = null;

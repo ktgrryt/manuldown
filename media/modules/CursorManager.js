@@ -7163,12 +7163,22 @@ export class CursorManager {
             }
         }
 
+        // A caret between top-level blocks trails the block before it. The
+        // editor itself must never be the anchor: its siblings are outside
+        // the document.
+        const getBlockBeforeTopLevelCaret = () => (range.startOffset > 0
+            ? getTopLevelBlockForNavigation(this.editor, range.startOffset)
+            : null);
+
         // 視覚的な移動が失敗した場合、構造的な移動を試みる
         if (!moved) {
             // 現在のブロック要素を特定
             let currentBlock = container;
             while (currentBlock && currentBlock !== this.editor && !this.domUtils.isBlockElement(currentBlock)) {
                 currentBlock = currentBlock.parentElement;
+            }
+            if (currentBlock === this.editor) {
+                currentBlock = getBlockBeforeTopLevelCaret();
             }
 
             // ブロックの下端付近にいるかチェック
@@ -7258,8 +7268,10 @@ export class CursorManager {
         }
 
         if (!moved) {
-            const anchor = getBlockFromContainer(container) ||
-                (container.nodeType === Node.ELEMENT_NODE ? container : container.parentElement);
+            const anchor = container === this.editor
+                ? getBlockBeforeTopLevelCaret()
+                : getBlockFromContainer(container) ||
+                    (container.nodeType === Node.ELEMENT_NODE ? container : container.parentElement);
             const nextElement = anchor ? this._getNextNavigableElementInDocument(anchor) : null;
             if (nextElement) {
                 if (nextElement.tagName === 'PRE' && this._selectCodeBlockLanguageLabel(nextElement, selection)) {

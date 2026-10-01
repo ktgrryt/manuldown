@@ -214,6 +214,34 @@ test('empty list items keep their place in the list', () => {
     );
 });
 
+test('a list item holding an image but no text keeps its marker', () => {
+    const provider = new MarkdownEditorProvider({});
+    const image = '<img alt="image" src="images/shot.png">';
+    const cases = [
+        [`<ul><li>a</li><li>${image}</li><li>c</li></ul>`, '- a\n- ![image](images/shot.png)\n- c\n'],
+        [`<ul><li><p>${image}</p></li></ul>`, '- ![image](images/shot.png)\n'],
+        [`<ol><li>a</li><li>${image}</li></ol>`, '1. a\n2. ![image](images/shot.png)\n'],
+        [`<ul><li><input type="checkbox">${image}</li></ul>`, '- [ ] ![image](images/shot.png)\n'],
+        [`<ul><li>${image}<ul><li>x</li></ul></li></ul>`, '- ![image](images/shot.png)\n  - x\n'],
+    ];
+
+    for (const [html, expected] of cases) {
+        assert.equal(provider.htmlToMarkdown(html, createTextDocument('- a\n- c\n')), expected, html);
+    }
+});
+
+test('an image pasted below the text of a list item stays in that item', () => {
+    const provider = new MarkdownEditorProvider({});
+    const image = '<img alt="image" src="images/shot.png">';
+    const markdown = provider.htmlToMarkdown(
+        `<ul><li>a<p>${image}</p></li><li>b</li></ul>`,
+        createTextDocument('- a\n- b\n')
+    );
+
+    assert.equal(markdown, '- a\n\n  ![image](images/shot.png)\n- b\n');
+    assert.equal(convert(markdown).markdown, markdown);
+});
+
 test('tabs inside fenced code blocks survive the round trip', () => {
     const sources = [
         '```make\nall:\n\tgo build ./...\n```\n',

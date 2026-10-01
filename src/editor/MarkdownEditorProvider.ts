@@ -194,6 +194,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             replacement: function (content: string, node: any, options: any) {
                 // Get direct text content (excluding nested lists)
                 let directText = '';
+                // An image has no text, but an item holding one is not empty.
+                let hasDirectImage = false;
                 for (let child of node.childNodes) {
                     if (child.nodeType === 3) { // TEXT_NODE
                         directText += child.textContent;
@@ -201,21 +203,26 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                         const tagName = child.tagName;
                         if (tagName !== 'UL' && tagName !== 'OL') {
                             directText += child.textContent;
+                            if (tagName === 'IMG' || child.querySelector('img')) {
+                                hasDirectImage = true;
+                            }
                         }
                     }
                 }
 
-                // Check if this is an empty list item with nested lists
-                const hasNestedList = node.querySelector('ul, ol') !== null;
+                // Check if this is an empty list item with nested lists.
+                // Turndown's DOM returns undefined, not null, when nothing matches.
+                const hasNestedList = !!node.querySelector('ul, ol');
                 // Check for &nbsp; which indicates a preserved empty list item
                 const hasNbsp = directText.includes('\u00A0');
-                const isEmptyWithNestedList = hasNestedList && directText.trim() === '';
-                const isPreservedEmptyWithNestedList = hasNestedList && hasNbsp && directText.replace(/\u00A0/g, '').trim() === '';
+                const isEmptyWithNestedList = hasNestedList && !hasDirectImage && directText.trim() === '';
+                const isPreservedEmptyWithNestedList = hasNestedList && !hasDirectImage && hasNbsp && directText.replace(/\u00A0/g, '').trim() === '';
                 const isIndependentIndentWrapper = !!(
                     node &&
                     typeof node.getAttribute === 'function' &&
                     node.getAttribute('data-mdw-indent-wrapper') === 'true' &&
                     hasNestedList &&
+                    !hasDirectImage &&
                     directText.replace(/\u00A0/g, '').trim() === ''
                 );
                 const getSourceIndent = (element: any): number | null => {
@@ -328,11 +335,11 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 };
 
                 // Check if this list item contains a checkbox (task list item)
-                const hasCheckbox = node.querySelector('input[type="checkbox"]') !== null;
+                const hasCheckbox = !!node.querySelector('input[type="checkbox"]');
 
                 // Check if this is a completely empty list item (no nested lists, just &nbsp; or empty)
                 // Checkbox items are not considered "completely empty" even if they have no text
-                const isCompletelyEmpty = !hasCheckbox && !hasNestedList && (directText.trim() === '' || directText.trim() === '\u00A0');
+                const isCompletelyEmpty = !hasCheckbox && !hasNestedList && !hasDirectImage && (directText.trim() === '' || directText.trim() === '\u00A0');
                 const isNestedListItem = node.parentNode && node.parentNode.parentNode && node.parentNode.parentNode.nodeName === 'LI';
 
                 if (isIndependentIndentWrapper) {
@@ -574,7 +581,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         if (lines.length === 0) {
             // A cell holding only an image (or an image link) has no text, but
             // its Markdown must still be written.
-            const hasImage = typeof node?.querySelector === 'function' && node.querySelector('img') !== null;
+            const hasImage = typeof node?.querySelector === 'function' && !!node.querySelector('img');
             if (!hasImage) {
                 return '';
             }
