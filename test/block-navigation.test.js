@@ -537,6 +537,108 @@ async function createTableExitManager(fixture, calls) {
 
 const TABLE = '<div class="md-table-wrapper"><table><tbody><tr><td>cell</td></tr></tbody></table></div>';
 
+const NAVIGATION_TABLE =
+    '<div class="md-table-wrapper">' +
+    '<div class="md-table-edge md-table-edge-left" data-table-edge="left">&nbsp;</div>' +
+    '<table><thead><tr><th><br></th><th><br></th></tr></thead>' +
+    '<tbody><tr><td><br></td><td><br></td></tr></tbody></table>' +
+    '<div class="md-table-edge md-table-edge-right" data-table-edge="right">&nbsp;</div></div>';
+
+async function createTableNavigationManager(fixture) {
+    const { TableManager } = await tableManagerModulePromise;
+    // Domino does not expose HTMLElement.dataset.
+    fixture.editor.querySelectorAll('.md-table-edge').forEach(edge => {
+        edge.dataset = { tableEdge: edge.getAttribute('data-table-edge') };
+    });
+    return new TableManager(fixture.editor, fixture.domUtils, null);
+}
+
+test('vertical keys pass through a table left edge without entering its cells', async () => {
+    for (const useCtrl of [false, true]) {
+        const fixture = await createFixture('<p><br></p>' + NAVIGATION_TABLE + '<p><br></p>');
+        try {
+            const manager = await createTableNavigationManager(fixture);
+            manager._isMac = true;
+            const { moveCursorDownFromEmptyBlock } = loadEditorFunctions(fixture, [
+                'moveCursorDownFromEmptyBlock',
+                'isEffectivelyEmptyBlock',
+                'getNextElementSibling',
+                'isNavigationExcludedElement',
+                'getPreferredFirstTextNodeForElement',
+            ], { getSingleImageFromImageOnlyBlock: () => null });
+            const above = fixture.editor.firstElementChild;
+            const below = fixture.editor.lastElementChild;
+            const leftEdge = fixture.editor.querySelector('.md-table-edge-left');
+            const originalHTML = fixture.editor.innerHTML;
+            const press = (direction) => {
+                let prevented = false;
+                const event = {
+                    key: useCtrl ? (direction === 'down' ? 'n' : 'p') : (direction === 'down' ? 'ArrowDown' : 'ArrowUp'),
+                    ctrlKey: useCtrl,
+                    preventDefault() { prevented = true; },
+                };
+                const handled = useCtrl ? manager.handleCtrlNavKeydown(event) : manager.handleArrowKeydown(event);
+                assert.equal(handled, true);
+                assert.equal(prevented, true);
+            };
+
+            fixture.placeCaret(above, 0);
+            assert.equal(moveCursorDownFromEmptyBlock(fixture.selection.getRangeAt(0), fixture.selection), true);
+            assert.equal(leftEdge.contains(fixture.selection.getRangeAt(0).startContainer), true);
+
+            press('down');
+            assert.equal(fixture.selection.getRangeAt(0).startContainer === below, true);
+            assert.equal(fixture.selection.getRangeAt(0).startOffset, 0);
+
+            press('up');
+            assert.equal(leftEdge.contains(fixture.selection.getRangeAt(0).startContainer), true);
+            press('up');
+            assert.equal(fixture.selection.getRangeAt(0).startContainer === above, true);
+            assert.equal(fixture.editor.innerHTML, originalHTML);
+        } finally {
+            fixture.restoreGlobals();
+        }
+    }
+});
+
+test('ArrowDown from the left edge of a final table creates a following empty line', async () => {
+    const fixture = await createFixture(NAVIGATION_TABLE);
+    try {
+        const manager = await createTableNavigationManager(fixture);
+        const wrapper = fixture.editor.firstElementChild;
+        fixture.placeCaret(wrapper.querySelector('.md-table-edge-left').firstChild, 0);
+
+        assert.equal(manager.handleArrowKeydown({ key: 'ArrowDown', preventDefault() {} }), true);
+
+        const paragraph = wrapper.nextSibling;
+        assert.equal(paragraph.tagName, 'P');
+        assert.equal(paragraph.innerHTML, '<br>');
+        assert.equal(fixture.selection.getRangeAt(0).startContainer === paragraph, true);
+    } finally {
+        fixture.restoreGlobals();
+    }
+});
+
+test('ArrowRight and Tab still enter the first cell from a table left edge', async () => {
+    const fixture = await createFixture(NAVIGATION_TABLE);
+    try {
+        const manager = await createTableNavigationManager(fixture);
+        const leftEdge = fixture.editor.querySelector('.md-table-edge-left');
+        const firstCell = fixture.editor.querySelector('th');
+        for (const key of ['ArrowRight', 'Tab']) {
+            fixture.placeCaret(leftEdge.firstChild, 0);
+            const event = { key, preventDefault() {} };
+
+            assert.equal(key === 'Tab' ? manager.handleTabKeydown(event) : manager.handleArrowKeydown(event), true);
+
+            assert.equal(fixture.selection.getRangeAt(0).startContainer === firstCell, true);
+            assert.equal(fixture.selection.getRangeAt(0).startOffset, 0);
+        }
+    } finally {
+        fixture.restoreGlobals();
+    }
+});
+
 test('leaving a table upward lands where leaving a paragraph does', async () => {
     for (const [above, expected] of [['<p>above</p>', 'lastLineStart'], [CODE_BLOCK, 'codeLastLineEnd']]) {
         const fixture = await createFixture(above + TABLE);

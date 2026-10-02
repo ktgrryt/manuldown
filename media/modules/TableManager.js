@@ -2596,7 +2596,7 @@ export class TableManager {
         const isRight = edge.dataset.tableEdge === 'right';
 
         if (isLeft) {
-            if (direction === 'right' || direction === 'next' || direction === 'down') {
+            if (direction === 'right' || direction === 'next') {
                 const firstCell = table.querySelector('td, th');
                 if (firstCell) {
                     if (direction === 'right') {
@@ -2613,6 +2613,11 @@ export class TableManager {
             }
             if (direction === 'up') {
                 this._moveCursorBeforeWrapper(wrapper, true);
+                return true;
+            }
+            if (direction === 'down') {
+                // Vertical navigation passes the table as a single block.
+                this._moveCursorAfterWrapper(wrapper, 'down');
                 return true;
             }
         }
