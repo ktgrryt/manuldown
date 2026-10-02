@@ -3,7 +3,7 @@
   "displayName": "ManulDown",
   "description": "WYSIWYG editor for Markdown files in VSCode",
   "icon": "images/icon.png",
-  "version": "2.1.1",
+  "version": "2.1.2",
   "publisher": "ktgrryt",
   "license": "MIT",
   "repository": {
@@ -326,7 +326,10 @@
     "watch": "npm run bundle:webview && tsc -watch -p ./",
     "pretest": "npm run compile",
     "test": "node --test test/*.test.js",
-    "lint": "eslint src media"
+    "lint": "eslint src media",
+
+    "package:vsix": "npx --yes @vscode/vsce package --githubBranch main",
+    "publish:vsce": "npx --yes @vscode/vsce publish --githubBranch main"
   },
   "devDependencies": {
     "@types/node": "20.x",
