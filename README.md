@@ -53,6 +53,7 @@ Type `/` in the editor to open the slash command menu. You can narrow results by
 | Command | Action |
 | --- | --- |
 | `/link` | Open the inline link field and insert a URL or workspace link |
+| `/toc` | Insert a nested list of links to the current document's headings |
 | `/table` | Insert a 2x2 table |
 | `/quote` | Convert the current block into a quote (or insert an empty quote block if conversion is not possible) |
 | `/code` | Insert a code block and focus the language label for editing |
@@ -69,7 +70,7 @@ For example, ~/.manuldown/meeting-minutes.md can be inserted with /meeting-minut
 Notes for custom command names:
 
 - Command IDs are normalized from file names (`spaces` -> `-`, leading `/` removed, lowercase).
-- Built-in command IDs (`link`, `table`, `quote`, `code`, `checkbox`) are reserved.
+- Built-in command IDs (`link`, `toc`, `table`, `quote`, `code`, `checkbox`) are reserved.
 - Duplicate normalized command IDs are ignored.
 
 Menu controls:
@@ -82,6 +83,7 @@ Menu controls:
 Notes:
 
 - Slash commands are available in normal text input context. The menu does not appear inside code blocks, inside table cells, or during IME composition.
+- `/toc` inserts a snapshot of the headings at the current cursor position. Run it again to insert an updated table of contents after changing headings. Documents without headings produce no list.
 
 ### Keyboard Shortcuts
 

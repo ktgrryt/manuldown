@@ -64,3 +64,36 @@ export function getMarkdownHeadingLinkSuggestions(headings, value = '', limit = 
         }];
     }).slice(0, limit);
 }
+
+export function createMarkdownTableOfContents(headings, ownerDocument) {
+    const items = Array.from(headings || []);
+    assignStableHeadingIds(items);
+    const list = ownerDocument.createElement('ul');
+    const ancestors = [];
+    for (const heading of items) {
+        if (!/^H[1-6]$/.test(heading?.tagName || '')) continue;
+        const text = String(heading.textContent || '').replace(/\s+/g, ' ').trim();
+        if (!text) continue;
+        const level = Number(heading.tagName.slice(1));
+        while (ancestors.length && ancestors[ancestors.length - 1].level >= level) {
+            ancestors.pop();
+        }
+        let parentList = list;
+        const parent = ancestors[ancestors.length - 1];
+        if (parent) {
+            if (!parent.list) {
+                parent.list = ownerDocument.createElement('ul');
+                parent.item.appendChild(parent.list);
+            }
+            parentList = parent.list;
+        }
+        const item = ownerDocument.createElement('li');
+        const link = ownerDocument.createElement('a');
+        link.setAttribute('href', `#${encodeURIComponent(heading.id)}`);
+        link.textContent = text;
+        item.appendChild(link);
+        parentList.appendChild(item);
+        ancestors.push({ level, item, list: null });
+    }
+    return list.childNodes.length ? list : null;
+}

@@ -81,6 +81,25 @@ function visibleText(html) {
     return html.replace(/<[^>]*>/g, '');
 }
 
+test('a generated table of contents saves as nested Markdown links and round trips', async () => {
+    const fs = require('node:fs');
+    const domino = require('@mixmark-io/domino');
+    const source = fs.readFileSync(path.join(__dirname, '..', 'media', 'modules', 'MarkdownHeadingSlug.js'), 'utf8');
+    const { createMarkdownTableOfContents } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+    const document = domino.createWindow('<h1>Plan</h1><h2>TODO項目</h2><h3>Details [draft]</h3><h2>TODO項目</h2>').document;
+    const toc = createMarkdownTableOfContents(document.querySelectorAll('h1, h2, h3'), document);
+    const provider = new MarkdownEditorProvider({});
+    const markdown = provider.htmlToMarkdown(toc.outerHTML, createTextDocument('- existing\n'));
+    assert.equal(markdown, [
+        '- [Plan](#plan)',
+        '  - [TODO項目](#todo%E9%A0%85%E7%9B%AE)',
+        '    - [Details \\[draft\\]](#details-draft)',
+        '  - [TODO項目](#todo%E9%A0%85%E7%9B%AE-1)',
+        ''
+    ].join('\n'));
+    assert.equal(convert(markdown).markdown, markdown);
+});
+
 test('list items that start with punctuation-led emphasis keep the emphasis', () => {
     const cases = [
         { source: '- **【必須】** 設定する\n' },

@@ -40,7 +40,8 @@ const {
 } = await import(`./modules/CursorManager.js${new URL(import.meta.url).search}`);
 const {
     assignStableHeadingIds,
-    getMarkdownHeadingLinkSuggestions
+    getMarkdownHeadingLinkSuggestions,
+    createMarkdownTableOfContents
 } = await import(`./modules/MarkdownHeadingSlug.js${new URL(import.meta.url).search}`);
 
 (function () {
@@ -4859,6 +4860,44 @@ const {
         });
     }
 
+    function insertSlashToc() {
+        if (isSelectionInListItem()) return false;
+        const selection = window.getSelection();
+        if (!selection || selection.rangeCount !== 1) return false;
+        const range = selection.getRangeAt(0);
+        if (!isEditorRange(range)) return false;
+        const headingSelector = 'h1, h2, h3, h4, h5, h6';
+        if (!Array.from(editor.querySelectorAll(headingSelector)).some(
+            (heading) => (heading.textContent || '').trim()
+        )) {
+            notifyChange();
+            return false;
+        }
+
+        stateManager.saveState();
+        const toc = document.createElement('ul');
+        tableManager._insertNodeAsBlock(range, toc);
+        // Block insertion can split or remove the paragraph/heading containing
+        // /toc. Build the links from the resulting document so every ID matches.
+        const contents = createMarkdownTableOfContents(
+            editor.querySelectorAll(headingSelector), document
+        );
+        if (contents) {
+            while (contents.firstChild) toc.appendChild(contents.firstChild);
+        }
+        let after = toc.nextSibling;
+        if (!after || after.nodeType !== Node.ELEMENT_NODE || after.tagName !== 'P') {
+            after = document.createElement('p');
+            after.appendChild(document.createElement('br'));
+            toc.parentNode.insertBefore(after, toc.nextSibling);
+        }
+        if (!contents) toc.remove();
+        placeCollapsedCaret(selection, after, 0);
+        editor.focus();
+        notifyChange();
+        return !!contents;
+    }
+
     function insertEmptyQuote() {
         const selection = window.getSelection();
         if (!selection || !selection.rangeCount) return;
@@ -5631,13 +5670,14 @@ const {
                 requestWorkspaceLink();
             }
         },
+        { id: 'toc', source: 'builtin', description: 'Insert a table of contents', action: insertSlashToc },
         { id: 'table', source: 'builtin', description: 'Insert a 2x2 table', action: insertSlashTable },
         { id: 'quote', source: 'builtin', description: 'Insert a quote block', action: insertSlashQuote },
         { id: 'code', source: 'builtin', description: 'Insert a code block', action: insertSlashCodeBlock },
         { id: 'checkbox', source: 'builtin', description: 'Create a checklist item', action: insertSlashCheckbox }
     ];
     const builtInSlashCommandIdSet = new Set(builtInSlashCommands.map((cmd) => cmd.id.toLowerCase()));
-    const listRestrictedSlashCommandIds = new Set(['table', 'quote', 'code']);
+    const listRestrictedSlashCommandIds = new Set(['table', 'quote', 'code', 'toc']);
 
     function getAllSlashCommands() {
         return builtInSlashCommands.concat(customSlashCommands);
