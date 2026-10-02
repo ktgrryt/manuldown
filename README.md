@@ -1,3 +1,5 @@
+[English](./README.md) / [日本語](./README.ja.md)
+
 # ManulDown for VSCode
 
 ManulDown is a VSCode extension that lets you edit Markdown files in a WYSIWYG editor.
