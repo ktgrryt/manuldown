@@ -115,6 +115,46 @@ test('readable heading rendering keeps reserved escapes and malformed fragments 
     }
 });
 
+test('ATX headings keep numbered titles without escaping their periods', () => {
+    for (let level = 1; level <= 6; level++) {
+        for (const title of ['1. 概要', '10. セットアップ', '1.2.3 詳細']) {
+            const source = `${'#'.repeat(level)} ${title}\n`;
+            const { html, markdown } = convert(source);
+            assert.match(html, new RegExp(`<h${level}>`));
+            assert.equal(markdown, source);
+            assert.equal(convert(markdown).markdown, source);
+        }
+    }
+    assert.equal(convert('## 1\\. 概要\n').markdown, '## 1. 概要\n');
+});
+
+test('numbered text inside heading formatting also keeps its periods', () => {
+    for (const source of [
+        '## **1. 概要**\n',
+        '## *2. 詳細*\n',
+        '## [3. ガイド](guide.md)\n',
+        '## 概要 **強調**1. 詳細\n',
+    ]) {
+        assert.equal(convert(source).markdown, source);
+        assert.equal(convert(convert(source).markdown).markdown, source);
+    }
+});
+
+test('heading number normalization preserves code and link targets', () => {
+    const source = '## 1. `1\\. literal` and [2. ガイド](https://example.com/1.txt)\n';
+    assert.equal(convert(source).markdown, source);
+    assert.equal(convert(convert(source).markdown).markdown, source);
+});
+
+test('ordered-list-like paragraphs and Setext headings keep required escaping', () => {
+    for (const source of ['1\\. 本文\n', '1\\. 見出し\n---\n']) {
+        const { html, markdown } = convert(source);
+        assert.doesNotMatch(html, /<ol/);
+        assert.equal(markdown, source);
+        assert.equal(convert(markdown).markdown, source);
+    }
+});
+
 test('list items that start with punctuation-led emphasis keep the emphasis', () => {
     const cases = [
         { source: '- **【必須】** 設定する\n' },

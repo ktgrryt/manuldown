@@ -46,6 +46,8 @@ Select text and use the Link button, `/link`, `Cmd+K`, or `Ctrl+K` to open the s
 
 Pasting an absolute local path directly over selected text also creates a relative link. Invalid, missing, symbolic-link, remote, and out-of-workspace targets remain an ordinary plain-text paste.
 
+Place the caret inside a link and press `Cmd+Enter` on macOS or `Ctrl+Enter` on Windows/Linux to open its URL, workspace file, or heading in the current document. `Cmd+Click` / `Ctrl+Click` also opens links.
+
 ### Slash Commands
 
 Type `/` in the editor to open the slash command menu. You can narrow results by typing a prefix such as `/ta`.
@@ -100,6 +102,7 @@ Notes:
 | Action | Mac | Windows / Linux |
 | --- | --- | --- |
 | Insert link | `Cmd+K` | `Ctrl+K` |
+| Open link at cursor | `Cmd+Enter` | `Ctrl+Enter` |
 | Undo | `Cmd+Z` | `Ctrl+Z` |
 | Redo | `Cmd+Shift+Z` | `Ctrl+Shift+Z` |
 | Find | `Cmd+F` | `Ctrl+F` |

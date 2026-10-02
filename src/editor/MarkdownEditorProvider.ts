@@ -148,6 +148,35 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             }
         });
 
+        this.turndownService.addRule('atxHeading', {
+            filter: (node: any) => {
+                if (!/^H[1-6]$/.test(node.nodeName)) {
+                    return false;
+                }
+                // Turndown escapes each text node as though it could start a
+                // list. An ATX heading's # prefix already prevents that. Protect
+                // only these periods before escaping; code and URLs stay intact.
+                const marker = this.createPlaceholderNamespace(node.outerHTML, 'HEADING_NUMBER_DOT');
+                const protectNumberDots = (parent: any): void => {
+                    for (const child of parent.childNodes) {
+                        if (child.nodeType === 3) {
+                            child.nodeValue = child.nodeValue.replace(/^(\d+)\. /, `$1${marker} `);
+                        } else if (child.nodeType === 1 && child.nodeName !== 'CODE') {
+                            protectNumberDots(child);
+                        }
+                    }
+                };
+                protectNumberDots(node);
+                node.mdwHeadingNumberDotMarker = marker;
+                return true;
+            },
+            replacement: (content: string, node: any) => {
+                const prefix = '#'.repeat(Number(node.nodeName.slice(1)));
+                const headingContent = content.split(node.mdwHeadingNumberDotMarker).join('.');
+                return `\n\n${prefix} ${headingContent}\n\n`;
+            }
+        });
+
         this.turndownService.addRule('setextHeading', {
             filter: function (node: any) {
                 return !!(

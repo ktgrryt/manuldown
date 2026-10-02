@@ -2644,6 +2644,10 @@ export class TableManager {
                 this._moveCursorAfterWrapper(wrapper);
                 return true;
             }
+            if (direction === 'up') {
+                this._moveCursorBeforeWrapper(wrapper, true);
+                return true;
+            }
             if (direction === 'down') {
                 this._moveCursorAfterWrapper(wrapper, 'down');
                 return true;

@@ -79,6 +79,11 @@
         "category": "ManulDown"
       },
       {
+        "command": "manulDown.openLinkAtCursor",
+        "title": "Open Link at Cursor",
+        "category": "ManulDown"
+      },
+      {
         "command": "manulDown.undo",
         "title": "Undo in ManulDown Editor",
         "category": "ManulDown"
@@ -162,6 +167,12 @@
         "key": "ctrl+k",
         "mac": "cmd+k",
         "when": "activeCustomEditorId == 'manulDown.editor'"
+      },
+      {
+        "command": "manulDown.openLinkAtCursor",
+        "key": "ctrl+enter",
+        "mac": "cmd+enter",
+        "when": "activeCustomEditorId == 'manulDown.editor' && webviewFocus"
       },
       {
         "command": "manulDown.undo",

@@ -131,6 +131,17 @@ export function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(insertWorkspaceLinkCommand);
 
+    const openLinkAtCursorCommand = vscode.commands.registerCommand(
+        'manulDown.openLinkAtCursor',
+        () => {
+            provider.postMessageToActiveEditor({
+                type: 'openLinkAtCursor',
+            });
+        }
+    );
+
+    context.subscriptions.push(openLinkAtCursorCommand);
+
     const historyCommands = [
         { id: 'manulDown.undo', direction: 'undo' },
         { id: 'manulDown.redo', direction: 'redo' },
