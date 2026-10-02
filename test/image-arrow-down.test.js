@@ -221,6 +221,7 @@ function extractEditorFunction(name) {
 function loadMoveCursorDownBelowTrailingImageBlock(fixture) {
     const sources = [
         'moveCursorDownBelowTrailingImageBlock',
+        'isCaretOnTrailingImageLine',
         'getClosestBlockElement',
         'hasMeaningfulTextContent',
         'isImageOnlyBlockElement',
@@ -320,6 +321,25 @@ test('ArrowDown from either edge of a trailing image opens a line below it', asy
         } finally {
             fixture.restoreGlobals();
         }
+    }
+});
+
+test('a trailing image after text is its own last line', async () => {
+    const fixture = await createFixture('<p>abc</p><p>text <img src="image.png"></p>');
+    try {
+        const { moveDown } = loadMoveCursorDownBelowTrailingImageBlock(fixture);
+        const imageBlock = fixture.editor.children[1];
+        const image = imageBlock.querySelector('img');
+
+        // The text line above the image moves to the image, not past it.
+        assert.equal(moveDown(fixture.placeCaret(imageBlock.firstChild, 2)), false);
+        assert.equal(fixture.editor.children.length, 2);
+
+        assert.equal(moveDown(fixture.placeCaret(imageBlock, childIndex(image))), true);
+
+        assertCaretInNewParagraphAfter(fixture, imageBlock);
+    } finally {
+        fixture.restoreGlobals();
     }
 });
 
