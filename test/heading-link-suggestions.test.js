@@ -31,7 +31,7 @@ test('opening link insertion lists current-document headings with their Markdown
         { label: '### 詳細', kind: 'heading' }
     ]);
     assert.equal(items[1].linkLabel, 'TODO項目');
-    assert.equal(decodeURIComponent(items[1].path), '#todo項目');
+    assert.equal(items[1].path, '#todo項目');
     assert.equal(f.editor.querySelector('h2').id, 'todo項目');
 });
 
@@ -49,7 +49,7 @@ test('duplicate and formatted headings use the same IDs as fragment navigation',
     const { getMarkdownHeadingLinkSuggestions, assignStableHeadingIds } = await slugModule;
     const f = fixture('<h2><strong>TODO項目</strong></h2><h2>TODO項目</h2><h3>TODO項目-1</h3><h4>!!!</h4>');
     const items = getMarkdownHeadingLinkSuggestions(f.headings());
-    assert.deepEqual(items.map(item => decodeURIComponent(item.path)), ['#todo項目', '#todo項目-1', '#todo項目-1-1', '#heading-3']);
+    assert.deepEqual(items.map(item => item.path), ['#todo項目', '#todo項目-1', '#todo項目-1-1', '#heading-3']);
     assignStableHeadingIds(f.headings());
     items.forEach(item => assert.ok(f.editor.querySelectorAll('[id]').some(heading => heading.id === decodeURIComponent(item.path.slice(1)))));
 });
@@ -131,4 +131,21 @@ test('workspace file candidates still use the host-owned candidate ID protocol',
     assert.equal(f.begin('suggestion', './TODO.md', { kind: 'workspace', searchRequestId: 'workspace-link-suggest-1-1', candidateId: 'candidate-2' }), true);
     assert.deepEqual(f.responses, []);
     assert.deepEqual(f.messages, [{ type: 'resolveWorkspaceLinkSuggestion', requestId: 'workspace-link-1-1', searchRequestId: 'workspace-link-suggest-1-1', candidateId: 'candidate-2' }]);
+});
+
+test('readable and previously encoded Japanese fragments navigate to the correct duplicate heading', async () => {
+    const { assignStableHeadingIds } = await slugModule;
+    const f = fixture('<h2>6 テーブル</h2><h2>6 テーブル</h2>');
+    const scrolled = [];
+    Array.from(f.headings()).forEach((heading, index) => {
+        heading.scrollIntoView = () => scrolled.push(index);
+    });
+    const revealLinkAnchor = new Function('document', 'editor', 'assignStableHeadingIds',
+        `${extractFunction('revealLinkAnchor')}\nreturn revealLinkAnchor;`
+    )(f.editor.ownerDocument, f.editor, assignStableHeadingIds);
+    for (const fragment of ['#6-テーブル', '#6-%E3%83%86%E3%83%BC%E3%83%96%E3%83%AB']) {
+        assert.equal(revealLinkAnchor(fragment), true);
+        assert.equal(revealLinkAnchor(`${fragment}-1`), true);
+    }
+    assert.deepEqual(scrolled, [0, 1, 0, 1]);
 });

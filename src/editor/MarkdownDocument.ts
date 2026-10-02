@@ -81,6 +81,23 @@ marked.use({
             renderer(token) {
                 const linkToken = token as Tokens.Link;
                 if (!isReferenceStyleLink(linkToken.raw)) {
+                    // Keep local heading fragments readable in the link field,
+                    // including links inserted by earlier encoded versions.
+                    if (linkToken.href.startsWith('#')) {
+                        let fragment = linkToken.href;
+                        try {
+                            fragment = decodeURIComponent(fragment);
+                        } catch {
+                            return false;
+                        }
+                        if (/[^\x00-\x7F]/.test(fragment) && /^#[\p{L}\p{M}\p{N}_-]+$/u.test(fragment)) {
+                            const content = this.parser.parseInline(linkToken.tokens);
+                            const title = linkToken.title
+                                ? ` title="${escapeAttribute(linkToken.title)}"`
+                                : '';
+                            return `<a href="${escapeAttribute(fragment)}"${title}>${content}</a>`;
+                        }
+                    }
                     return false;
                 }
                 const content = this.parser.parseInline(linkToken.tokens);

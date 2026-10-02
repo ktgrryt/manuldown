@@ -58,7 +58,7 @@ export function getMarkdownHeadingLinkSuggestions(headings, value = '', limit = 
         return [{
             kind: 'heading',
             headingId: heading.id,
-            path: `#${encodeURIComponent(heading.id)}`,
+            path: `#${heading.id}`,
             label: `${'#'.repeat(Number(heading.tagName.slice(1)))} ${text || `Heading ${index + 1}`}`,
             linkLabel: text || `Heading ${index + 1}`
         }];
@@ -89,7 +89,7 @@ export function createMarkdownTableOfContents(headings, ownerDocument) {
         }
         const item = ownerDocument.createElement('li');
         const link = ownerDocument.createElement('a');
-        link.setAttribute('href', `#${encodeURIComponent(heading.id)}`);
+        link.setAttribute('href', `#${heading.id}`);
         link.textContent = text;
         item.appendChild(link);
         parentList.appendChild(item);

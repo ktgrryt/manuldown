@@ -92,12 +92,27 @@ test('a generated table of contents saves as nested Markdown links and round tri
     const markdown = provider.htmlToMarkdown(toc.outerHTML, createTextDocument('- existing\n'));
     assert.equal(markdown, [
         '- [Plan](#plan)',
-        '  - [TODO項目](#todo%E9%A0%85%E7%9B%AE)',
+        '  - [TODO項目](#todo項目)',
         '    - [Details \\[draft\\]](#details-draft)',
-        '  - [TODO項目](#todo%E9%A0%85%E7%9B%AE-1)',
+        '  - [TODO項目](#todo項目-1)',
         ''
     ].join('\n'));
     assert.equal(convert(markdown).markdown, markdown);
+});
+
+test('Japanese heading links remain readable on reload, including previously encoded links', () => {
+    for (const fragment of ['#6-テーブル', '#6-%E3%83%86%E3%83%BC%E3%83%96%E3%83%AB']) {
+        const { html, markdown } = convert(`[テーブル](${fragment} "表へ移動")\n\n## 6 テーブル\n`);
+        assert.match(html, /href="#6-テーブル" title="表へ移動"/);
+        assert.match(markdown, /\[テーブル\]\(#6-テーブル "表へ移動"\)/);
+        assert.equal(convert(markdown).markdown, markdown);
+    }
+});
+
+test('readable heading rendering keeps reserved escapes and malformed fragments intact', () => {
+    for (const fragment of ['#a%23b', '#a%2Fb', '#a%22b', '#a%3Cb', '#a%20b', '#a%62', '#bad%E3']) {
+        assert.equal(convert(`[link](${fragment})\n`).markdown, `[link](${fragment})\n`);
+    }
 });
 
 test('list items that start with punctuation-led emphasis keep the emphasis', () => {
