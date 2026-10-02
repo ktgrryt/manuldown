@@ -409,6 +409,18 @@ export class DOMUtils {
         // エディタの内容をクローン
         const clone = this.editor.cloneNode(true);
 
+        // Code-block gaps are temporary caret positions. Saving or comparing
+        // history must not turn an untouched gap into a Markdown blank line.
+        clone.querySelectorAll('[data-mdw-code-gap="true"]').forEach(paragraph => {
+            const hasText = (paragraph.textContent || '').replace(/[\u200B\u2060\uFEFF]/g, '') !== '';
+            const hasContent = !!paragraph.querySelector('img,hr,table,pre,ul,ol,input,blockquote');
+            if (!hasText && !hasContent) {
+                paragraph.remove();
+            } else {
+                paragraph.removeAttribute('data-mdw-code-gap');
+            }
+        });
+
         // コードブロックツールバーを削除
         const toolbars = clone.querySelectorAll('.code-block-toolbar');
         toolbars.forEach(toolbar => {

@@ -12,6 +12,7 @@ function importModule(relativePath) {
 const domUtilsModulePromise = importModule('media/modules/DOMUtils.js');
 const cursorManagerModulePromise = importModule('media/modules/CursorManager.js');
 const tableManagerModulePromise = importModule('media/modules/TableManager.js');
+const codeBlockGapManagerModulePromise = importModule('media/modules/CodeBlockGapManager.js');
 const editorSource = fs.readFileSync(
     path.join(__dirname, '..', 'media', 'editor.js'),
     'utf8'
@@ -186,11 +187,16 @@ async function createFixture(editorHtml) {
     const { CursorManager } = await cursorManagerModulePromise;
     const domUtils = new DOMUtils(editor);
     const cursorManager = new CursorManager(editor, domUtils);
+    const { CodeBlockGapManager } = await codeBlockGapManagerModulePromise;
+    const codeBlockGapManager = new CodeBlockGapManager(editor);
+    cursorManager.moveToCodeBlockGap = (pre, direction, selection) =>
+        codeBlockGapManager.moveToGap(pre, direction, selection);
 
     return {
         editor,
         domUtils,
         cursorManager,
+        codeBlockGapManager,
         selection,
         placeCaret(container, offset) {
             const range = new TestRange();
@@ -229,6 +235,7 @@ function loadEditorFunctions(fixture, names, stubs = {}) {
         'domUtils',
         'cursorManager',
         'notifyChange',
+        'codeBlockGapManager',
         ...stubNames,
         `${sources.join('\n\n')}\nreturn { ${names.join(', ')} };`
     );
@@ -237,6 +244,7 @@ function loadEditorFunctions(fixture, names, stubs = {}) {
         fixture.domUtils,
         fixture.cursorManager,
         () => {},
+        fixture.codeBlockGapManager,
         ...stubNames.map(name => stubs[name])
     );
 }
@@ -767,6 +775,264 @@ test('entering a block from above stops at an image on its first line', async ()
         assert.equal(range.startContainer === item, true);
         assert.equal(range.startOffset, 0);
     } finally {
+        fixture.restoreGlobals();
+    }
+});
+
+function loadCodeBlockDownNavigation(fixture) {
+    return loadEditorFunctions(fixture, [
+        'exitEmptyCodeBlockDownFromPre',
+        'getNextNavigableNodeAfter',
+        'getNextNavigableSibling',
+        'isNavigationExcludedElement',
+        'isEffectivelyEmptyBlock',
+        'placeCaretInEmptyParagraph',
+        'placeCollapsedCaret',
+        'getCodeBlockNavigationContext',
+        'getFollowingEmptyParagraphAfterCodeBlock',
+        'isCodeBlockDownExitPosition',
+        'getCodeBlockLastNavigableLineIndex',
+        'isCodeNavigationWhitespace',
+        'moveCodeBlockDownToFollowingEmptyParagraph',
+    ], {
+        getSelectedCodeBlockLanguageLabel: () => null,
+        getCodeBlockCursorOffset: (code, range) => fixture.cursorManager.getCodeBlockCursorOffset(code, range),
+        getPreferredFirstTextNodeForElement: element => fixture.domUtils.getFirstTextNode(element),
+        selectCodeBlockLanguageLabel: () => true,
+    });
+}
+
+const SIMPLE_CODE = '<pre><code>one\ntwo\n</code></pre>';
+const READ_ONLY = '<pre class="mdw-opaque-source" contenteditable="false"><code>&lt;div&gt;HTML&lt;/div&gt;</code></pre>';
+
+// Check both entry points: editor.js's primary exit and CursorManager's fallback.
+for (const route of ['editor', 'cursor']) {
+    test(`${route}: only document edges, code/code and code/read-only boundaries get temporary paragraphs`, async () => {
+        const cases = [
+            [SIMPLE_CODE, true],
+            [SIMPLE_CODE + SIMPLE_CODE, true],
+            [SIMPLE_CODE + READ_ONLY, true],
+            [SIMPLE_CODE + READ_ONLY + '<p><br></p>', true],
+            [SIMPLE_CODE + '<p>after</p>', false],
+            [SIMPLE_CODE + '<h2>after</h2>', false],
+            [SIMPLE_CODE + '<hr>', false],
+            [SIMPLE_CODE + '<p><img src="image.png"></p>', false],
+            [SIMPLE_CODE + '<div class="md-table-wrapper"><table><tr><td>after</td></tr></table></div>', false],
+            [SIMPLE_CODE + '<p><br></p>' + SIMPLE_CODE, false],
+            [SIMPLE_CODE + 'unwrapped text', false],
+            ['<blockquote>' + SIMPLE_CODE + '</blockquote><p>after</p>', false],
+        ];
+        for (const [html, expectedGap] of cases) {
+            const fixture = await createFixture(html);
+            try {
+                const pre = fixture.editor.querySelector('pre');
+                const original = fixture.domUtils.getCleanedHTML();
+                const paragraphCount = fixture.editor.querySelectorAll('p').length;
+                fixture.placeCaret(pre.querySelector('code').firstChild, 5);
+                if (route === 'editor') {
+                    const nav = loadCodeBlockDownNavigation(fixture);
+                    nav.moveCodeBlockDownToFollowingEmptyParagraph(fixture.selection.getRangeAt(0), fixture.selection) ||
+                        nav.exitEmptyCodeBlockDownFromPre(pre, fixture.selection, true, true);
+                } else {
+                    fixture.cursorManager.moveCursorDown(() => assert.fail('caret navigation must not notify a document edit'));
+                }
+                const gap = fixture.editor.querySelector('[data-mdw-code-gap="true"]');
+                assert.equal(!!gap, expectedGap, html);
+                assert.equal(fixture.editor.querySelectorAll('p').length, paragraphCount + Number(expectedGap), html);
+                if (gap) {
+                    assert.ok(gap.contains(fixture.selection.getRangeAt(0).startContainer));
+                    assert.equal(fixture.domUtils.getCleanedHTML(), original, 'saving while in a gap preserves the original content');
+                    fixture.placeCaret(pre.querySelector('code').firstChild, 0);
+                    fixture.codeBlockGapManager.reconcile(fixture.selection);
+                    assert.ok(!fixture.editor.querySelector('[data-mdw-code-gap]'));
+                    assert.equal(fixture.domUtils.getCleanedHTML(), original);
+                }
+            } finally {
+                fixture.restoreGlobals();
+            }
+        }
+    });
+}
+
+test('a gap before a code block exists only at the document start or next to code/read-only content', async () => {
+    for (const [before, expectedGap] of [
+        ['', true], [SIMPLE_CODE, true], [READ_ONLY, true],
+        ['<p>before</p>', false], ['<p><br></p>', false], ['<hr>', false],
+        ['<blockquote><p>before</p></blockquote>', false],
+    ]) {
+        const fixture = await createFixture(before + CODE_BLOCK);
+        try {
+            const pre = fixture.editor.lastElementChild;
+            const original = fixture.domUtils.getCleanedHTML();
+            fixture.placeCaret(pre.querySelector('code').firstChild, 0);
+            // Language-label navigation uses a non-collapsed label selection.
+            const range = fixture.selection.getRangeAt(0);
+            range.selectNode(pre.querySelector('.code-block-language'));
+            assert.equal(loadLabelNavigation(fixture).up(), true);
+            const gap = fixture.editor.querySelector('[data-mdw-code-gap="true"]');
+            assert.equal(!!gap, expectedGap, before);
+            if (gap) {
+                assert.equal(gap.nextElementSibling, pre);
+                assert.ok(gap.contains(fixture.selection.getRangeAt(0).startContainer));
+                assert.equal(fixture.domUtils.getCleanedHTML(), original);
+            }
+        } finally {
+            fixture.restoreGlobals();
+        }
+    }
+});
+
+test('UI after a code block is ignored, but read-only content is a real boundary', async () => {
+    const fixture = await createFixture(SIMPLE_CODE + '<div data-exclude-from-markdown="true">UI</div>' + READ_ONLY + '<p>after</p>');
+    try {
+        const pre = fixture.editor.querySelector('pre');
+        fixture.placeCaret(pre.querySelector('code').firstChild, 5);
+        loadCodeBlockDownNavigation(fixture).exitEmptyCodeBlockDownFromPre(pre, fixture.selection, true, true);
+        const gap = fixture.editor.querySelector('[data-mdw-code-gap]');
+        assert.ok(gap);
+        assert.equal(gap.previousElementSibling, pre);
+        assert.equal(fixture.editor.querySelectorAll('p').length, 2);
+    } finally {
+        fixture.restoreGlobals();
+    }
+});
+
+test('the same code/code gap is reused from either direction and existing empty paragraphs survive leaving', async () => {
+    const fixture = await createFixture(SIMPLE_CODE + SIMPLE_CODE + '<p><br></p>');
+    try {
+        const [first, second] = Array.from(fixture.editor.querySelectorAll('pre'));
+        const permanentEmpty = fixture.editor.lastElementChild;
+        fixture.placeCaret(first.querySelector('code').firstChild, 5);
+        assert.equal(fixture.codeBlockGapManager.moveToGap(first, 'down', fixture.selection), true);
+        const gap = fixture.editor.querySelector('[data-mdw-code-gap]');
+        fixture.placeCaret(second.querySelector('code').firstChild, 0);
+        assert.equal(fixture.codeBlockGapManager.moveToGap(second, 'up', fixture.selection), true);
+        assert.equal(fixture.editor.querySelectorAll('[data-mdw-code-gap]').length, 1);
+        assert.ok(gap.contains(fixture.selection.getRangeAt(0).startContainer));
+        fixture.placeCaret(permanentEmpty, 0);
+        fixture.codeBlockGapManager.reconcile(fixture.selection);
+        assert.equal(gap.parentNode, null);
+        assert.equal(permanentEmpty.parentNode, fixture.editor);
+    } finally {
+        fixture.restoreGlobals();
+    }
+});
+
+test('typed text, whitespace and rich content promote a gap to a permanent paragraph', async () => {
+    for (const content of ['hello', ' ', '<img src="image.png">']) {
+        const fixture = await createFixture(SIMPLE_CODE);
+        try {
+            const pre = fixture.editor.querySelector('pre');
+            fixture.placeCaret(pre.querySelector('code').firstChild, 5);
+            fixture.codeBlockGapManager.moveToGap(pre, 'down', fixture.selection);
+            const gap = fixture.editor.querySelector('[data-mdw-code-gap]');
+            gap.innerHTML = content;
+            // Serialization must retain input even before input/IME callbacks run.
+            assert.ok(fixture.domUtils.getCleanedHTML().includes(content));
+            fixture.placeCaret(gap, 0);
+            fixture.codeBlockGapManager.reconcile(fixture.selection);
+            assert.equal(gap.hasAttribute('data-mdw-code-gap'), false);
+            fixture.placeCaret(pre.querySelector('code').firstChild, 0);
+            fixture.codeBlockGapManager.reconcile(fixture.selection);
+            assert.ok(gap.parentNode);
+        } finally {
+            fixture.restoreGlobals();
+        }
+    }
+});
+
+test('IME keeps the temporary caret DOM intact until composition finishes', async () => {
+    const fixture = await createFixture(SIMPLE_CODE);
+    try {
+        const pre = fixture.editor.querySelector('pre');
+        fixture.placeCaret(pre.querySelector('code').firstChild, 5);
+        fixture.codeBlockGapManager.moveToGap(pre, 'down', fixture.selection);
+        const gap = fixture.editor.querySelector('[data-mdw-code-gap]');
+        fixture.codeBlockGapManager.reconcile(null, true);
+        assert.ok(gap.parentNode);
+        gap.firstChild.textContent += '日本語';
+        fixture.codeBlockGapManager.reconcile(fixture.selection, true);
+        assert.equal(gap.getAttribute('data-mdw-code-gap'), 'true');
+        fixture.codeBlockGapManager.reconcile(fixture.selection);
+        assert.equal(gap.hasAttribute('data-mdw-code-gap'), false);
+        assert.ok(fixture.domUtils.getCleanedHTML().includes('日本語'));
+    } finally {
+        fixture.restoreGlobals();
+    }
+});
+
+test('intentional Enter commits an empty gap while an untouched gap disappears on loss of selection', async () => {
+    const fixture = await createFixture(SIMPLE_CODE);
+    try {
+        const pre = fixture.editor.querySelector('pre');
+        fixture.placeCaret(pre.querySelector('code').firstChild, 5);
+        fixture.codeBlockGapManager.moveToGap(pre, 'down', fixture.selection);
+        const gap = fixture.editor.querySelector('[data-mdw-code-gap]');
+        fixture.codeBlockGapManager.commitAtSelection(fixture.selection);
+        fixture.placeCaret(pre.querySelector('code').firstChild, 0);
+        fixture.codeBlockGapManager.reconcile(fixture.selection);
+        assert.ok(gap.parentNode);
+        assert.equal(gap.hasAttribute('data-mdw-code-gap'), false);
+        gap.remove();
+        fixture.codeBlockGapManager.moveToGap(pre, 'down', fixture.selection);
+        fixture.codeBlockGapManager.reconcile(null);
+        assert.ok(!fixture.editor.querySelector('p'));
+    } finally {
+        fixture.restoreGlobals();
+    }
+});
+
+test('table navigation defers code-block vertical movement instead of creating a permanent table exit line', async () => {
+    const fixture = await createFixture('<blockquote><div class="md-table-wrapper"><table><tbody><tr><td>' + SIMPLE_CODE + '</td></tr></tbody></table></div></blockquote><p>after</p>');
+    try {
+        const { TableManager } = await tableManagerModulePromise;
+        const manager = new TableManager(fixture.editor, fixture.domUtils, null, {});
+        const pre = fixture.editor.querySelector('pre');
+        fixture.placeCaret(pre.querySelector('code').firstChild, 5);
+        assert.equal(manager.handleArrowKeydown({ key: 'ArrowDown', preventDefault() {} }), false);
+        loadCodeBlockDownNavigation(fixture).exitEmptyCodeBlockDownFromPre(pre, fixture.selection, true, true);
+        assert.equal(fixture.editor.querySelectorAll('p').length, 1);
+        assert.ok(!fixture.editor.querySelector('[data-mdw-code-gap]'));
+    } finally {
+        fixture.restoreGlobals();
+    }
+});
+
+test('temporary gaps do not add Undo steps or clear Redo, while input is undoable and redoable', async () => {
+    const fixture = await createFixture(SIMPLE_CODE);
+    const { StateManager } = await importModule('media/modules/StateManager.js');
+    const history = new StateManager(fixture.editor, {}, {
+        getComparableHtml: () => fixture.domUtils.getCleanedHTML({ historyComparable: true }),
+    });
+    // This test checks the history snapshots; UI focus restoration is asynchronous
+    // in production and tested separately in state-manager.test.js.
+    history.finishHistoryRestore = () => {};
+    try {
+        let pre = fixture.editor.querySelector('pre');
+        fixture.placeCaret(pre.querySelector('code').firstChild, 5);
+        const original = fixture.domUtils.getCleanedHTML();
+        history.saveState();
+        fixture.codeBlockGapManager.moveToGap(pre, 'down', fixture.selection);
+        history.saveState();
+        assert.equal(history.undoStack.length, 1, 'opening the gap is not an edit');
+        const gap = fixture.editor.querySelector('[data-mdw-code-gap]');
+        gap.firstChild.textContent += 'written';
+        fixture.codeBlockGapManager.reconcile(fixture.selection);
+        history.commitStateAfterChange({ preferLiveSelection: true });
+        assert.equal(history.undoStack.length, 2);
+        assert.equal(history.performUndo(), true);
+        assert.equal(fixture.domUtils.getCleanedHTML(), original);
+        assert.equal(history.redoStack.length, 1);
+        pre = fixture.editor.querySelector('pre');
+        fixture.placeCaret(pre.querySelector('code').firstChild, 5);
+        fixture.codeBlockGapManager.moveToGap(pre, 'down', fixture.selection);
+        history.saveState();
+        assert.equal(history.redoStack.length, 1, 'opening a gap after Undo preserves Redo');
+        assert.equal(history.performRedo(), true);
+        assert.ok(fixture.domUtils.getCleanedHTML().includes('written'));
+        assert.ok(!fixture.editor.querySelector('[data-mdw-code-gap]'));
+    } finally {
+        history.clearHistory();
         fixture.restoreGlobals();
     }
 });

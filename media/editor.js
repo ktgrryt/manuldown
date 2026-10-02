@@ -1,5 +1,6 @@
 // @ts-nocheck
 import { DOMUtils } from './modules/DOMUtils.js';
+import { CodeBlockGapManager } from './modules/CodeBlockGapManager.js';
 import { StateManager } from './modules/StateManager.js';
 import { ListManager } from './modules/ListManager.js';
 import { MarkdownConverter } from './modules/MarkdownConverter.js';
@@ -1479,7 +1480,11 @@ const {
         maxHistorySize: 500
     });
     const typingUndoGroup = new TypingUndoGroup();
-    const cursorManager = new CursorManager(editor, domUtils);
+    const codeBlockGapManager = new CodeBlockGapManager(editor);
+    const cursorManager = new CursorManager(editor, domUtils, {
+        moveToCodeBlockGap: (pre, direction, selection) =>
+            codeBlockGapManager.moveToGap(pre, direction, selection)
+    });
     const listManager = new ListManager(editor, domUtils);
     const markdownConverter = new MarkdownConverter(editor, domUtils, {
         applyImageSourcePolicy
@@ -6523,6 +6528,7 @@ const {
     }
 
     function createSyncSnapshot(options = {}) {
+        codeBlockGapManager.reconcile(window.getSelection(), isComposing || compositionUpdateGate.composing);
         const preservePendingUpdate = options.preservePendingUpdate === true;
         if (!preservePendingUpdate) {
             clearNotifyTimeout();
@@ -6660,6 +6666,7 @@ const {
 
     // 変更を通知
     function prepareEditorForNotify(options = {}) {
+        codeBlockGapManager.reconcile(window.getSelection(), isComposing || compositionUpdateGate.composing);
         if (options.preservePendingPastedPathLinks !== true) {
             finalizePendingPastedPathLinks();
         }
@@ -10576,6 +10583,10 @@ const {
         if (!pre) return false;
         const selection = window.getSelection();
         if (!selection) return false;
+        if (codeBlockGapManager.moveToGap(pre, 'up', selection, true)) {
+            setCodeBlockLanguageNavSelection(null);
+            return true;
+        }
 
         let prevElement = getPreviousElementSibling(pre);
         if (prevElement && prevElement.tagName === 'HR') {
@@ -10612,15 +10623,7 @@ const {
             return true;
         }
 
-        const parent = pre.parentElement;
-        if (!parent) return false;
-        const newP = document.createElement('p');
-        newP.appendChild(document.createElement('br'));
-        parent.insertBefore(newP, pre);
-        placeCollapsedCaret(selection, newP, 0);
-        editor.focus();
-        notifyChange();
-        return true;
+        return false;
     }
 
     function moveCursorAboveCodeBlockFromLabelToLineEnd(label) {
@@ -10629,6 +10632,10 @@ const {
         if (!pre) return false;
         const selection = window.getSelection();
         if (!selection) return false;
+        if (codeBlockGapManager.moveToGap(pre, 'up', selection, true)) {
+            setCodeBlockLanguageNavSelection(null);
+            return true;
+        }
 
         let prevElement = getPreviousElementSibling(pre);
         if (prevElement && prevElement.tagName === 'HR') {
@@ -10675,16 +10682,7 @@ const {
             return true;
         }
 
-        const parent = pre.parentElement;
-        if (!parent) return false;
-        const newP = document.createElement('p');
-        newP.appendChild(document.createElement('br'));
-        parent.insertBefore(newP, pre);
-        placeCollapsedCaret(selection, newP, newP.childNodes.length);
-        setCodeBlockLanguageNavSelection(null);
-        editor.focus();
-        notifyChange();
-        return true;
+        return false;
     }
 
     function moveCursorIntoCodeBlockFromToolbarTarget(target, selection) {
@@ -12524,10 +12522,7 @@ const {
             }
         }
 
-        const nextCodeBlock = getNextCodeBlockAfterOnlyEmptyBlocks(preBlock);
-        if (nextCodeBlock) {
-            return selectCodeBlockLanguageLabel(nextCodeBlock);
-        }
+        if (codeBlockGapManager.moveToGap(preBlock, 'down', selection)) return true;
 
         const nextNode = getNextNavigableNodeAfter(preBlock);
         if (nextNode && nextNode.nodeType === Node.ELEMENT_NODE && nextNode.tagName === 'HR') {
@@ -12585,19 +12580,8 @@ const {
             return true;
         }
 
-        const newParagraph = document.createElement('p');
-        let insertionAnchor = preBlock;
-        while (insertionAnchor.parentElement && insertionAnchor.parentElement !== editor) {
-            insertionAnchor = insertionAnchor.parentElement;
-        }
-        if (insertionAnchor.nextSibling) {
-            insertionAnchor.parentElement.insertBefore(newParagraph, insertionAnchor.nextSibling);
-        } else {
-            insertionAnchor.parentElement.appendChild(newParagraph);
-        }
-        placeCaretInEmptyParagraph(newParagraph, selection);
-        editor.focus();
-        notifyChange();
+        // Consume the navigation even when a nested boundary has no destination.
+        // Only CodeBlockGapManager may create a code-block boundary paragraph.
         return true;
     }
 
@@ -12696,6 +12680,10 @@ const {
         if (!context) return false;
 
         const { preBlock, codeBlock } = context;
+        if (isCodeBlockDownExitPosition(range, preBlock, codeBlock) &&
+            codeBlockGapManager.moveToGap(preBlock, 'down', selection)) {
+            return true;
+        }
         const targetParagraph = getFollowingEmptyParagraphAfterCodeBlock(preBlock);
         if (!targetParagraph || !isCodeBlockDownExitPosition(range, preBlock, codeBlock)) {
             return false;
@@ -13783,7 +13771,6 @@ const {
                     if (result && result.handled) {
                         e.preventDefault();
                         if (result.exited) {
-                            notifyChange();
                             setTimeout(() => correctCheckboxCursorPosition(), 0);
                         }
                         return true;
@@ -13818,7 +13805,6 @@ const {
                             if (shouldExit) {
                                 e.preventDefault();
                                 if (exitEmptyCodeBlockDownFromPre(preBlock, selection, true, true)) {
-                                    notifyChange();
                                     setTimeout(() => correctCheckboxCursorPosition(), 0);
                                     return true;
                                 }
@@ -13846,7 +13832,6 @@ const {
                             if (!inCode) {
                                 e.preventDefault();
                                 if (exitEmptyCodeBlockDownFromPre(preBlock, selection, true, true)) {
-                                    notifyChange();
                                     setTimeout(() => correctCheckboxCursorPosition(), 0);
                                     return true;
                                 }
@@ -13867,7 +13852,6 @@ const {
                         if (lineInfo && !lineInfo.hasLineBelow) {
                             e.preventDefault();
                             if (exitEmptyCodeBlockDownFromPre(preBlock, selection, true, true)) {
-                                notifyChange();
                                 setTimeout(() => correctCheckboxCursorPosition(), 0);
                                 return true;
                             }
@@ -13893,7 +13877,6 @@ const {
                             } else {
                                 e.preventDefault();
                                 if (exitEmptyCodeBlockDownFromPre(preBlock, selection, true, true)) {
-                                    notifyChange();
                                     setTimeout(() => correctCheckboxCursorPosition(), 0);
                                     return true;
                                 }
@@ -13910,7 +13893,6 @@ const {
                         const range = selection.getRangeAt(0);
                         if (exitCodeBlockDownIfAtEnd(range)) {
                             e.preventDefault();
-                            notifyChange();
                             setTimeout(() => correctCheckboxCursorPosition(), 0);
                             return true;
                         }
@@ -13961,7 +13943,6 @@ const {
                                 if (shouldExit) {
                                     e.preventDefault();
                                     if (exitEmptyCodeBlockDownFromPre(preBlock, selection, true, true)) {
-                                        notifyChange();
                                         // チェックボックス行に入った場合、カーソル位置を補正
                                         setTimeout(() => correctCheckboxCursorPosition(), 0);
                                         return true;
@@ -16369,6 +16350,13 @@ const {
                 recordCtrlNavHandled('down', fromCommand);
                 return true;
             }
+            const codeSelection = window.getSelection();
+            const codeResult = handleCodeBlockArrowDown(codeSelection);
+            if (codeResult && codeResult.handled) {
+                e.preventDefault();
+                recordCtrlNavHandled('down', fromCommand);
+                return true;
+            }
             // チェックボックス上でCtrl+N → 下のリストアイテムのチェックボックスへ移動
             const cbOnCursorN = isCursorOnCheckbox();
             if (cbOnCursorN) {
@@ -17898,6 +17886,13 @@ const {
             }
         }, true);
         editor.addEventListener('mousedown', () => typingUndoGroup.break(), true);
+        editor.addEventListener('focusout', () => {
+            setTimeout(() => {
+                if (!editor.contains(document.activeElement)) {
+                    codeBlockGapManager.reconcile(null, isComposing || compositionUpdateGate.composing);
+                }
+            }, 0);
+        });
         editor.addEventListener('compositionstart', () => {
             typingUndoGroup.break();
             // Record the committed text before the composition changes the DOM,
@@ -17941,6 +17936,10 @@ const {
             if (isComposing || e.isComposing || e.inputType === 'insertCompositionText') {
                 pendingEmptyListItemInsert = null;
                 return;
+            }
+
+            if (e.inputType === 'insertParagraph' || e.inputType === 'insertLineBreak') {
+                codeBlockGapManager.commitAtSelection(window.getSelection(), () => stateManager.saveState());
             }
 
             // Checkpoint the pre-edit DOM when a native edit starts a new undo
@@ -18117,6 +18116,7 @@ const {
                     return;
                 }
 
+                codeBlockGapManager.reconcile(window.getSelection());
                 stripEditorControlCharacters(editor);
                 stateManager.saveStateDebounced();
                 const isDeleteInput = typeof e.inputType === 'string' && e.inputType.startsWith('delete');
@@ -21076,6 +21076,7 @@ const {
                 );
 
             handleKeydown(e);
+            codeBlockGapManager.reconcile(window.getSelection(), isComposing || compositionUpdateGate.composing);
 
             // Run after every vertical-key branch, including early returns for HR,
             // list items, empty blocks, checkboxes, and code-block controls.
@@ -23165,6 +23166,9 @@ const {
         // 水平線の選択状態を視覚的に反映 & チェックボックス付近のカーソル補正
         let isCorrectingCheckboxCursor = false;
         document.addEventListener('selectionchange', () => {
+            if (!isUpdating) {
+                codeBlockGapManager.reconcile(window.getSelection(), isComposing || compositionUpdateGate.composing);
+            }
             if (activeResizeImage && !imageResizeState && !shouldKeepImageResizeOverlayForSelection(activeResizeImage)) {
                 hideImageResizeOverlay();
             }

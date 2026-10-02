@@ -2573,6 +2573,12 @@ export class TableManager {
         if (!selection || !selection.rangeCount || !selection.isCollapsed) return false;
 
         const range = selection.getRangeAt(0);
+        // Code blocks own vertical navigation, including temporary boundary
+        // paragraphs. Exiting a cell must not create a permanent code-block gap.
+        if ((direction === 'up' || direction === 'down') &&
+            this.domUtils.getParentElement(range.startContainer, 'PRE')?.querySelector('code')) {
+            return false;
+        }
         const edge = this._getEdgeFromRange(range);
         if (edge) {
             return this._handleEdgeNavigation(edge, direction);
