@@ -36,10 +36,10 @@ test('/toc preserves heading order and nesting, including skipped levels', async
 test('/toc links every heading, including Japanese and duplicate titles, to its stable ID', async () => {
     const { headings, toc } = await createToc('<h1>文書</h1><h2>TODO項目</h2><h2>TODO項目</h2><h2>TODO項目-1</h2><h3>!!!</h3>');
     const links = Array.from(toc.querySelectorAll('a'));
-    assert.deepEqual(links.map(link => decodeURIComponent(link.getAttribute('href'))), [
+    assert.deepEqual(links.map(link => link.getAttribute('href')), [
         '#文書', '#todo項目', '#todo項目-1', '#todo項目-1-1', '#heading-4'
     ]);
-    links.forEach((link, index) => assert.equal(decodeURIComponent(link.getAttribute('href').slice(1)), headings[index].id));
+    links.forEach((link, index) => assert.equal(link.getAttribute('href').slice(1), headings[index].id));
 });
 
 test('/toc omits empty headings without changing fragment fallback IDs', async () => {
