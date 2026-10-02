@@ -26,9 +26,10 @@ export function shouldRouteHorizontalArrowAfterComposition(event, compositionAct
 }
 
 export class CursorManager {
-    constructor(editor, domUtils) {
+    constructor(editor, domUtils, options = {}) {
         this.editor = editor;
         this.domUtils = domUtils;
+        this.moveToCodeBlockGap = options.moveToCodeBlockGap || null;
         this._forwardImageStep = null;
         this._inlineCodeLeftBoundaryState = null;
     }
@@ -948,6 +949,23 @@ export class CursorManager {
             }
         }
         return resolveVisibleListItem(this.domUtils.getParentElement(container, 'LI'), direction);
+    }
+
+    _getAdjacentNavigableNodeInDocument(element, direction) {
+        let current = element;
+        while (current && current !== this.editor) {
+            let next = direction === 'up' ? current.previousSibling : current.nextSibling;
+            while (next) {
+                if (next.nodeType === Node.TEXT_NODE) {
+                    if (!this._isIgnorableTextNode(next)) return next;
+                } else if (next.nodeType === Node.ELEMENT_NODE && !this._isNavigationExcludedElement(next)) {
+                    return next;
+                }
+                next = direction === 'up' ? next.previousSibling : next.nextSibling;
+            }
+            current = current.parentElement;
+        }
+        return null;
     }
 
     _getNextNavigableElementInDocument(element) {
@@ -4174,18 +4192,11 @@ export class CursorManager {
                     this.getCodeBlockLineInfo(text, cursorOffset);
 
                 if (currentLineIndex === 0) {
-                    // コードブロックから出る
-                    let prevElement = preBlock.previousSibling;
-
-                    // 空白のみのテキストノードをスキップ
-                    while (prevElement && prevElement.nodeType === 3 && prevElement.textContent.trim() === '') {
-                        prevElement = prevElement.previousSibling;
-                    }
-                    while (prevElement && prevElement.nodeType === 1 && this._isNavigationExcludedElement(prevElement)) {
-                        prevElement = prevElement.previousSibling;
-                        while (prevElement && prevElement.nodeType === 3 && prevElement.textContent.trim() === '') {
-                            prevElement = prevElement.previousSibling;
-                        }
+                    if (this.moveToCodeBlockGap?.(preBlock, 'up', selection)) return;
+                    const prevElement = this._getAdjacentNavigableNodeInDocument(preBlock, 'up');
+                    if (prevElement && prevElement.nodeType === Node.TEXT_NODE) {
+                        this._placeCollapsedCaret(selection, prevElement, prevElement.textContent.length);
+                        return;
                     }
 
                     // 前の要素がある場合、そこにカーソルを移動
@@ -4204,16 +4215,6 @@ export class CursorManager {
                         newRange.collapse(true);
                         selection.removeAllRanges();
                         selection.addRange(newRange);
-                    } else {
-                        // 新しい段落を作成
-                        const newP = document.createElement('p');
-                        newP.appendChild(document.createElement('br'));
-
-                        preBlock.parentElement.insertBefore(newP, preBlock);
-
-                        this._placeCollapsedCaret(selection, newP, 0);
-
-                        if (notifyCallback) notifyCallback();
                     }
 
                     return;
@@ -5663,33 +5664,14 @@ export class CursorManager {
             }
         }
 
-        const getNextCodeBlockAfterOnlyEmptyBlocks = (element) => {
-            let current = element;
-            while (current) {
-                const nextElement = this._getNextNavigableElementInDocument(current);
-                if (!nextElement || nextElement.nodeType !== Node.ELEMENT_NODE) {
-                    return null;
-                }
-                if (nextElement.tagName === 'PRE' && nextElement.querySelector('code')) {
-                    return nextElement;
-                }
-                if (/^(P|DIV)$/.test(nextElement.tagName) && isEffectivelyEmptyBlock(nextElement)) {
-                    current = nextElement;
-                    continue;
-                }
-                return null;
-            }
-            return null;
-        };
-
         const exitCodeBlockDown = () => {
             if (!preBlock) return false;
-            const nextCodeBlock = getNextCodeBlockAfterOnlyEmptyBlocks(preBlock);
-            if (nextCodeBlock && this._selectCodeBlockLanguageLabel(nextCodeBlock, selection)) {
+            if (this.moveToCodeBlockGap?.(preBlock, 'down', selection)) return true;
+            const nextElement = this._getAdjacentNavigableNodeInDocument(preBlock, 'down');
+            if (nextElement && nextElement.nodeType === Node.TEXT_NODE) {
+                this._placeCollapsedCaret(selection, nextElement, 0);
                 return true;
             }
-
-            const nextElement = this._getNextNavigableElementInDocument(preBlock);
 
             // 水平線の場合は水平線全体を選択
             if (nextElement && nextElement.nodeType === 1 && nextElement.tagName === 'HR') {
@@ -5729,22 +5711,15 @@ export class CursorManager {
                 return true;
             }
 
-            // 新しい段落を作成
-            const newP = document.createElement('p');
-
-            if (preBlock.nextSibling) {
-                preBlock.parentElement.insertBefore(newP, preBlock.nextSibling);
-            } else {
-                preBlock.parentElement.appendChild(newP);
-            }
-
-            this._placeCursorInEmptyParagraph(newP, selection);
-
-            if (notifyCallback) notifyCallback();
+            // No new permanent paragraph is created by cursor navigation.
             return true;
         };
 
         if (preBlock && codeBlock) {
+            if (this._isCodeBlockDownExitPosition(codeBlock, preBlock, range) &&
+                this.moveToCodeBlockGap?.(preBlock, 'down', selection)) {
+                return;
+            }
             const followingEmptyParagraph = this._getFollowingEmptyParagraphAfterCodeBlock(preBlock);
             if (followingEmptyParagraph &&
                 this._isCodeBlockDownExitPosition(codeBlock, preBlock, range) &&
