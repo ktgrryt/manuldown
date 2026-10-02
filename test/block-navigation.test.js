@@ -609,6 +609,68 @@ test('vertical keys pass through a table left edge without entering its cells', 
     }
 });
 
+test('ArrowUp and Ctrl+P from the right table edge return to the Project board heading', async () => {
+    for (const useCtrl of [false, true]) {
+        const fixture = await createFixture(
+            '<h2>Project board</h2>' + NAVIGATION_TABLE +
+            '<blockquote><p>Great documentation starts with a small note. ' +
+            'Make it clear, then make it useful.</p></blockquote>'
+        );
+        try {
+            fixture.editor.querySelector('table').innerHTML =
+                '<thead><tr><th>Task</th><th>Owner</th><th>Status</th></tr></thead>' +
+                '<tbody><tr><td>Explore ideas</td><td>Design</td><td>Done</td></tr>' +
+                '<tr><td>Build the prototype</td><td>Engineering</td><td>In progress</td></tr>' +
+                '<tr><td>Write the guide</td><td>Documentation</td><td>In review</td></tr>' +
+                '<tr><td>Share the release</td><td>Team</td><td>Planned</td></tr></tbody>';
+            const manager = await createTableNavigationManager(fixture);
+            manager._isMac = true;
+            const heading = fixture.editor.querySelector('h2');
+            const rightEdge = fixture.editor.querySelector('.md-table-edge-right');
+            const originalHTML = fixture.editor.innerHTML;
+            fixture.placeCaret(rightEdge.firstChild, rightEdge.firstChild.length);
+            let prevented = false;
+            const event = {
+                key: useCtrl ? 'p' : 'ArrowUp',
+                ctrlKey: useCtrl,
+                preventDefault() { prevented = true; },
+            };
+
+            const handled = useCtrl ? manager.handleCtrlNavKeydown(event) : manager.handleArrowKeydown(event);
+
+            assert.equal(handled, true);
+            assert.equal(prevented, true);
+            assert.equal(fixture.selection.getRangeAt(0).startContainer, heading.firstChild);
+            assert.equal(fixture.selection.getRangeAt(0).startOffset, 0);
+            assert.equal(fixture.editor.innerHTML, originalHTML);
+        } finally {
+            fixture.restoreGlobals();
+        }
+    }
+});
+
+test('ArrowUp from the right edge of a first table creates a preceding empty line', async () => {
+    const fixture = await createFixture(NAVIGATION_TABLE);
+    try {
+        const manager = await createTableNavigationManager(fixture);
+        const wrapper = fixture.editor.firstElementChild;
+        const originalHTML = wrapper.outerHTML;
+        const rightEdge = wrapper.querySelector('.md-table-edge-right');
+        fixture.placeCaret(rightEdge.firstChild, rightEdge.firstChild.length);
+
+        assert.equal(manager.handleArrowKeydown({ key: 'ArrowUp', preventDefault() {} }), true);
+
+        const paragraph = wrapper.previousSibling;
+        assert.equal(paragraph.tagName, 'P');
+        assert.equal(paragraph.innerHTML, '<br>');
+        assert.equal(fixture.selection.getRangeAt(0).startContainer, paragraph);
+        assert.equal(fixture.selection.getRangeAt(0).startOffset, 0);
+        assert.equal(wrapper.outerHTML, originalHTML);
+    } finally {
+        fixture.restoreGlobals();
+    }
+});
+
 test('ArrowDown from the left edge of a final table creates a following empty line', async () => {
     const fixture = await createFixture(NAVIGATION_TABLE);
     try {

@@ -84,6 +84,7 @@ const {
     let commitPendingTransientEditorUi = () => false;
     let requestWorkspaceLink = () => false;
     let openInlineLinkPopover = () => false;
+    let requestOpenLinkAtCursor = () => false;
     let finishInlineLinkRequest = () => {};
     let shouldApplyInlineLinkResponse = () => true;
     let receiveWorkspaceLinkSuggestions = () => false;
@@ -8425,6 +8426,22 @@ const {
         }
         // The contributed VS Code command opens the native picker. Suppress only
         // Chromium's contenteditable behavior here so the command runs once.
+        e.preventDefault();
+        return true;
+    }
+
+    function handleOpenLinkShortcutKeydown(e) {
+        if (isImeInteractionKeydown(e) || compositionUpdateGate.composing ||
+            compositionUpdateGate.finalizing || e.altKey || e.shiftKey) {
+            return false;
+        }
+        const primaryModifier = isMac
+            ? e.metaKey && !e.ctrlKey
+            : e.ctrlKey && !e.metaKey;
+        if (!primaryModifier || e.key !== 'Enter') {
+            return false;
+        }
+        // VS Code executes the command once; suppress native Enter handling.
         e.preventDefault();
         return true;
     }
@@ -17023,6 +17040,10 @@ const {
             return;
         }
 
+        if (handleOpenLinkShortcutKeydown(e)) {
+            return;
+        }
+
         if (handleFormatShortcutKeydown(e)) {
             return;
         }
@@ -22574,6 +22595,40 @@ const {
             return true;
         }
 
+        function navigateToLink(url) {
+            if (!url || !isOpenableLinkUrl(url)) {
+                return false;
+            }
+            if (!revealLinkAnchor(url)) {
+                vscode.postMessage({ type: 'openLink', url });
+            }
+            return true;
+        }
+
+        function openLinkAtCursor() {
+            if (isUpdating || editorLoadFailed || isComposing || activeCompositionElement ||
+                compositionUpdateGate.composing || compositionUpdateGate.finalizing) {
+                return false;
+            }
+            const activeElement = document.activeElement;
+            if (!activeElement || !editor.contains(activeElement) ||
+                activeElement.closest('input, textarea, select, button, [contenteditable="false"]')) {
+                return false;
+            }
+            const selection = window.getSelection();
+            if (!selection || selection.rangeCount !== 1) {
+                return false;
+            }
+            const range = selection.getRangeAt(0);
+            if (!range.collapsed) {
+                return false;
+            }
+            const link = getClosestAnchor(range.startContainer);
+            return !!link && navigateToLink(link.getAttribute('href'));
+        }
+
+        requestOpenLinkAtCursor = openLinkAtCursor;
+
         function openLink() {
             const input = linkPopover?.querySelector('.link-popover-input');
             if (
@@ -22591,16 +22646,7 @@ const {
             saveLinkUrlIfChanged();
             if (currentLink) {
                 const url = currentLink.getAttribute('href');
-                if (url && isOpenableLinkUrl(url)) {
-                    if (revealLinkAnchor(url)) {
-                        hideLinkPopover(true);
-                        return;
-                    }
-                    vscode.postMessage({
-                        type: 'openLink',
-                        url: url
-                    });
-                } else {
+                if (!navigateToLink(url)) {
                     syncLinkPopoverOpenButtonState(url || '');
                     return;
                 }
@@ -22938,16 +22984,7 @@ const {
                 if (e.metaKey || e.ctrlKey) {
                     e.preventDefault();
                     e.stopPropagation();
-                    const url = link.getAttribute('href');
-                    if (url && revealLinkAnchor(url)) {
-                        return;
-                    }
-                    if (url && isOpenableLinkUrl(url)) {
-                        vscode.postMessage({
-                            type: 'openLink',
-                            url: url
-                        });
-                    }
+                    navigateToLink(link.getAttribute('href'));
                 }
             }
         }, true);
@@ -23526,6 +23563,9 @@ const {
                 break;
             case 'openWorkspaceLinkPicker':
                 requestWorkspaceLink();
+                break;
+            case 'openLinkAtCursor':
+                requestOpenLinkAtCursor();
                 break;
             case 'workspaceLinkSuggestions':
                 receiveWorkspaceLinkSuggestions(message);
