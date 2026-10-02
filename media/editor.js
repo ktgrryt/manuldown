@@ -7503,6 +7503,23 @@ const {
             }
         };
 
+        // 見出し行頭で直前が空行なら、空行だけを削除して見出しを維持する。
+        // 空見出しの段落化や先頭インラインコードの通常削除より先に処理する。
+        if (range.collapsed) {
+            const currentBlock = getCurrentBlock(range.startContainer);
+            if (currentBlock && /^H[1-6]$/.test(currentBlock.tagName) &&
+                isRangeAtBlockStart(range, currentBlock)) {
+                const prev = currentBlock.previousElementSibling;
+                if (prev && (prev.tagName === 'P' || prev.tagName === 'DIV') && isEffectivelyEmptyBlock(prev)) {
+                    prev.remove();
+                    const firstNode = domUtils.getFirstTextNode(currentBlock);
+                    placeCollapsedCaret(selection, firstNode || currentBlock, 0);
+                    notifyChange();
+                    return true;
+                }
+            }
+        }
+
         // Backspace at outside-left of a leading inline code should delete line break first,
         // not consume inline-code boundary and jump inside-left.
         if (range.collapsed) {
@@ -7577,32 +7594,6 @@ const {
 
                 notifyChange();
                 return true;
-            }
-
-            // 見出し行頭で、直前が空段落の場合:
-            // 現在の挙動（見出しを通常段落へ）を保ちつつ、カーソルは先頭に置く
-            if (isAtHeadingStart) {
-                const prev = heading.previousElementSibling;
-                if (prev && prev.tagName === 'P' && isEffectivelyEmptyBlock(prev)) {
-                    const p = document.createElement('p');
-                    p.innerHTML = heading.innerHTML;
-                    prev.replaceWith(p);
-                    heading.remove();
-
-                    const newRange = document.createRange();
-                    const firstNode = domUtils.getFirstTextNode(p);
-                    if (firstNode) {
-                        newRange.setStart(firstNode, 0);
-                    } else {
-                        newRange.setStart(p, 0);
-                    }
-                    newRange.collapse(true);
-                    selection.removeAllRanges();
-                    selection.addRange(newRange);
-
-                    notifyChange();
-                    return true;
-                }
             }
         }
 
