@@ -452,10 +452,15 @@ test('inline workspace suggestions are debounced, request-scoped, and rendered a
     const receiverStart = editorSource.indexOf('receiveWorkspaceLinkSuggestions = (message) =>');
     const receiverEnd = editorSource.indexOf('function repositionLinkPopoverWithinViewport', receiverStart);
     const receiverSource = editorSource.slice(receiverStart, receiverEnd);
-    assert.match(receiverSource, /document\.createElement\('button'\)/);
-    assert.match(receiverSource, /label\.textContent = item\.label/);
-    assert.match(receiverSource, /pathText\.textContent = item\.path/);
+    assert.match(receiverSource, /renderLinkSuggestions\(/);
+    const rendererStart = editorSource.indexOf('function renderLinkSuggestions(items)');
+    const rendererEnd = editorSource.indexOf('function getLinkPopoverAnchorRect', rendererStart);
+    const rendererSource = editorSource.slice(rendererStart, rendererEnd);
+    assert.match(rendererSource, /document\.createElement\('button'\)/);
+    assert.match(rendererSource, /label\.textContent = item\.label/);
+    assert.match(rendererSource, /pathText\.textContent = item\.kind === 'heading'[\s\S]*?This document · #[\s\S]*?: item\.path/);
     assert.doesNotMatch(receiverSource, /innerHTML/);
+    assert.doesNotMatch(rendererSource, /innerHTML/);
     assert.match(editorSource, /event\.key === 'ArrowDown' \|\| event\.key === 'ArrowUp'/);
     assert.match(editorSource, /event\.key === 'Enter'/);
     assert.match(editorSource, /event\.key === 'Escape'/);
@@ -501,7 +506,7 @@ test('link entry opens the inline URL or path UI without a native Files action',
     assert.match(requestSource, /openInlineLinkPopover\(range\.cloneRange\(\), existingLink\)/);
     assert.doesNotMatch(requestSource, /vscode\.postMessage/);
 
-    assert.match(editorSource, /placeholder="URL or workspace file path"/);
+    assert.match(editorSource, /placeholder="URL, heading, or workspace file path"/);
     assert.doesNotMatch(editorSource, /data-action="browse"|Files…/);
     assert.match(editorSource, /data-action="apply">Apply<\/button>/);
     assert.match(editorSource, /type: 'requestLinkInputResolution'/);

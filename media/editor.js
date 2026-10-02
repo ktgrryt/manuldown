@@ -10,7 +10,6 @@ import { TableManager } from './modules/TableManager.js';
 import { SearchManager } from './modules/SearchManager.js';
 import { CompositionUpdateGate } from './modules/CompositionUpdateGate.js';
 import { TypingUndoGroup } from './modules/TypingUndoGroup.js';
-import { assignStableHeadingIds } from './modules/MarkdownHeadingSlug.js';
 import {
     getWorkspaceLinkSuggestionQuery,
     getPastedAbsolutePathCandidate,
@@ -33,12 +32,16 @@ import {
 } from './modules/CaretScroll.js';
 
 // The entry module carries the Webview asset cache key. Propagate it to the
-// cursor module so reopening a development Webview cannot pair a new keyboard
-// route with a stale CursorManager implementation.
+// cursor and heading modules so reopening a development Webview cannot pair
+// new entry points with stale module implementations.
 const {
     CursorManager,
     shouldRouteHorizontalArrowAfterComposition
 } = await import(`./modules/CursorManager.js${new URL(import.meta.url).search}`);
+const {
+    assignStableHeadingIds,
+    getMarkdownHeadingLinkSuggestions
+} = await import(`./modules/MarkdownHeadingSlug.js${new URL(import.meta.url).search}`);
 
 (function () {
     // @ts-ignore
@@ -21534,12 +21537,12 @@ const {
             popover.className = 'link-popover';
             popover.innerHTML = `
                 <div class="link-popover-controls">
-                    <input type="text" class="link-popover-input" role="combobox" aria-label="Link URL or workspace file path" aria-autocomplete="list" aria-controls="link-workspace-suggestions" aria-expanded="false" autocomplete="off" spellcheck="false" placeholder="URL or workspace file path">
+                    <input type="text" class="link-popover-input" role="combobox" aria-label="Link URL, heading, or workspace file path" aria-autocomplete="list" aria-controls="link-workspace-suggestions" aria-expanded="false" autocomplete="off" spellcheck="false" placeholder="URL, heading, or workspace file path">
                     <button class="link-popover-btn danger" data-action="unlink">Unlink</button>
                     <button class="link-popover-btn primary" data-action="apply">Apply</button>
                     <button class="link-popover-btn primary" data-action="open">Open</button>
                 </div>
-                <div id="link-workspace-suggestions" class="link-popover-suggestions" role="listbox" aria-label="Workspace files" hidden></div>
+                <div id="link-workspace-suggestions" class="link-popover-suggestions" role="listbox" aria-label="Headings and workspace files" hidden></div>
             `;
             const input = popover.querySelector('.link-popover-input');
             input.addEventListener('input', () => {
@@ -21730,8 +21733,9 @@ const {
                 isComposing ||
                 compositionUpdateGate.composing
             ) return false;
+            renderLinkSuggestions(getCurrentDocumentHeadingSuggestions(value));
             const query = getWorkspaceLinkSuggestionQuery(value);
-            if (query === null) return false;
+            if (query === null || query.startsWith('#')) return linkSuggestions.length > 0;
             linkSuggestionDebounceTimer = setTimeout(() => {
                 linkSuggestionDebounceTimer = null;
                 if (
@@ -21753,6 +21757,14 @@ const {
                 });
             }, 150);
             return true;
+        }
+
+        function getCurrentDocumentHeadingSuggestions(query) {
+            return getMarkdownHeadingLinkSuggestions(
+                editor.querySelectorAll('h1, h2, h3, h4, h5, h6'),
+                query,
+                query && !query.startsWith('#') ? 10 : 20
+            ).map((item) => ({ ...item, query }));
         }
 
         function setActiveLinkSuggestion(index) {
@@ -21832,7 +21844,7 @@ const {
             activeLinkSuggestionRequestId = null;
             activeLinkSuggestionQuery = '';
             const rawItems = Array.isArray(message.items) ? message.items.slice(0, 20) : [];
-            const items = rawItems.flatMap((item) => {
+            const fileItems = rawItems.flatMap((item) => {
                 const candidateId = typeof item?.candidateId === 'string'
                     ? item.candidateId
                     : '';
@@ -21841,6 +21853,7 @@ const {
                     return [];
                 }
                 return [{
+                    kind: 'workspace',
                     candidateId,
                     label: normalizeWorkspaceLinkLabel(item?.label),
                     path,
@@ -21848,18 +21861,28 @@ const {
                     searchRequestId: requestId,
                 }];
             });
-            if (items.length === 0) {
-                linkSuggestionSessionId = null;
-                hideLinkSuggestionList();
+            linkSuggestionSessionId = fileItems.length ? requestId : null;
+            if (fileItems.length === 0) {
                 vscode.postMessage({
                     type: 'cancelWorkspaceLinkSuggestions',
                     requestId
                 });
-                return true;
             }
+            renderLinkSuggestions([
+                ...getCurrentDocumentHeadingSuggestions(query),
+                ...fileItems
+            ].slice(0, 20));
+            return true;
+        };
 
-            linkSuggestionSessionId = requestId;
+        function renderLinkSuggestions(items) {
+            if (!linkPopover) return;
+            if (items.length === 0) {
+                hideLinkSuggestionList();
+                return;
+            }
             linkSuggestions = items;
+            const input = linkPopover.querySelector('.link-popover-input');
             const list = linkPopover.querySelector('.link-popover-suggestions');
             list.replaceChildren();
             items.forEach((item, index) => {
@@ -21875,7 +21898,9 @@ const {
                 label.textContent = item.label;
                 const pathText = document.createElement('span');
                 pathText.className = 'link-popover-suggestion-path';
-                pathText.textContent = item.path;
+                pathText.textContent = item.kind === 'heading'
+                    ? `This document · #${item.headingId}`
+                    : item.path;
                 option.append(label, pathText);
                 list.appendChild(option);
             });
@@ -21883,41 +21908,52 @@ const {
             input.setAttribute('aria-expanded', 'true');
             setActiveLinkSuggestion(0);
             setTimeout(() => repositionLinkPopoverWithinViewport(), 0);
-            return true;
-        };
+        }
+
+        function getLinkPopoverAnchorRect() {
+            if (currentLink && typeof currentLink.getBoundingClientRect === 'function') {
+                const rect = currentLink.getBoundingClientRect();
+                if (isUsableCaretRect(rect)) return rect;
+            }
+            if (linkCreationRange) {
+                const rect = measureCaretRangeRect(linkCreationRange);
+                // Empty text nodes can report a zero rectangle at the page
+                // origin. Never let that hide the input behind the toolbar.
+                if (rect && ['left', 'right', 'top', 'bottom'].every(
+                    (edge) => Number.isFinite(rect[edge])
+                ) && (rect.top !== 0 || rect.bottom !== 0)) {
+                    return rect;
+                }
+            }
+
+            const element = getNodeElement(linkCreationRange?.startContainer) || editor;
+            const rect = element.getBoundingClientRect();
+            const style = window.getComputedStyle(element);
+            const left = rect.left + (parseFloat(style.paddingLeft) || 0);
+            const top = rect.top + (parseFloat(style.paddingTop) || 0);
+            return {
+                left,
+                right: left,
+                top,
+                bottom: top + (parseFloat(style.lineHeight) || 20)
+            };
+        }
 
         function repositionLinkPopoverWithinViewport() {
             if (!linkPopover || linkPopover.style.display === 'none') return;
             const margin = 8;
-            let anchorRect = null;
-            if (currentLink && typeof currentLink.getBoundingClientRect === 'function') {
-                anchorRect = currentLink.getBoundingClientRect();
-            } else if (
-                linkCreationRange &&
-                typeof linkCreationRange.getBoundingClientRect === 'function'
-            ) {
-                anchorRect = linkCreationRange.getBoundingClientRect();
+            const anchorRect = getLinkPopoverAnchorRect();
+            const popoverRect = linkPopover.getBoundingClientRect();
+            const editorRect = editor.getBoundingClientRect();
+            const minTop = Math.max(margin, editorRect.top + margin);
+            const maxTop = Math.max(minTop, window.innerHeight - popoverRect.height - margin);
+            let top = anchorRect.bottom + 4;
+            if (top > maxTop) {
+                top = anchorRect.top - popoverRect.height - 4;
             }
-            if (anchorRect) {
-                linkPopover.style.top = `${anchorRect.bottom + window.scrollY + 4}px`;
-            }
-            let popoverRect = linkPopover.getBoundingClientRect();
-            if (popoverRect.right > window.innerWidth - margin) {
-                linkPopover.style.left = `${Math.max(
-                    window.scrollX + margin,
-                    window.scrollX + window.innerWidth - popoverRect.width - margin
-                )}px`;
-            }
-            popoverRect = linkPopover.getBoundingClientRect();
-            if (popoverRect.left < margin) {
-                linkPopover.style.left = `${window.scrollX + margin}px`;
-            }
-            if (popoverRect.bottom <= window.innerHeight - margin) return;
-
-            const topAboveAnchor = anchorRect
-                ? anchorRect.top + window.scrollY - popoverRect.height - 4
-                : window.scrollY + window.innerHeight - popoverRect.height - margin;
-            linkPopover.style.top = `${Math.max(window.scrollY + margin, topAboveAnchor)}px`;
+            const maxLeft = Math.max(margin, window.innerWidth - popoverRect.width - margin);
+            linkPopover.style.left = `${window.scrollX + Math.max(margin, Math.min(anchorRect.left, maxLeft))}px`;
+            linkPopover.style.top = `${window.scrollY + Math.max(minTop, Math.min(top, maxTop))}px`;
         }
 
         function syncLinkPopoverOpenButtonState(urlValue) {
@@ -21991,17 +22027,7 @@ const {
             linkInputDebounceTimer = null;
             syncLinkPopoverOpenButtonState(input.value);
 
-            // リンクの位置に合わせてポップオーバーを表示
-            const rect = link.getBoundingClientRect();
             linkPopover.style.display = 'flex';
-            linkPopover.style.top = `${rect.bottom + window.scrollY + 4}px`;
-            linkPopover.style.left = `${rect.left + window.scrollX}px`;
-
-            // 画面外にはみ出す場合は調整
-            const popoverRect = linkPopover.getBoundingClientRect();
-            if (popoverRect.right > window.innerWidth) {
-                linkPopover.style.left = `${window.innerWidth - popoverRect.width - 8}px`;
-            }
             repositionLinkPopoverWithinViewport();
 
             // 入力フィールドにフォーカス
@@ -22046,24 +22072,8 @@ const {
             linkInputDebounceTimer = null;
             syncLinkPopoverOpenButtonState('');
 
-            let rect = typeof range.getBoundingClientRect === 'function'
-                ? range.getBoundingClientRect()
-                : null;
-            if (!rect || (!rect.width && !rect.height)) {
-                const anchorElement = getNodeElement(range.startContainer);
-                if (anchorElement && typeof anchorElement.getBoundingClientRect === 'function') {
-                    rect = anchorElement.getBoundingClientRect();
-                }
-            }
-            const left = rect && Number.isFinite(rect.left) ? rect.left : 8;
-            const bottom = rect && Number.isFinite(rect.bottom) ? rect.bottom : 8;
             linkPopover.style.display = 'flex';
-            linkPopover.style.top = `${bottom + window.scrollY + 4}px`;
-            linkPopover.style.left = `${left + window.scrollX}px`;
-            const popoverRect = linkPopover.getBoundingClientRect();
-            if (popoverRect.right > window.innerWidth) {
-                linkPopover.style.left = `${Math.max(8, window.innerWidth - popoverRect.width - 8)}px`;
-            }
+            scheduleWorkspaceLinkSuggestions('');
             repositionLinkPopoverWithinViewport();
             setTimeout(() => input.focus(), 0);
             return true;
@@ -22168,7 +22178,23 @@ const {
             }
             syncLinkPopoverOpenButtonState(input?.value || '');
 
-            if (type === 'input') {
+            if (type === 'suggestion' && suggestion?.kind === 'heading') {
+                const heading = getMarkdownHeadingLinkSuggestions(
+                    editor.querySelectorAll('h1, h2, h3, h4, h5, h6'),
+                    '',
+                    Number.MAX_SAFE_INTEGER
+                ).find((item) => item.headingId === suggestion.headingId && item.path === inputValue);
+                if (!heading) {
+                    finishInlineLinkRequest(requestId, false);
+                    return false;
+                }
+                return insertSelectedWorkspaceLink({
+                    requestId,
+                    linkKind: 'workspace',
+                    href: heading.path,
+                    label: heading.linkLabel
+                });
+            } else if (type === 'input') {
                 vscode.postMessage({
                     type: 'requestLinkInputResolution',
                     requestId,
@@ -22463,20 +22489,31 @@ const {
 
         function unlinkLink() {
             if (currentLink) {
-                const text = currentLink.textContent || '';
-                const textNode = document.createTextNode(text);
                 const parent = currentLink.parentNode;
                 if (!parent) {
                     hideLinkPopover(true);
                     return;
                 }
-                parent.replaceChild(textNode, currentLink);
+                const linkOffset = Array.from(parent.childNodes).indexOf(currentLink);
+                const lastChild = currentLink.lastChild;
+                const contents = document.createDocumentFragment();
+                // Unwrap the link without flattening images or inline formatting.
+                while (currentLink.firstChild) {
+                    contents.appendChild(currentLink.firstChild);
+                }
+                parent.replaceChild(contents, currentLink);
 
                 // Keep keyboard shortcuts on the editor after clicking the popover button.
                 focusEditorWithoutScroll();
                 const selection = window.getSelection();
                 if (selection) {
-                    placeCollapsedCaret(selection, textNode, text.length);
+                    if (lastChild && lastChild.nodeType === Node.TEXT_NODE) {
+                        placeCollapsedCaret(selection, lastChild, lastChild.textContent.length);
+                    } else if (lastChild) {
+                        placeCollapsedCaretAfter(selection, lastChild);
+                    } else {
+                        placeCollapsedCaret(selection, parent, linkOffset);
+                    }
                 }
 
                 // Save immediately so unlink is always undoable/redoable.
@@ -22715,8 +22752,10 @@ const {
 
         window.addEventListener('resize', () => {
             syncImageResizeOverlayPosition();
+            repositionLinkPopoverWithinViewport();
             scheduleEditorOverflowStateUpdate();
         });
+        editor.addEventListener('scroll', repositionLinkPopoverWithinViewport);
 
         const IMAGE_KEYBOARD_RESIZE_STEP_PX = 16;
         const IMAGE_KEYBOARD_RESIZE_MIN_WIDTH_PX = 40;
@@ -23020,12 +23059,11 @@ const {
                 linkInputIsComposing = false;
                 if (
                     selectedSuggestion &&
-                    selectedSuggestion.query &&
+                    typeof selectedSuggestion.query === 'string' &&
                     input.value === selectedSuggestion.path
                 ) {
-                    // The host invalidates candidate IDs when this panel loses
-                    // focus. Restore the query so returning to the tab can issue
-                    // a fresh, safely scoped search instead of showing a dead ID.
+                    // Refresh selected headings and host-held file candidates
+                    // after a tab switch, including an initially empty query.
                     input.value = selectedSuggestion.query;
                     linkInputSavedValue = input.value;
                     input.removeAttribute('aria-invalid');
