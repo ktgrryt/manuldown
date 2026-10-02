@@ -784,10 +784,14 @@ export class DOMUtils {
             !this.getParentElement(element.parentElement, 'PRE')
         );
 
+        // The code block toolbar is editor UI. Unwrapping its language label
+        // drops a selection on the label and makes CodeBlockManager rebuild it.
+        const isCodeBlockToolbarPart = (element) => !!element.closest('.code-block-toolbar');
+
         // Pasting from rich text editors can leave visual styles in the live
         // contenteditable DOM even when the saved Markdown cannot represent them.
         this.editor.querySelectorAll('[style]').forEach(element => {
-            if (element.tagName === 'IMG') {
+            if (element.tagName === 'IMG' || isCodeBlockToolbarPart(element)) {
                 return;
             }
             element.removeAttribute('style');
@@ -797,7 +801,8 @@ export class DOMUtils {
         this.editor.querySelectorAll('font, span').forEach(element => {
             if (isSyntaxHighlightToken(element) ||
                 isTableStructureHandle(element) ||
-                isInlineCodeCaretAnchor(element)) {
+                isInlineCodeCaretAnchor(element) ||
+                isCodeBlockToolbarPart(element)) {
                 return;
             }
 

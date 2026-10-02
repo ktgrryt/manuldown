@@ -16,6 +16,15 @@ export class TableManager {
         // (code, selection) => boolean. Places the caret outside-left of inline
         // code with the same boundary state as paragraph navigation.
         this.placeCaretBeforeInlineCode = options.placeCaretBeforeInlineCode || null;
+        // Leaving the table moves to the same places as leaving a paragraph:
+        // (block, selection) => boolean. The start of the block's last visual line.
+        this.placeCaretAtBlockLastLineStart = options.placeCaretAtBlockLastLineStart || null;
+        // (pre, selection) => boolean. The end of the code block's last line.
+        this.placeCaretAtCodeBlockLastLineEnd = options.placeCaretAtCodeBlockLastLineEnd || null;
+        // (pre, selection) => boolean. Selects the code block's language label.
+        this.selectCodeBlockLanguageLabel = options.selectCodeBlockLanguageLabel || null;
+        // (block, selection) => boolean. The left edge of an image on the block's first line.
+        this.placeCaretAtLeadingImageLine = options.placeCaretAtLeadingImageLine || null;
 
         this.selectedCells = [];
         this.selectionRange = null;
@@ -2625,7 +2634,7 @@ export class TableManager {
                 return true;
             }
             if (direction === 'down') {
-                this._moveCursorAfterWrapper(wrapper);
+                this._moveCursorAfterWrapper(wrapper, 'down');
                 return true;
             }
         }
@@ -2784,7 +2793,7 @@ export class TableManager {
             }
             const wrapper = table.closest('.md-table-wrapper');
             if (wrapper) {
-                this._moveCursorAfterWrapper(wrapper);
+                this._moveCursorAfterWrapper(wrapper, 'down');
                 return true;
             }
             return false;
@@ -3280,6 +3289,10 @@ export class TableManager {
                 selection.removeAllRanges();
                 selection.addRange(range);
                 return;
+            } else if (prev.tagName === 'PRE' && this.placeCaretAtCodeBlockLastLineEnd?.(prev, selection)) {
+                return;
+            } else if (placeAtStart && this.placeCaretAtBlockLastLineStart?.(prev, selection)) {
+                return;
             } else if (placeAtStart) {
                 const firstNode = this.domUtils.getFirstTextNode(prev);
                 if (firstNode) {
@@ -3307,7 +3320,7 @@ export class TableManager {
         selection.addRange(range);
     }
 
-    _moveCursorAfterWrapper(wrapper) {
+    _moveCursorAfterWrapper(wrapper, direction = 'right') {
         const next = this._getNextNavigableSiblingNode(wrapper);
         const selection = window.getSelection();
         if (!selection) return;
@@ -3339,6 +3352,19 @@ export class TableManager {
                 range.selectNode(next);
                 selection.removeAllRanges();
                 selection.addRange(range);
+                return;
+            } else if (next.tagName === 'PRE') {
+                // ↓ selects the language label; other moves enter the code itself.
+                if (direction === 'down' && this.selectCodeBlockLanguageLabel?.(next, selection)) {
+                    return;
+                }
+                const firstNode = this.domUtils.getFirstTextNode(next.querySelector('code') || next);
+                if (firstNode) {
+                    range.setStart(firstNode, 0);
+                } else {
+                    range.setStart(next, 0);
+                }
+            } else if (this.placeCaretAtLeadingImageLine?.(next, selection)) {
                 return;
             } else {
                 const firstNode = this.domUtils.getFirstTextNode(next);

@@ -979,13 +979,35 @@ const {
         // marked formats its output with line feeds between top-level blocks. If
         // those formatting nodes reach contenteditable, Chromium can place the
         // caret in them even though they have no visible representation.
+        const isFormattingWhitespace = (node) =>
+            node.nodeType === Node.TEXT_NODE &&
+            /^[\t\r\n ]*$/.test(node.textContent || '');
         Array.from(container.childNodes || []).forEach((node) => {
-            if (
-                node.nodeType === Node.TEXT_NODE &&
-                /^[\t\r\n ]*$/.test(node.textContent || '')
-            ) {
+            if (isFormattingWhitespace(node)) {
                 node.remove();
             }
+        });
+
+        // The same line feeds sit between the children of lists, quotes and
+        // tables, and around the block children of a loose list item. Inside a
+        // list item, whitespace next to inline content is real text.
+        const blockTags = new Set([
+            'P', 'DIV', 'UL', 'OL', 'BLOCKQUOTE', 'PRE', 'TABLE', 'HR',
+            'H1', 'H2', 'H3', 'H4', 'H5', 'H6'
+        ]);
+        const isBlockOrEdge = (node) => !node ||
+            (node.nodeType === Node.ELEMENT_NODE && blockTags.has(node.tagName));
+        container.querySelectorAll('ul, ol, li, blockquote, table, thead, tbody, tfoot, tr').forEach((element) => {
+            if (element.closest('pre')) return;
+            Array.from(element.childNodes).forEach((node) => {
+                if (!isFormattingWhitespace(node)) return;
+                if (element.tagName === 'LI') {
+                    const prev = node.previousSibling;
+                    const next = node.nextSibling;
+                    if (!isBlockOrEdge(prev) || !isBlockOrEdge(next) || (!prev && !next)) return;
+                }
+                node.remove();
+            });
         });
 
         // A Markdown file may end in two spaces (the hard-break marker without a
@@ -1470,7 +1492,14 @@ const {
     });
     const tableManager = new TableManager(editor, domUtils, stateManager, {
         placeCaretBeforeInlineCode: (code, selection) =>
-            cursorManager._placeCursorBeforeInlineCodeElement(code, selection)
+            cursorManager._placeCursorBeforeInlineCodeElement(code, selection),
+        placeCaretAtBlockLastLineStart: (block, selection) =>
+            cursorManager.placeCursorAtLastVisualLineStart(block, selection),
+        placeCaretAtCodeBlockLastLineEnd: (pre, selection) =>
+            moveCursorToCodeBlockLastContentLineEnd(pre, selection),
+        selectCodeBlockLanguageLabel: (pre) => selectCodeBlockLanguageLabel(pre),
+        placeCaretAtLeadingImageLine: (block, selection) =>
+            cursorManager.placeCursorAtLeadingImageLine(block, selection)
     });
     const searchManager = new SearchManager(editor, {
         onWillReplace: (range) => {
@@ -7214,6 +7243,21 @@ const {
             nextElement = p;
         }
 
+        if (nextElement.tagName === 'HR') {
+            const hrRange = document.createRange();
+            hrRange.selectNode(nextElement);
+            selection.removeAllRanges();
+            selection.addRange(hrRange);
+            return true;
+        }
+        if (nextElement.tagName === 'PRE' &&
+            enterCodeBlockFromAbove(nextElement, selection, options.direction === 'down' ? 'down' : 'right')) {
+            return true;
+        }
+        if (cursorManager.placeCursorAtLeadingImageLine(nextElement, selection)) {
+            return true;
+        }
+
         // カーソルを次の要素の先頭に移動
         const newRange = document.createRange();
         const firstNode = getPreferredFirstTextNodeForElement(nextElement);
@@ -10444,6 +10488,12 @@ const {
                 return true;
             }
 
+            // 段落の行頭から↑と同じく、最終表示行の行頭へ
+            if (cursorManager.placeCursorAtLastVisualLineStart(prevElement, selection)) {
+                editor.focus();
+                return true;
+            }
+
             const newRange = document.createRange();
             const firstNode = domUtils.getFirstTextNode(prevElement);
             if (firstNode) {
@@ -10488,6 +10538,14 @@ const {
 
         if (prevElement) {
             if (prevElement.tagName === 'PRE' && moveCursorToCodeBlockLastContentLineEnd(prevElement, selection)) {
+                return true;
+            }
+
+            // 段落の行頭から←と同じく、ブロックの末尾へ。表は下の処理で右端に置く。
+            if (!prevElement.classList.contains('md-table-wrapper') &&
+                cursorManager.placeCursorAtBlockEnd(prevElement, selection)) {
+                setCodeBlockLanguageNavSelection(null);
+                editor.focus();
                 return true;
             }
 
@@ -10567,6 +10625,17 @@ const {
         const blockRect = block.getBoundingClientRect();
         const lineHeight = rect.height || 16;
         return currentY <= blockRect.top + lineHeight || (currentY - blockRect.top) < 40;
+    }
+
+    // 先頭／末尾の表示行にいるかを行で判定する。isCaretNearBlockTop/Bottom の「端から 40px 以内」は
+    // 1行の高さ（約 22px）では2行目まで含むため、隣のブロックへ出るときに行を飛ばす。
+    function isCaretOnBlockEdgeLine(range, block, edge) {
+        const lines = cursorManager._getVisualLinesForBlock(block);
+        const caretRect = cursorManager._getVisualCaretRectForRange(range);
+        if (lines.length === 0 || !caretRect) {
+            return edge === 'top' ? isCaretNearBlockTop(range, block) : isCaretNearBlockBottom(range, block);
+        }
+        return cursorManager._isSameVisualLine(edge === 'top' ? lines[0] : lines[lines.length - 1], caretRect);
     }
 
     function isCaretOnLastVisualLine(range, block) {
@@ -12119,7 +12188,7 @@ const {
         }
         if (!currentBlock || currentBlock === editor) return false;
         const isEmptyBlock = isEffectivelyEmptyBlock(currentBlock);
-        if (!isEmptyBlock && !isCaretNearBlockBottom(range, currentBlock)) return false;
+        if (!isEmptyBlock && !isCaretOnBlockEdgeLine(range, currentBlock, 'bottom')) return false;
         const nextElement = getNextElementSibling(currentBlock);
         if (nextElement && nextElement.tagName === 'PRE' && nextElement.querySelector('code')) {
             return selectCodeBlockLanguageLabel(nextElement);
@@ -12138,7 +12207,7 @@ const {
         }
         if (!currentBlock || currentBlock === editor) return false;
         const isEmptyBlock = isEffectivelyEmptyBlock(currentBlock);
-        if (!isEmptyBlock && !isCaretNearBlockTop(range, currentBlock)) return false;
+        if (!isEmptyBlock && !isCaretOnBlockEdgeLine(range, currentBlock, 'top')) return false;
         const prevElement = getPreviousElementSibling(currentBlock);
         if (prevElement && prevElement.tagName === 'PRE' && prevElement.querySelector('code')) {
             return selectCodeBlockLanguageLabel(prevElement);
@@ -12187,7 +12256,7 @@ const {
         }
         if (!currentBlock || currentBlock === editor) return false;
         if (isEffectivelyEmptyBlock(currentBlock)) return false;
-        if (!isAtBlockStartForRange(range, currentBlock) && !isCaretNearBlockTop(range, currentBlock)) {
+        if (!isAtBlockStartForRange(range, currentBlock) && !isCaretOnBlockEdgeLine(range, currentBlock, 'top')) {
             return false;
         }
 
@@ -12383,6 +12452,10 @@ const {
             if (nextElement.nodeType === Node.ELEMENT_NODE &&
                 nextElement.tagName === 'P' &&
                 placeCaretInEmptyParagraph(nextElement, selection)) {
+                editor.focus();
+                return true;
+            }
+            if (cursorManager.placeCursorAtLeadingImageLine(nextElement, selection)) {
                 editor.focus();
                 return true;
             }
@@ -12916,6 +12989,16 @@ const {
         return true;
     }
 
+    // 上のブロックからコードブロックへ入るときの移動先。段落から移動するときと同じく、
+    // ↓は言語ラベルを選択し、→はコードの先頭に置く。
+    function enterCodeBlockFromAbove(pre, selection, direction) {
+        if (direction === 'down') {
+            return selectCodeBlockLanguageLabel(pre);
+        }
+        const code = pre.querySelector('code');
+        return !!code && cursorManager.setCodeBlockCursorOffset(code, selection, 0);
+    }
+
     // 水平線から指定方向にカーソルを移動
     function navigateFromHR(hr, direction) {
         const selection = window.getSelection();
@@ -12924,7 +13007,7 @@ const {
 
         if (direction === 'up' || direction === 'left') {
             // 水平線の前の要素へ移動
-            let prevElement = hr.previousElementSibling;
+            let prevElement = getPreviousElementSibling(hr);
             if (prevElement) {
                 // 前の要素がHRの場合はそのHRを選択
                 if (prevElement.tagName === 'HR') {
@@ -12933,6 +13016,15 @@ const {
                     selection.addRange(newRange);
                     return true;
                 }
+                // 段落の行頭から↑/←と同じ位置へ。←で表に入るときは下の処理で右端に置く。
+                if (prevElement.tagName === 'PRE' && moveCursorToCodeBlockLastContentLineEnd(prevElement, selection)) {
+                    return true;
+                }
+                const placed = direction === 'up'
+                    ? cursorManager.placeCursorAtLastVisualLineStart(prevElement, selection)
+                    : !prevElement.classList.contains('md-table-wrapper') &&
+                        cursorManager.placeCursorAtBlockEnd(prevElement, selection);
+                if (placed) return true;
                 const boundary = direction === 'up' ? 'start' : 'end';
                 return placeCursorAtElementBoundary(prevElement, boundary);
             }
@@ -12943,13 +13035,19 @@ const {
             return placeCursorAtElementBoundary(newParagraph, 'start');
         } else if (direction === 'down' || direction === 'right') {
             // 水平線の後の要素へ移動
-            let nextElement = hr.nextElementSibling;
+            let nextElement = getNextElementSibling(hr);
             if (nextElement) {
                 // 次の要素がHRの場合はそのHRを選択
                 if (nextElement.tagName === 'HR') {
                     newRange.selectNode(nextElement);
                     selection.removeAllRanges();
                     selection.addRange(newRange);
+                    return true;
+                }
+                if (nextElement.tagName === 'PRE' && enterCodeBlockFromAbove(nextElement, selection, direction)) {
+                    return true;
+                }
+                if (cursorManager.placeCursorAtLeadingImageLine(nextElement, selection)) {
                     return true;
                 }
                 return placeCursorAtElementBoundary(nextElement, 'start');
@@ -13202,6 +13300,18 @@ const {
         return isRangeOnFirstLogicalLineInTopLevelNode(range, topLevelBlock);
     }
 
+    // 段落内の画像は独立した行なので、リスト項目などの専用の上下移動より先に、
+    // テキストの行と画像の行を1行ずつたどる。
+    function moveVerticallyAcrossBlockImages(e, direction) {
+        if (!cursorManager._moveVerticallyAcrossBlockImages(window.getSelection(), direction)) {
+            return false;
+        }
+        e.preventDefault();
+        e.stopPropagation();
+        syncImageCaretEdgeIndicatorsNow();
+        return true;
+    }
+
     function handleArrowKeydown(e) {
         if (e.key === 'ArrowDown' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
             if (isEditorEffectivelyEmpty()) {
@@ -13255,6 +13365,9 @@ const {
 
         // 矢印キー
         if (e.key === 'ArrowUp' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
+            if (moveVerticallyAcrossBlockImages(e, 'up')) {
+                return true;
+            }
             // チェックボックス上で↑ → 上のリストアイテムのチェックボックスへ移動
             {
                 const cbOnCursor = isCursorOnCheckbox();
@@ -13333,6 +13446,9 @@ const {
             return true;
         }
         if (e.key === 'ArrowDown' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
+            if (moveVerticallyAcrossBlockImages(e, 'down')) {
+                return true;
+            }
             {
                 const selection = window.getSelection();
                 if (selection && selection.rangeCount > 0) {
@@ -13395,13 +13511,13 @@ const {
                     }
                 }
             }
-            // リスト末尾からの下移動で HR を飛び越えるケースを防ぐ。
+            // リスト末尾からの下移動で HR やコードブロックの言語ラベルを飛び越えるケースを防ぐ。
             {
                 const selection = window.getSelection();
                 if (selection && selection.rangeCount > 0) {
                     const range = selection.getRangeAt(0);
                     const currentListItem = getListItemFromRange(range, 'down');
-                    if (currentListItem && isCaretNearBlockBottom(range, currentListItem)) {
+                    if (currentListItem && isCaretOnBlockEdgeLine(range, currentListItem, 'bottom')) {
                         const hasNextListItem = cursorManager &&
                             typeof cursorManager._getAdjacentListItem === 'function'
                             ? !!cursorManager._getAdjacentListItem(currentListItem, 'next')
@@ -13425,6 +13541,11 @@ const {
                                 hrRange.selectNode(nextAfterList);
                                 selection.removeAllRanges();
                                 selection.addRange(hrRange);
+                                return true;
+                            }
+                            if (nextAfterList && nextAfterList.tagName === 'PRE' &&
+                                enterCodeBlockFromAbove(nextAfterList, selection, 'down')) {
+                                e.preventDefault();
                                 return true;
                             }
                         }
@@ -13750,7 +13871,7 @@ const {
             // Check if we should exit a blockquote
             if (isAtBlockquoteEnd() || shouldExitBlockquoteDownByVisualPosition()) {
                 e.preventDefault();
-                exitBlockquoteAfter({ preferTopLevelGap: true });
+                exitBlockquoteAfter({ preferTopLevelGap: true, direction: 'down' });
                 notifyChange();
                 return true;
             }
@@ -14922,6 +15043,16 @@ const {
     // An image-only block at the end of the document has no line below it, so
     // ArrowDown from either edge of the image opens one, as leaving a trailing
     // code block or list does.
+    // A trailing image after text is the block's own last line (images are
+    // display: block). Its left and right edges are on that line.
+    function isCaretOnTrailingImageLine(range, block) {
+        const image = cursorManager._getTrailingImageInBlock(block);
+        return !!image && (
+            cursorManager._isCollapsedRangeAtNodeBoundary(range, image, 'before') ||
+            cursorManager._isCollapsedRangeAtNodeBoundary(range, image, 'after')
+        );
+    }
+
     function moveCursorDownBelowTrailingImageBlock(range, selection) {
         if (!range || !range.collapsed || !selection) {
             return false;
@@ -14937,7 +15068,7 @@ const {
         }
         if (!imageBlock ||
             !imageBlock.querySelector('img') ||
-            !isImageOnlyBlockElement(imageBlock) ||
+            !(isImageOnlyBlockElement(imageBlock) || isCaretOnTrailingImageLine(range, imageBlock)) ||
             imageBlock.closest('td, th, pre')) {
             return false;
         }
@@ -16032,6 +16163,10 @@ const {
         }
         // Ctrl+P (上に移動) - macOS/Emacsスタイル
         if (isCtrlP) {
+            if (moveVerticallyAcrossBlockImages(e, 'up')) {
+                recordCtrlNavHandled('up', fromCommand);
+                return true;
+            }
             // チェックボックス上でCtrl+P → 上のリストアイテムのチェックボックスへ移動
             const cbOnCursorP = isCursorOnCheckbox();
             if (cbOnCursorP) {
@@ -16126,6 +16261,10 @@ const {
 
         // Ctrl+N (下に移動) - macOS/Emacsスタイル
         if (isCtrlN) {
+            if (moveVerticallyAcrossBlockImages(e, 'down')) {
+                recordCtrlNavHandled('down', fromCommand);
+                return true;
+            }
             // チェックボックス上でCtrl+N → 下のリストアイテムのチェックボックスへ移動
             const cbOnCursorN = isCursorOnCheckbox();
             if (cbOnCursorN) {
@@ -16186,7 +16325,7 @@ const {
             // Check if we should exit a blockquote
             if (isAtBlockquoteEnd() || shouldExitBlockquoteDownByVisualPosition()) {
                 e.preventDefault();
-                exitBlockquoteAfter({ preferTopLevelGap: true });
+                exitBlockquoteAfter({ preferTopLevelGap: true, direction: 'down' });
                 notifyChange();
                 recordCtrlNavHandled('down', fromCommand);
                 return true;
@@ -16363,13 +16502,16 @@ const {
         // Ctrl+F (右に移動) - macOS/Emacsスタイル
         if (isCtrlF) {
             const selectedCodeBlockLabel = getSelectedCodeBlockLanguageLabel();
+            // A selected label or HR is a navigation stop, not a text selection to collapse.
+            const selectedHR = isHRSelected();
             {
                 const selection = window.getSelection();
                 if (
                     selection &&
                     selection.rangeCount > 0 &&
                     !selection.isCollapsed &&
-                    !selectedCodeBlockLabel
+                    !selectedCodeBlockLabel &&
+                    !selectedHR
                 ) {
                     let collapsed = false;
                     if (typeof selection.collapseToEnd === 'function') {
