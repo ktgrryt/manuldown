@@ -269,6 +269,70 @@ test('Tab and Shift+Tab keep the line order when list types are mixed', async ()
     });
 });
 
+// The task item helpers of editor.js, run against editor.
+function checkboxHelpers(editor, domUtils) {
+    const source = sliceEditorSource('function getCheckboxInListItemDirectContent(listItem)', 'function isEmptyCheckboxListItem(listItem)') +
+        sliceEditorSource('function getFirstDirectTextNodeAfterCheckbox(li)', 'function normalizeCheckboxListItems(');
+    return new Function(
+        'editor', 'domUtils', 'document', 'Node', 'NodeFilter',
+        `${source}\nreturn { ensureCheckboxLeadingSpace, releaseStrayCheckboxPlaceholderBreaks };`
+    )(editor, domUtils, global.document, global.Node, global.NodeFilter);
+}
+
+// domino has no ":scope", which the helpers use only as ":scope > selector".
+// Its querySelector cannot be replaced, so each element gets its own.
+function supportScopeChildSelector(elements) {
+    for (const element of Array.from(elements)) {
+        const querySelector = element.querySelector;
+        Object.defineProperty(element, 'querySelector', {
+            value(selectors) {
+                const match = /^:scope > (.+)$/.exec(selectors);
+                if (!match) return querySelector.call(this, selectors);
+                return Array.from(this.children).find((child) => child.matches(match[1])) || null;
+            },
+        });
+    }
+}
+
+const checkboxPlaceholderBreak = '<br data-mdw-checkbox-placeholder="true" data-exclude-from-markdown="true">';
+
+test('an empty task item gets a line for the caret that stays out of the Markdown', async () => {
+    const { DOMUtils } = await domUtilsModulePromise;
+    const html = '<ul><li><input type="checkbox"></li><li><input type="checkbox"> a</li>' +
+        '<li><input type="checkbox"><ul><li>b</li></ul></li></ul>';
+    await withEditor(html, (editor) => {
+        supportScopeChildSelector(editor.querySelectorAll('li'));
+        const { ensureCheckboxLeadingSpace } = checkboxHelpers(editor, new DOMUtils(editor));
+        const [empty, withText, withNestedList] = Array.from(editor.firstChild.children);
+        // A second run changes nothing.
+        for (let run = 0; run < 2; run++) {
+            [empty, withText, withNestedList].forEach(ensureCheckboxLeadingSpace);
+        }
+
+        // Without a line, Chrome draws the caret at the checkbox, on its left.
+        assert.equal(empty.innerHTML, `<input type="checkbox">${checkboxPlaceholderBreak}`);
+        assert.deepEqual(Array.from(empty.childNodes, (node) => node.nodeName), ['INPUT', '#text', 'BR']);
+        assert.equal(withText.innerHTML, '<input type="checkbox">a');
+        assert.equal(withNestedList.innerHTML, '<input type="checkbox"><ul><li>b</li></ul>');
+
+        empty.childNodes[1].textContent = 'typed';
+        ensureCheckboxLeadingSpace(empty);
+        assert.equal(empty.innerHTML, '<input type="checkbox">typed');
+    });
+});
+
+test('a caret line left outside a task item goes away', async () => {
+    const { DOMUtils } = await domUtilsModulePromise;
+    const taskItem = `<li><input type="checkbox">${checkboxPlaceholderBreak}</li>`;
+    const html = `<ul>${taskItem}<li>a${checkboxPlaceholderBreak}</li></ul><p>${checkboxPlaceholderBreak}</p>`;
+    await withEditor(html, (editor) => {
+        const { releaseStrayCheckboxPlaceholderBreaks } = checkboxHelpers(editor, new DOMUtils(editor));
+        releaseStrayCheckboxPlaceholderBreaks();
+        // The empty paragraph keeps its line with a plain <br>.
+        assert.equal(editor.innerHTML, `<ul>${taskItem}<li>a</li></ul><p><br></p>`);
+    });
+});
+
 test('turning a body row into the header row keeps the column alignment', async () => {
     const { TableManager } = await tableManagerModulePromise;
     await withEditor(
