@@ -37,7 +37,7 @@ class ImageImportError extends Error {
 
 export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     private static readonly viewType = 'manulDown.editor';
-    private static readonly builtInSlashCommandIds = new Set(['table', 'quote', 'code', 'checkbox', 'link']);
+    private static readonly builtInSlashCommandIds = new Set(['table', 'quote', 'code', 'checkbox', 'link', 'toc']);
     private static readonly workspaceLinkRequestIdPattern = /^workspace-link-\d{1,16}-\d{1,10}$/;
     private static readonly workspaceLinkSuggestionRequestIdPattern =
         /^workspace-link-suggest-\d{1,16}-\d{1,10}$/;
