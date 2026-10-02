@@ -3478,11 +3478,71 @@ const {
         return offset;
     }
 
+    const CHECKBOX_PLACEHOLDER_BREAK_ATTRIBUTE = 'data-mdw-checkbox-placeholder';
+
     function ensureCheckboxLeadingSpace(li) {
         if (!li) return;
         const checkbox = li.querySelector(':scope > input[type="checkbox"]');
         if (!checkbox) return;
+        ensureCheckboxTextAnchor(li, checkbox);
+        syncCheckboxPlaceholderBreak(li, checkbox);
+    }
 
+    // A task item with nothing on its line has no line box, so Chrome draws the
+    // caret at the absolutely positioned checkbox, i.e. on its left. A BR gives
+    // the item a line, as in <p><br></p>, and the caret then sits where text goes.
+    // The BR is left out of the Markdown and removed once the item has content.
+    // An empty item with a nested list gets its line from "&nbsp;" instead.
+    function syncCheckboxPlaceholderBreak(li, checkbox) {
+        const placeholders = [];
+        let isEmpty = true;
+        for (const child of li.childNodes) {
+            if (child === checkbox) continue;
+            if (child.nodeType === Node.TEXT_NODE) {
+                // Collapsible whitespace renders nothing.
+                if (/[^\t\n\r ]/.test(child.textContent || '')) isEmpty = false;
+            } else if (child.nodeType === Node.ELEMENT_NODE) {
+                if (child.tagName === 'BR' && child.hasAttribute(CHECKBOX_PLACEHOLDER_BREAK_ATTRIBUTE)) {
+                    placeholders.push(child);
+                } else {
+                    isEmpty = false;
+                }
+            }
+        }
+
+        const kept = isEmpty ? placeholders.shift() : null;
+        placeholders.forEach(br => br.remove());
+        if (!isEmpty || kept) return;
+
+        const br = document.createElement('br');
+        br.setAttribute(CHECKBOX_PLACEHOLDER_BREAK_ATTRIBUTE, 'true');
+        br.setAttribute('data-exclude-from-markdown', 'true');
+        li.appendChild(br);
+    }
+
+    // A placeholder outside a task item (the checkbox was removed, or the line
+    // was moved into another block) goes away, unless it is all its block holds:
+    // then it stays as a plain BR so the empty block keeps its line.
+    function releaseStrayCheckboxPlaceholderBreaks() {
+        editor.querySelectorAll(`br[${CHECKBOX_PLACEHOLDER_BREAK_ATTRIBUTE}]`).forEach(br => {
+            const parent = br.parentElement;
+            if (!parent) return;
+            if (parent.tagName === 'LI' && hasCheckboxAtStart(parent)) return;
+            const hasOtherContent = Array.from(parent.childNodes).some(node =>
+                node !== br &&
+                (node.nodeType === Node.ELEMENT_NODE ||
+                    (node.nodeType === Node.TEXT_NODE && /[^\t\n\r ]/.test(node.textContent || '')))
+            );
+            if (hasOtherContent) {
+                br.remove();
+            } else {
+                br.removeAttribute(CHECKBOX_PLACEHOLDER_BREAK_ATTRIBUTE);
+                br.removeAttribute('data-exclude-from-markdown');
+            }
+        });
+    }
+
+    function ensureCheckboxTextAnchor(li, checkbox) {
         const isPlaceholderOnlyListNode = (node) => {
             if (!node) return true;
             if (node.nodeType === Node.TEXT_NODE) {
@@ -6092,6 +6152,7 @@ const {
     // Update list item classes based on content
     function updateListItemClasses() {
         cleanupEmptyListContainers(true);
+        releaseStrayCheckboxPlaceholderBreaks();
 
         const listItems = editor.querySelectorAll('li');
         const selection = window.getSelection();
