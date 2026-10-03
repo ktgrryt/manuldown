@@ -3,7 +3,7 @@
   "displayName": "ManulDown",
   "description": "WYSIWYG editor for Markdown files in VSCode",
   "icon": "images/icon.png",
-  "version": "2.1.3",
+  "version": "2.1.5",
   "publisher": "ktgrryt",
   "license": "MIT",
   "repository": {
@@ -172,7 +172,7 @@
         "command": "manulDown.openLinkAtCursor",
         "key": "ctrl+enter",
         "mac": "cmd+enter",
-        "when": "activeCustomEditorId == 'manulDown.editor' && webviewFocus"
+        "when": "activeCustomEditorId == 'manulDown.editor'"
       },
       {
         "command": "manulDown.undo",
