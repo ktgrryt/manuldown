@@ -11,6 +11,13 @@ const tableManagerSource = fs.readFileSync(
 const tableManagerModulePromise = import(
     `data:text/javascript;base64,${Buffer.from(tableManagerSource).toString('base64')}`
 );
+const domUtilsSource = fs.readFileSync(
+    path.join(__dirname, '..', 'media', 'modules', 'DOMUtils.js'),
+    'utf8'
+);
+const domUtilsModulePromise = import(
+    `data:text/javascript;base64,${Buffer.from(domUtilsSource).toString('base64')}`
+);
 
 function createClassList() {
     const classes = new Set();
@@ -164,6 +171,116 @@ test('hover resolution ignores a stale event target after handles are rebuilt', 
 
     assert.equal(resolvedTargets[0], currentCellTarget);
     assert.deepEqual(manager.hoverHandleContext, { table, rowIndex: 1, colIndex: 2 });
+});
+
+test('boundary clicks keep the insert highlight after notifying a change without moving the pointer', async (t) => {
+    const { TableManager } = await tableManagerModulePromise;
+    const { DOMUtils } = await domUtilsModulePromise;
+    const cases = [
+        { name: 'left column boundary', type: 'col', x: 101, y: 148 },
+        { name: 'right column boundary', type: 'col', x: 399, y: 148 },
+        { name: 'top row boundary', type: 'row', x: 165, y: 101 },
+        { name: 'interior row boundary', type: 'row', x: 165, y: 140 },
+        { name: 'bottom row boundary', type: 'row', x: 165, y: 219 },
+    ];
+
+    for (const scenario of cases) {
+        await t.test(scenario.name, () => {
+            const domWindow = domino.createWindow(
+                '<div id="editor"><div class="md-table-wrapper"><table class="md-table">' +
+                '<thead><tr><th>A</th><th>B</th><th>C</th></tr></thead>' +
+                '<tbody><tr><td>D</td><td>E</td><td>F</td></tr>' +
+                '<tr><td>G</td><td>H</td><td>I</td></tr></tbody></table></div></div>'
+            );
+            const editor = domWindow.document.querySelector('#editor');
+            const table = editor.querySelector('table');
+            const previousGlobals = {
+                document: global.document, window: global.window,
+                Node: global.Node, NodeFilter: global.NodeFilter,
+            };
+            const nodeListPrototype = Object.getPrototypeOf(editor.querySelectorAll('td'));
+            const previousForEach = nodeListPrototype.forEach;
+            nodeListPrototype.forEach = Array.prototype.forEach;
+            Object.assign(global, {
+                document: domWindow.document, window: domWindow,
+                Node: domWindow.Node, NodeFilter: domWindow.NodeFilter,
+            });
+            domWindow.getSelection = () => ({ rangeCount: 0, removeAllRanges() {}, addRange() {} });
+            domWindow.document.createRange = () => ({ setStart() {}, collapse() {} });
+            editor.scrollLeft = 0;
+            editor.scrollTop = 0;
+            editor.getBoundingClientRect = () => ({ left: 0, top: 0 });
+            table.getBoundingClientRect = () => ({
+                left: 100, top: 100, width: 300, height: table.rows.length * 40,
+            });
+            table.tBodies = Array.from(table.querySelectorAll('tbody'));
+            // Supply the table indices and layout APIs missing from Domino.
+            domWindow.document.elementFromPoint = (x, y) => {
+                Array.from(table.rows).forEach((row, rowIndex) => {
+                    row.rowIndex = rowIndex;
+                    Array.from(row.cells).forEach((cell, cellIndex) => {
+                        cell.cellIndex = cellIndex;
+                        cell.getBoundingClientRect = () => {
+                            const width = 300 / row.cells.length;
+                            const left = 100 + cellIndex * width;
+                            const top = 100 + rowIndex * 40;
+                            return { left, right: left + width, top, bottom: top + 40, width, height: 40 };
+                        };
+                    });
+                });
+                return Array.from(table.querySelectorAll('td, th')).find(cell => {
+                    const rect = cell.getBoundingClientRect();
+                    return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+                }) || editor;
+            };
+            const domUtils = new DOMUtils(editor);
+            let savedStates = 0;
+            const manager = Object.create(TableManager.prototype);
+            Object.assign(manager, {
+                editor, domUtils, isMouseDown: false, structureDrag: null,
+                structureSelection: null, hoverHandleContext: null,
+                // Structure handles are covered separately; Domino lacks dataset.
+                _ensureStructureHandles() {},
+                stateManager: { saveState: () => savedStates++ },
+                notifyChange: () => domUtils.cleanupGhostStyles(),
+            });
+
+            try {
+                manager._createInsertLines();
+                manager._handleHoverMove({ clientX: scenario.x, clientY: scenario.y });
+                assert.equal(manager.hoverInsert.type, scenario.type);
+                const line = scenario.type === 'col' ? manager.insertLineVertical : manager.insertLineHorizontal;
+
+                for (let click = 1; click <= 2; click++) {
+                    const target = domWindow.document.elementFromPoint(scenario.x, scenario.y);
+                    assert.equal(manager.handleMouseDown({
+                        button: 0, target, clientX: scenario.x, clientY: scenario.y,
+                        preventDefault() {},
+                    }), true);
+                    assert.equal(line.style.display, 'block');
+                    assert.equal(manager.hoverInsert.type, scenario.type);
+                    assert.equal(table.rows.length, scenario.type === 'row' ? 3 + click : 3);
+                    assert.equal(table.rows[0].cells.length, scenario.type === 'col' ? 3 + click : 3);
+                    assert.equal(savedStates, click);
+                }
+                assert.ok(line.style.left.endsWith('px'));
+                assert.ok(line.style.top.endsWith('px'));
+                const size = scenario.type === 'col' ? line.style.height : line.style.width;
+                assert.equal(size, scenario.type === 'col' ? `${table.rows.length * 40 + 2}px` : '302px');
+
+                manager._handleHoverMove({ clientX: 120, clientY: 120 });
+                assert.equal(line.style.display, 'none');
+                assert.equal(manager.hoverInsert, null);
+            } finally {
+                if (previousForEach === undefined) delete nodeListPrototype.forEach;
+                else nodeListPrototype.forEach = previousForEach;
+                for (const [key, value] of Object.entries(previousGlobals)) {
+                    if (value === undefined) delete global[key];
+                    else global[key] = value;
+                }
+            }
+        });
+    }
 });
 
 test('finishing a structure drag refreshes handles from the mouseup position', async () => {

@@ -799,11 +799,23 @@ export class DOMUtils {
         // The code block toolbar is editor UI. Unwrapping its language label
         // drops a selection on the label and makes CodeBlockManager rebuild it.
         const isCodeBlockToolbarPart = (element) => !!element.closest('.code-block-toolbar');
+        const isTableOverlay = (element) => !!(
+            element.tagName === 'DIV' &&
+            element.getAttribute('data-exclude-from-markdown') === 'true' &&
+            element.getAttribute('contenteditable') === 'false' &&
+            (
+                (element.classList.contains('md-table-insert-line') && element.parentElement === this.editor) ||
+                (element.classList.contains('md-table-structure-outline') &&
+                    element.parentElement?.classList.contains('md-table-wrapper'))
+            )
+        );
 
         // Pasting from rich text editors can leave visual styles in the live
         // contenteditable DOM even when the saved Markdown cannot represent them.
+        // Table overlays use inline display and geometry to keep insertion and
+        // selection feedback visible across change notifications.
         this.editor.querySelectorAll('[style]').forEach(element => {
-            if (element.tagName === 'IMG' || isCodeBlockToolbarPart(element)) {
+            if (element.tagName === 'IMG' || isCodeBlockToolbarPart(element) || isTableOverlay(element)) {
                 return;
             }
             element.removeAttribute('style');
