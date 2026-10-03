@@ -5893,6 +5893,17 @@ const {
         slashMenu.style.left = `${left}px`;
     }
 
+    function repositionSlashCommandMenu() {
+        if (!slashMenuState.visible) return;
+        const match = getSlashCommandMatch();
+        if (!match) {
+            hideSlashCommandMenu();
+            return;
+        }
+        slashMenuState.match = match;
+        positionSlashMenu(match.range);
+    }
+
     function renderSlashMenu(items) {
         if (!slashMenu) {
             slashMenu = createSlashMenu();
@@ -7551,7 +7562,8 @@ const {
             while (currentOffset > 0 &&
                 (
                     currentNode.textContent[currentOffset - 1] === '\u200B' ||
-                    currentNode.textContent[currentOffset - 1] === '\u2060'
+                    currentNode.textContent[currentOffset - 1] === '\u2060' ||
+                    currentNode.textContent[currentOffset - 1] === '\uFEFF'
                 )) {
                 currentOffset--;
                 deletedZWSP = true;
@@ -18310,9 +18322,9 @@ const {
         });
 
         editor.addEventListener('scroll', () => {
-            if (slashMenuState.visible) {
-                hideSlashCommandMenu();
-            }
+            // Typing at the document end can scroll the caret into view after
+            // input has opened the menu. Keep that menu anchored to the caret.
+            repositionSlashCommandMenu();
             syncImageResizeOverlayPosition();
             scheduleEditorOverflowStateUpdate();
         });
@@ -22060,9 +22072,17 @@ const {
             linkCreationRange = null;
             linkCreationRevision = null;
             try {
-                const linkRange = document.createRange();
-                linkRange.selectNodeContents(link);
-                linkRange.collapse(true);
+                const selection = window.getSelection();
+                const selectedRange = selection && selection.rangeCount === 1
+                    ? selection.getRangeAt(0)
+                    : null;
+                const linkRange = selectedRange && link.contains(selectedRange.commonAncestorContainer)
+                    ? selectedRange
+                    : document.createRange();
+                if (linkRange !== selectedRange) {
+                    linkRange.selectNodeContents(link);
+                    linkRange.collapse(true);
+                }
                 linkHistorySelection = stateManager.saveRange(linkRange);
             } catch (_error) {
                 linkHistorySelection = null;
@@ -22522,6 +22542,12 @@ const {
         }
 
         function hideLinkPopover(skipSave = false) {
+            // Hiding a focused input drops focus onto the page. Capture the
+            // editor bookmark before clearing it, but respect an outside click.
+            const shouldRestoreSelection = linkPopover &&
+                linkPopover.style.display !== 'none' &&
+                linkPopover.contains(document.activeElement);
+            const savedSelection = shouldRestoreSelection ? linkHistorySelection : null;
             cancelActiveLinkPopoverRequest();
             clearWorkspaceLinkSuggestions({ cancelHost: true });
             linkInputIsComposing = false;
@@ -22538,6 +22564,11 @@ const {
             linkCreationRange = null;
             linkCreationRevision = null;
             linkHistorySelection = null;
+            if (shouldRestoreSelection) {
+                focusEditorWithoutScroll();
+                stateManager.restoreSelection(savedSelection);
+                revealCaretAfterKeyboardNavigation();
+            }
         }
 
         function unlinkLink() {
@@ -22831,6 +22862,7 @@ const {
         window.addEventListener('resize', () => {
             syncImageResizeOverlayPosition();
             repositionLinkPopoverWithinViewport();
+            repositionSlashCommandMenu();
             scheduleEditorOverflowStateUpdate();
         });
         editor.addEventListener('scroll', repositionLinkPopoverWithinViewport);

@@ -47,7 +47,7 @@ class TestRange {
     }
 }
 
-async function createFixture(html) {
+async function createFixture(html, onNativeDelete = () => {}) {
     const window = domino.createWindow(`<div id="editor">${html}</div>`);
     const document = window.document;
     const editor = document.getElementById('editor');
@@ -67,8 +67,17 @@ async function createFixture(html) {
     window.getSelection = () => selection;
     let nativeDeletes = 0;
     let changes = 0;
-    document.execCommand = (command) => { assert.equal(command, 'delete'); nativeDeletes++; };
-    const names = ['handleBackspace', 'isEffectivelyEmptyBlock', 'placeCollapsedCaret'];
+    document.execCommand = (command) => {
+        assert.equal(command, 'delete');
+        nativeDeletes++;
+        onNativeDelete(editor, selection);
+    };
+    const names = [
+        'handleBackspace', 'isEffectivelyEmptyBlock', 'placeCollapsedCaret',
+        'hasDirectTextContent', 'getDirectTextContent', 'isRangeAtListItemStart',
+        'hasCheckboxAtStart', 'hasCheckbox', 'getCheckboxInListItemDirectContent',
+        'getFirstDirectTextNode'
+    ];
     const backspace = new Function('window', 'editor', 'domUtils', 'notifyChange', 'requestAnimationFrame',
         `${names.map(extractFunction).join('\n')}\nreturn handleBackspace;`
     )(window, editor, new DOMUtils(editor), () => changes++, () => {});
@@ -131,6 +140,40 @@ test('repeated Backspace removes one blank line at a time before a heading', asy
         fixture.backspace();
         assert.equal(fixture.nativeDeletes, 1);
     } finally { fixture.restore(); }
+});
+
+test('Backspace after removing a blank line below a list skips invisible boundaries and immediately deletes text', async () => {
+    for (const boundary of ['\u200B', '\u2060', '\uFEFF', '\u200B\u2060\uFEFF']) {
+        const fixture = await createFixture(`<ul><li>aaa${boundary}</li></ul><p><br></p>`, (editor, selection) => {
+            const range = selection.getRangeAt(0);
+            if (range.startContainer.nodeName === 'P') {
+                // Chromium joins the blank paragraph to the preceding list and
+                // puts the caret after the invisible suffix of its text node.
+                range.startContainer.remove();
+                const text = editor.querySelector('li').firstChild;
+                range.setStart(text, text.textContent.length);
+            } else {
+                const text = range.startContainer;
+                const offset = range.startOffset;
+                text.textContent = text.textContent.slice(0, offset - 1) + text.textContent.slice(offset);
+                range.setStart(text, offset - 1);
+            }
+        });
+        try {
+            fixture.caret(fixture.editor.lastElementChild);
+            fixture.backspace();
+            assert.equal(fixture.editor.querySelectorAll('p').length, 0);
+            const text = fixture.editor.querySelector('li').firstChild;
+            assert.equal(text.textContent, `aaa${boundary}`);
+            fixture.backspace();
+            assert.equal(text.textContent, `aa${boundary}`);
+            assert.equal(fixture.selection.getRangeAt(0).startOffset, 2);
+            fixture.backspace();
+            assert.equal(text.textContent, `a${boundary}`);
+            assert.equal(fixture.selection.getRangeAt(0).startOffset, 1);
+            assert.equal(fixture.nativeDeletes, 3);
+        } finally { fixture.restore(); }
+    }
 });
 
 test('an empty heading without a preceding blank line still becomes a paragraph', async () => {
