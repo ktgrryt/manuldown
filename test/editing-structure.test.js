@@ -313,7 +313,11 @@ test('an empty task item gets a line for the caret that stays out of the Markdow
         assert.equal(empty.innerHTML, `<input type="checkbox">${checkboxPlaceholderBreak}`);
         assert.deepEqual(Array.from(empty.childNodes, (node) => node.nodeName), ['INPUT', '#text', 'BR']);
         assert.equal(withText.innerHTML, '<input type="checkbox">a');
-        assert.equal(withNestedList.innerHTML, '<input type="checkbox"><ul><li>b</li></ul>');
+        assert.equal(withNestedList.innerHTML, `<input type="checkbox">${checkboxPlaceholderBreak}<ul><li>b</li></ul>`);
+
+        withNestedList.childNodes[1].textContent = 'parent';
+        ensureCheckboxLeadingSpace(withNestedList);
+        assert.equal(withNestedList.innerHTML, '<input type="checkbox">parent<ul><li>b</li></ul>');
 
         empty.childNodes[1].textContent = 'typed';
         ensureCheckboxLeadingSpace(empty);

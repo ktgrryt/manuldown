@@ -162,11 +162,13 @@ test('only Cmd+Enter on Mac and Ctrl+Enter on Windows/Linux suppress native Ente
     }
 });
 
-test('the VS Code command executes navigation once after DOM default prevention', async () => {
+test('the VS Code shortcut uses the custom editor context and executes navigation once', async () => {
     const binding = packageJson.contributes.keybindings.find(entry => entry.command === 'manulDown.openLinkAtCursor');
     assert.deepEqual(binding, {
         command: 'manulDown.openLinkAtCursor', key: 'ctrl+enter', mac: 'cmd+enter',
-        when: "activeCustomEditorId == 'manulDown.editor' && webviewFocus"
+        // VS Code has no webviewFocus context key. Navigation itself checks the
+        // focused editor so toolbar/input focus cannot open a stale selection.
+        when: "activeCustomEditorId == 'manulDown.editor'"
     });
     assert.ok(packageJson.contributes.commands.some(entry => entry.command === binding.command));
     const f = await fixture('<p><a href="https://example.com">link</a></p>');

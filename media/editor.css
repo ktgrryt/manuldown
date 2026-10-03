@@ -1469,18 +1469,60 @@ body.toc-resizing #toc-resizer::before {
     min-height: 1.6em;
 }
 
+#editor li:has(> input[type="checkbox"]:first-child:checked) {
+    color: color-mix(in srgb, var(--vscode-editor-foreground) 60%, var(--vscode-editor-background));
+    text-decoration: line-through;
+    text-decoration-thickness: 1px;
+}
+
+/* Keep a completed parent's decoration and color out of its nested lists. */
+#editor li:has(> input[type="checkbox"]:first-child) > ul,
+#editor li:has(> input[type="checkbox"]:first-child) > ol {
+    display: inline-block;
+    width: 100%;
+    vertical-align: top;
+    color: var(--vscode-editor-foreground);
+    text-decoration: none;
+}
+
 #editor li > input[type="checkbox"]:first-child {
+    appearance: none;
+    -webkit-appearance: none;
     position: absolute;
     /* Place checkbox in marker gutter (similar to numbered list marker area) */
-    left: -1.15em;
-    top: 0.35em;
+    left: calc(-1.4em + 2px);
+    top: 0.375em;
+    display: grid;
+    place-content: center;
+    width: 0.85em;
+    height: 0.85em;
     margin: 0;
+    padding: 0;
+    font: inherit;
+    color: var(--vscode-editor-foreground);
+    background-color: transparent;
+    border: 1px solid currentColor;
+    border-radius: 1px;
     cursor: pointer;
 }
 
+#editor li > input[type="checkbox"]:first-child:checked {
+    background-color: currentColor;
+}
+
+#editor li > input[type="checkbox"]:first-child:checked::after {
+    content: '';
+    width: 0.25em;
+    height: 0.45em;
+    border: solid var(--vscode-editor-background);
+    border-width: 0 0.08em 0.08em 0;
+    transform: translateY(-0.04em) rotate(45deg);
+}
+
+#editor li > input[type="checkbox"]:focus-visible,
 #editor li > input[type="checkbox"].cursor-on {
-    outline: 2px solid var(--vscode-focusBorder);
-    outline-offset: 1px;
+    color: var(--vscode-editorCursor-foreground, var(--vscode-editor-foreground));
+    outline: none;
 }
 
 #editor li:has(> input[type="checkbox"].cursor-on) {

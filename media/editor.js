@@ -3502,7 +3502,8 @@ const {
     // caret at the absolutely positioned checkbox, i.e. on its left. A BR gives
     // the item a line, as in <p><br></p>, and the caret then sits where text goes.
     // The BR is left out of the Markdown and removed once the item has content.
-    // An empty item with a nested list gets its line from "&nbsp;" instead.
+    // Keep that line before nested lists too, which are inline blocks so they
+    // don't inherit a completed parent's text decoration.
     function syncCheckboxPlaceholderBreak(li, checkbox) {
         const placeholders = [];
         let isEmpty = true;
@@ -3512,6 +3513,7 @@ const {
                 // Collapsible whitespace renders nothing.
                 if (/[^\t\n\r ]/.test(child.textContent || '')) isEmpty = false;
             } else if (child.nodeType === Node.ELEMENT_NODE) {
+                if (child.tagName === 'UL' || child.tagName === 'OL') continue;
                 if (child.tagName === 'BR' && child.hasAttribute(CHECKBOX_PLACEHOLDER_BREAK_ATTRIBUTE)) {
                     placeholders.push(child);
                 } else {
@@ -3527,7 +3529,8 @@ const {
         const br = document.createElement('br');
         br.setAttribute(CHECKBOX_PLACEHOLDER_BREAK_ATTRIBUTE, 'true');
         br.setAttribute('data-exclude-from-markdown', 'true');
-        li.appendChild(br);
+        const firstSublist = Array.from(li.children).find(child => child.tagName === 'UL' || child.tagName === 'OL');
+        li.insertBefore(br, firstSublist || null);
     }
 
     // A placeholder outside a task item (the checkbox was removed, or the line
@@ -10164,6 +10167,15 @@ const {
         return null;
     }
 
+    function syncCheckboxCaretIndicatorNow() {
+        const checkbox = isCursorOnCheckbox();
+        const activeCheckbox = checkbox && editor.contains(checkbox) ? checkbox : null;
+        editor.querySelectorAll('input[type="checkbox"].cursor-on').forEach(cb => {
+            if (cb !== activeCheckbox) cb.classList.remove('cursor-on');
+        });
+        if (activeCheckbox) activeCheckbox.classList.add('cursor-on');
+    }
+
     // チェックボックス付きリストアイテムのテキスト先頭にカーソルがあるかを判定
     // テキスト先頭にある場合はそのLI要素を返す。それ以外はnull。
     function isCursorAtCheckboxTextStart() {
@@ -10177,25 +10189,41 @@ const {
         while (li && li.tagName !== 'LI') {
             li = li.parentElement;
         }
-        if (!li || !hasCheckboxAtStart(li)) return null;
-
-        const firstTextNode = getFirstDirectTextNodeAfterCheckbox(li);
-        const minOffset = getCheckboxTextMinOffset(li);
-
-        if (firstTextNode && container === firstTextNode) {
-            if (isEmptyCheckboxListItem(li)) {
-                return li;
-            }
-            if (offset <= minOffset) {
-                return li;
-            }
+        if (!li || !editor.contains(li) || !hasCheckboxAtStart(li) || isCursorOnCheckbox()) return null;
+        if (container.nodeType === Node.ELEMENT_NODE &&
+            (container.tagName === 'INPUT' || container.tagName === 'UL' || container.tagName === 'OL')) {
+            return null;
         }
 
-        // Safari/WebView ではチェックボックス直後が { container: li, offset: 1 } になることがある
-        if (container === li && offset === 1) {
-            return li;
+        const checkbox = li.querySelector(':scope > input[type="checkbox"]');
+        if (!checkbox) return null;
+        try {
+            // The same visible start can be a text offset, an inline element's
+            // boundary, or an LI boundary after invisible caret anchors.
+            const prefix = document.createRange();
+            prefix.setStartAfter(checkbox);
+            prefix.setEnd(container, offset);
+            const fragment = prefix.cloneContents();
+            if (fragment.querySelector('br:not([data-exclude-from-markdown="true"])')) return null;
+            if (!Array.from(fragment.childNodes).some(hasMeaningfulContentForSelectionBoundary)) return li;
+        } catch (_error) {
+            return null;
         }
+
         return null;
+    }
+
+    function moveCaretToCheckboxFromTextStart(e) {
+        const li = isCursorAtCheckboxTextStart();
+        if (!li) return false;
+        lastCaretIntentSource = 'keyboard';
+        if (cursorManager && typeof cursorManager.clearInlineCodeBoundaryState === 'function') {
+            cursorManager.clearInlineCodeBoundaryState();
+        }
+        placeCollapsedCaret(window.getSelection(), li, 0);
+        e.preventDefault();
+        e.stopPropagation();
+        return true;
     }
 
     // チェックボックス付きリストアイテムを丸ごと削除し、カーソルを隣接アイテムへ移動
@@ -13425,6 +13453,10 @@ const {
     }
 
     function handleArrowKeydown(e) {
+        if (e.key === 'ArrowLeft' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey &&
+            moveCaretToCheckboxFromTextStart(e)) {
+            return true;
+        }
         if (e.key === 'ArrowDown' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
             if (isEditorEffectivelyEmpty()) {
                 e.preventDefault();
@@ -14134,27 +14166,15 @@ const {
                 }
             }
             // チェックボックスli内での左矢印ナビゲーション
-            // テキスト先頭 → チェックボックス位置、チェックボックス位置 → 前の要素
+            // チェックボックス位置 → 前の要素
             {
                 const sel = window.getSelection();
                 if (sel && sel.rangeCount > 0 && sel.isCollapsed) {
                     const r = sel.getRangeAt(0);
                     const c = r.startContainer;
-                    const o = r.startOffset;
                     const li = domUtils.getParentElement(c, 'LI');
                     if (li && hasCheckboxAtStart(li)) {
-                        const firstTN = getFirstDirectTextNodeAfterCheckbox(li);
-                        const minOffset = getCheckboxTextMinOffset(li);
-                        const isAtTextStart = (c === firstTN && o <= minOffset);
-                        const isAtElementPos1 = (c === li && o === 1);
-                        const isOnCheckbox = (c === li && o === 0);
-
-                        // テキスト先頭 or offset=1 → チェックボックス位置へ移動
-                        if (isAtTextStart || isAtElementPos1) {
-                            e.preventDefault();
-                            placeCollapsedCaret(sel, li, 0);
-                            return true;
-                        }
+                        const isOnCheckbox = !!isCursorOnCheckbox();
 
                         // チェックボックス位置 → 前のリストアイテムの末尾へ移動
                         if (isOnCheckbox) {
@@ -14432,6 +14452,89 @@ const {
             return;
         }
         syncImageCaretEdgeIndicatorsNow(afterSelection);
+    }
+
+    function normalizeUpwardEntryAtCheckbox(beforeRange) {
+        const selection = window.getSelection();
+        if (!beforeRange || !selection || !selection.rangeCount || !selection.isCollapsed) return false;
+
+        const afterRange = selection.getRangeAt(0);
+        const listItem = domUtils.getParentElement(afterRange.startContainer, 'LI');
+        const previousListItem = domUtils.getParentElement(beforeRange.startContainer, 'LI');
+        if (!listItem || !editor.contains(listItem) || listItem === previousListItem) return false;
+        if (!listItem.querySelector(':scope > input[type="checkbox"]')) return false;
+
+        lastCaretIntentSource = 'keyboard';
+        if (cursorManager && typeof cursorManager.clearInlineCodeBoundaryState === 'function') {
+            cursorManager.clearInlineCodeBoundaryState();
+        }
+        placeCollapsedCaret(selection, listItem, 0);
+        return true;
+    }
+
+    function restoreTaskTextHorizontalPosition(beforeRect) {
+        const selection = window.getSelection();
+        if (!beforeRect || !Number.isFinite(beforeRect.left) || !selection ||
+            !selection.rangeCount || !selection.isCollapsed || !document.caretRangeFromPoint) return false;
+
+        const range = selection.getRangeAt(0);
+        if (range.startContainer.nodeType !== Node.TEXT_NODE || !range.startContainer.textContent) return false;
+        const afterRect = cursorManager._getCaretRect(range);
+        if (!afterRect || !(afterRect.height > 0) || Math.abs(afterRect.left - beforeRect.left) <= 1) return false;
+
+        const target = document.caretRangeFromPoint(beforeRect.left, afterRect.top + afterRect.height / 2);
+        if (!target || target.startContainer.nodeType !== Node.TEXT_NODE || !editor.contains(target.startContainer)) return false;
+        const block = getClosestBlockElement(range.startContainer);
+        if (!block || block.tagName === 'PRE' || getClosestBlockElement(target.startContainer) !== block) return false;
+        const targetRect = cursorManager._getCaretRect(target);
+        if (!targetRect || Math.abs(targetRect.top - afterRect.top) > 2 ||
+            Math.abs(targetRect.left - beforeRect.left) >= Math.abs(afterRect.left - beforeRect.left)) return false;
+
+        selection.removeAllRanges();
+        selection.addRange(target);
+        return true;
+    }
+
+    function handleVerticalNavigation(navigate, direction) {
+        const selection = window.getSelection();
+        const beforeRange = selection && selection.rangeCount
+            ? selection.getRangeAt(0).cloneRange()
+            : null;
+        const beforeListItem = beforeRange
+            ? domUtils.getParentElement(beforeRange.startContainer, 'LI')
+            : null;
+        const fromTaskText = beforeRange && beforeRange.collapsed &&
+            beforeListItem && hasCheckboxAtStart(beforeListItem) && !isCursorOnCheckbox() &&
+            !(beforeRange.startContainer.nodeType === Node.ELEMENT_NODE &&
+                ['INPUT', 'UL', 'OL', 'IMG'].includes(beforeRange.startContainer.tagName));
+        const beforeRect = fromTaskText && cursorManager && typeof cursorManager._getCaretRect === 'function'
+            ? cursorManager._getCaretRect(beforeRange)
+            : null;
+        const handled = navigate();
+        if (fromTaskText) {
+            // Text-to-text movement keeps the horizontal position, even when a
+            // browser or empty-item fallback lands at the checkbox boundary.
+            const checkbox = isCursorOnCheckbox();
+            if (checkbox && editor.contains(checkbox)) {
+                const listItem = checkbox.parentElement;
+                if (beforeRect && Number.isFinite(beforeRect.left) &&
+                    typeof cursorManager._placeCursorInListItemAtX === 'function') {
+                    cursorManager._placeCursorInListItemAtX(listItem, beforeRect.left, direction, selection);
+                }
+                if (isCursorOnCheckbox()) {
+                    let textNode = getFirstDirectTextNodeAfterCheckbox(listItem);
+                    if (!textNode) {
+                        textNode = document.createTextNode('');
+                        listItem.insertBefore(textNode, checkbox.nextSibling);
+                    }
+                    placeCollapsedCaret(selection, textNode, getCheckboxTextMinOffset(listItem));
+                }
+            }
+            restoreTaskTextHorizontalPosition(beforeRect);
+        } else if (direction === 'up') {
+            normalizeUpwardEntryAtCheckbox(beforeRange);
+        }
+        return handled;
     }
 
     function normalizeVerticalEntryAtLeadingInlineCodeToOutsideLeft(beforeRange = null) {
@@ -16530,21 +16633,15 @@ const {
                     }
                 }
             }
-            // チェックボックスli内のテキスト先頭での左移動 → チェックボックスをスキップ
-            // チェックボックスが先頭にある場合のみ
+            // チェックボックス上から前のリストアイテムへ移動
             {
                 const sel = window.getSelection();
                 if (sel && sel.rangeCount > 0 && sel.isCollapsed) {
                     const r = sel.getRangeAt(0);
                     const c = r.startContainer;
-                    const o = r.startOffset;
                     const li = domUtils.getParentElement(c, 'LI');
                     if (li && hasCheckboxAtStart(li)) {
-                        const firstTN = getFirstDirectTextNodeAfterCheckbox(li);
-                        const minOffset = getCheckboxTextMinOffset(li);
-                        const isAtTextStart = (c === firstTN && o <= minOffset);
-                        const isAtElementPos = (c === li && o <= 1);
-                        if (isAtTextStart || isAtElementPos) {
+                        if (isCursorOnCheckbox()) {
                             // 前のリストアイテムの末尾へ移動
                             const prevLi = li.previousElementSibling;
                             if (prevLi) {
@@ -16888,22 +16985,20 @@ const {
     }
 
     function handleLineBoundaryKeydown(e) {
+        const isCtrlA = isMac && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey &&
+            typeof e.key === 'string' && e.key.toLowerCase() === 'a';
+        if (isCtrlA && moveCaretToCheckboxFromTextStart(e)) {
+            return true;
+        }
         if (tableManager.handleLineBoundaryKeydown(e)) {
             return true;
         }
 
         // Ctrl+A (行頭) - macOS Emacsキーバインド
-        if (isMac && e.ctrlKey && !e.metaKey && e.key === 'a' && !e.shiftKey) {
+        if (isCtrlA) {
             e.preventDefault();
             // チェックボックス上にカーソルがある場合はそのまま
             if (isCursorOnCheckbox()) {
-                return true;
-            }
-            // チェックボックスのテキスト先頭にカーソルがある場合はチェックボックスに移動
-            const checkboxTextStartLi = isCursorAtCheckboxTextStart();
-            if (checkboxTextStartLi) {
-                const sel = window.getSelection();
-                placeCollapsedCaret(sel, checkboxTextStartLi, 0);
                 return true;
             }
             cursorManager.moveCursorToLineStart();
@@ -21099,8 +21194,16 @@ const {
                         (key === 'p' || key === 'n'))
                 );
 
-            handleKeydown(e);
+            if (shouldRevealAfterVerticalNavigation) {
+                const direction = e.key === 'ArrowUp' || key === 'p' ? 'up' : 'down';
+                handleVerticalNavigation(() => handleKeydown(e), direction);
+            } else {
+                handleKeydown(e);
+            }
             codeBlockGapManager.reconcile(window.getSelection(), isComposing || compositionUpdateGate.composing);
+            // selectionchange is queued by the browser; update before it can
+            // paint a normal text caret at the checkbox boundary.
+            syncCheckboxCaretIndicatorNow();
 
             // Run after every vertical-key branch, including early returns for HR,
             // list items, empty blocks, checkboxes, and code-block controls.
@@ -23246,11 +23349,7 @@ const {
             setCodeBlockLanguageNavSelection(getSelectedCodeBlockLanguageLabel());
 
             // チェックボックスのフォーカス表示管理
-            editor.querySelectorAll('input[type="checkbox"].cursor-on').forEach(cb => cb.classList.remove('cursor-on'));
-            const cursorCheckbox = isCursorOnCheckbox();
-            if (cursorCheckbox) {
-                cursorCheckbox.classList.add('cursor-on');
-            }
+            syncCheckboxCaretIndicatorNow();
 
             const sel = window.getSelection();
             updateImageCaretEdgeIndicators(sel);
@@ -23263,7 +23362,8 @@ const {
             const container = range.startContainer;
             const offset = range.startOffset;
             const pointerAdjustWindowMs = 450;
-            const pointerRecent = Date.now() - lastPointerCaretIntentTs < pointerAdjustWindowMs;
+            const pointerRecent = lastCaretIntentSource === 'pointer' &&
+                Date.now() - lastPointerCaretIntentTs < pointerAdjustWindowMs;
 
             const placeCheckboxCaretAtTextStart = (li) => {
                 if (!li || !hasCheckboxAtStart(li)) return false;
@@ -23873,6 +23973,7 @@ const {
                 tableManager.executeTableCommand(message.command);
                 break;
             case 'cursorMove':
+                lastCaretIntentSource = 'keyboard';
                 if (message.direction === 'up') {
                     if (shouldSuppressCommandNav('up')) {
                         break;
@@ -23882,7 +23983,7 @@ const {
                         break;
                     }
                     if (!shouldSuppressCommandNav('up')) {
-                        handleEmacsNavKeydown(createCommandNavEvent('up'));
+                        handleVerticalNavigation(() => handleEmacsNavKeydown(createCommandNavEvent('up')), 'up');
                         setTimeout(() => correctCheckboxCursorPosition(), 0);
                     }
                 }
@@ -23901,10 +24002,11 @@ const {
                         break;
                     }
                     if (!shouldSuppressCommandNav('down')) {
-                        handleEmacsNavKeydown(createCommandNavEvent('down'));
+                        handleVerticalNavigation(() => handleEmacsNavKeydown(createCommandNavEvent('down')), 'down');
                         setTimeout(() => correctCheckboxCursorPosition(), 0);
                     }
                 }
+                syncCheckboxCaretIndicatorNow();
                 break;
         }
     };

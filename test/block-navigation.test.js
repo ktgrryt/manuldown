@@ -275,6 +275,545 @@ function loadLabelNavigation(fixture) {
     };
 }
 
+// Only the prefix from a task checkbox to the caret is cloned by these tests.
+class CheckboxPrefixRange extends TestRange {
+    cloneContents() {
+        const root = this.startContainer;
+        const fragment = root.ownerDocument.createDocumentFragment();
+        let reachedEnd = false;
+        const cloneBeforeEnd = (node) => {
+            if (node === this.endContainer) {
+                reachedEnd = true;
+                if (node.nodeType === 3) {
+                    return node.ownerDocument.createTextNode(node.data.slice(0, this.endOffset));
+                }
+                const clone = node.cloneNode(false);
+                Array.from(node.childNodes).slice(0, this.endOffset)
+                    .forEach(child => clone.appendChild(child.cloneNode(true)));
+                return clone;
+            }
+            if (!node.contains(this.endContainer)) return node.cloneNode(true);
+            const clone = node.cloneNode(false);
+            for (const child of Array.from(node.childNodes)) {
+                clone.appendChild(cloneBeforeEnd(child));
+                if (reachedEnd) break;
+            }
+            return clone;
+        };
+        const children = Array.from(root.childNodes);
+        const end = this.endContainer === root ? this.endOffset : children.length;
+        for (const child of children.slice(this.startOffset, end)) {
+            fragment.appendChild(cloneBeforeEnd(child));
+            if (reachedEnd) break;
+        }
+        return fragment;
+    }
+}
+
+function loadCheckboxNavigation(fixture, nativeTopLine = true) {
+    global.document.createRange = () => new CheckboxPrefixRange();
+    for (const element of Array.from(fixture.editor.querySelectorAll('li'))) {
+        const querySelector = element.querySelector;
+        Object.defineProperty(element, 'querySelector', {
+            value(selector) {
+                if (!selector.startsWith(':scope > ')) return querySelector.call(this, selector);
+                const selectors = selector.split(',').map(part => part.trim().replace(/^:scope > /, ''));
+                return Array.from(this.children).find(child => selectors.some(part => child.matches(part))) || null;
+            },
+        });
+    }
+    const names = [
+        'getCheckboxInListItemDirectContent', 'hasCheckbox', 'hasCheckboxAtStart',
+        'getDirectTextContent', 'hasDirectTextContent', 'isEmptyCheckboxListItem',
+        'isIgnorableEditorTextValue', 'hasMeaningfulContentForSelectionBoundary',
+        'isCursorOnCheckbox', 'syncCheckboxCaretIndicatorNow',
+        'isCursorAtCheckboxTextStart', 'moveCaretToCheckboxFromTextStart',
+        'normalizeUpwardEntryAtCheckbox', 'handleVerticalNavigation',
+        'restoreTaskTextHorizontalPosition', 'getClosestBlockElement',
+        'getFirstDirectTextNodeAfterCheckbox', 'getCheckboxTextMinOffset',
+        'placeCollapsedCaret', 'handleArrowKeydown', 'handleEmacsNavKeydown',
+        'handleLineBoundaryKeydown', 'createArrowNavEventFromDirection', 'createCommandNavEvent', 'getLastDirectTextNode',
+    ];
+    const pointerCheck = editorSource.match(/const pointerRecent = ([\s\S]*?);/)[1];
+    const keydownStart = editorSource.indexOf("        editor.addEventListener('keydown', (e) => {", editorSource.indexOf('        // キーボードイベント'));
+    const keydownEnd = editorSource.indexOf('\n        // mousedown', keydownStart);
+    const commandStart = editorSource.indexOf("            case 'cursorMove':");
+    const commandEnd = editorSource.indexOf('\n        }\n    };', commandStart);
+    assert.notEqual(keydownStart, -1);
+    assert.notEqual(keydownEnd, -1);
+    assert.notEqual(commandStart, -1);
+    assert.notEqual(commandEnd, -1);
+    return new Function('editor', 'domUtils', 'cursorManager', 'nativeTopLine', `
+        const isMac = true;
+        let lastCaretIntentSource = 'pointer';
+        const lastPointerCaretIntentTs = Date.now();
+        const pointerAdjustWindowMs = 450;
+        const recordedDirections = [];
+        const tableManager = {
+            handleArrowKeydown: () => false,
+            handleCtrlNavKeydown: () => true,
+            handleLineBoundaryKeydown: () => false,
+        };
+        const isHRSelected = () => null;
+        const shouldSuppressKeydownNav = () => false;
+        const recordCtrlNavHandled = direction => recordedDirections.push(direction);
+        const shouldUseNativeArrowForTopLine = () => nativeTopLine;
+        const moveSelectionWithNativeNav = () => false;
+        const getSelectedCodeBlockLanguageLabel = () => null;
+        const handleCodeBlockArrowLeft = () => null;
+        const moveCursorIntoCodeBlockFromBlockStartBelow = () => false;
+        ${names.map(extractEditorFunction).join('\n')}
+        const listen = (handleKeydown) => {
+            const isImeInteractionKeydown = e => e.isComposing || e.keyCode === 229;
+            const isComposing = false;
+            const compositionUpdateGate = { composing: false };
+            const codeBlockGapManager = { reconcile() {} };
+            const revealCaretAfterKeyboardNavigation = () => {};
+            ${editorSource.slice(keydownStart, keydownEnd)}
+        };
+        const command = (direction, handleEmacsNavKeydown) => {
+            const message = { type: 'cursorMove', direction };
+            const shouldSuppressCommandNav = () => false;
+            const moveSlashCommandSelection = () => false;
+            const setTimeout = () => {};
+            switch (message.type) {
+                ${editorSource.slice(commandStart, commandEnd)}
+            }
+        };
+        return {
+            arrow: handleArrowKeydown,
+            backward: handleEmacsNavKeydown,
+            lineStart: handleLineBoundaryKeydown,
+            detect: isCursorAtCheckboxTextStart,
+            up: navigate => handleVerticalNavigation(navigate, 'up'),
+            down: navigate => handleVerticalNavigation(navigate, 'down'),
+            listen,
+            command,
+            get pointerRecent() { return ${pointerCheck}; },
+            recordedDirections,
+        };
+    `)(fixture.editor, fixture.domUtils, fixture.cursorManager, nativeTopLine);
+}
+
+function navigationKey(key, ctrlKey = false) {
+    return {
+        key, ctrlKey, metaKey: false, altKey: false, shiftKey: false,
+        defaultPrevented: false,
+        preventDefault() { this.defaultPrevented = true; },
+        stopPropagation() {},
+    };
+}
+
+test('Left, Ctrl+B and Ctrl+A enter the checkbox from every task text start', async () => {
+    const cases = [
+        ['plain text', 'Task', li => [li.lastChild, 0]],
+        ['LI boundary', 'Task', li => [li, 1]],
+        ['bold text', '<strong>Task</strong>', li => [li.querySelector('strong').firstChild, 0]],
+        ['bold element boundary', '<strong>Task</strong>', li => [li.querySelector('strong'), 0]],
+        ['nested inline boundary', '<strong><em>Task</em></strong>', li => [li.querySelector('em'), 0]],
+        ['inline code', '<code>Task</code>', li => [li.querySelector('code').firstChild, 0]],
+        ['loose task paragraph', '<p>Task</p>', li => [li.querySelector('p'), 0]],
+        ['invisible prefix', '\u200B\uFEFF<strong>Task</strong>', li => [li.querySelector('strong').firstChild, 0]],
+        ['boundary after an invisible prefix', '\u200B<strong>Task</strong>', li => [li, 2]],
+        ['nested task', 'Task<ul><li>Child</li></ul>', li => [li.childNodes[1], 0]],
+    ];
+    for (const [label, content, boundary] of cases) {
+        for (const [handler, key, ctrlKey] of [['arrow', 'ArrowLeft', false], ['backward', 'b', true], ['lineStart', 'a', true]]) {
+            const fixture = await createFixture(`<ul><li><input type="checkbox">${content}</li></ul>`);
+            try {
+                const navigation = loadCheckboxNavigation(fixture);
+                const li = fixture.editor.querySelector('li');
+                fixture.placeCaret(...boundary(li));
+                const html = fixture.editor.innerHTML;
+                const event = navigationKey(key, ctrlKey);
+
+                assert.equal(navigation[handler](event), true, `${label}: ${key}`);
+                assert.equal(event.defaultPrevented, true);
+                const range = fixture.selection.getRangeAt(0);
+                assert.equal(range.startContainer === li, true, `${label}: ${key} selects checkbox`);
+                assert.equal(range.startOffset, 0);
+                assert.equal(navigation.pointerRecent, false, 'a recent mouse click cannot undo keyboard movement');
+                assert.equal(fixture.editor.innerHTML, html, 'navigation does not edit the document');
+                if (handler === 'backward') assert.deepEqual(navigation.recordedDirections, ['left']);
+            } finally {
+                fixture.restoreGlobals();
+            }
+        }
+    }
+});
+
+test('checkbox start detection excludes later content, real line breaks, images and nested lists', async () => {
+    const cases = [
+        ['Task', li => [li.lastChild, 1]],
+        ['<strong>Task</strong>later', li => [li.lastChild, 0]],
+        ['<img src="image.png">Task', li => [li.lastChild, 0]],
+        ['<br>Task', li => [li.lastChild, 0]],
+        ['<ul><li>Child</li></ul>', li => [li.querySelector('ul'), 0]],
+        ['<ul><li>Child</li></ul>', li => [li.querySelector('ul li').firstChild, 0]],
+    ];
+    for (const [content, boundary] of cases) {
+        const fixture = await createFixture(`<ul><li><input type="checkbox">${content}</li></ul>`);
+        try {
+            const navigation = loadCheckboxNavigation(fixture);
+            fixture.placeCaret(...boundary(fixture.editor.querySelector('li')));
+            assert.equal(navigation.detect(), null, content);
+        } finally {
+            fixture.restoreGlobals();
+        }
+    }
+});
+
+test('checkbox start detection preserves text selections and an existing checkbox cursor', async () => {
+    const fixture = await createFixture('<ul><li><input type="checkbox">Task</li></ul>');
+    try {
+        const navigation = loadCheckboxNavigation(fixture);
+        const li = fixture.editor.querySelector('li');
+        const range = fixture.placeCaret(li.lastChild, 0);
+        range.setEnd(li.lastChild, 2);
+        assert.equal(navigation.detect(), null);
+        fixture.placeCaret(li, 0);
+        assert.equal(navigation.detect(), null);
+    } finally {
+        fixture.restoreGlobals();
+    }
+});
+
+test('another Left from the checkbox moves to the previous task text end', async () => {
+    const fixture = await createFixture('<ul><li>Previous</li><li><input type="checkbox">Task</li></ul>');
+    try {
+        const navigation = loadCheckboxNavigation(fixture, false);
+        const li = fixture.editor.querySelectorAll('li')[1];
+        fixture.placeCaret(li.lastChild, 0);
+        assert.equal(navigation.arrow(navigationKey('ArrowLeft')), true);
+        assert.equal(navigation.arrow(navigationKey('ArrowLeft')), true);
+        const range = fixture.selection.getRangeAt(0);
+        assert.equal(range.startContainer.data, 'Previous');
+        assert.equal(range.startOffset, 'Previous'.length);
+    } finally {
+        fixture.restoreGlobals();
+    }
+});
+
+test('upward entry from outside task text selects the checkbox across block navigation paths', async () => {
+    const cases = [
+        ['paragraph below', '<ul><li><input type="checkbox">Task</li></ul><p>Below</p>',
+            editor => [editor.querySelector('p').firstChild, 0], li => [li.lastChild, 0]],
+        ['list item below', '<ul><li><input type="checkbox">Task</li><li>Below</li></ul>',
+            editor => [editor.querySelectorAll('li')[1].firstChild, 2], li => [li.lastChild, 2]],
+        ['checkbox below', '<ul><li><input type="checkbox">Task</li><li><input type="checkbox">Below</li></ul>',
+            editor => [editor.querySelectorAll('li')[1], 0], li => [li.lastChild, 4]],
+        ['formatted task', '<ul><li><input type="checkbox"><strong><code>Task</code></strong></li></ul><p>Below</p>',
+            editor => [editor.querySelector('p').firstChild, 0], li => [li.querySelector('code').firstChild, 0]],
+        ['empty task', '<ul><li><input type="checkbox"><br data-exclude-from-markdown="true"></li></ul><p>Below</p>',
+            editor => [editor.querySelector('p').firstChild, 0], li => [li, 1]],
+        ['nested task', '<ul><li>Parent<ul><li><input type="checkbox">Task</li><li>Below</li></ul></li></ul>',
+            editor => [editor.querySelectorAll('li')[2].firstChild, 0], li => [li.lastChild, 0]],
+        ['parent task from child', '<ul><li><input type="checkbox">Task<ul><li>Below</li></ul></li></ul>',
+            editor => [editor.querySelectorAll('li')[1].firstChild, 0], li => [li.childNodes[1], 0]],
+    ];
+    for (const [label, html, origin, target] of cases) {
+        const fixture = await createFixture(html);
+        try {
+            const navigation = loadCheckboxNavigation(fixture);
+            const task = fixture.editor.querySelector('input').parentElement;
+            fixture.placeCaret(...origin(fixture.editor));
+            const beforeHtml = fixture.editor.innerHTML;
+
+            assert.equal(navigation.up(() => {
+                fixture.placeCaret(...target(task));
+                return true;
+            }), true, label);
+
+            const range = fixture.selection.getRangeAt(0);
+            assert.equal(range.startContainer === task, true, label);
+            assert.equal(range.startOffset, 0, label);
+            assert.equal(navigation.pointerRecent, false, label);
+            assert.equal(fixture.editor.innerHTML, beforeHtml, label);
+        } finally {
+            fixture.restoreGlobals();
+        }
+    }
+});
+
+test('vertical movement from task text preserves the target text position', async () => {
+    const contents = [
+        ['ABCDEFGHIJ', li => [li.lastChild, 3]],
+        ['<strong>ABCDEFGHIJ</strong>', li => [li.querySelector('strong').firstChild, 3]],
+        ['<code>ABCDEFGHIJ</code>', li => [li.querySelector('code').firstChild, 3]],
+        ['<p>ABCDEFGHIJ</p>', li => [li.querySelector('p'), 0]],
+        ['ABCDEFGHIJ', li => [li, 1]],
+    ];
+    for (const [content, origin] of contents) {
+        const fixture = await createFixture(`<ul><li><input type="checkbox">ABCDEFGHIJ</li><li><input type="checkbox">${content}</li><li><input type="checkbox">ABCDEFGHIJ</li></ul>`);
+        try {
+            const navigation = loadCheckboxNavigation(fixture);
+            const items = fixture.editor.querySelectorAll('li');
+            for (const [direction, target] of [['up', items[0]], ['down', items[2]]]) {
+                fixture.placeCaret(...origin(items[1]));
+                const html = fixture.editor.innerHTML;
+                navigation[direction](() => fixture.placeCaret(target.lastChild, 3));
+
+                const range = fixture.selection.getRangeAt(0);
+                assert.equal(range.startContainer === target.lastChild, true, `${content}: ${direction}`);
+                assert.equal(range.startOffset, 3);
+                assert.equal(fixture.editor.innerHTML, html);
+            }
+        } finally {
+            fixture.restoreGlobals();
+        }
+    }
+});
+
+test('vertical movement from task text corrects a checkbox landing using the original horizontal position', async () => {
+    const fixture = await createFixture('<ul><li><input type="checkbox">ABCDEFGHIJ</li><li><input type="checkbox">ABCDEFGHIJ</li><li><input type="checkbox">ABCDEFGHIJ</li></ul>');
+    try {
+        const navigation = loadCheckboxNavigation(fixture);
+        const items = fixture.editor.querySelectorAll('li');
+        fixture.cursorManager._getCaretRect = () => ({ left: 84 });
+        const placements = [];
+        fixture.cursorManager._placeCursorInListItemAtX = (item, x, direction) => {
+            placements.push({ x, direction });
+            fixture.placeCaret(item.lastChild, 4);
+            return true;
+        };
+        for (const [direction, target] of [['up', items[0]], ['down', items[2]]]) {
+            fixture.placeCaret(items[1].lastChild, 4);
+            navigation[direction](() => fixture.placeCaret(target, 0));
+            const range = fixture.selection.getRangeAt(0);
+            assert.equal(range.startContainer === target.lastChild, true);
+            assert.equal(range.startOffset, 4);
+        }
+        assert.deepEqual(placements, [{ x: 84, direction: 'up' }, { x: 84, direction: 'down' }]);
+
+        fixture.cursorManager._getCaretRect = () => null;
+        fixture.placeCaret(items[1].lastChild, 4);
+        navigation.down(() => fixture.placeCaret(items[2], 0));
+        assert.equal(fixture.selection.getRangeAt(0).startContainer === items[2].lastChild, true);
+        assert.equal(fixture.selection.getRangeAt(0).startOffset, 0);
+    } finally {
+        fixture.restoreGlobals();
+    }
+});
+
+test('vertical movement from task text enters the text side of an empty task', async () => {
+    const fixture = await createFixture('<ul><li><input type="checkbox"><br data-exclude-from-markdown="true"></li><li><input type="checkbox">Task</li></ul>');
+    try {
+        const navigation = loadCheckboxNavigation(fixture);
+        const [empty, task] = Array.from(fixture.editor.querySelectorAll('li'));
+        const html = fixture.editor.innerHTML;
+        fixture.placeCaret(task.lastChild, 3);
+
+        navigation.up(() => fixture.placeCaret(empty, 0));
+
+        const range = fixture.selection.getRangeAt(0);
+        assert.equal(range.startContainer.nodeType, Node.TEXT_NODE);
+        assert.equal(range.startContainer.parentElement === empty, true);
+        assert.equal(range.startOffset, 0);
+        assert.equal(fixture.editor.innerHTML, html, 'the empty anchor does not change the document content');
+    } finally {
+        fixture.restoreGlobals();
+    }
+});
+
+test('leaving task text for a paragraph keeps the original horizontal position on the target line', async () => {
+    const fixture = await createFixture('<ul><li><input type="checkbox">ABCDEFGHIJ</li></ul><p>ABCDEFGHIJKLMNO</p>');
+    try {
+        const navigation = loadCheckboxNavigation(fixture);
+        const taskText = fixture.editor.querySelector('li').lastChild;
+        const paragraphText = fixture.editor.querySelector('p').firstChild;
+        fixture.cursorManager._getCaretRect = range => ({
+            left: range.startContainer === taskText || range.startOffset === 4 ? 84 : 20,
+            top: range.startContainer === taskText ? 20 : 40,
+            height: 16,
+        });
+        const probes = [];
+        document.caretRangeFromPoint = (x, y) => {
+            probes.push({ x, y });
+            const range = document.createRange();
+            range.setStart(paragraphText, 4);
+            range.collapse(true);
+            return range;
+        };
+        fixture.placeCaret(taskText, 3);
+
+        navigation.down(() => fixture.placeCaret(paragraphText, 0));
+
+        assert.equal(fixture.selection.getRangeAt(0).startContainer === paragraphText, true);
+        assert.equal(fixture.selection.getRangeAt(0).startOffset, 4);
+        assert.deepEqual(probes, [{ x: 84, y: 48 }]);
+    } finally {
+        fixture.restoreGlobals();
+    }
+});
+
+test('upward entry from a selected block below a task selects its checkbox', async () => {
+    for (const block of ['<hr>', '<pre><span class="code-block-language">plaintext</span><code>Code</code></pre>']) {
+        const fixture = await createFixture(`<ul><li><input type="checkbox">Task</li></ul>${block}`);
+        try {
+            const navigation = loadCheckboxNavigation(fixture);
+            const task = fixture.editor.querySelector('li');
+            const range = document.createRange();
+            range.selectNode(fixture.editor.querySelector('.code-block-language, hr'));
+            fixture.selection.addRange(range);
+
+            navigation.up(() => fixture.placeCaret(task.lastChild, 0));
+
+            assert.equal(fixture.selection.getRangeAt(0).startContainer === task, true);
+            assert.equal(fixture.selection.getRangeAt(0).startOffset, 0);
+        } finally {
+            fixture.restoreGlobals();
+        }
+    }
+});
+
+test('upward task normalization preserves movement within a task, ordinary items and text selections', async () => {
+    const fixture = await createFixture('<ul><li><input type="checkbox">First<br>Second</li><li>Ordinary</li></ul><p>Below</p>');
+    try {
+        const navigation = loadCheckboxNavigation(fixture);
+        const [task, ordinary] = Array.from(fixture.editor.querySelectorAll('li'));
+        fixture.placeCaret(task.lastChild, 0);
+        const handled = navigation.up(() => {
+            fixture.placeCaret(task.childNodes[1], 2);
+            return false;
+        });
+        assert.equal(handled, false);
+        assert.equal(fixture.selection.getRangeAt(0).startContainer === task.childNodes[1], true);
+        assert.equal(fixture.selection.getRangeAt(0).startOffset, 2);
+
+        fixture.placeCaret(fixture.editor.querySelector('p').firstChild, 0);
+        navigation.up(() => fixture.placeCaret(ordinary.firstChild, 2));
+        assert.equal(fixture.selection.getRangeAt(0).startContainer === ordinary.firstChild, true);
+        assert.equal(fixture.selection.getRangeAt(0).startOffset, 2);
+
+        fixture.placeCaret(ordinary.firstChild, 0);
+        navigation.up(() => {
+            const range = fixture.placeCaret(task.childNodes[1], 0);
+            range.setEnd(task.childNodes[1], 3);
+        });
+        assert.equal(fixture.selection.isCollapsed, false);
+        assert.equal(fixture.selection.getRangeAt(0).endOffset, 3);
+    } finally {
+        fixture.restoreGlobals();
+    }
+});
+
+test('the editor keydown listener normalizes ArrowUp and Ctrl+P but preserves other key gestures', async () => {
+    const cases = [
+        [{ key: 'ArrowUp' }, true],
+        [{ key: 'p', ctrlKey: true }, true],
+        [{ key: 'P', ctrlKey: true }, true],
+        [{ key: 'ArrowDown' }, false],
+        [{ key: 'n', ctrlKey: true }, false],
+        [{ key: 'ArrowUp', shiftKey: true }, false],
+        [{ key: 'ArrowUp', metaKey: true }, false],
+        [{ key: 'p', ctrlKey: true, altKey: true }, false],
+        [{ key: 'ArrowUp', isComposing: true }, false],
+    ];
+    for (const [keys, selectsCheckbox] of cases) {
+        const fixture = await createFixture('<ul><li><input type="checkbox">Task</li></ul><p>Below</p>');
+        try {
+            const navigation = loadCheckboxNavigation(fixture);
+            const task = fixture.editor.querySelector('li');
+            fixture.placeCaret(fixture.editor.querySelector('p').firstChild, 0);
+            navigation.listen(e => {
+                fixture.placeCaret(task.lastChild, 0);
+                e.preventDefault();
+            });
+            const event = new window.Event('keydown', { bubbles: true, cancelable: true });
+            Object.assign(event, keys);
+
+            fixture.editor.dispatchEvent(event);
+
+            assert.equal(fixture.selection.getRangeAt(0).startContainer === task, selectsCheckbox, JSON.stringify(keys));
+            assert.equal(task.querySelector('input').classList.contains('cursor-on'), selectsCheckbox,
+                'the checkbox indicator updates before a selectionchange event');
+        } finally {
+            fixture.restoreGlobals();
+        }
+    }
+});
+
+test('horizontal keyboard entry shows the checkbox cursor before selectionchange', async () => {
+    for (const [handler, key, ctrlKey] of [['arrow', 'ArrowLeft', false], ['backward', 'b', true], ['lineStart', 'a', true]]) {
+        const fixture = await createFixture('<ul><li><input type="checkbox">Task</li></ul>');
+        try {
+            const navigation = loadCheckboxNavigation(fixture);
+            const task = fixture.editor.querySelector('li');
+            fixture.placeCaret(task.lastChild, 0);
+            navigation.listen(e => navigation[handler](e));
+            const event = new window.Event('keydown', { bubbles: true, cancelable: true });
+            Object.assign(event, { key, ctrlKey });
+
+            fixture.editor.dispatchEvent(event);
+
+            assert.equal(event.defaultPrevented, true, key);
+            assert.equal(task.querySelector('input').classList.contains('cursor-on'), true, key);
+        } finally {
+            fixture.restoreGlobals();
+        }
+    }
+});
+
+test('keyboard movement transfers or clears the checkbox cursor before selectionchange', async () => {
+    const fixture = await createFixture('<ul><li><input type="checkbox" class="cursor-on">First</li><li><input type="checkbox">Second</li></ul><p>Below</p>');
+    try {
+        const navigation = loadCheckboxNavigation(fixture);
+        const [first, second] = Array.from(fixture.editor.querySelectorAll('li'));
+        const firstCheckbox = first.querySelector('input');
+        const secondCheckbox = second.querySelector('input');
+        fixture.placeCaret(first, 0);
+        let target = [second, 0];
+        navigation.listen(e => {
+            fixture.placeCaret(...target);
+            e.preventDefault();
+        });
+        const press = key => {
+            const event = new window.Event('keydown', { bubbles: true, cancelable: true });
+            event.key = key;
+            fixture.editor.dispatchEvent(event);
+        };
+
+        press('ArrowDown');
+        assert.equal(firstCheckbox.classList.contains('cursor-on'), false);
+        assert.equal(secondCheckbox.classList.contains('cursor-on'), true);
+
+        target = [second.lastChild, 0];
+        press('ArrowRight');
+        assert.equal(secondCheckbox.classList.contains('cursor-on'), false);
+
+        fixture.placeCaret(second, 0);
+        target = [first, 0];
+        press('ArrowUp');
+        assert.equal(firstCheckbox.classList.contains('cursor-on'), true);
+
+        target = [fixture.editor.querySelector('p').firstChild, 0];
+        press('ArrowDown');
+        assert.equal(firstCheckbox.classList.contains('cursor-on'), false);
+        assert.equal(fixture.editor.querySelectorAll('input.cursor-on').length, 0);
+    } finally {
+        fixture.restoreGlobals();
+    }
+});
+
+test('host cursor commands update the checkbox indicator without waiting for selectionchange', async () => {
+    const fixture = await createFixture('<p>Above</p><ul><li><input type="checkbox">Task</li></ul>');
+    try {
+        const navigation = loadCheckboxNavigation(fixture);
+        const task = fixture.editor.querySelector('li');
+        const checkbox = task.querySelector('input');
+        fixture.placeCaret(fixture.editor.querySelector('p').firstChild, 0);
+
+        navigation.command('down', () => fixture.placeCaret(task, 0));
+        assert.equal(checkbox.classList.contains('cursor-on'), true);
+        assert.equal(navigation.pointerRecent, false, 'the command overrides a recent pointer intent');
+
+        navigation.command('right', () => fixture.placeCaret(task.lastChild, 0));
+        assert.equal(checkbox.classList.contains('cursor-on'), false);
+    } finally {
+        fixture.restoreGlobals();
+    }
+});
+
 // Describes the selected node as text: a failed assertion on a domino node
 // takes very long to print.
 function selectedNode(fixture) {
