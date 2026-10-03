@@ -150,6 +150,50 @@ test('live DOM cleanup preserves generated table structure handles', async () =>
     }
 });
 
+test('live DOM cleanup preserves table overlay geometry while removing pasted styles', async () => {
+    const window = domino.createWindow(
+        '<div id="editor">' +
+        '<div class="md-table-wrapper"><table><tbody><tr><td>cell</td></tr></tbody></table>' +
+        '<div class="md-table-structure-outline active" data-exclude-from-markdown="true" ' +
+        'contenteditable="false" style="left: 12px; top: 8px; width: 100px; height: 32px"></div></div>' +
+        '<div class="md-table-insert-line vertical" data-exclude-from-markdown="true" ' +
+        'contenteditable="false" style="display: block; left: 12px; top: 8px; height: 64px"></div>' +
+        '<div class="md-table-insert-line horizontal" data-exclude-from-markdown="true" ' +
+        'contenteditable="false" style="display: none; left: 12px; top: 40px; width: 100px"></div>' +
+        '<p style="color: red"><span style="font-size: 24px">pasted text</span></p>' +
+        '<div class="md-table-insert-line" style="display: block">pasted lookalike</div>' +
+        '</div>'
+    );
+    const editor = window.document.querySelector('#editor');
+    const overlays = Array.from(editor.querySelectorAll('[data-exclude-from-markdown="true"]'));
+    const styles = overlays.map(overlay => overlay.getAttribute('style'));
+    const nodeListPrototype = Object.getPrototypeOf(editor.querySelectorAll('span'));
+    const previousForEach = nodeListPrototype.forEach;
+    nodeListPrototype.forEach = Array.prototype.forEach;
+
+    try {
+        const { DOMUtils } = await domUtilsModulePromise;
+        new DOMUtils(editor).cleanupGhostStyles();
+
+        assert.deepEqual(overlays.map(overlay => overlay.getAttribute('style')), styles);
+        assert.equal(editor.querySelector('p').getAttribute('style'), null);
+        assert.ok(!editor.querySelector('span'));
+        assert.equal(editor.lastElementChild.getAttribute('style'), null);
+        assert.equal(editor.querySelector('p').textContent, 'pasted text');
+    } finally {
+        if (previousForEach === undefined) {
+            delete nodeListPrototype.forEach;
+        } else {
+            nodeListPrototype.forEach = previousForEach;
+        }
+    }
+
+    const cleanedHTML = await cleanEditorHTML(editor.innerHTML);
+    assert.doesNotMatch(cleanedHTML, /md-table-structure-outline|data-exclude-from-markdown|style=/);
+    assert.doesNotMatch(cleanedHTML, /md-table-insert-line (?:vertical|horizontal)/);
+    assert.match(cleanedHTML, /<td>cell<\/td>/);
+});
+
 test('history comparison canonicalizes asynchronously reconstructed image UI', async () => {
     const cleanedHTML = await cleanEditorHTML(
         '<p><img alt="diagram|320x180" data-md-path="./diagram.png" ' +
