@@ -1060,6 +1060,9 @@ const {
         }
 
         textNodes.forEach((textNode) => {
+            if (textNode.parentElement?.closest('[data-mdw-source-zero-width="true"], [data-mdw-opaque-source]')) {
+                return;
+            }
             const raw = textNode.textContent || '';
             const newInlineCode = textNode.parentElement?.closest('code[data-is-new="true"]');
             if (newInlineCode && !newInlineCode.closest('pre') && range?.collapsed &&
@@ -1104,6 +1107,7 @@ const {
 
     function stripListPlaceholderCharactersFromTextNode(textNode) {
         if (!textNode || textNode.nodeType !== Node.TEXT_NODE) return false;
+        if (textNode.parentElement?.closest('[data-mdw-source-zero-width="true"]')) return false;
 
         const raw = textNode.textContent || '';
         const cleaned = raw.replace(/[\u00A0\u200B\u2060]/g, '');
@@ -6694,20 +6698,6 @@ const {
         }
     });
 
-    // 隣接する同タイプのリストをマージ
-    function mergeAdjacentLists() {
-        const lists = editor.querySelectorAll('ol, ul');
-        for (const list of lists) {
-            const next = list.nextElementSibling;
-            if (next && next.tagName === list.tagName) {
-                while (next.firstChild) {
-                    list.appendChild(next.firstChild);
-                }
-                next.remove();
-            }
-        }
-    }
-
     // 変更を通知
     function prepareEditorForNotify(options = {}) {
         footnoteManager.reconcileReferenceDeletion();
@@ -6724,9 +6714,6 @@ const {
 
         // Update list item classes before notifying
         normalizeListRenderingAfterStructureChange();
-
-        // 隣接する同タイプのリスト(ol+ol, ul+ul)を自動マージ
-        mergeAdjacentLists();
 
         scheduleEditorOverflowStateUpdate();
     }

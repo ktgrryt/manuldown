@@ -1589,7 +1589,8 @@ export class CursorManager {
         }
 
         const rawCodeText = code.textContent || '';
-        const visibleCodeText = rawCodeText.replace(/[\u200B\u2060\uFEFF]/g, '');
+        const visibleCodeText = code.getAttribute('data-mdw-source-zero-width') === 'true'
+            ? rawCodeText : rawCodeText.replace(/[\u200B\u2060\uFEFF]/g, '');
         const existingMarkers = Array.from(code.childNodes || []).filter(node => (
             node &&
             node.nodeType === Node.ELEMENT_NODE &&

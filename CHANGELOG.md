@@ -18,6 +18,9 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 
 ### Fixed
 - Keep the selected link text intact when editor DOM normalization runs while a pasted path is being validated.
+- Preserve unchanged Markdown blocks and inline syntax when another part of a document is edited, including underscore spelling, footnote definition order, and boundary blank lines.
+- Keep literal punctuation and backslashes literal, escape image labels and titles correctly, and retain original zero-width characters in text and code.
+- Preserve lazy blockquote continuations, loose and empty nested list structure, raw-source whitespace, math expressions, alert markers, table alignment, and code-fence info strings.
 
 ### Security
 - Keep workspace discovery inside the extension host with bounded file scans.

@@ -1,0 +1,374 @@
+[
+  {
+    "name": "underscore identifier",
+    "source": "foo_bar_baz\n"
+  },
+  {
+    "name": "underscore literal",
+    "source": "_\n"
+  },
+  {
+    "name": "underscore Japanese",
+    "source": "foo_バー_baz\n"
+  },
+  {
+    "name": "emphasis underscore",
+    "source": "_italic_ and __bold__\n"
+  },
+  {
+    "name": "inline code underscore",
+    "source": "`foo_bar`\n"
+  },
+  {
+    "name": "literal punctuation",
+    "source": "a * b, [x], #tag, 1. word\n"
+  },
+  {
+    "name": "literal backticks",
+    "source": "\\`foo\\`\n"
+  },
+  {
+    "name": "literal hyphen at head",
+    "source": "\\- item\n"
+  },
+  {
+    "name": "literal backslash asterisk",
+    "source": "\\\\*foo\n"
+  },
+  {
+    "name": "literal backslash underscore",
+    "source": "foo\\\\_bar\n"
+  },
+  {
+    "name": "Windows path",
+    "source": "C:\\Users\\name\\file.md\n"
+  },
+  {
+    "name": "literal escaped footnote",
+    "source": "\\[^note]\n"
+  },
+  {
+    "name": "bare checkbox",
+    "source": "[ ]\n"
+  },
+  {
+    "name": "escaped bare checkbox",
+    "source": "\\[x\\]\n"
+  },
+  {
+    "name": "escaped task inside list",
+    "source": "- \\[x\\] literal\n"
+  },
+  {
+    "name": "bare task inside list",
+    "source": "- [x] task\n"
+  },
+  {
+    "name": "unordered loose list",
+    "source": "- one\n\n- two\n"
+  },
+  {
+    "name": "ordered loose list",
+    "source": "1. one\n\n2. two\n"
+  },
+  {
+    "name": "mixed unordered markers",
+    "source": "- one\n* two\n+ three\n"
+  },
+  {
+    "name": "nonsequential ordered list",
+    "source": "3. one\n7. two\n"
+  },
+  {
+    "name": "ordered paren delimiter",
+    "source": "1) one\n2) two\n"
+  },
+  {
+    "name": "nested empty list",
+    "source": "- parent\n  -\n  - child\n"
+  },
+  {
+    "name": "lazy quote",
+    "source": "> quoted\ncontinued\n"
+  },
+  {
+    "name": "nested lazy quote",
+    "source": "> > quoted\ncontinued\n"
+  },
+  {
+    "name": "ATX close markers",
+    "source": "## Heading ##\n"
+  },
+  {
+    "name": "Setext",
+    "source": "Heading\n=======\n"
+  },
+  {
+    "name": "horizontal rule",
+    "source": "***\n"
+  },
+  {
+    "name": "tilde fence",
+    "source": "~~~js\nx_y\n~~~\n"
+  },
+  {
+    "name": "long fence",
+    "source": "````js\nx_y\n````\n"
+  },
+  {
+    "name": "indented code",
+    "source": "    x_y\n    a  b\n"
+  },
+  {
+    "name": "tilde info with backtick",
+    "source": "~~~js title=`x`\na\n~~~\n"
+  },
+  {
+    "name": "unterminated fence",
+    "source": "```js\nx\n"
+  },
+  {
+    "name": "fenced tabs",
+    "source": "```js\n\tfoo_bar\n```\n"
+  },
+  {
+    "name": "frontmatter",
+    "source": "---\ntitle: example\n---\n\nBody\n"
+  },
+  {
+    "name": "frontmatter blank spaces",
+    "source": "---\nx: |\n  a\n  \n  b\n---\n\nBody\n"
+  },
+  {
+    "name": "TOML frontmatter",
+    "source": "+++\ntitle = \"example\"\n+++\n\nBody\n"
+  },
+  {
+    "name": "comment",
+    "source": "<!-- keep me -->\n\nBody\n"
+  },
+  {
+    "name": "raw HTML",
+    "source": "<details>\n<summary>Title</summary>\n\nBody\n</details>\n"
+  },
+  {
+    "name": "raw HTML blank spaces",
+    "source": "<pre>\n  \n</pre>\n"
+  },
+  {
+    "name": "references",
+    "source": "[x][ref]\n\n[ref]: ./some_file.md \"Title\"\n"
+  },
+  {
+    "name": "entity amp",
+    "source": "A &amp; B\n"
+  },
+  {
+    "name": "entity copyright",
+    "source": "&copy;\n"
+  },
+  {
+    "name": "nonbreaking space",
+    "source": "a&nbsp;b\n"
+  },
+  {
+    "name": "inline multiple spaces",
+    "source": "a   b\n"
+  },
+  {
+    "name": "inline tab",
+    "source": "a\tb\n"
+  },
+  {
+    "name": "NBSP Unicode",
+    "source": "a b\n"
+  },
+  {
+    "name": "zero width Unicode",
+    "source": "a​b⁠c﻿d\n"
+  },
+  {
+    "name": "soft break",
+    "source": "one\ntwo\n"
+  },
+  {
+    "name": "hard break spaces",
+    "source": "one  \ntwo\n"
+  },
+  {
+    "name": "hard break slash",
+    "source": "one\\\ntwo\n"
+  },
+  {
+    "name": "leading blank lines",
+    "source": "\n\nBody\n"
+  },
+  {
+    "name": "trailing blank lines",
+    "source": "Body\n\n\n"
+  },
+  {
+    "name": "EOF without newline",
+    "source": "Body"
+  },
+  {
+    "name": "blank doc",
+    "source": ""
+  },
+  {
+    "name": "link quoted title",
+    "source": "[x](./a.md 'title')\n"
+  },
+  {
+    "name": "angle link destination",
+    "source": "[x](<./a.md>)\n"
+  },
+  {
+    "name": "autolink",
+    "source": "<https://example.com>\n"
+  },
+  {
+    "name": "plain URL",
+    "source": "https://example.com/foo_bar\n"
+  },
+  {
+    "name": "plain email",
+    "source": "name@example.com\n"
+  },
+  {
+    "name": "image alt underscore",
+    "source": "![foo_bar](./foo_bar.png)\n"
+  },
+  {
+    "name": "image Unicode path",
+    "source": "![x](./画像.png)\n"
+  },
+  {
+    "name": "image link title",
+    "source": "![x](./x.png 'Title')\n"
+  },
+  {
+    "name": "table compact",
+    "source": "a | b\n--- | ---\nx | y\n"
+  },
+  {
+    "name": "table formatting",
+    "source": "| a | b |\n|---|:---:|\n| **bold** | `code_x` |\n"
+  },
+  {
+    "name": "table escaped pipe",
+    "source": "| a |\n|---|\n| x\\|y |\n"
+  },
+  {
+    "name": "table code pipe",
+    "source": "| a |\n|---|\n| `x\\|y` |\n"
+  },
+  {
+    "name": "table br HTML",
+    "source": "| a |\n|---|\n| one<br>two |\n"
+  },
+  {
+    "name": "footnote order",
+    "source": "B[^b] A[^a]\n\n[^a]: A\n\n[^b]: B\n"
+  },
+  {
+    "name": "math",
+    "source": "$$\nx_y\n$$\n"
+  },
+  {
+    "name": "inline math",
+    "source": "$x_y$\n"
+  },
+  {
+    "name": "image trailing break",
+    "source": "![x](./x.png)  \n"
+  },
+  {
+    "name": "empty ordered item",
+    "source": "1.\n2. text\n"
+  },
+  {
+    "name": "escaped link",
+    "source": "\\[label\\](https://example.com)\n"
+  },
+  {
+    "name": "escaped image alt close bracket",
+    "source": "![a\\]b](./x.png)\n"
+  },
+  {
+    "name": "escaped image alt open bracket",
+    "source": "![a\\[b](./x.png)\n"
+  },
+  {
+    "name": "image alt asterisk",
+    "source": "![*alt*](./x.png)\n"
+  },
+  {
+    "name": "image alt HTML entity",
+    "source": "![&copy;](./x.png)\n"
+  },
+  {
+    "name": "image angle space",
+    "source": "![x](<./a b.png>)\n"
+  },
+  {
+    "name": "link angle space",
+    "source": "[x](<./a b.md>)\n"
+  },
+  {
+    "name": "image balanced parens",
+    "source": "![x](./a(b).png)\n"
+  },
+  {
+    "name": "code zero-width",
+    "source": "```text\na​b⁠c﻿d\n```\n"
+  },
+  {
+    "name": "inline code zero-width",
+    "source": "`a​b`\n"
+  },
+  {
+    "name": "YAML blankline Unicode",
+    "source": "---\nkey: |\n  a\n \n  b\n---\n"
+  },
+  {
+    "name": "HTML blankline Unicode",
+    "source": "<pre>\na\n \nb\n</pre>\n"
+  },
+  {
+    "name": "quote blankline",
+    "source": "> one\n>\n> two\n"
+  },
+  {
+    "name": "fence trailing spaces info",
+    "source": "~~~js  title=\"a.js\"  \nx\n~~~\n"
+  },
+  {
+    "name": "empty nested parent",
+    "source": "-\n  - child\n"
+  },
+  {
+    "name": "escaped thematic break",
+    "source": "\\- - -\n"
+  },
+  {
+    "name": "escaped fence",
+    "source": "\\`\\`\\`\n"
+  },
+  {
+    "name": "escaped heading number",
+    "source": "## 1\\. foo\n"
+  },
+  {
+    "name": "math subscript pair",
+    "source": "$a_b_c$\n"
+  },
+  {
+    "name": "bold math",
+    "source": "**$x_y$**\n"
+  },
+  {
+    "name": "GFM alert",
+    "source": "> [!NOTE]\n> text\n"
+  }
+]

@@ -624,11 +624,19 @@ export class DOMUtils {
             // クリーンアップは行わない - サブリストのみを含む空のリストアイテムも有効な構造
         });
 
-        // カーソル配置用のゼロ幅スペースを削除
-        let html = clone.innerHTML;
-        html = html.replace(/[\u200B\u2060\uFEFF]/g, '');
-
-        return html;
+        // Source characters are marked when Markdown is rendered. Only remove
+        // unmarked caret anchors; a global replacement also deleted code/text.
+        const removeCaretAnchors = (node) => {
+            if (node.nodeType === 3) {
+                if (!node.parentElement?.closest('[data-mdw-source-zero-width="true"]')) {
+                    node.nodeValue = node.nodeValue.replace(/[\u200B\u2060\uFEFF]/g, '');
+                }
+            } else {
+                Array.from(node.childNodes || []).forEach(removeCaretAnchors);
+            }
+        };
+        removeCaretAnchors(clone);
+        return clone.innerHTML;
     }
 
     /**
@@ -687,7 +695,9 @@ export class DOMUtils {
                     const tempRange = document.createRange();
                     tempRange.selectNodeContents(codeElement);
                     tempRange.setEnd(range.startContainer, range.startOffset);
-                    activeOffset = tempRange.toString().replace(/[\u200B\u2060\uFEFF]/g, '').length;
+                    const prefix = tempRange.toString();
+                    activeOffset = codeElement.getAttribute('data-mdw-source-zero-width') === 'true'
+                        ? prefix.length : prefix.replace(/[\u200B\u2060\uFEFF]/g, '').length;
                 } catch (e) {
                     activeCode = null;
                     activeOffset = null;
@@ -712,7 +722,8 @@ export class DOMUtils {
             }
 
             const rawText = code.textContent || '';
-            const normalized = rawText.replace(/[\u200B\u2060\uFEFF]/g, '');
+            const normalized = code.getAttribute('data-mdw-source-zero-width') === 'true'
+                ? rawText : rawText.replace(/[\u200B\u2060\uFEFF]/g, '');
 
             if (normalized === '') {
                 // 内容が空の場合
@@ -764,7 +775,8 @@ export class DOMUtils {
             const textNode = activeCode.firstChild;
             if (textNode && textNode.nodeType === Node.TEXT_NODE && textNode.isConnected) {
                 const rawText = textNode.textContent || '';
-                const normalizedLength = rawText.replace(/[\u200B\u2060\uFEFF]/g, '').length;
+                const normalizedLength = activeCode.getAttribute('data-mdw-source-zero-width') === 'true'
+                    ? rawText.length : rawText.replace(/[\u200B\u2060\uFEFF]/g, '').length;
                 let targetOffset = normalizedLength === 0 ? rawText.length : Math.min(activeOffset, normalizedLength);
                 const newRange = document.createRange();
                 newRange.setStart(textNode, targetOffset);
@@ -840,6 +852,7 @@ export class DOMUtils {
             if (isSyntaxHighlightToken(element) ||
                 isTableStructureHandle(element) ||
                 isInlineCodeCaretAnchor(element) ||
+                element.getAttribute('data-mdw-source-zero-width') === 'true' ||
                 isCodeBlockToolbarPart(element)) {
                 return;
             }

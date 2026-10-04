@@ -81,6 +81,153 @@ function visibleText(html) {
     return html.replace(/<[^>]*>/g, '');
 }
 
+async function withEditableDocument(source, callback) {
+    const fs = require('node:fs');
+    const domino = require('@mixmark-io/domino');
+    const moduleSource = fs.readFileSync(path.join(__dirname, '..', 'media', 'modules', 'DOMUtils.js'), 'utf8');
+    const { DOMUtils } = await import(`data:text/javascript;base64,${Buffer.from(moduleSource).toString('base64')}`);
+    const html = new MarkdownDocument(createTextDocument(source)).toHtml();
+    const window = domino.createWindow(`<div id="editor">${html}</div>`);
+    window.getSelection = () => null;
+    const editor = window.document.getElementById('editor');
+    Object.getPrototypeOf(editor.querySelectorAll('a')).forEach = Array.prototype.forEach;
+    const previous = { Node: global.Node, document: global.document, window: global.window };
+    Object.assign(global, { Node: window.Node, document: window.document, window });
+    try {
+        // Exercise the real loading cleanup as well as the outgoing snapshot.
+        const editorSource = fs.readFileSync(path.join(__dirname, '..', 'media', 'editor.js'), 'utf8');
+        const start = editorSource.indexOf('    function normalizeLoadedEditorBoundaryWhitespace(');
+        const end = editorSource.indexOf('    function stripListPlaceholderCharactersFromTextNode(', start);
+        const loadCleanup = new Function('editor', 'window', 'document', 'Node', 'NodeFilter',
+            `${editorSource.slice(start, end)}\nreturn () => { normalizeLoadedEditorBoundaryWhitespace(editor); stripEditorControlCharacters(editor, { preserveSelection: false }); };`
+        )(editor, window, window.document, window.Node, window.NodeFilter);
+        loadCleanup();
+        const domUtils = new DOMUtils(editor);
+        domUtils.cleanupGhostStyles();
+        domUtils.ensureInlineCodeSpaces();
+        return await callback(editor, domUtils, window.document);
+    } finally {
+        Object.assign(global, previous);
+    }
+}
+
+for (const { name, source } of require('./fixtures/markdown-source.json')) {
+    test(`original Markdown survives editor cleanup and repeated conversion: ${name}`, async () => {
+        await withEditableDocument(source, (editor, domUtils) => {
+            const provider = new MarkdownEditorProvider({});
+            const snapshot = domUtils.getCleanedHTML();
+            const markdown = provider.htmlToMarkdown(snapshot, createTextDocument(source));
+            assert.equal(markdown, source);
+            assert.equal(provider.htmlToMarkdown(snapshot, createTextDocument(markdown)), source);
+        });
+    });
+    if (name !== 'unterminated fence') {
+        test(`editing another paragraph preserves existing source: ${name}`, async () => {
+            const input = `${source}\n\nEDIT TARGET\n`;
+            await withEditableDocument(input, (editor, domUtils) => {
+                const paragraphs = editor.querySelectorAll('p');
+                const target = Array.from(paragraphs).find(node => node.textContent === 'EDIT TARGET');
+                assert.ok(target, 'The editable paragraph must be outside the original block');
+                target.textContent = 'Changed';
+                const provider = new MarkdownEditorProvider({});
+                const snapshot = domUtils.getCleanedHTML();
+                const output = provider.htmlToMarkdown(snapshot, createTextDocument(input));
+                assert.equal(output, `${source}\n\nChanged\n`);
+                assert.equal(provider.htmlToMarkdown(snapshot, createTextDocument(output)), output);
+            });
+        });
+    }
+}
+
+test('editing prose retains unchanged inline syntax and necessary escaping', async () => {
+    const source = 'Before _italic_ and foo_bar _ with `code_x` and ![a\\]b](./画像.png).\n';
+    await withEditableDocument(source, (editor, domUtils) => {
+        editor.querySelector('p').firstChild.nodeValue = 'After ';
+        const output = new MarkdownEditorProvider({}).htmlToMarkdown(domUtils.getCleanedHTML(), createTextDocument(source));
+        assert.equal(output, source.replace('Before', 'After'));
+    });
+});
+
+test('new literal punctuation remains literal instead of becoming Markdown structure', () => {
+    const provider = new MarkdownEditorProvider({});
+    for (const literal of ['- item', '`foo`', '[ ]', '[x]', 'foo\\_bar']) {
+        const output = provider.htmlToMarkdown(`<p>${literal}</p>`, createTextDocument(''));
+        const html = new MarkdownDocument(createTextDocument(output)).toHtml();
+        assert.doesNotMatch(html, /<(?:ul|pre|code|input)\b/);
+        assert.equal(require('@mixmark-io/domino').createWindow(html).document.body.textContent.trim(), literal);
+    }
+});
+
+test('new images escape alt brackets, backslashes and quoted titles', () => {
+    const html = '<p><img src="./x.png" alt="a]b\\c[d" title="a &quot;quote&quot;"></p>';
+    const output = new MarkdownEditorProvider({}).htmlToMarkdown(html, createTextDocument(''));
+    const rendered = new MarkdownDocument(createTextDocument(output)).toHtml();
+    const image = require('@mixmark-io/domino').createWindow(rendered).document.querySelector('img');
+    assert.ok(image);
+    assert.equal(image.getAttribute('alt'), 'a]b\\c[d');
+    assert.equal(image.getAttribute('title'), 'a "quote"');
+});
+
+test('changing code preserves original zero-width characters while caret anchors are removed', async () => {
+    const source = '`a\u200bb`\n\n```text\na\u2060b\ufeffc\n```\n';
+    await withEditableDocument(source, (editor, domUtils, document) => {
+        editor.querySelector('pre code').textContent += 'Changed\n';
+        editor.querySelector('p').appendChild(document.createTextNode('\u200b'));
+        const output = new MarkdownEditorProvider({}).htmlToMarkdown(domUtils.getCleanedHTML(), createTextDocument(source));
+        assert.equal(output, '`a\u200bb`\n\n```text\na\u2060b\ufeffc\nChanged\n```\n');
+    });
+});
+
+test('edited tilde code fences retain backticks in info strings and enclose tilde runs safely', async () => {
+    const source = '~~~js title=`x`\noriginal\n~~~\n';
+    await withEditableDocument(source, (editor, domUtils) => {
+        editor.querySelector('code').textContent = 'original\n~~~\nchanged\n';
+        const output = new MarkdownEditorProvider({}).htmlToMarkdown(domUtils.getCleanedHTML(), createTextDocument(source));
+        assert.equal(output, '~~~~js title=`x`\noriginal\n~~~\nchanged\n~~~~\n');
+        assert.match(convert(output).html, /original\n~~~\nchanged\n/);
+    });
+});
+
+test('typing into leading and trailing blank paragraphs consumes those blank lines', async () => {
+    const source = '\n\nBody\n\n\n';
+    await withEditableDocument(source, (editor, domUtils) => {
+        assert.equal(editor.querySelectorAll('[data-mdw-blankline]').length, 2);
+        editor.firstElementChild.textContent = 'Start';
+        editor.lastElementChild.textContent = 'End';
+        const output = new MarkdownEditorProvider({}).htmlToMarkdown(domUtils.getCleanedHTML(), createTextDocument(source));
+        assert.equal(output, 'Start\n\nBody\n\nEnd\n');
+    });
+});
+
+test('changed link destinations, table alignment and formatting are written instead of restoring stale source', async () => {
+    const source = '[label](old.md)\n\n| a |\n| --- |\n| data |\n\nPlain\n';
+    await withEditableDocument(source, (editor, domUtils) => {
+        editor.querySelector('a').setAttribute('href', 'new.md');
+        editor.querySelector('th').style.textAlign = 'right';
+        const last = editor.lastElementChild;
+        last.innerHTML = '<strong>Plain</strong>';
+        const output = new MarkdownEditorProvider({}).htmlToMarkdown(domUtils.getCleanedHTML(), createTextDocument(source));
+        assert.match(output, /\[label\]\(new\.md\)/);
+        assert.match(output, /\*\*Plain\*\*/);
+        const table = require('@mixmark-io/domino').createWindow(convert(output).html).document.querySelector('th');
+        assert.equal(table.getAttribute('align'), 'right');
+    });
+});
+
+test('editing either adjacent list keeps different markers and separate list structure', async () => {
+    for (const source of ['- one\n\n* two\n', '* one\n\n+ two\n', '1) one\n\n2. two\n', '1. one\n\n2) two\n']) {
+        for (const index of [0, 1]) {
+            await withEditableDocument(source, (editor, domUtils) => {
+                editor.querySelectorAll('li')[index].firstChild.nodeValue = 'Changed';
+                const output = new MarkdownEditorProvider({}).htmlToMarkdown(domUtils.getCleanedHTML(), createTextDocument(source));
+                assert.equal(output, source.replace(index === 0 ? 'one' : 'two', 'Changed'));
+                const rendered = require('@mixmark-io/domino').createWindow(convert(output).html).document;
+                assert.equal(rendered.querySelectorAll('ul,ol').length, 2);
+            });
+        }
+    }
+});
+
 test('a generated table of contents saves as nested Markdown links and round trips', async () => {
     const fs = require('node:fs');
     const domino = require('@mixmark-io/domino');
@@ -104,7 +251,7 @@ test('Japanese heading links remain readable on reload, including previously enc
     for (const fragment of ['#6-テーブル', '#6-%E3%83%86%E3%83%BC%E3%83%96%E3%83%AB']) {
         const { html, markdown } = convert(`[テーブル](${fragment} "表へ移動")\n\n## 6 テーブル\n`);
         assert.match(html, /href="#6-テーブル" title="表へ移動"/);
-        assert.match(markdown, /\[テーブル\]\(#6-テーブル "表へ移動"\)/);
+        assert.equal(markdown, `[テーブル](${fragment} "表へ移動")\n\n## 6 テーブル\n`);
         assert.equal(convert(markdown).markdown, markdown);
     }
 });
@@ -125,7 +272,7 @@ test('ATX headings keep numbered titles without escaping their periods', () => {
             assert.equal(convert(markdown).markdown, source);
         }
     }
-    assert.equal(convert('## 1\\. 概要\n').markdown, '## 1. 概要\n');
+    assert.equal(convert('## 1\\. 概要\n').markdown, '## 1\\. 概要\n');
 });
 
 test('numbered text inside heading formatting also keeps its periods', () => {
@@ -162,8 +309,8 @@ test('list items that start with punctuation-led emphasis keep the emphasis', ()
         { source: '- **• List**: Unordered list\n' },
         { source: '- **[リンク](https://example.com)** の説明\n' },
         { source: '- *(optional)* flag\n' },
-        // Turndown writes emphasis with "*"; the emphasis itself must survive.
-        { source: '- _italic_ item\n', expected: '- *italic* item\n' },
+        // Existing delimiter spelling survives as well as the emphasis.
+        { source: '- _italic_ item\n' },
         { source: '1. **(注)** 番号付き\n' },
     ];
 
@@ -185,7 +332,7 @@ test('loose list items do not expose internal list markers', () => {
     for (const { source, texts } of cases) {
         const { html, markdown } = convert(source);
         assert.doesNotMatch(visibleText(html), /MDW/, `editor text must not show markers for ${JSON.stringify(source)}`);
-        assert.match(html, /<li data-mdw-source-indent="0">/);
+        assert.match(html, /<li\b[^>]*data-mdw-source-indent="0"[^>]*>/);
         assert.doesNotMatch(markdown, /MDW/);
         for (const text of texts) {
             assert.ok(markdown.includes(text), `${JSON.stringify(text)} must survive in ${JSON.stringify(markdown)}`);
@@ -278,7 +425,7 @@ test('fence info strings and non-ASCII link targets keep their spelling', () => 
 
 test('empty list items keep their place in the list', () => {
     assert.equal(convert('- a\n- \n- c\n').markdown, '- a\n- \n- c\n');
-    assert.equal(convert('1. a\n2.\n3. c\n').markdown, '1. a\n2. \n3. c\n');
+    assert.equal(convert('1. a\n2.\n3. c\n').markdown, '1. a\n2.\n3. c\n');
 
     // An empty item made in the editor does not pull the next item under it.
     const provider = new MarkdownEditorProvider({});
@@ -312,7 +459,7 @@ test('an image pasted below the text of a list item stays in that item', () => {
         createTextDocument('- a\n- b\n')
     );
 
-    assert.equal(markdown, '- a\n\n  ![image](images/shot.png)\n- b\n');
+    assert.equal(markdown, '- a\n\n  ![image](images/shot.png)\n\n- b\n');
     assert.equal(convert(markdown).markdown, markdown);
 });
 
@@ -372,7 +519,7 @@ test('footnotes render editable bodies and stable numbers for repeated and named
     assert.equal(root.querySelector('.mdw-footnote-content').getAttribute('contenteditable'), null);
     assert.deepEqual(Array.from(root.querySelectorAll('[data-mdw-footnote-definition]'))
         .map(node => node.getAttribute('data-mdw-footnote-definition')), [encodeURIComponent('注釈'), 'b']);
-    assert.equal(markdown, 'First[^注釈] then second[^b] and first again[^注釈].\n\n[^注釈]: 日本語の注釈。\n[^b]: **Bold** note.\n\n');
+    assert.equal(markdown, source);
     assert.equal(convert(markdown).markdown, markdown);
 });
 
@@ -394,7 +541,7 @@ test('reordered footnotes save their content and keep following body text separa
     const root = require('@mixmark-io/domino').createWindow(html).document;
     assert.deepEqual(Array.from(root.querySelectorAll('.mdw-footnote-backref')).map(node => node.textContent), ['1 ↩', '2 ↩']);
     assert.equal(root.querySelector('.mdw-footnote-content strong').textContent, 'Beta');
-    assert.equal(markdown, 'First[^b] then second[^a].\n\n[^b]: **Beta**.\n\nFollowing body.\n\n[^a]: _Alpha_.\n\n');
+    assert.equal(markdown, source);
     assert.equal(convert(markdown).markdown, markdown);
     const reloaded = require('@mixmark-io/domino').createWindow(convert(markdown).html).document;
     assert.deepEqual(Array.from(reloaded.querySelectorAll('.mdw-footnote-content')).map(node => node.textContent.trim()), ['Beta.', 'Alpha.']);
@@ -403,7 +550,7 @@ test('reordered footnotes save their content and keep following body text separa
 test('a note originally at EOF stays separate from the next definition after sorting', () => {
     const source = 'First[^b] then second[^a].\n\n[^a]: Alpha.\n\n[^b]: Beta.';
     const { markdown } = convert(source);
-    assert.equal(markdown, 'First[^b] then second[^a].\n\n[^b]: Beta.\n[^a]: Alpha.\n\n');
+    assert.equal(markdown, source);
     assert.equal(convert(markdown).markdown, markdown);
 });
 
@@ -433,7 +580,7 @@ test('code and escaped literals do not become footnote references', () => {
     const document = require('@mixmark-io/domino').createWindow(html).document;
     assert.equal(document.querySelectorAll('sup[data-mdw-footnote-ref]').length, 1);
     assert.equal(document.querySelector('pre code').textContent, '[^a]: code\n[^a]\n');
-    assert.equal(markdown, source.replace('\\[^a]', '\\[^a\\]'));
+    assert.equal(markdown, source);
     assert.equal(convert(markdown).markdown, markdown);
 });
 
@@ -537,12 +684,12 @@ test('emptied blocks inside lists, quotes and table cells convert without leftov
         {
             html: '<ul><li data-mdw-source-indent="0"><p>a</p></li><li data-mdw-source-indent="0"><p><br></p></li></ul>',
             source: '- a\n\n- b\n',
-            expected: /^- a\n- ?\n$/,
+            expected: /^- a\n\n- ?\n$/,
         },
         {
             html: '<ol><li data-mdw-source-indent="0"><p>a</p></li><li data-mdw-source-indent="0"><p><br></p></li></ol>',
             source: '1. a\n\n2. b\n',
-            expected: /^1\. a\n2\. ?\n$/,
+            expected: /^1\. a\n\n2\. ?\n$/,
         },
         {
             html: '<ul><li>x<blockquote><p></p></blockquote></li></ul>',
@@ -588,7 +735,7 @@ test('newly typed identifiers that start with MDW_ are not mistaken for markers'
         '<p>MDW_CONFIGURATION_SETTING_FOR_PRODUCTION_ENV</p>',
         createTextDocument('')
     );
-    assert.equal(markdown, 'MDW\\_CONFIGURATION\\_SETTING\\_FOR\\_PRODUCTION\\_ENV\n');
+    assert.equal(markdown, 'MDW_CONFIGURATION_SETTING_FOR_PRODUCTION_ENV\n');
 });
 
 test('htmlToMarkdown refuses output that contains an unrestored internal marker', (t) => {

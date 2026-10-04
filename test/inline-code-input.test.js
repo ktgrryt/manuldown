@@ -81,9 +81,20 @@ test('the first typed text removes the placeholder and keeps the caret after the
     assert.equal(f.code.hasAttribute('data-is-new'), false);
 });
 
-test('ordinary inline code still removes invisible characters', async (t) => {
+test('inline code still removes unmarked caret anchors', async (t) => {
     const f = await fixture(t, '<p><code>\u200Bvalue</code></p>', 6);
     assert.equal(f.strip(), true);
     assert.equal(f.code.textContent, 'value');
     assert.equal(f.range.startOffset, 5);
+});
+
+test('loading and input cleanup preserve source zero-width characters in text and code', async (t) => {
+    const text = 'a\u200bb\u2060c\ufeffd';
+    const f = await fixture(t, `<p><span data-mdw-source-zero-width="true">${text}</span><code data-mdw-source-zero-width="true">${text}</code></p>`, 3);
+    f.domUtils.cleanupGhostStyles();
+    assert.equal(f.strip(), false);
+    f.domUtils.ensureInlineCodeSpaces();
+    assert.equal(f.code.textContent, text);
+    assert.equal(f.code.previousSibling.textContent, text);
+    assert.equal(f.range.startOffset, 3);
 });

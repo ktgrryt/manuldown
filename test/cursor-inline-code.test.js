@@ -561,6 +561,18 @@ test('a stale inline-code boundary state does not claim an unrelated selection',
     }
 });
 
+test('entering inline code preserves zero-width characters from the source', async () => {
+    const text = 'a\u200bb\u2060c\ufeffd';
+    const fixture = await createInlineCodeFixture({ codeText: text });
+    try {
+        fixture.code.setAttribute('data-mdw-source-zero-width', 'true');
+        assert.equal(fixture.manager._placeCursorInsideInlineCodeStart(fixture.code, fixture.selection), true);
+        assert.equal(fixture.code.textContent, text);
+    } finally {
+        fixture.restoreGlobals();
+    }
+});
+
 test('an outside-left state never rewinds an actual logical offset one', async () => {
     const fixture = await createInlineCodeFixture();
     try {

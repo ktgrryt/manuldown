@@ -36,6 +36,12 @@ ManulDown is a VSCode extension that lets you edit Markdown files in a WYSIWYG e
 
 3. Start editing in the WYSIWYG editor.
 
+### Preserving Markdown source
+
+Opening a file leaves its source unchanged. When editing, unchanged blocks and inline formatting retain their original Markdown, including underscore emphasis, list markers, code fences, links, table spacing, and blank lines. Edited blocks are serialized with the escaping needed to preserve their meaning. Footnotes follow reference order on screen while existing definitions keep their source order.
+
+Unsupported math expressions (`$…$` / `$$…$$`) and GitHub alert markers such as `[!NOTE]` are shown as read-only source and kept intact. Front matter, raw HTML, and reference definitions also retain their source.
+
 ### Toolbar Buttons
 
 - **B**: Bold

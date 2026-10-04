@@ -10,6 +10,7 @@ import {
     normalizeExternalLinkHref,
 } from '../utils/workspaceLinks';
 import { MAX_EDITABLE_FOOTNOTE_DEPTH, decodeFootnoteLabel, parseFootnoteDefinition, serializeFootnoteDefinition } from './Footnotes';
+import { MarkdownSourceBlock, preserveMarkdownSource } from './MarkdownSource';
 import TurndownService from 'turndown';
 const { createWindow } = require('@mixmark-io/domino');
 const { gfm } = require('turndown-plugin-gfm');
@@ -70,6 +71,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     private currentEmptyListItemMarker: string | null = null;
     // Text of the document being converted by htmlToMarkdown (see escapeHtmlLikeText).
     private currentConversionDocumentText: string | null = null;
+    private sourceCache: { text: string; html: string; blocks?: MarkdownSourceBlock[] } | undefined;
     private readonly workspaceLinkPicker = new WorkspaceLinkPicker();
     public explicitlyRequested = false;
 
@@ -88,12 +90,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 // list neither loses the item nor, when ordered, splits in two.
                 if (node.nodeName === 'LI') {
                     const parent = node.parentNode;
-                    let prefix = (options?.bulletListMarker || '-') + ' ';
-                    if (parent && parent.nodeName === 'OL') {
-                        const start = parent.getAttribute('start');
-                        const index = Array.prototype.indexOf.call(parent.children, node);
-                        prefix = (start ? Number(start) + index : index + 1) + '. ';
-                    }
+                    const prefix = this.getListItemPrefix(node, options?.bulletListMarker || '-');
                     // As in the listItem rule, a nested empty item keeps "&nbsp;".
                     const isNested = !!(parent && parent.parentNode && parent.parentNode.nodeName === 'LI');
                     return prefix + (isNested ? '&nbsp;' : '') + (node.nextSibling ? '\n' : '');
@@ -111,19 +108,14 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             }
         });
 
-        // Override escape behavior:
-        // - keep legacy behavior for backticks/hyphens
-        // - collapse redundant escaping for already-escaped Markdown markers
-        //   (e.g. "\*" should not become "\\\*")
+        // Escape literal text, including actual backslashes. Intraword
+        // underscores cannot delimit emphasis and need no extra backslash.
         const originalEscape = (this.turndownService as any).escape;
-        const redundantEscapedMarkerPattern = /\\\\\\([\\`*_{}\[\]()#+.!|>~])/g;
         (this.turndownService as any).escape = function (text: string) {
-            // Call original escape first, then normalize selected sequences.
             const escaped = originalEscape.call(this, text);
             return provider.escapeHtmlLikeText(escaped
-                .replace(redundantEscapedMarkerPattern, '\\$1')
-                .replace(/\\`/g, '`')
-                .replace(/\\-/g, '-'));
+                .replace(/(?<=[\p{L}\p{N}])\\_(?=[\p{L}\p{N}])/gu, '_')
+                .replace(/(?<=^|\s)\\_(?=$|\s)/gu, '_'));
         };
 
         // Override nested-list indentation width (updated dynamically on save).
@@ -209,9 +201,23 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         });
 
         const provider = this;
+        this.turndownService.addRule('image', {
+            filter: 'img',
+            replacement: (_content: string, node: any) => {
+                const src = String(node.getAttribute('src') || '');
+                const alt = String(node.getAttribute('alt') || '').replace(/([\\[\]])/g, '\\$1');
+                const title = String(node.getAttribute('title') || '').replace(/([\\"])/g, '\\$1');
+                const destination = src.replace(/[\s<>]/g, character => encodeURIComponent(character))
+                    .replace(/([\\()])/g, '\\$1');
+                return src ? `![${alt}](${destination}${title ? ` "${title}"` : ''})` : '';
+            }
+        });
         this.turndownService.addRule('tableCell', {
             filter: ['th', 'td'],
             replacement: function (content: string, node: any) {
+                if (['left', 'center', 'right'].includes(node.style.textAlign)) {
+                    node.setAttribute('align', node.style.textAlign);
+                }
                 const index = Array.prototype.indexOf.call(node.parentNode.childNodes, node);
                 const prefix = index === 0 ? '| ' : ' ';
                 const cellContent = provider.serializeTableCellForMarkdown(node, content);
@@ -380,7 +386,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                         .replace(/^(?=.)/gm, provider.currentListIndent);
 
                     return content + (node.nextSibling && !/\n$/.test(content) ? '\n' : '');
-                } else if (isPreservedEmptyWithNestedList) {
+                } else if (isPreservedEmptyWithNestedList || isEmptyWithNestedList) {
                     // Preserved empty list item with nested list: <li>&nbsp;<ul><li>c</li></ul></li>
                     // This is intentionally created by the user (e.g., after backspace)
                     // Use a special marker that will be replaced with &nbsp; later
@@ -398,42 +404,20 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     content = contentLines.join('\n');
                     content = content.replace(/^(?=.)/gm, getNestedContentIndent(content)); // indent nested content
 
-                    let prefix = options.bulletListMarker + ' ';
-                    const parent = node.parentNode;
-                    if (parent.nodeName === 'OL') {
-                        const start = parent.getAttribute('start');
-                        const index = Array.prototype.indexOf.call(parent.children, node);
-                        prefix = (start ? Number(start) + index : index + 1) + '. ';
-                    }
+                    const prefix = provider.getListItemPrefix(node, options.bulletListMarker);
 
                     // Return marker with special placeholder, then the nested content
                     if (!provider.currentEmptyListItemMarker) {
                         throw new Error('Empty list item marker is not initialized');
                     }
                     return prefix + provider.currentEmptyListItemMarker + '\n' + content + (node.nextSibling && !/\n$/.test(content) ? '\n' : '');
-                } else if (isEmptyWithNestedList) {
-                    // Empty list item with nested list (not preserved): <li><ul><li>b</li></ul></li>
-                    // Output only the nested content without the parent marker
-                    // This prevents double markers while preserving the nested list
-                    content = content
-                        .replace(/^\n+/, '') // remove leading newlines
-                        .replace(/\n+$/, '\n') // replace trailing newlines with just a single one
-                        .replace(/\n/gm, `\n${provider.currentListIndent}`); // indent
-
-                    // Return the indented content without prefix
-                    return content + (node.nextSibling && !/\n$/.test(content) ? '\n' : '');
                 } else if (isCompletelyEmpty) {
                     // Completely empty list item - use &nbsp; for nested items to avoid heading parse
                     content = isNestedListItem ? '&nbsp;' : '';
                 }
 
-                let prefix = options.bulletListMarker + ' ';
+                const prefix = provider.getListItemPrefix(node, options.bulletListMarker);
                 const parent = node.parentNode;
-                if (parent.nodeName === 'OL') {
-                    const start = parent.getAttribute('start');
-                    const index = Array.prototype.indexOf.call(parent.children, node);
-                    prefix = (start ? Number(start) + index : index + 1) + '. ';
-                }
 
                 if (!isCompletelyEmpty) {
                     // Normal list item processing
@@ -451,7 +435,9 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                         .replace(/\n(?=[^\n])/g, `\n${continuationIndent}`);
                 }
 
-                return prefix + content + (node.nextSibling && !/\n$/.test(content) ? '\n' : '');
+                const loose = Array.prototype.some.call(parent.children, (item: any) =>
+                    Array.prototype.some.call(item.children, (child: any) => child.nodeName === 'P'));
+                return prefix + content + (node.nextSibling ? (loose ? '\n\n' : /\n$/.test(content) ? '' : '\n') : '');
             }
         });
 
@@ -563,12 +549,16 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     0,
                     ...Array.from(codeContent.matchAll(/`+/g), (match) => match[0].length)
                 );
-                const fence = '`'.repeat(Math.max(3, longestBacktickRun + 1));
+                const storedInfo = String(codeNode.getAttribute('data-mdw-code-info') || '');
+                const longestTildeRun = Math.max(0, ...Array.from(codeContent.matchAll(/~+/g), match => match[0].length));
+                const fence = storedInfo.includes('`')
+                    ? '~'.repeat(Math.max(3, longestTildeRun + 1))
+                    : '`'.repeat(Math.max(3, longestBacktickRun + 1));
                 // Keep the rest of the fence's info string (e.g. title="a.js")
                 // while the language is unchanged. A backtick fence's info
                 // string cannot hold backticks or line breaks.
                 const codeInfo = String(codeNode.getAttribute('data-mdw-code-info') || '')
-                    .replace(/[`\r\n]/g, '')
+                    .replace(/[\r\n]/g, '')
                     .trim();
                 const infoString = language && codeInfo.split(/\s+/)[0] === language
                     ? codeInfo
@@ -2349,6 +2339,23 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         return applied;
     }
 
+    private getListItemPrefix(node: any, defaultBullet: string): string {
+        const parent = node.parentNode;
+        const ordered = parent?.nodeName === 'OL';
+        const validStyle = ordered ? /^[.)]$/ : /^[*+-]$/;
+        // Changing a marker can merge otherwise separate adjacent lists. New
+        // items inherit their list's existing style; new lists use the default.
+        const style = Array.from<any>(parent?.children || [])
+            .map(item => item.getAttribute('data-mdw-list-marker') || '')
+            .find(value => validStyle.test(value)) || (ordered ? '.' : defaultBullet);
+        if (ordered) {
+            const start = parent.getAttribute('start');
+            const index = Array.prototype.indexOf.call(parent.children, node);
+            return `${start ? Number(start) + index : index + 1}${style} `;
+        }
+        return `${style} `;
+    }
+
     private getDefaultUnorderedListMarker(): UnorderedListMarker {
         const useDashStyle = vscode.workspace
             .getConfiguration('manulDown')
@@ -2692,22 +2699,6 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         throw new Error(`Could not create a unique ${purpose} placeholder namespace`);
     }
 
-    private restoreEscapedMarkdownLinks(markdown: string): string {
-        const lines = markdown.split('\n');
-        const fencedLines = this.getFencedCodeLineMask(lines);
-
-        return lines.map((line, index) => {
-            if (fencedLines[index]) {
-                return line;
-            }
-
-            return line.replace(
-                /\\\[([^\]\n]+)\\\]\(((?:https?:\/\/|mailto:|file:)[^\s)]+)\)/g,
-                (_match, label: string, href: string) => `[${label}](${href})`
-            );
-        }).join('\n');
-    }
-
     /**
      * Text shown literally in the editor must stay literal in the saved
      * Markdown. "&copy;" as text (written "&amp;copy;" in the file) would
@@ -3035,6 +3026,18 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             // Pre-process HTML to convert webview URIs back to relative paths
             html = this.convertWebviewUrisToRelativePaths(html, document);
             html = this.restoreDocumentSpelledLinkTargets(html, documentText);
+            let preservedSource = { html, restore: (value: string) => value };
+            if (footnoteContext.depth === 0) {
+                const sourceText = documentText.replace(/\r\n?/g, '\n');
+                const originalDocument = new MarkdownDocument(document);
+                if (!this.sourceCache || this.sourceCache.text !== sourceText) {
+                    this.sourceCache = { text: sourceText, html: originalDocument.toHtml() };
+                }
+                const cache = this.sourceCache;
+                preservedSource = preserveMarkdownSource(html, sourceText, cache.html, () =>
+                    cache.blocks ??= originalDocument.getSourceBlocks());
+            }
+            html = preservedSource.html;
             const protectedFootnotes = this.protectEditableFootnotes(html, document, footnoteContext.depth, footnoteContext.trustedBodySource);
             html = protectedFootnotes.html;
 
@@ -3044,9 +3047,6 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             // when its decoded source still exists in the current document.
             const protectedOpaqueSources = this.protectOpaqueMarkdownSources(html, documentText, footnoteContext.trustedBodySource);
             html = protectedOpaqueSources.html;
-
-            // Remove zero-width markers used for caret placement
-            html = html.replace(/[\u200B\u2060\uFEFF]/g, '');
 
             // Restore markdown hard break for image lines that were split into
             // separate paragraphs for stable caret navigation in the webview.
@@ -3272,7 +3272,6 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
 
 
             let markdown = this.turndownService.turndown(html);
-            markdown = this.restoreEscapedMarkdownLinks(markdown);
 
             // Resolve the temporary empty-code marker before protecting fenced
             // blocks from the remaining document-level post-processing.
@@ -3349,37 +3348,6 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 `$1${unorderedListMarker} `
             );
 
-            // 1.5. Ensure bare task markers become list items ("[ ]" -> "<marker> [ ]")
-            const taskLines = markdown.split('\n');
-            const taskFencedLines = this.getFencedCodeLineMask(taskLines);
-            for (let i = 0; i < taskLines.length; i++) {
-                const line = taskLines[i];
-                if (taskFencedLines[i]) {
-                    continue;
-                }
-                taskLines[i] = line.replace(
-                    /^(\s*(?:[-*+]|\d+\.)\s+)\\\[(\s|x|X)\\\](?=\s|$)/,
-                    (_match, prefix, marker) => {
-                        const checked = marker === 'x' || marker === 'X' ? 'x' : ' ';
-                        return `${prefix}[${checked}]`;
-                    }
-                );
-                const escapedBareMatch = taskLines[i].match(/^(\s*)\\\[(\s|x|X)\\\]\s*$/);
-                if (escapedBareMatch) {
-                    const indent = escapedBareMatch[1];
-                    const checked = escapedBareMatch[2] === 'x' || escapedBareMatch[2] === 'X' ? 'x' : ' ';
-                    taskLines[i] = `${indent}${unorderedListMarker} [${checked}]`;
-                    continue;
-                }
-                const bareMatch = taskLines[i].match(/^(\s*)\[(\s|x|X)\]\s*$/);
-                if (bareMatch) {
-                    const indent = bareMatch[1];
-                    const checked = bareMatch[2] === 'x' || bareMatch[2] === 'X' ? 'x' : ' ';
-                    taskLines[i] = `${indent}${unorderedListMarker} [${checked}]`;
-                }
-            }
-            markdown = taskLines.join('\n');
-
             // 2. Replace the empty-list marker and remove following whitespace-only lines.
             // Convert it to &nbsp; so nested empty items don't get parsed as headings.
             markdown = markdown.replace(
@@ -3430,31 +3398,6 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 }
             );
 
-            // 4. Remove empty lines between list items only
-            const lines = markdown.split('\n');
-            const processedLines: string[] = [];
-            const unorderedListItemPattern = new RegExp(`^\\s*${escapedUnorderedListMarker}\\s+`);
-            const fencedLines = this.getFencedCodeLineMask(lines);
-
-            for (let i = 0; i < lines.length; i++) {
-                const line = lines[i];
-
-                // Skip empty lines between list items only (but not in code blocks)
-                if (!fencedLines[i] && line.trim() === '' && i > 0 && i < lines.length - 1) {
-                    const prevLine = lines[i - 1];
-                    const nextLine = lines[i + 1];
-                    // Check if both surrounding lines are list items (with any indentation)
-                    if (unorderedListItemPattern.test(prevLine) && unorderedListItemPattern.test(nextLine)) {
-                        continue;
-                    }
-                }
-
-                processedLines.push(line);
-            }
-
-
-            // Join lines
-            markdown = processedLines.join('\n');
             markdown = this.restorePreservedEmptyListChildIndents(markdown, documentText);
 
             // Don't trim trailing whitespace - it may be part of code blocks
@@ -3462,9 +3405,9 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             if (!markdown.endsWith('\n')) {
                 markdown += '\n';
             }
-            const restoredMarkdown = protectedFootnotes.restore(
+            const restoredMarkdown = preservedSource.restore(protectedFootnotes.restore(
                 protectedOpaqueSources.restore(protectedFencedMarkdown.restore(markdown))
-            );
+            ));
             this.assertNoLeakedPlaceholderMarkers(restoredMarkdown, documentText);
             return restoredMarkdown;
         } catch (error) {
