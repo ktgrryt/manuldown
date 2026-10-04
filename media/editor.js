@@ -9,6 +9,7 @@ import { TableOfContentsManager } from './modules/TableOfContentsManager.js';
 import { ToolbarManager } from './modules/ToolbarManager.js';
 import { TableManager } from './modules/TableManager.js';
 import { SearchManager } from './modules/SearchManager.js';
+import { FootnoteManager } from './modules/FootnoteManager.js';
 import { CompositionUpdateGate } from './modules/CompositionUpdateGate.js';
 import { TypingUndoGroup } from './modules/TypingUndoGroup.js';
 import {
@@ -1164,6 +1165,8 @@ const {
         }
         stripEditorControlCharacters(editor, { preserveSelection: false });
         assignStableHeadingIds(editor.querySelectorAll('h1, h2, h3, h4, h5, h6'));
+        footnoteManager.cancelPendingDelete();
+        footnoteManager.refresh();
     }
 
     function setEditorLoadFailureState(failed) {
@@ -1533,13 +1536,16 @@ const {
             notifyChangeImmediate();
         }
     });
+    const footnoteManager = new FootnoteManager(editor, stateManager, { onChange: () => notifyChange() });
     const toolbarManager = new ToolbarManager(editor, stateManager, {
         onInsertTable: () => tableManager.openTableDialog(),
         onInsertQuote: () => insertToolbarQuote(),
         onInsertCodeBlock: () => insertToolbarCodeBlock(),
         onInsertCheckbox: () => insertSlashCheckbox(),
         onInsertLink: () => requestWorkspaceLink(),
-        onInsertImage: () => requestImageFile()
+        onInsertImage: () => requestImageFile(),
+        onInsertFootnote: () => footnoteManager.insert(),
+        canInsertFootnote: () => footnoteManager.canInsert()
     });
 
     function requestImageFile() {
@@ -2847,9 +2853,11 @@ const {
         const wrapper = document.createElement('div');
         wrapper.appendChild(fragment);
         wrapper.querySelectorAll('[data-exclude-from-markdown="true"]').forEach((node) => node.remove());
+        const text = fragmentToClipboardPlainText(wrapper);
+        footnoteManager.appendClipboardDefinitions(wrapper);
         return {
             html: wrapper.innerHTML,
-            text: fragmentToClipboardPlainText(wrapper)
+            text
         };
     }
 
@@ -5698,6 +5706,7 @@ const {
             }
         },
         { id: 'toc', source: 'builtin', description: 'Insert a table of contents', action: insertSlashToc },
+        { id: 'footnote', source: 'builtin', description: 'Insert a footnote', action: () => footnoteManager.insert() },
         { id: 'table', source: 'builtin', description: 'Insert a 2x2 table', action: insertSlashTable },
         { id: 'quote', source: 'builtin', description: 'Insert a quote block', action: insertSlashQuote },
         { id: 'code', source: 'builtin', description: 'Insert a code block', action: insertSlashCodeBlock },
@@ -6699,6 +6708,8 @@ const {
 
     // 変更を通知
     function prepareEditorForNotify(options = {}) {
+        footnoteManager.reconcileReferenceDeletion();
+        footnoteManager.refresh();
         codeBlockGapManager.reconcile(window.getSelection(), isComposing || compositionUpdateGate.composing);
         if (options.preservePendingPastedPathLinks !== true) {
             finalizePendingPastedPathLinks();
@@ -8390,6 +8401,8 @@ const {
     }
 
     function syncUiAfterHistoryRestore() {
+        footnoteManager.cancelPendingDelete();
+        footnoteManager.refresh();
         tocManager.cancelScrollAnimation();
         // A snapshot can carry a table cell selection, and the selected cells
         // it refers to are gone. Without this the next Backspace or paste
@@ -9837,7 +9850,7 @@ const {
             }
         }
 
-        if (!blockquote || blockquote.parentElement !== editor) {
+        if (!blockquote || blockquote.parentElement !== domUtils.getEditingRoot(range.startContainer)) {
             return null;
         }
 
@@ -10003,8 +10016,9 @@ const {
         if (!isEffectivelyEmptyBlock(block)) return false;
 
         const isHeading = /^H[1-6]$/.test(block.tagName);
+        const editingRoot = domUtils.getEditingRoot(block);
         const nextElement = getNextElementSibling(block);
-        if (!nextElement && !isHeading) return false;
+        if (!nextElement && !isHeading && editingRoot === editor) return false;
 
         let wrapper = null;
         const nextIsRawTable = !!(nextElement && nextElement.tagName === 'TABLE');
@@ -10073,7 +10087,7 @@ const {
             const selection = window.getSelection();
             const p = document.createElement('p');
             p.appendChild(document.createElement('br'));
-            editor.appendChild(p);
+            editingRoot.appendChild(p);
             if (selection) {
                 placeCollapsedCaret(selection, p, 0);
             }
@@ -10256,9 +10270,10 @@ const {
         const p = document.createElement('p');
         p.appendChild(document.createElement('br'));
 
-        // トップレベルのブロック祖先（editorの直接の子）を探す
+        // 本文または注釈本文の直下のブロック祖先を探す
+        const editingRoot = domUtils.getEditingRoot(li);
         let topLevelAncestor = parentList;
-        while (topLevelAncestor.parentElement && topLevelAncestor.parentElement !== editor) {
+        while (topLevelAncestor.parentElement && topLevelAncestor.parentElement !== editingRoot) {
             topLevelAncestor = topLevelAncestor.parentElement;
         }
         const isNested = (topLevelAncestor !== parentList);
@@ -10279,7 +10294,7 @@ const {
             if (topLevelAncestor.querySelectorAll('li').length === 0) {
                 topLevelAncestor.replaceWith(p);
             } else {
-                editor.insertBefore(p, topLevelAncestor.nextSibling);
+                editingRoot.insertBefore(p, topLevelAncestor.nextSibling);
             }
         } else if (li.previousElementSibling || li.nextElementSibling) {
             // 他のアイテムがある場合: liの位置にpを挿入してliを削除
@@ -11182,6 +11197,7 @@ const {
     }
 
     function getCtrlKLineContainer(node) {
+        const editingRoot = domUtils.getEditingRoot(node);
         const closestBlock = getClosestBlockElement(node);
         const tableCell =
             domUtils.getParentElement(node, 'TD') ||
@@ -11196,7 +11212,8 @@ const {
             return tableCell;
         }
 
-        return closestBlock || getTopLevelLineContainer(node);
+        if (closestBlock && closestBlock !== editingRoot) return closestBlock;
+        return editingRoot !== editor ? editingRoot.firstElementChild : getTopLevelLineContainer(node);
     }
 
     function getNearestTopLevelElementFromIndex(nodes, startIndex, step) {
@@ -11221,15 +11238,16 @@ const {
     function getCtrlKLineContainerFromRange(range) {
         if (!range) return null;
         const container = range.startContainer;
-        const nodes = editor ? editor.childNodes : null;
+        const editingRoot = domUtils.getEditingRoot(container);
+        const nodes = editingRoot ? editingRoot.childNodes : null;
         if (!nodes) return null;
 
-        if (container === editor && container.nodeType === Node.ELEMENT_NODE) {
+        if (container === editingRoot && container.nodeType === Node.ELEMENT_NODE) {
             return getNearestTopLevelElementFromIndex(nodes, range.startOffset, 1) ||
                 getNearestTopLevelElementFromIndex(nodes, range.startOffset - 1, -1);
         }
 
-        if (container && container.nodeType === Node.TEXT_NODE && container.parentElement === editor) {
+        if (container && container.nodeType === Node.TEXT_NODE && container.parentElement === editingRoot) {
             const text = container.textContent || '';
             const textIndex = Array.prototype.indexOf.call(nodes, container);
             if (textIndex !== -1) {
@@ -11247,18 +11265,19 @@ const {
     }
 
     function isRangeAtTopLevelBoundaryBeforeBlock(range, block) {
-        if (!range || !block || !range.collapsed || !editor || block.parentElement !== editor) {
+        if (!range || !block || !range.collapsed || !editor || block.parentElement !== domUtils.getEditingRoot(block)) {
             return false;
         }
-        const nodes = editor.childNodes || [];
+        const editingRoot = domUtils.getEditingRoot(block);
+        const nodes = editingRoot.childNodes || [];
         const blockIndex = Array.prototype.indexOf.call(nodes, block);
         if (blockIndex === -1) return false;
 
-        if (range.startContainer === editor) {
+        if (range.startContainer === editingRoot) {
             return range.startOffset === blockIndex;
         }
 
-        if (range.startContainer && range.startContainer.nodeType === Node.TEXT_NODE && range.startContainer.parentElement === editor) {
+        if (range.startContainer && range.startContainer.nodeType === Node.TEXT_NODE && range.startContainer.parentElement === editingRoot) {
             const textNode = range.startContainer;
             const text = textNode.textContent || '';
             const textIndex = Array.prototype.indexOf.call(nodes, textNode);
@@ -15601,6 +15620,14 @@ const {
             }
         }
 
+        // A collapsed kill command must stay in the same footnote, even when
+        // the browser's character probe crosses the last editable line.
+        const editingRoot = domUtils.getEditingRoot(startRange.startContainer);
+        if (editingRoot !== editor && !editingRoot.contains(endRange.startContainer)) {
+            endRange = document.createRange();
+            endRange.selectNodeContents(editingRoot);
+            endRange.collapse(false);
+        }
         applySelectionRange(selection, startRange);
 
         if (rangesShareSameCaretPosition(startRange, endRange)) {
@@ -15680,6 +15707,7 @@ const {
         if (!selection || !range || !editor.contains(range.commonAncestorContainer)) {
             return false;
         }
+        const editingRootForCtrlK = domUtils.getEditingRoot(range.startContainer);
 
         const selectedLabel = getSelectedCodeBlockLanguageLabel();
         if (selectedLabel) {
@@ -15835,7 +15863,7 @@ const {
                     const blockEndText = blockEndRange.toString().replace(/[\u200B\u2060\uFEFF\u00A0\s]/g, '');
                     if (blockEndText.length === 0) {
                         const isRemovableEmptyLineBlock =
-                            startBlock.parentElement === editor &&
+                            startBlock.parentElement === editingRootForCtrlK &&
                             /^(P|DIV|H[1-6])$/.test(startBlock.tagName) &&
                             isEffectivelyEmptyBlock(startBlock);
                         const cellForCtrlK =
@@ -15922,7 +15950,7 @@ const {
                             } else {
                                 const p = document.createElement('p');
                                 p.appendChild(document.createElement('br'));
-                                editor.appendChild(p);
+                                editingRootForCtrlK.appendChild(p);
                                 const newRange = document.createRange();
                                 newRange.setStart(p, 0);
                                 newRange.collapse(true);
@@ -17161,6 +17189,10 @@ const {
             return;
         }
 
+        if (footnoteManager.handleKeydown(e, isMac)) {
+            return;
+        }
+
         if (handleWorkspaceLinkShortcutKeydown(e)) {
             return;
         }
@@ -18072,6 +18104,10 @@ const {
             // Even harmless-looking cleanup can commit it or relocate its caret.
             if (isComposing || e.isComposing || e.inputType === 'insertCompositionText') {
                 pendingEmptyListItemInsert = null;
+                return;
+            }
+
+            if (footnoteManager.handleBeforeInput(e)) {
                 return;
             }
 
@@ -19408,6 +19444,10 @@ const {
 
         const setCaretToEndOfInsertedNode = (selection, node) => {
             if (!selection || !node) return;
+            if (node.nodeType === Node.ELEMENT_NODE && node.matches('sup[data-mdw-footnote-ref]')) {
+                setCaretAfterNode(selection, node);
+                return;
+            }
             if (node.nodeType === Node.TEXT_NODE) {
                 placeCollapsedCaret(selection, node, (node.textContent || '').length);
                 return;
@@ -19420,6 +19460,11 @@ const {
 
             const lastTextNode = domUtils.getLastTextNode(node);
             if (lastTextNode) {
+                const reference = lastTextNode.parentElement?.closest('sup[data-mdw-footnote-ref]');
+                if (reference) {
+                    setCaretAfterNode(selection, reference);
+                    return;
+                }
                 placeCollapsedCaret(selection, lastTextNode, (lastTextNode.textContent || '').length);
                 return;
             }
@@ -19434,7 +19479,8 @@ const {
         const tryInsertInternalHtmlFromClipboard = (
             rawHtml,
             trustedImages = null,
-            requireTrustedImagePaths = false
+            requireTrustedImagePaths = false,
+            trustedFootnotes = false
         ) => {
             if (typeof rawHtml !== 'string' || rawHtml.trim() === '') {
                 return false;
@@ -19456,7 +19502,8 @@ const {
                 return false;
             }
 
-            const container = createSanitizedContainerFromHtml(rawHtml, {
+            const preparedFootnotes = footnoteManager.prepareClipboardImport(rawHtml);
+            const container = createSanitizedContainerFromHtml(preparedFootnotes.html, {
                 allowLocalImageResolution: false
             });
             container.querySelectorAll('[data-exclude-from-markdown="true"]').forEach((node) => node.remove());
@@ -19591,8 +19638,18 @@ const {
                 return false;
             }
             autoLinkUrlTextNodesInContainer(container);
+            const importedFootnotes = footnoteManager.restoreClipboardImport(container, preparedFootnotes, trustedFootnotes);
             const nodes = Array.from(container.childNodes || []);
             if (nodes.length === 0) {
+                if (importedFootnotes.length) {
+                    stateManager.saveState();
+                    importedFootnotes.forEach(note => editor.appendChild(note));
+                    tableManager.wrapTables();
+                    applyImageRenderSizes();
+                    footnoteManager.placeCaret(importedFootnotes[0].querySelector('.mdw-footnote-content'), true);
+                    notifyChange();
+                    return true;
+                }
                 return false;
             }
 
@@ -19610,6 +19667,7 @@ const {
                     replaceListBoundarySelectionWithInlineFragment(range, selection, fragment) ||
                     insertInlineFragmentAtCollapsedListBoundary(range, selection, fragment)
                 )) {
+                importedFootnotes.forEach(note => editor.appendChild(note));
                 normalizeCheckboxListItems();
                 domUtils.ensureInlineCodeSpaces();
                 domUtils.cleanupGhostStyles();
@@ -19635,6 +19693,7 @@ const {
                 caretMarker.remove();
             }
 
+            importedFootnotes.forEach(note => editor.appendChild(note));
             normalizeCheckboxListItems();
             domUtils.ensureInlineCodeSpaces();
             domUtils.cleanupGhostStyles();
@@ -20991,7 +21050,8 @@ const {
                     tryInsertInternalHtmlFromClipboard(
                         richPastedHtml,
                         trustedInternalImages,
-                        !!internalPastedHtml
+                        !!internalPastedHtml,
+                        !!trustedInternalPayload
                     )
                 ) {
                     e.preventDefault();
@@ -21145,6 +21205,7 @@ const {
         // so that pasting them keeps their structure and formatting.
         const clipboardPayloadHasStructure = (selection, payload, plainText) => (
             selectionContainsListStructure(selection) ||
+            /data-mdw-footnote-(?:ref|definition)=/.test(payload.html || '') ||
             plainText.includes('\n') ||
             (
                 typeof payload.html === 'string' &&
@@ -21218,6 +21279,7 @@ const {
             } else {
                 handleKeydown(e);
             }
+            if (!isImeInteractionKeydown(e)) footnoteManager.normalizeCaret();
             codeBlockGapManager.reconcile(window.getSelection(), isComposing || compositionUpdateGate.composing);
             // selectionchange is queued by the browser; update before it can
             // paint a normal text caret at the checkbox boundary.
@@ -23347,6 +23409,9 @@ const {
         // 水平線の選択状態を視覚的に反映 & チェックボックス付近のカーソル補正
         let isCorrectingCheckboxCursor = false;
         document.addEventListener('selectionchange', () => {
+            if (!isUpdating && !isComposing && !compositionUpdateGate.composing) {
+                footnoteManager.normalizeCaret();
+            }
             if (!isUpdating) {
                 codeBlockGapManager.reconcile(window.getSelection(), isComposing || compositionUpdateGate.composing);
             }
@@ -23527,6 +23592,7 @@ const {
 
     // 初期化
     function init() {
+        footnoteManager.setup();
         toolbarManager.setup();
         tableManager.setup({ notifyChange });
         setupEditor();

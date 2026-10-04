@@ -2168,9 +2168,9 @@ test('HTML to Markdown conversion errors are propagated without a lossy fallback
 });
 
 test('Markdown rendering errors are propagated instead of returning editable error content', () => {
-    const originalParse = marked.parse;
+    const originalParser = marked.parser;
     const originalConsoleError = console.error;
-    marked.parse = () => {
+    marked.parser = () => {
         throw new Error('synthetic render failure');
     };
     console.error = () => {};
@@ -2181,7 +2181,7 @@ test('Markdown rendering errors are propagated instead of returning editable err
             /synthetic render failure/
         );
     } finally {
-        marked.parse = originalParse;
+        marked.parser = originalParser;
         console.error = originalConsoleError;
     }
 });

@@ -1,7 +1,8 @@
 import * as vscode from 'vscode';
-import { marked, Tokens } from 'marked';
+import { marked, Tokens, Links } from 'marked';
 import * as path from 'path';
 import { getNonce } from '../utils/getNonce';
+import { MAX_EDITABLE_FOOTNOTE_DEPTH, numberFootnotes, parseFootnoteDefinition } from './Footnotes';
 
 function escapeOpaqueSourceForHtml(value: string): string {
     return value
@@ -38,6 +39,23 @@ marked.use({
     gfm: true,
     pedantic: false,
     extensions: [
+        {
+            name: 'footnoteReference',
+            level: 'inline',
+            start(source: string) { return source.indexOf('[^'); },
+            tokenizer(source: string) {
+                const match = /^\[\^([^\[\]\s\\]+)\]/.exec(source);
+                if (!match) {
+                    return;
+                }
+                return { type: 'footnoteReference', raw: match[0], label: match[1] };
+            },
+            renderer(token) {
+                const label = String(token.label);
+                const key = encodeURIComponent(label);
+                return `<sup class="mdw-footnote-ref" data-mdw-footnote-ref="${escapeAttribute(key)}" contenteditable="false"><a href="#mdw-fn-${escapeAttribute(key)}" title="Footnote ${escapeAttribute(label)}">1</a></sup>`;
+            }
+        },
         {
             name: 'br',
             renderer(token) {
@@ -124,6 +142,7 @@ marked.use({
 });
 
 export class MarkdownDocument {
+    private referenceLinks: Links | undefined;
     private static readonly blanklineMarkerHtml = '<p data-mdw-blankline="true"><br></p>';
     private static readonly imageHardBreakMarkerAttr = 'data-mdw-image-hardbreak="true"';
     private static readonly imageHardBreakPlaceholderHtml = '<p data-mdw-image-hardbreak-placeholder="true"><br></p>';
@@ -153,7 +172,8 @@ export class MarkdownDocument {
 
     constructor(
         private readonly document: vscode.TextDocument,
-        private readonly webview?: vscode.Webview
+        private readonly webview?: vscode.Webview,
+        private readonly footnoteContext: { depth: number; links: Links } | undefined = undefined
     ) { }
 
     public toHtml(): string {
@@ -196,7 +216,13 @@ export class MarkdownDocument {
                 listIndentWrapperMarker,
                 listIndentMarkerPrefix
             );
-            let html = marked.parse(sourceIndentAnnotatedMarkdown) as string;
+            const lexer = new marked.Lexer({ ...marked.defaults });
+            if (this.footnoteContext) {
+                Object.assign(lexer.tokens.links, this.footnoteContext.links);
+            }
+            const tokens = lexer.lex(sourceIndentAnnotatedMarkdown);
+            this.referenceLinks = tokens.links;
+            let html = marked.parser(tokens);
             html = codeTabProtection.restore(html);
             html = codeInfoProtection.restore(html);
             html = opaqueBlockProtection.restore(html);
@@ -319,7 +345,7 @@ export class MarkdownDocument {
                 html = this.convertImagePaths(html);
             }
 
-            return html;
+            return numberFootnotes(html);
         } catch (error) {
             console.error('Error parsing markdown:', error);
             throw error;
@@ -738,10 +764,9 @@ export class MarkdownDocument {
         }
         protectedMarkdown = rawHtmlOutput.join('');
 
-        // Marked does not support footnotes, so a definition such as
-        // "[^1]: text" would become an ordinary paragraph that Turndown escapes.
-        // Keep each definition (with its continuation lines) as read-only source.
-        const footnoteDefinitionPattern = /^ {0,3}\[\^[^\]\s]+\]:/;
+        // Extract definitions before Marked parses reference-style links. Their
+        // bodies are rendered separately as editable Markdown at the same position.
+        const footnoteDefinitionPattern = /^ {0,3}\[\^[^\[\]\s\\]+\]:/;
         const footnoteInterruptingBlockPattern = /^ {0,3}(?:#{1,6}(?:[ \t]|$)|>|[*+-][ \t]|\d+[.)][ \t]|`{3,}|~{3,}|<)/;
         const isBlankSegment = (segment: string): boolean => segment.replace(/\r?\n$/, '').trim() === '';
         const footnoteSegments = protectedMarkdown.match(/[^\n]*\n|[^\n]+$/g) ?? [];
@@ -893,7 +918,9 @@ export class MarkdownDocument {
                 let restoredHtml = html;
                 for (const block of protectedBlocks) {
                     const escapedMarker = block.marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                    const opaqueHtml = renderOpaqueSource(block.source, block.kind, true);
+                    const opaqueHtml = block.kind === 'footnote-definition'
+                        ? this.renderFootnoteDefinition(block.source)
+                        : renderOpaqueSource(block.source, block.kind, true);
                     const standaloneMarkerPattern = new RegExp(`<p>\\s*${escapedMarker}\\s*<\\/p>\\s*`, 'i');
                     if (standaloneMarkerPattern.test(restoredHtml)) {
                         restoredHtml = restoredHtml.replace(standaloneMarkerPattern, () => opaqueHtml);
@@ -913,6 +940,33 @@ export class MarkdownDocument {
                 return restoredHtml;
             }
         };
+    }
+
+    private renderFootnoteDefinition(source: string): string {
+        const definition = parseFootnoteDefinition(source);
+        if (!definition || (this.footnoteContext?.depth ?? 0) >= MAX_EDITABLE_FOOTNOTE_DEPTH) {
+            return renderOpaqueSource(source, 'footnote-definition', true);
+        }
+        const key = escapeAttribute(encodeURIComponent(definition.label));
+        const content = this.renderFootnoteContent(definition.content, this.footnoteContext?.depth ?? 0) || '<p><br></p>';
+        return `<div class="mdw-footnote-definition" id="mdw-fn-${key}" data-mdw-footnote-definition="${key}" data-mdw-footnote-source="${encodeOpaqueSource(source)}"><a class="mdw-footnote-backref" data-mdw-footnote-backref="${key}" data-exclude-from-markdown="true" contenteditable="false" href="#mdw-fnref-${key}-1" title="Back to reference">↩</a><div class="mdw-footnote-content">${content}</div></div>\n`;
+    }
+
+    /** Render a note with the enclosing document's reference-link definitions. */
+    public renderFootnoteContent(content: string, depth = 0): string {
+        if (!this.referenceLinks) {
+            const protectedSource = this.protectNonRenderedMarkdown(
+                this.normalizeIgnoredLineWhitespace(this.document.getText())
+            );
+            this.referenceLinks = marked.lexer(protectedSource.markdown).links;
+        }
+        const bodyDocument = {
+            getText: () => content,
+            uri: this.document.uri
+        } as vscode.TextDocument;
+        // Use the normal renderer so raw HTML, code, images and links receive
+        // exactly the same protection as they do in the document body.
+        return new MarkdownDocument(bodyDocument, undefined, { depth: depth + 1, links: this.referenceLinks }).toHtml();
     }
 
     /**

@@ -48,6 +48,18 @@ test('clicking a different heading level still changes the heading level', async
     assert.deepEqual(formattedBlocks, ['h2']);
 });
 
+test('the footnote toolbar command dispatches insertion only in an allowed context', async () => {
+    const { manager, savedStates } = await createToolbarManager();
+    let inserted = 0;
+    manager.onInsertFootnote = () => { inserted++; };
+    manager.canInsertFootnote = () => true;
+    manager.executeCommand('footnote');
+    manager.canInsertFootnote = () => false;
+    manager.executeCommand('footnote');
+    assert.equal(inserted, 1);
+    assert.equal(savedStates.length, 0);
+});
+
 test('the active heading button remains enabled and exposes its pressed state', async () => {
     const { manager } = await createToolbarManager();
     const classes = new Set();

@@ -14,6 +14,8 @@ export class ToolbarManager {
         this.onInsertCheckbox = options.onInsertCheckbox || null;
         this.onInsertLink = options.onInsertLink || null;
         this.onInsertImage = options.onInsertImage || null;
+        this.onInsertFootnote = options.onInsertFootnote || null;
+        this.canInsertFootnote = options.canInsertFootnote || (() => true);
         this.commandButtons = new Map();
         this.overflowButtons = new Map();
         this.overflowSelection = null;
@@ -79,7 +81,7 @@ export class ToolbarManager {
                 const command = button.getAttribute('data-command');
                 this.executeCommand(command);
                 // ダイアログを開くコマンドはダイアログ側でフォーカスを管理するため、ここではスキップ
-                if (command !== 'table' && command !== 'link' && command !== 'image') {
+                if (command !== 'table' && command !== 'link' && command !== 'image' && command !== 'footnote') {
                     setTimeout(() => this.editor.focus(), 0);
                 }
             });
@@ -135,7 +137,7 @@ export class ToolbarManager {
                 if (menuItem.disabled) return;
                 this.closeOverflowMenu({ restoreSelection: true });
                 this.executeCommand(command);
-                if (command !== 'table' && command !== 'link' && command !== 'image') {
+                if (command !== 'table' && command !== 'link' && command !== 'image' && command !== 'footnote') {
                     setTimeout(() => this.editor.focus(), 0);
                 }
             });
@@ -321,6 +323,12 @@ export class ToolbarManager {
     executeCommand(command) {
         this.editor.focus();
 
+        if (command === 'footnote') {
+            if (this.canInsertFootnote() && this.onInsertFootnote) this.onInsertFootnote();
+            this.updateToolbarState();
+            return;
+        }
+
         if (command === 'inlinecode') {
             this.toggleInlineCode();
             this.updateToolbarState();
@@ -457,6 +465,7 @@ export class ToolbarManager {
             const disabledInlineCode = command === 'inlinecode' && !this.canToggleInlineCode();
             const disabledImageInCode = command === 'image' &&
                 (inCodeBlockContext || this.isSelectionTouchingInlineCode());
+            const disabledFootnote = command === 'footnote' && !this.canInsertFootnote();
             const isDisabled =
                 disabledByTable ||
                 disabledBoldInHeading ||
@@ -464,7 +473,8 @@ export class ToolbarManager {
                 disabledCodeBlockInCodeBlock ||
                 disabledLinkInCodeBlock ||
                 disabledInlineCode ||
-                disabledImageInCode;
+                disabledImageInCode ||
+                disabledFootnote;
             button.disabled = isDisabled;
             button.classList.toggle('is-disabled', isDisabled);
             button.classList.toggle('is-current-heading', isCurrentHeadingLevel);

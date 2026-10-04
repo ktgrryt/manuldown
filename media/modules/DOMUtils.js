@@ -9,6 +9,14 @@ export class DOMUtils {
         this.editor = editor;
     }
 
+    /** The editable document containing a node, excluding footnote controls. */
+    getEditingRoot(node) {
+        const element = node?.nodeType === 3 ? node.parentElement : node;
+        const content = element?.closest?.('.mdw-footnote-content');
+        return content && this.editor.contains(content) && content.closest('[data-mdw-footnote-definition]')
+            ? content : this.editor;
+    }
+
     /**
      * 指定されたタグ名の親要素を取得
      * @param {Node} node - 開始ノード
@@ -469,6 +477,12 @@ export class DOMUtils {
         removeTransientClass('table.md-table', 'md-table');
 
         if (historyComparable) {
+            // Footnote numbers and navigation targets are derived view state.
+            clone.querySelectorAll('sup[data-mdw-footnote-ref]').forEach(reference => {
+                reference.textContent = '';
+                reference.removeAttribute('id');
+                reference.classList.remove('mdw-footnote-missing');
+            });
             clone.querySelectorAll('img').forEach(image => {
                 if (image.closest('[data-mdw-opaque-source]')) return;
 

@@ -361,6 +361,161 @@ test('escaped footnote-like text stays escaped', () => {
     assert.equal(convert(source).markdown, source);
 });
 
+test('footnotes render editable bodies and stable numbers for repeated and named references', () => {
+    const source = 'First[^注釈] then second[^b] and first again[^注釈].\n\n[^b]: **Bold** note.\n\n[^注釈]: 日本語の注釈。\n';
+    const { html, markdown } = convert(source);
+    const root = require('@mixmark-io/domino').createWindow(html).document;
+    assert.deepEqual(Array.from(root.querySelectorAll('sup a')).map(node => node.textContent), ['1', '2', '1']);
+    assert.equal(root.querySelectorAll('.mdw-footnote-content').length, 2);
+    assert.equal(root.querySelector('.mdw-footnote-content strong').textContent, 'Bold');
+    assert.equal(root.querySelector('sup').getAttribute('contenteditable'), 'false');
+    assert.equal(root.querySelector('.mdw-footnote-content').getAttribute('contenteditable'), null);
+    assert.deepEqual(Array.from(root.querySelectorAll('[data-mdw-footnote-definition]'))
+        .map(node => node.getAttribute('data-mdw-footnote-definition')), [encodeURIComponent('注釈'), 'b']);
+    assert.equal(markdown, 'First[^注釈] then second[^b] and first again[^注釈].\n\n[^注釈]: 日本語の注釈。\n[^b]: **Bold** note.\n\n');
+    assert.equal(convert(markdown).markdown, markdown);
+});
+
+test('editing a footnote saves rich text and multiple indented paragraphs without navigation labels', () => {
+    const source = 'Body[^note].\n\n[^note]: Original.\n';
+    const textDocument = createTextDocument(source);
+    const html = new MarkdownDocument(textDocument).toHtml();
+    const document = require('@mixmark-io/domino').createWindow(`<div id="root">${html}</div>`).document;
+    document.querySelector('.mdw-footnote-content').innerHTML = '<p>Edited <strong>note</strong>.</p><p>Second paragraph.</p><ul><li>Item</li></ul>';
+    const markdown = new MarkdownEditorProvider({}).htmlToMarkdown(document.getElementById('root').innerHTML, textDocument);
+    assert.equal(markdown, 'Body[^note].\n\n[^note]: Edited **note**.\n\n    Second paragraph.\n\n    * Item\n');
+    assert.equal(convert(markdown).markdown, markdown);
+    assert.doesNotMatch(markdown, /↩|mdw-fn|data-mdw/);
+});
+
+test('reordered footnotes save their content and keep following body text separate on reload', () => {
+    const source = 'First[^b] then second[^a].\n\n[^a]: _Alpha_.\n\nFollowing body.\n\n[^b]: **Beta**.';
+    const { html, markdown } = convert(source);
+    const root = require('@mixmark-io/domino').createWindow(html).document;
+    assert.deepEqual(Array.from(root.querySelectorAll('.mdw-footnote-backref')).map(node => node.textContent), ['1 ↩', '2 ↩']);
+    assert.equal(root.querySelector('.mdw-footnote-content strong').textContent, 'Beta');
+    assert.equal(markdown, 'First[^b] then second[^a].\n\n[^b]: **Beta**.\n\nFollowing body.\n\n[^a]: _Alpha_.\n\n');
+    assert.equal(convert(markdown).markdown, markdown);
+    const reloaded = require('@mixmark-io/domino').createWindow(convert(markdown).html).document;
+    assert.deepEqual(Array.from(reloaded.querySelectorAll('.mdw-footnote-content')).map(node => node.textContent.trim()), ['Beta.', 'Alpha.']);
+});
+
+test('a note originally at EOF stays separate from the next definition after sorting', () => {
+    const source = 'First[^b] then second[^a].\n\n[^a]: Alpha.\n\n[^b]: Beta.';
+    const { markdown } = convert(source);
+    assert.equal(markdown, 'First[^b] then second[^a].\n\n[^b]: Beta.\n[^a]: Alpha.\n\n');
+    assert.equal(convert(markdown).markdown, markdown);
+});
+
+test('new footnotes and empty notes save without escaping or disappearing', () => {
+    const source = 'Body.\n';
+    const html = '<p>Body.<sup data-mdw-footnote-ref="1" contenteditable="false"><a href="#mdw-fn-1">1</a></sup></p>' +
+        '<div data-mdw-footnote-definition="1"><a data-mdw-footnote-backref="1">1 ↩</a><div class="mdw-footnote-content"><p><br></p></div></div>';
+    const markdown = new MarkdownEditorProvider({}).htmlToMarkdown(html, createTextDocument(source));
+    assert.equal(markdown, 'Body.[^1]\n\n[^1]: \n');
+    assert.equal(convert(markdown).markdown, markdown);
+});
+
+test('editing a definition before body text keeps that text outside the note', () => {
+    const source = 'Body[^a].\n\n[^a]: Original.\n\nFollowing body.\n';
+    const document = require('@mixmark-io/domino').createWindow(`<div id="root">${convert(source).html}</div>`).document;
+    document.querySelector('.mdw-footnote-content p').textContent = 'Edited.';
+    const markdown = new MarkdownEditorProvider({}).htmlToMarkdown(document.getElementById('root').innerHTML, createTextDocument(source));
+    assert.equal(markdown, source.replace('Original.', 'Edited.'));
+    const reloaded = require('@mixmark-io/domino').createWindow(convert(markdown).html).document;
+    assert.equal(reloaded.querySelector('.mdw-footnote-content').textContent.trim(), 'Edited.');
+    assert.equal(reloaded.querySelectorAll('.mdw-footnote-content p').length, 1);
+});
+
+test('code and escaped literals do not become footnote references', () => {
+    const source = 'Literal \\[^a] and `[^a]` with real[^a].\n\n```md\n[^a]: code\n[^a]\n```\n\n[^a]: Note.\n';
+    const { html, markdown } = convert(source);
+    const document = require('@mixmark-io/domino').createWindow(html).document;
+    assert.equal(document.querySelectorAll('sup[data-mdw-footnote-ref]').length, 1);
+    assert.equal(document.querySelector('pre code').textContent, '[^a]: code\n[^a]\n');
+    assert.equal(markdown, source.replace('\\[^a]', '\\[^a\\]'));
+    assert.equal(convert(markdown).markdown, markdown);
+});
+
+test('footnote sources preserve formatting, hard breaks and code when unchanged', () => {
+    for (const source of [
+        'Body[^a].\n\n[^a]: _emphasis_ and **bold**.\n\n    Second paragraph.\n\n    ```js\n    console.log("note");\n    ```\n',
+        'Body[^a].\n\n[^a]: First  \n    second\n',
+        'Body[^a].\n\n[^a]:\n\tA note.\n',
+        'Body[^a].\n\n[^a]: Note.\n\n\nAfter.\n'
+    ]) assert.equal(convert(source).markdown, source);
+});
+
+test('footnotes retain safe raw HTML handling and flag missing definitions', () => {
+    const source = 'Body[^missing] and note[^a].\n\n[^a]: <script>alert(1)</script> and text.\n';
+    const { html, markdown } = convert(source);
+    assert.doesNotMatch(html, /<script>/);
+    assert.match(html, /mdw-footnote-missing/);
+    assert.match(html, /&lt;script&gt;/);
+    assert.equal(markdown, source);
+});
+
+test('footnotes resolve document reference links and images and preserve their spelling on edits', () => {
+    const source = 'Body[^a].\n\n[^a]: _Original_ [site][url] and ![photo][img].\n\n[url]: https://example.com "Site"\n[img]: images/photo.png\n';
+    const { html, markdown } = convert(source);
+    const root = require('@mixmark-io/domino').createWindow(`<div id="root">${html}</div>`).document;
+    const content = root.querySelector('.mdw-footnote-content');
+    assert.equal(content.querySelector('a').getAttribute('href'), 'https://example.com');
+    assert.equal(content.querySelector('img').getAttribute('src'), 'images/photo.png');
+    assert.equal(markdown, source);
+    content.querySelector('em').textContent = 'Edited';
+    const edited = new MarkdownEditorProvider({}).htmlToMarkdown(root.getElementById('root').innerHTML, createTextDocument(source));
+    assert.match(edited, /\[site\]\[url\] and !\[photo\]\[img\]/);
+    assert.equal(convert(edited).markdown, edited);
+});
+
+test('editing footnote prose keeps multiline raw HTML and comments as their original source', () => {
+    for (const block of ['<div>\nHTML\n</div>', '<!-- Comment\nmore -->']) {
+        for (const indentation of ['    ', '\t']) {
+            const source = `Body[^a].\n\n[^a]: Original.\n\n${block.split('\n').map(line => indentation + line).join('\n')}\n`;
+            const root = require('@mixmark-io/domino').createWindow(`<div id="root">${convert(source).html}</div>`).document;
+            root.querySelector('.mdw-footnote-content p').textContent = 'Edited.';
+            const edited = new MarkdownEditorProvider({}).htmlToMarkdown(root.getElementById('root').innerHTML, createTextDocument(source));
+            assert.equal(edited, source.replace('Original.', 'Edited.').replace(/\t/g, '    '));
+            assert.doesNotMatch(edited, /```/);
+            assert.equal(convert(edited).markdown, edited);
+        }
+    }
+});
+
+test('deeply nested footnote definitions have bounded editable expansion and retain their source', () => {
+    const source = 'Body[^n0].\n\n' + Array.from({ length: 200 }, (_, index) =>
+        `${' '.repeat(index * 4)}[^n${index}]: note${index}\n`).join('\n');
+    const { html, markdown } = convert(source);
+    const root = require('@mixmark-io/domino').createWindow(html).document;
+    assert.equal(root.querySelectorAll('.mdw-footnote-definition').length, 4);
+    assert.equal(root.querySelectorAll('[data-mdw-opaque-kind="footnote-definition"]').length, 1);
+    assert.ok(html.length < source.length * 16, 'Source expansion is bounded by the fixed depth');
+    assert.equal(markdown, source);
+});
+
+test('the deepest editable footnote still saves references when its prose changes', () => {
+    const source = 'Body[^n0].\n\n' + Array.from({ length: 4 }, (_, index) =>
+        `${' '.repeat(index * 4)}[^n${index}]: Level ${index}[^shared].\n`).join('\n') + '\n[^shared]: Shared.\n';
+    const root = require('@mixmark-io/domino').createWindow(`<div id="root">${convert(source).html}</div>`).document;
+    root.querySelector('[data-mdw-footnote-definition="n3"] p').firstChild.data = 'Edited';
+    const edited = new MarkdownEditorProvider({}).htmlToMarkdown(root.getElementById('root').innerHTML, createTextDocument(source));
+    assert.match(edited, /Edited\[\^shared\]\./);
+    assert.doesNotMatch(edited, /mdw-fn/);
+    assert.equal(convert(edited).markdown, edited);
+});
+
+test('forged footnote source cannot grant trust to an opaque block not in the document', () => {
+    const original = 'Body[^a].\n\n[^a]: Original.\n';
+    const forged = '[^a]: <script>forged()</script>\n';
+    const html = '<p>Body.</p><div data-mdw-footnote-definition="a" data-mdw-footnote-source="' + Buffer.from(forged).toString('base64') + '">' +
+        '<div class="mdw-footnote-content"><code data-mdw-opaque-kind="raw-html-inline" data-mdw-opaque-source="' +
+        Buffer.from('<script>forged()</script>').toString('base64') + '">Visible</code></div></div>';
+    const markdown = new MarkdownEditorProvider({}).htmlToMarkdown(html, createTextDocument(original));
+    assert.doesNotMatch(markdown, /forged|<script>/);
+    assert.match(markdown, /`Visible`/);
+});
+
 test('a raw HTML block directly after paragraph text keeps its source', () => {
     const { html, markdown } = convert('Some text\n<div>\nInner\n</div>\n');
     assert.doesNotMatch(visibleText(html), /MDW/);

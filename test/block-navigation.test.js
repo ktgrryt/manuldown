@@ -13,6 +13,7 @@ const domUtilsModulePromise = importModule('media/modules/DOMUtils.js');
 const cursorManagerModulePromise = importModule('media/modules/CursorManager.js');
 const tableManagerModulePromise = importModule('media/modules/TableManager.js');
 const codeBlockGapManagerModulePromise = importModule('media/modules/CodeBlockGapManager.js');
+const footnoteManagerModulePromise = importModule('media/modules/FootnoteManager.js');
 const editorSource = fs.readFileSync(
     path.join(__dirname, '..', 'media', 'editor.js'),
     'utf8'
@@ -189,6 +190,8 @@ async function createFixture(editorHtml) {
     const cursorManager = new CursorManager(editor, domUtils);
     const { CodeBlockGapManager } = await codeBlockGapManagerModulePromise;
     const codeBlockGapManager = new CodeBlockGapManager(editor);
+    const { FootnoteManager } = await footnoteManagerModulePromise;
+    const footnoteManager = new FootnoteManager(editor, {});
     cursorManager.moveToCodeBlockGap = (pre, direction, selection) =>
         codeBlockGapManager.moveToGap(pre, direction, selection);
 
@@ -197,6 +200,7 @@ async function createFixture(editorHtml) {
         domUtils,
         cursorManager,
         codeBlockGapManager,
+        footnoteManager,
         selection,
         placeCaret(container, offset) {
             const range = new TestRange();
@@ -343,7 +347,7 @@ function loadCheckboxNavigation(fixture, nativeTopLine = true) {
     assert.notEqual(keydownEnd, -1);
     assert.notEqual(commandStart, -1);
     assert.notEqual(commandEnd, -1);
-    return new Function('editor', 'domUtils', 'cursorManager', 'nativeTopLine', `
+    return new Function('editor', 'domUtils', 'cursorManager', 'footnoteManager', 'nativeTopLine', `
         const isMac = true;
         let lastCaretIntentSource = 'pointer';
         const lastPointerCaretIntentTs = Date.now();
@@ -392,8 +396,127 @@ function loadCheckboxNavigation(fixture, nativeTopLine = true) {
             get pointerRecent() { return ${pointerCheck}; },
             recordedDirections,
         };
-    `)(fixture.editor, fixture.domUtils, fixture.cursorManager, nativeTopLine);
+    `)(fixture.editor, fixture.domUtils, fixture.cursorManager, fixture.footnoteManager, nativeTopLine);
 }
+
+function loadFootnoteEditing(fixture) {
+    const snapshots = [];
+    const changes = [];
+    const methods = loadEditorFunctions(fixture, [
+        'getTopLevelBlockquoteForCtrlK', 'isCtrlKTargetBlockquoteEmpty',
+        'replaceBlockquoteWithEmptyParagraph', 'getCtrlKTargetEmptyBlockquoteParagraph',
+        'deleteEmptyBlockquoteParagraphForCtrlK', 'handleCtrlKEmptyLineBeforeTableKeydown',
+        'getClosestBlockElement', 'getTopLevelLineContainer', 'getCtrlKLineContainer',
+        'getCtrlKLineContainerFromRange', 'getNearestTopLevelElementFromIndex',
+        'isRangeAtTopLevelBoundaryBeforeBlock', 'isEffectivelyEmptyBlock',
+        'getNextElementSibling', 'getPreviousElementSibling', 'isNavigationExcludedElement',
+        'getPreferredFirstTextNodeForElement', 'placeCollapsedCaret', 'applySelectionRange',
+        'deleteCheckboxListItem', 'buildCtrlKKillRange', 'getCtrlKBlockEndBoundary',
+    ], {
+        isMac: true,
+        tableManager: { isSelectionInTableContext: () => false, wrapTables() {} },
+        stateManager: { saveState: () => snapshots.push(fixture.editor.innerHTML) },
+        notifyChangeImmediate: () => changes.push(fixture.editor.innerHTML),
+        emacsKillBuffer: '',
+        finalizeCtrlKDeleteTurn() {},
+        isEditorEffectivelyEmpty: () => false,
+        rangesShareSameCaretPosition: (a, b) => a.startContainer === b.startContainer && a.startOffset === b.startOffset,
+    });
+    return { ...methods, snapshots, changes };
+}
+
+const editableNote = body => `<div data-mdw-footnote-definition="a"><a contenteditable="false" data-exclude-from-markdown="true">1 ↩</a><div class="mdw-footnote-content">${body}</div><a contenteditable="false" data-exclude-from-markdown="true">×</a></div>`;
+
+test('Ctrl+K removes a first, middle or last empty footnote line and keeps its controls', async () => {
+    for (const body of ['<p id="blank"><br></p><p>Next</p>', '<p>Previous</p><p id="blank"><br></p><p>Next</p>', '<p>Previous</p><p id="blank"><br></p>']) {
+        const fixture = await createFixture(`<p>Body</p>${editableNote(body)}<div data-mdw-footnote-definition="b">Other note</div>`);
+        try {
+            const editing = loadFootnoteEditing(fixture);
+            const content = fixture.editor.querySelector('.mdw-footnote-content');
+            const blank = content.querySelector('#blank');
+            const definition = content.parentElement;
+            const range = fixture.placeCaret(blank, 0);
+            const event = navigationKey('k', true);
+            assert.equal(editing.handleCtrlKEmptyLineBeforeTableKeydown(event, { range, container: blank }), true);
+            assert.equal(content.contains(blank), false);
+            assert.equal(fixture.editor.querySelector('[data-mdw-footnote-definition="a"]'), definition);
+            assert.equal(definition.querySelectorAll('a').length, 2);
+            assert.equal(fixture.editor.querySelector('[data-mdw-footnote-definition="b"]').textContent, 'Other note');
+            assert.equal(content.contains(fixture.selection.getRangeAt(0).startContainer), true);
+            assert.equal(editing.snapshots.length, 1);
+            assert.equal(editing.changes.length, 1);
+            // The saved state contains the blank line, so Undo can restore it.
+            assert.match(editing.snapshots[0], /id="blank"/);
+        } finally {
+            fixture.restoreGlobals();
+        }
+    }
+});
+
+test('Ctrl+K keeps a sole empty footnote editable and converts an empty quote inside it', async () => {
+    for (const body of ['<p><br></p>', '<blockquote><p><br></p></blockquote>']) {
+        const fixture = await createFixture(`<p>Body</p>${editableNote(body)}`);
+        try {
+            const editing = loadFootnoteEditing(fixture);
+            const content = fixture.editor.querySelector('.mdw-footnote-content');
+            const paragraph = content.querySelector('p');
+            const range = fixture.placeCaret(paragraph, 0);
+            assert.equal(editing.handleCtrlKEmptyLineBeforeTableKeydown(navigationKey('k', true), { range, container: paragraph }), true);
+            assert.equal(content.innerHTML, '<p><br></p>');
+            assert.equal(fixture.editor.children.length, 2, 'No paragraph is appended to the main body');
+            assert.equal(fixture.selection.getRangeAt(0).startContainer, content.firstChild);
+        } finally {
+            fixture.restoreGlobals();
+        }
+    }
+});
+
+test('removing an empty list item keeps the footnote editing body and neighboring list items', async () => {
+    for (const list of ['<ul><li id="empty"></li></ul>', '<ul><li id="empty"></li><li>Remaining</li></ul>']) {
+        const fixture = await createFixture(`<p>Body</p>${editableNote(list)}`);
+        try {
+            const editing = loadFootnoteEditing(fixture);
+            const content = fixture.editor.querySelector('.mdw-footnote-content');
+            const definition = content.parentElement;
+            editing.deleteCheckboxListItem(content.querySelector('#empty'), true);
+            assert.equal(content.parentElement, definition);
+            assert.equal(definition.querySelectorAll('a').length, 2);
+            assert.equal(content.firstChild.tagName, 'P');
+            assert.equal(content.contains(fixture.selection.getRangeAt(0).startContainer), true);
+            if (list.includes('Remaining')) assert.equal(content.querySelector('li').textContent, 'Remaining');
+            else assert.equal(content.innerHTML, '<p><br></p>');
+        } finally {
+            fixture.restoreGlobals();
+        }
+    }
+});
+
+test('Ctrl+K line resolution and browser probes stay inside the active note', async () => {
+    const fixture = await createFixture(`<p>Body</p>${editableNote('<p>Last</p>')}<div data-mdw-footnote-definition="b"><p>Neighbor</p></div>`);
+    try {
+        const editing = loadFootnoteEditing(fixture);
+        const content = fixture.editor.querySelector('.mdw-footnote-content');
+        const paragraph = content.firstChild;
+        const text = paragraph.firstChild;
+        const outside = fixture.editor.querySelector('[data-mdw-footnote-definition="b"] p').firstChild;
+        const boundary = fixture.placeCaret(content, 0);
+        assert.equal(editing.getCtrlKLineContainerFromRange(boundary), paragraph);
+        assert.equal(editing.isRangeAtTopLevelBoundaryBeforeBlock(boundary, paragraph), true);
+        const range = fixture.placeCaret(text, text.textContent.length);
+        range.compareBoundaryPoints = function (_how, other) {
+            if (this.startContainer === other.startContainer) return Math.sign(this.startOffset - other.startOffset);
+            return other.startContainer.contains(this.startContainer) ? -1 : 1;
+        };
+        fixture.cursorManager.moveCursorToLineEnd = () => {};
+        fixture.selection.modify = () => { fixture.placeCaret(outside, 1); };
+        const killRange = editing.buildCtrlKKillRange(fixture.selection, range);
+        assert.equal(killRange.endContainer, content);
+        assert.equal(killRange.endOffset, content.childNodes.length);
+        assert.equal(fixture.selection.getRangeAt(0).startContainer, text);
+    } finally {
+        fixture.restoreGlobals();
+    }
+});
 
 function navigationKey(key, ctrlKey = false) {
     return {
@@ -748,6 +871,32 @@ test('horizontal keyboard entry shows the checkbox cursor before selectionchange
 
             assert.equal(event.defaultPrevented, true, key);
             assert.equal(task.querySelector('input').classList.contains('cursor-on'), true, key);
+        } finally {
+            fixture.restoreGlobals();
+        }
+    }
+});
+
+test('the keydown listener repairs note-control carets before Chromium can lose them', async () => {
+    for (const key of ['ArrowDown', 'ArrowRight']) {
+        const fixture = await createFixture('<p>Body</p><div data-mdw-footnote-definition="a"><a data-mdw-footnote-backref="a" contenteditable="false">1 ↩</a><div class="mdw-footnote-content"><p><br></p></div></div>');
+        try {
+            fixture.editor.scrollTo = ({ top }) => { fixture.editor.scrollTop = top; };
+            const navigation = loadCheckboxNavigation(fixture);
+            const controlText = fixture.editor.querySelector('a').firstChild;
+            const paragraph = fixture.editor.querySelector('.mdw-footnote-content p');
+            fixture.placeCaret(fixture.editor.firstChild.firstChild, 0);
+            navigation.listen(e => {
+                // Reproduce generic navigation choosing the first text in the
+                // definition, which belongs to the noneditable number control.
+                fixture.placeCaret(controlText, 0);
+                e.preventDefault();
+            });
+            const event = new window.Event('keydown', { bubbles: true, cancelable: true });
+            event.key = key;
+            fixture.editor.dispatchEvent(event);
+            assert.equal(fixture.selection.getRangeAt(0).startContainer, paragraph);
+            assert.equal(fixture.selection.getRangeAt(0).startOffset, 0);
         } finally {
             fixture.restoreGlobals();
         }

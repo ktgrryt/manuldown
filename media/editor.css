@@ -2053,3 +2053,84 @@ body.image-resizing * {
         min-width: 40px;
     }
 }
+/* Footnote labels are controls; their bodies inherit normal editor formatting. */
+.mdw-footnote-ref {
+    font-size: 0.75em;
+    line-height: 0;
+    vertical-align: super;
+    margin-inline: 0.1em;
+}
+
+.mdw-footnote-ref a,
+.mdw-footnote-backref {
+    color: var(--vscode-textLink-foreground, #3794ff);
+    cursor: pointer;
+    text-decoration: none;
+}
+
+.mdw-footnote-ref a:hover,
+.mdw-footnote-backref:hover {
+    text-decoration: underline;
+}
+
+.mdw-footnote-missing a {
+    text-decoration: underline wavy;
+}
+
+.mdw-footnote-definition {
+    display: flex;
+    gap: 0.75em;
+    border-top: 1px solid var(--vscode-panel-border, #8885);
+    padding-block: 0.25em;
+    padding-block-start: 0.75em;
+    margin-block: 1em 0;
+    font-size: 0.9em;
+}
+
+.mdw-footnote-definition ~ .mdw-footnote-definition {
+    border-top: none;
+    padding-block-start: 0.25em;
+    margin-block-start: 0;
+}
+
+.mdw-footnote-backref {
+    flex: 0 0 auto;
+    min-width: 2em;
+    user-select: none;
+}
+
+.mdw-footnote-content {
+    flex: 1;
+    min-width: 0;
+}
+
+#editor .mdw-footnote-content > :first-child {
+    margin-top: 0;
+}
+
+#editor .mdw-footnote-content > :last-child {
+    margin-bottom: 0;
+}
+
+.mdw-footnote-delete {
+    flex: 0 0 auto;
+    align-self: flex-start;
+    margin-inline-start: auto;
+    color: var(--vscode-descriptionForeground, #888);
+    cursor: pointer;
+    text-decoration: none;
+    user-select: none;
+    padding-inline: 0.25em;
+    visibility: hidden;
+    pointer-events: none;
+}
+
+.mdw-footnote-definition:hover .mdw-footnote-delete,
+.mdw-footnote-definition:focus-within .mdw-footnote-delete {
+    visibility: visible;
+    pointer-events: auto;
+}
+
+.mdw-footnote-delete:hover {
+    color: var(--vscode-errorForeground, #f44);
+}

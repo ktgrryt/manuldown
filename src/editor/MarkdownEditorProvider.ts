@@ -9,7 +9,9 @@ import {
     isUriSecurelyWithinDirectory,
     normalizeExternalLinkHref,
 } from '../utils/workspaceLinks';
+import { MAX_EDITABLE_FOOTNOTE_DEPTH, decodeFootnoteLabel, parseFootnoteDefinition, serializeFootnoteDefinition } from './Footnotes';
 import TurndownService from 'turndown';
+const { createWindow } = require('@mixmark-io/domino');
 const { gfm } = require('turndown-plugin-gfm');
 
 type CustomSlashCommandTemplate = {
@@ -37,7 +39,7 @@ class ImageImportError extends Error {
 
 export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     private static readonly viewType = 'manulDown.editor';
-    private static readonly builtInSlashCommandIds = new Set(['table', 'quote', 'code', 'checkbox', 'link', 'toc']);
+    private static readonly builtInSlashCommandIds = new Set(['table', 'quote', 'code', 'checkbox', 'link', 'toc', 'footnote']);
     private static readonly workspaceLinkRequestIdPattern = /^workspace-link-\d{1,16}-\d{1,10}$/;
     private static readonly workspaceLinkSuggestionRequestIdPattern =
         /^workspace-link-suggest-\d{1,16}-\d{1,10}$/;
@@ -2759,29 +2761,6 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         );
     }
 
-    private restoreEscapedFootnoteReferences(markdown: string, documentText: string): string {
-        const lines = markdown.split('\n');
-        const fencedLines = this.getFencedCodeLineMask(lines);
-
-        return lines.map((line, index) => {
-            if (fencedLines[index]) {
-                return line;
-            }
-
-            // Only undo Turndown's escaping for references that the document
-            // already writes unescaped. Code spans are kept as they are.
-            return line.replace(
-                /(`+)[^`]*?\1|\\\[\^([^\]\s\\]+)\\\]/g,
-                (match: string, codeFence: string | undefined, label: string | undefined) => {
-                    if (codeFence || !label || !documentText.includes(`[^${label}]`)) {
-                        return match;
-                    }
-                    return `[^${label}]`;
-                }
-            );
-        }).join('\n');
-    }
-
     private assertNoLeakedPlaceholderMarkers(markdown: string, documentText: string): void {
         // Internal markers are "MDW" + purpose + a 32-character nonce. Turndown
         // may have escaped their underscores. One that is not already part of
@@ -2803,7 +2782,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
 
     private protectOpaqueMarkdownSources(
         html: string,
-        documentText: string
+        documentText: string,
+        trustedBodySource?: string
     ): { html: string; restore: (markdown: string) => string } {
         const normalizedDocumentText = documentText.replace(/^[ \t]+(?=\r?$)/gm, '');
         const placeholderNamespace = this.createPlaceholderNamespace(
@@ -2847,7 +2827,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 Buffer.from(decoded, 'utf8').toString('base64') !== encoded ||
                 (
                     !documentText.includes(decoded) &&
-                    !normalizedDocumentText.includes(decoded)
+                    !normalizedDocumentText.includes(decoded) &&
+                    !trustedBodySource?.includes(decoded)
                 )
             ) {
                 return null;
@@ -2908,7 +2889,110 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         };
     }
 
-    private htmlToMarkdown(html: string, document: vscode.TextDocument): string {
+    private protectEditableFootnotes(html: string, document: vscode.TextDocument, depth: number, trustedBodySource?: string): {
+        html: string;
+        restore: (markdown: string) => string;
+    } {
+        if (!/data-mdw-footnote-(?:ref|definition)=/i.test(html)) {
+            return { html, restore: markdown => markdown };
+        }
+        const domDocument = createWindow(`<div id="footnotes-root">${html}</div>`).document;
+        const root = domDocument.getElementById('footnotes-root')!;
+        const namespace = this.createPlaceholderNamespace(html, 'FOOTNOTE');
+        const sources: Array<{ marker: string; source: string; block: boolean }> = [];
+        const preserve = (node: any, source: string, block: boolean): void => {
+            const marker = `${namespace}${sources.length}END`;
+            sources.push({ marker, source, block });
+            const replacement = block ? domDocument.createElement('p') : domDocument.createTextNode(marker);
+            if (block) {
+                replacement.textContent = marker;
+            }
+            node.parentNode.replaceChild(replacement, node);
+        };
+        const documentText = document.getText();
+        let converter: MarkdownEditorProvider | undefined;
+        let originalRenderer: MarkdownDocument | undefined;
+        const definitions = depth < MAX_EDITABLE_FOOTNOTE_DEPTH
+            ? Array.from<any>(root.querySelectorAll('div[data-mdw-footnote-definition]')) : [];
+        for (const node of definitions) {
+            if (!root.contains(node)) {
+                continue;
+            }
+            const label = decodeFootnoteLabel(node.getAttribute('data-mdw-footnote-definition'));
+            const content = Array.from<any>(node.children).find(child => child.classList.contains('mdw-footnote-content'));
+            if (!label || !content) {
+                continue;
+            }
+            converter ??= new MarkdownEditorProvider(this.context);
+            const encoded = node.getAttribute('data-mdw-footnote-source');
+            const decoded = encoded && /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)
+                ? Buffer.from(encoded, 'base64').toString('utf8') : null;
+            const original = decoded && Buffer.from(decoded, 'utf8').toString('base64') === encoded &&
+                (documentText.includes(decoded) || trustedBodySource?.includes(decoded)) ? decoded : null;
+            const definition = original ? parseFootnoteDefinition(original) : null;
+            const conversionContext = {
+                depth: depth + 1,
+                trustedBodySource: definition?.label === label ? definition.content : undefined
+            };
+            const markdown = converter.htmlToMarkdown(content.innerHTML, document, conversionContext);
+            let source = serializeFootnoteDefinition(label, markdown);
+            let nextNode = node.nextSibling;
+            while (nextNode && nextNode.nodeType === 3 && nextNode.textContent.trim() === '') {
+                nextNode = nextNode.nextSibling;
+            }
+            if (nextNode) {
+                // A following paragraph must not become a lazy continuation of
+                // the definition after its placeholder separators are consumed.
+                source += '\n';
+            }
+            if (original && definition?.label === label) {
+                if (definition?.label === label) {
+                    const trailing = original.match(/(?:\r?\n){2,}$/)?.[0];
+                    if (trailing) {
+                        source = source.replace(/\n+$/, '') + trailing;
+                    }
+                }
+                if (definition?.label === label) {
+                    originalRenderer ??= new MarkdownDocument(document);
+                    const originalHtml = originalRenderer.renderFootnoteContent(definition.content, depth);
+                    // Compare through the normal serializer, which ignores syntax
+                    // highlighting, caret anchors and other reconstructed editor UI.
+                    if (markdown === converter.htmlToMarkdown(originalHtml, document, conversionContext)) {
+                        source = original;
+                    }
+                }
+            }
+            if (nextNode) {
+                // A reordered note may have originally ended at EOF. Separate
+                // following definitions, and keep body text outside the note.
+                if (!source.endsWith('\n')) {
+                    source += '\n';
+                }
+                if (!nextNode.hasAttribute?.('data-mdw-footnote-definition') && !/(?:\r?\n){2}$/.test(source)) {
+                    source += '\n';
+                }
+            }
+            preserve(node, source, true);
+        }
+        for (const node of Array.from<any>(root.querySelectorAll('sup[data-mdw-footnote-ref]'))) {
+            const label = decodeFootnoteLabel(node.getAttribute('data-mdw-footnote-ref'));
+            if (label) {
+                preserve(node, `[^${label}]`, false);
+            }
+        }
+        return {
+            html: root.innerHTML,
+            restore: markdown => {
+                for (const entry of sources) {
+                    const trailing = entry.block ? '(?:\\r?\\n){0,2}' : '';
+                    markdown = markdown.replace(new RegExp(`${this.escapeRegExp(entry.marker)}${trailing}`, 'g'), () => entry.source);
+                }
+                return markdown;
+            }
+        };
+    }
+
+    private htmlToMarkdown(html: string, document: vscode.TextDocument, footnoteContext: { depth: number; trustedBodySource?: string } = { depth: 0 }): string {
         // Use Turndown for reliable HTML to Markdown conversion
         const placeholderNamespace = this.createPlaceholderNamespace(html, 'CONVERSION');
         const emptyLineMarker = `${placeholderNamespace}EMPTYLINE`;
@@ -2951,12 +3035,14 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             // Pre-process HTML to convert webview URIs back to relative paths
             html = this.convertWebviewUrisToRelativePaths(html, document);
             html = this.restoreDocumentSpelledLinkTargets(html, documentText);
+            const protectedFootnotes = this.protectEditableFootnotes(html, document, footnoteContext.depth, footnoteContext.trustedBodySource);
+            html = protectedFootnotes.html;
 
             // Raw HTML, front matter, comments, and reference definitions cannot
             // be represented faithfully by the editable DOM. MarkdownDocument
             // renders them as source-backed opaque nodes. Only restore a marker
             // when its decoded source still exists in the current document.
-            const protectedOpaqueSources = this.protectOpaqueMarkdownSources(html, documentText);
+            const protectedOpaqueSources = this.protectOpaqueMarkdownSources(html, documentText, footnoteContext.trustedBodySource);
             html = protectedOpaqueSources.html;
 
             // Remove zero-width markers used for caret placement
@@ -3187,7 +3273,6 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
 
             let markdown = this.turndownService.turndown(html);
             markdown = this.restoreEscapedMarkdownLinks(markdown);
-            markdown = this.restoreEscapedFootnoteReferences(markdown, documentText);
 
             // Resolve the temporary empty-code marker before protecting fenced
             // blocks from the remaining document-level post-processing.
@@ -3377,8 +3462,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             if (!markdown.endsWith('\n')) {
                 markdown += '\n';
             }
-            const restoredMarkdown = protectedOpaqueSources.restore(
-                protectedFencedMarkdown.restore(markdown)
+            const restoredMarkdown = protectedFootnotes.restore(
+                protectedOpaqueSources.restore(protectedFencedMarkdown.restore(markdown))
             );
             this.assertNoLeakedPlaceholderMarkers(restoredMarkdown, documentText);
             return restoredMarkdown;
@@ -4388,6 +4473,9 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         </button>
         <button class="toolbar-btn" data-command="link" title="Insert Link (Cmd/Ctrl+K)">
             Link
+        </button>
+        <button class="toolbar-btn" data-command="footnote" title="Insert Footnote" aria-label="Insert Footnote">
+            Footnote
         </button>
         <button class="toolbar-btn toolbar-overflow-toggle" type="button" title="More tools" aria-label="More tools" aria-haspopup="menu" aria-expanded="false" aria-controls="toolbar-overflow-menu" hidden>
             &hellip;

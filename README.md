@@ -21,6 +21,7 @@ ManulDown is a VSCode extension that lets you edit Markdown files in a WYSIWYG e
 - **Syntax highlighting**: Multi-language highlighting powered by Prism.js.
 - **Image support**: Paste and drag-and-drop images.
 - **Links**: Insert HTTP, HTTPS, and email links, or safely encoded links to files in the current workspace folder.
+- **Footnotes**: Render and edit `[^label]` references and `[^label]: note` definitions. Numbers and notes follow reference order; click a number to edit its note and click ↩ to return to the text.
 - **Table of contents**: Auto-generated from headings.
 - **Two-way sync**: Changes in the editor are reflected in the Markdown file immediately.
 - **Toolbar**: Quick access buttons for common formatting.
@@ -43,6 +44,11 @@ ManulDown is a VSCode extension that lets you edit Markdown files in a WYSIWYG e
 - **H1, H2, H3**: Heading levels
 - **• / 1. / ☑**: Unordered list, ordered list, and task list. Hover over each button to see its name.
 - **Link**: Open the inline link field for a URL, an absolute workspace path, or workspace file search
+- **Footnote**: Insert a reference at the caret (or after selected text) and focus its editable note at the end of the document
+
+Edit note text directly. Hover over a note to show × at its right edge, then click it to delete the note and all its references. Insertion, editing and deletion support Undo/Redo.
+Backspace or Delete on a reference removes that occurrence. Deleting the last reference also removes its note.
+Copying or moving annotated text preserves its notes. Notes can use reference-style links and images defined in the document. Nested footnote definitions are editable up to four levels; deeper definitions retain their original Markdown as read-only source.
 - **Code**: Insert a code block
 - **Image**: Choose an image file to copy into the document's image folder and insert at the original selection. Image and Link follow the other buttons in the left-aligned toolbar.
 
@@ -62,6 +68,7 @@ Type `/` in the editor to open the slash command menu. You can narrow results by
 | --- | --- |
 | `/link` | Open the inline link field and insert a URL or workspace link |
 | `/toc` | Insert a nested list of links to the current document's headings |
+| `/footnote` | Insert a footnote and focus its note for editing |
 | `/table` | Insert a 2x2 table |
 | `/quote` | Convert the current block into a quote (or insert an empty quote block if conversion is not possible) |
 | `/code` | Insert a code block and focus the language label for editing |
@@ -78,7 +85,7 @@ For example, ~/.manuldown/meeting-minutes.md can be inserted with /meeting-minut
 Notes for custom command names:
 
 - Command IDs are normalized from file names (`spaces` -> `-`, leading `/` removed, lowercase).
-- Built-in command IDs (`link`, `toc`, `table`, `quote`, `code`, `checkbox`) are reserved.
+- Built-in command IDs (`link`, `toc`, `footnote`, `table`, `quote`, `code`, `checkbox`) are reserved.
 - Duplicate normalized command IDs are ignored.
 
 Menu controls:
