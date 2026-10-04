@@ -192,6 +192,8 @@ async function createFixture(editorHtml) {
     const codeBlockGapManager = new CodeBlockGapManager(editor);
     const { FootnoteManager } = await footnoteManagerModulePromise;
     const footnoteManager = new FootnoteManager(editor, {});
+    cursorManager.moveAcrossFootnoteReference = (selection, direction) =>
+        footnoteManager.moveAcrossReference(selection, direction);
     cursorManager.moveToCodeBlockGap = (pre, direction, selection) =>
         codeBlockGapManager.moveToGap(pre, direction, selection);
 
@@ -335,7 +337,7 @@ function loadCheckboxNavigation(fixture, nativeTopLine = true) {
         'normalizeUpwardEntryAtCheckbox', 'handleVerticalNavigation',
         'restoreTaskTextHorizontalPosition', 'getClosestBlockElement',
         'getFirstDirectTextNodeAfterCheckbox', 'getCheckboxTextMinOffset',
-        'placeCollapsedCaret', 'handleArrowKeydown', 'handleEmacsNavKeydown',
+        'placeCollapsedCaret', 'moveCursorUpFromFootnoteToCodeGap', 'handleArrowKeydown', 'handleEmacsNavKeydown',
         'handleLineBoundaryKeydown', 'createArrowNavEventFromDirection', 'createCommandNavEvent', 'getLastDirectTextNode',
     ];
     const pointerCheck = editorSource.match(/const pointerRecent = ([\s\S]*?);/)[1];
@@ -347,7 +349,7 @@ function loadCheckboxNavigation(fixture, nativeTopLine = true) {
     assert.notEqual(keydownEnd, -1);
     assert.notEqual(commandStart, -1);
     assert.notEqual(commandEnd, -1);
-    return new Function('editor', 'domUtils', 'cursorManager', 'footnoteManager', 'nativeTopLine', `
+    return new Function('editor', 'domUtils', 'cursorManager', 'footnoteManager', 'codeBlockGapManager', 'nativeTopLine', `
         const isMac = true;
         let lastCaretIntentSource = 'pointer';
         const lastPointerCaretIntentTs = Date.now();
@@ -396,7 +398,7 @@ function loadCheckboxNavigation(fixture, nativeTopLine = true) {
             get pointerRecent() { return ${pointerCheck}; },
             recordedDirections,
         };
-    `)(fixture.editor, fixture.domUtils, fixture.cursorManager, fixture.footnoteManager, nativeTopLine);
+    `)(fixture.editor, fixture.domUtils, fixture.cursorManager, fixture.footnoteManager, fixture.codeBlockGapManager, nativeTopLine);
 }
 
 function loadFootnoteEditing(fixture) {
@@ -426,6 +428,128 @@ function loadFootnoteEditing(fixture) {
 }
 
 const editableNote = body => `<div data-mdw-footnote-definition="a"><a contenteditable="false" data-exclude-from-markdown="true">1 ↩</a><div class="mdw-footnote-content">${body}</div><a contenteditable="false" data-exclude-from-markdown="true">×</a></div>`;
+const inlineNoteReference = key => `<sup contenteditable="false" data-mdw-footnote-ref="${key}"><a>1</a></sup>`;
+
+test('horizontal navigation crosses an inline footnote without skipping its neighboring text', async () => {
+    const fixture = await createFixture(`<p>ab${inlineNoteReference('a')}cd</p>${editableNote('<p>Note</p>')}`);
+    try {
+        const reference = fixture.editor.querySelector('sup');
+        const before = reference.previousSibling;
+        const after = reference.nextSibling;
+        const original = fixture.domUtils.getCleanedHTML();
+        fixture.placeCaret(before, 0);
+        for (const [node, offset] of [[before, 1], [before, 2], [after, 0], [after, 1], [after, 2]]) {
+            assert.equal(fixture.cursorManager.moveCursorForward(() => assert.fail('navigation is not an edit')), true);
+            const range = fixture.selection.getRangeAt(0);
+            assert.equal(range.startContainer, node);
+            assert.equal(range.startOffset, offset);
+        }
+        for (const [node, offset] of [[after, 1], [after, 0], [before, 2], [before, 1], [before, 0]]) {
+            assert.equal(fixture.cursorManager.moveCursorBackward(() => assert.fail('navigation is not an edit')), true);
+            const range = fixture.selection.getRangeAt(0);
+            assert.equal(range.startContainer, node);
+            assert.equal(range.startOffset, offset);
+        }
+        assert.equal(fixture.domUtils.getCleanedHTML(), original);
+    } finally {
+        fixture.restoreGlobals();
+    }
+});
+
+test('horizontal navigation collapses a native selection of a footnote to the correct edge', async () => {
+    const fixture = await createFixture(`<p>ab${inlineNoteReference('a')}cd</p>${editableNote('<p>Note</p>')}`);
+    try {
+        const reference = fixture.editor.querySelector('sup');
+        const before = reference.previousSibling;
+        const after = reference.nextSibling;
+        for (const [direction, target, offset] of [['forward', after, 0], ['backward', before, 2]]) {
+            const range = fixture.placeCaret(before, 2);
+            range.setEnd(after, 0);
+            const navigate = direction === 'forward' ? 'moveCursorForward' : 'moveCursorBackward';
+            assert.equal(fixture.cursorManager[navigate](), true);
+            const caret = fixture.selection.getRangeAt(0);
+            assert.equal(caret.collapsed, true);
+            assert.equal(caret.startContainer, target);
+            assert.equal(caret.startOffset, offset);
+        }
+    } finally {
+        fixture.restoreGlobals();
+    }
+});
+
+test('horizontal reference navigation respects formatting and paragraph boundaries', async () => {
+    for (const body of [
+        `<p><strong>ab</strong>${inlineNoteReference('a')}<em>cd</em></p>`,
+        `<p>ab<strong>${inlineNoteReference('a')}</strong>cd</p>`,
+        `<p>${inlineNoteReference('a')}${inlineNoteReference('b')}</p>`,
+    ]) {
+        const fixture = await createFixture(body + editableNote('<p>Note</p>'));
+        try {
+            const references = Array.from(fixture.editor.querySelectorAll('sup'));
+            const reference = references[0];
+            const parent = reference.parentNode;
+            const index = childIndex(reference);
+            const original = fixture.domUtils.getCleanedHTML();
+            fixture.placeCaret(parent, index);
+            assert.equal(fixture.cursorManager.moveCursorForward(), true);
+            assert.equal(fixture.selection.getRangeAt(0).startContainer, parent);
+            assert.equal(fixture.selection.getRangeAt(0).startOffset, index + 1);
+            assert.equal(fixture.cursorManager.moveCursorBackward(), true);
+            assert.equal(fixture.selection.getRangeAt(0).startContainer, parent);
+            assert.equal(fixture.selection.getRangeAt(0).startOffset, index);
+            assert.equal(fixture.domUtils.getCleanedHTML(), original);
+        } finally {
+            fixture.restoreGlobals();
+        }
+    }
+    const fixture = await createFixture(`<p>ab</p><p>${inlineNoteReference('a')}cd</p>${editableNote('<p>Note</p>')}`);
+    try {
+        const before = fixture.editor.firstElementChild.firstChild;
+        fixture.placeCaret(before, before.textContent.length);
+        assert.equal(fixture.footnoteManager.moveAcrossReference(fixture.selection, 'forward'), false, 'a reference on another line is not adjacent');
+    } finally {
+        fixture.restoreGlobals();
+    }
+});
+
+test('crossing a reference next to inline code retains the code entry and exit positions', async () => {
+    for (const codeFirst of [false, true]) {
+        const content = codeFirst ? `<code>x</code>${inlineNoteReference('a')}` : `${inlineNoteReference('a')}<code>x</code>`;
+        const fixture = await createFixture(`<p>a${content}b</p>${editableNote('<p>Note</p>')}`);
+        try {
+            const code = fixture.editor.querySelector('code');
+            const reference = fixture.editor.querySelector('sup');
+            const before = fixture.editor.querySelector('p').firstChild;
+            const after = fixture.editor.querySelector('p').lastChild;
+            if (codeFirst) {
+                fixture.placeCaret(code.firstChild, 1);
+                fixture.cursorManager.moveCursorForward();
+                fixture.cursorManager.moveCursorForward();
+                assert.equal(fixture.selection.getRangeAt(0).startContainer, after);
+                assert.equal(fixture.selection.getRangeAt(0).startOffset, 0);
+                fixture.cursorManager.moveCursorBackward();
+                fixture.cursorManager.moveCursorBackward();
+                assert.equal(fixture.selection.getRangeAt(0).startContainer, code.firstChild);
+                assert.equal(fixture.selection.getRangeAt(0).startOffset, 1);
+            } else {
+                fixture.placeCaret(before, 1);
+                fixture.cursorManager.moveCursorForward();
+                const edge = fixture.selection.getRangeAt(0);
+                assert.equal(edge.startContainer, reference.parentNode);
+                assert.equal(edge.startOffset, childIndex(reference) + 1);
+                fixture.cursorManager.moveCursorForward();
+                assert.equal(code.contains(fixture.selection.getRangeAt(0).startContainer), true);
+                fixture.cursorManager.moveCursorBackward();
+                fixture.cursorManager.moveCursorBackward();
+                assert.equal(fixture.selection.getRangeAt(0).startContainer, before);
+                assert.equal(fixture.selection.getRangeAt(0).startOffset, 1);
+            }
+            assert.equal(fixture.editor.querySelectorAll('sup').length, 1);
+        } finally {
+            fixture.restoreGlobals();
+        }
+    }
+});
 
 test('Ctrl+K removes a first, middle or last empty footnote line and keeps its controls', async () => {
     for (const body of ['<p id="blank"><br></p><p>Next</p>', '<p>Previous</p><p id="blank"><br></p><p>Next</p>', '<p>Previous</p><p id="blank"><br></p>']) {
@@ -1555,14 +1679,119 @@ function loadCodeBlockDownNavigation(fixture) {
 const SIMPLE_CODE = '<pre><code>one\ntwo\n</code></pre>';
 const READ_ONLY = '<pre class="mdw-opaque-source" contenteditable="false"><code>&lt;div&gt;HTML&lt;/div&gt;</code></pre>';
 
+test('ArrowUp, Ctrl+P and the host Up command open the same body gap from the first footnote', async () => {
+    for (const route of ['arrow', 'ctrl', 'command']) {
+        for (const body of [SIMPLE_CODE, '<blockquote>' + SIMPLE_CODE + '</blockquote>', '<ul><li>' + SIMPLE_CODE + '</li></ul>']) {
+            const fixture = await createFixture(body + editableNote('<p>Note</p>'));
+            try {
+                const navigation = loadCheckboxNavigation(fixture);
+                const pre = fixture.editor.querySelector('pre');
+                const definition = fixture.editor.querySelector('[data-mdw-footnote-definition]');
+                const noteText = definition.querySelector('p').firstChild;
+                const original = fixture.domUtils.getCleanedHTML();
+                const pressUp = () => {
+                    fixture.placeCaret(noteText, 0);
+                    if (route === 'command') {
+                        navigation.command('up', navigation.backward);
+                    } else {
+                        const event = new window.Event('keydown', { bubbles: true, cancelable: true });
+                        Object.assign(event, route === 'arrow' ? { key: 'ArrowUp' } : { key: 'p', ctrlKey: true });
+                        fixture.editor.dispatchEvent(event);
+                        assert.equal(event.defaultPrevented, true);
+                    }
+                };
+                navigation.listen(event => navigation.arrow(event) || navigation.backward(event));
+                pressUp();
+                const gap = fixture.editor.querySelector('[data-mdw-code-gap]');
+                assert.ok(gap, route);
+                assert.equal(gap.parentElement, fixture.editor);
+                assert.equal(gap.nextElementSibling, definition);
+                assert.ok(gap.contains(fixture.selection.getRangeAt(0).startContainer));
+                assert.equal(fixture.domUtils.getCleanedHTML(), original);
+
+                pressUp();
+                assert.equal(fixture.editor.querySelector('[data-mdw-code-gap]'), gap, 'Up reuses the empty body line');
+                assert.equal(fixture.editor.querySelectorAll('[data-mdw-code-gap]').length, 1);
+                fixture.placeCaret(pre.querySelector('code').firstChild, 0);
+                fixture.codeBlockGapManager.reconcile(fixture.selection);
+                assert.equal(gap.parentNode, null, 'leaving without typing removes the gap');
+                assert.equal(fixture.domUtils.getCleanedHTML(), original);
+
+                pressUp();
+                const paragraph = fixture.editor.querySelector('[data-mdw-code-gap]');
+                paragraph.firstChild.textContent += 'New body text';
+                fixture.codeBlockGapManager.reconcile(fixture.selection);
+                assert.equal(paragraph.hasAttribute('data-mdw-code-gap'), false);
+                assert.equal(paragraph.nextElementSibling, definition);
+                assert.equal(noteText.textContent, 'Note');
+            } finally {
+                fixture.restoreGlobals();
+            }
+        }
+    }
+});
+
+test('upward footnote exit applies only to its first visual line and preserves selections and modified arrows', async () => {
+    const fixture = await createFixture(SIMPLE_CODE + editableNote('<p>First wrapped text</p><p>Later paragraph</p>'));
+    try {
+        const navigation = loadCheckboxNavigation(fixture);
+        const [first, later] = Array.from(fixture.editor.querySelectorAll('.mdw-footnote-content p'));
+        fixture.cursorManager._getVisualCaretRectForRange = range => {
+            const top = range.startContainer === first.firstChild && range.startOffset < 6 ? 100 : 120;
+            return { top, bottom: top + 20, height: 20 };
+        };
+        for (const [node, offset, keys, selected] of [
+            [first.firstChild, 8, { key: 'ArrowUp' }, false],
+            [later.firstChild, 0, { key: 'ArrowUp' }, false],
+            [first.firstChild, 0, { key: 'ArrowUp', shiftKey: true }, false],
+            [first.firstChild, 0, { key: 'ArrowUp', altKey: true }, false],
+            [first.firstChild, 0, { key: 'ArrowUp', metaKey: true }, false],
+            [first.firstChild, 0, { key: 'ArrowUp' }, true],
+        ]) {
+            const range = fixture.placeCaret(node, offset);
+            if (selected) range.setEnd(node, offset + 3);
+            assert.equal(navigation.arrow({ ...keys, preventDefault() {}, stopPropagation() {} }), false);
+            assert.ok(!fixture.editor.querySelector('[data-mdw-code-gap]'));
+            assert.equal(fixture.selection.getRangeAt(0), range);
+        }
+        fixture.placeCaret(first.firstChild, 3);
+        assert.equal(navigation.arrow({ key: 'ArrowUp', preventDefault() {}, stopPropagation() {} }), true);
+        assert.ok(fixture.editor.querySelector('[data-mdw-code-gap]'));
+    } finally {
+        fixture.restoreGlobals();
+    }
+});
+
+test('upward footnote exit requires code at the end of the preceding body and never splits notes', async () => {
+    for (const [html, selector] of [
+        ['<p>Body</p>' + editableNote('<p>Note</p>'), '.mdw-footnote-content p'],
+        [SIMPLE_CODE + '<p><br></p>' + editableNote('<p>Note</p>'), '.mdw-footnote-content p'],
+        ['<blockquote>' + SIMPLE_CODE + '<p>Body after code</p></blockquote>' + editableNote('<p>Note</p>'), '.mdw-footnote-content p'],
+        [SIMPLE_CODE + editableNote('<p>First</p>') + '<div data-mdw-footnote-definition="b"><div class="mdw-footnote-content"><p>Second</p></div></div>', '[data-mdw-footnote-definition="b"] p'],
+        [SIMPLE_CODE + editableNote(editableNote('<p>Nested</p>')), '.mdw-footnote-content .mdw-footnote-content p'],
+        [SIMPLE_CODE + editableNote(SIMPLE_CODE), '.mdw-footnote-content code'],
+    ]) {
+        const fixture = await createFixture(html);
+        try {
+            fixture.placeCaret(fixture.editor.querySelector(selector).firstChild, 0);
+            assert.equal(fixture.codeBlockGapManager.moveUpFromFootnote(fixture.selection, () => true), false);
+            assert.ok(!fixture.editor.querySelector('[data-mdw-code-gap]'));
+        } finally {
+            fixture.restoreGlobals();
+        }
+    }
+});
+
 // Check both entry points: editor.js's primary exit and CursorManager's fallback.
 for (const route of ['editor', 'cursor']) {
-    test(`${route}: only document edges, code/code and code/read-only boundaries get temporary paragraphs`, async () => {
+    test(`${route}: document edges, footnotes, code/code and code/read-only boundaries get temporary paragraphs`, async () => {
         const cases = [
             [SIMPLE_CODE, true],
             [SIMPLE_CODE + SIMPLE_CODE, true],
             [SIMPLE_CODE + READ_ONLY, true],
             [SIMPLE_CODE + READ_ONLY + '<p><br></p>', true],
+            [SIMPLE_CODE + editableNote('<p>Note</p>'), true],
+            ['<blockquote>' + SIMPLE_CODE + '</blockquote>' + editableNote('<p>Note</p>'), true],
             [SIMPLE_CODE + '<p>after</p>', false],
             [SIMPLE_CODE + '<h2>after</h2>', false],
             [SIMPLE_CODE + '<hr>', false],
@@ -1571,6 +1800,8 @@ for (const route of ['editor', 'cursor']) {
             [SIMPLE_CODE + '<p><br></p>' + SIMPLE_CODE, false],
             [SIMPLE_CODE + 'unwrapped text', false],
             ['<blockquote>' + SIMPLE_CODE + '</blockquote><p>after</p>', false],
+            [editableNote(SIMPLE_CODE) + '<div data-mdw-footnote-definition="b"><p>Other note</p></div>', false],
+            [editableNote(SIMPLE_CODE + editableNote('<p>Nested note</p>')), false],
         ];
         for (const [html, expectedGap] of cases) {
             const fixture = await createFixture(html);
@@ -1597,6 +1828,51 @@ for (const route of ['editor', 'cursor']) {
                     assert.ok(!fixture.editor.querySelector('[data-mdw-code-gap]'));
                     assert.equal(fixture.domUtils.getCleanedHTML(), original);
                 }
+            } finally {
+                fixture.restoreGlobals();
+            }
+        }
+    });
+
+    test(`${route}: text entered below the last body code block stays before the footnotes`, async () => {
+        for (const code of [SIMPLE_CODE, '<blockquote>' + SIMPLE_CODE + '</blockquote>']) {
+            const fixture = await createFixture(code + editableNote('<p>Note</p>'));
+            try {
+                const pre = fixture.editor.querySelector('pre');
+                const definition = fixture.editor.querySelector('[data-mdw-footnote-definition]');
+                const original = fixture.domUtils.getCleanedHTML();
+                const moveDown = () => {
+                    fixture.placeCaret(pre.querySelector('code').firstChild, 5);
+                    if (route === 'editor') {
+                        const nav = loadCodeBlockDownNavigation(fixture);
+                        nav.moveCodeBlockDownToFollowingEmptyParagraph(fixture.selection.getRangeAt(0), fixture.selection) ||
+                            nav.exitEmptyCodeBlockDownFromPre(pre, fixture.selection, true, true);
+                    } else {
+                        fixture.cursorManager.moveCursorDown(() => assert.fail('opening the line is not a document edit'));
+                    }
+                };
+                moveDown();
+                const untouchedGap = fixture.editor.querySelector('[data-mdw-code-gap]');
+                assert.ok(untouchedGap, 'Down opens a body paragraph before the footnotes');
+                assert.equal(untouchedGap.parentElement, fixture.editor);
+                assert.equal(untouchedGap.nextElementSibling, definition);
+                assert.ok(untouchedGap.contains(fixture.selection.getRangeAt(0).startContainer));
+                assert.equal(fixture.domUtils.getCleanedHTML(), original);
+                fixture.placeCaret(pre.querySelector('code').firstChild, 0);
+                fixture.codeBlockGapManager.reconcile(fixture.selection);
+                assert.equal(untouchedGap.parentNode, null, 'leaving without typing removes the temporary line');
+
+                moveDown();
+                const paragraph = fixture.editor.querySelector('[data-mdw-code-gap]');
+                paragraph.firstChild.textContent += 'New body text';
+                fixture.codeBlockGapManager.reconcile(fixture.selection);
+                fixture.footnoteManager.refresh();
+                assert.equal(paragraph.hasAttribute('data-mdw-code-gap'), false);
+                assert.equal(paragraph.parentElement, fixture.editor);
+                assert.equal(paragraph.nextElementSibling, definition);
+                assert.equal(definition.querySelector('.mdw-footnote-content').textContent, 'Note');
+                const cleaned = fixture.domUtils.getCleanedHTML();
+                assert.ok(cleaned.indexOf('New body text') < cleaned.indexOf('data-mdw-footnote-definition'));
             } finally {
                 fixture.restoreGlobals();
             }

@@ -375,11 +375,50 @@ export class FootnoteManager {
         range.collapse(true);
     }
 
+    setCaretAtReferenceEdge(range, reference, atStart) {
+        const sibling = atStart ? reference.previousSibling : reference.nextSibling;
+        if (sibling?.nodeType === 3 && sibling.textContent.length > 0) {
+            range.setStart(sibling, atStart ? sibling.textContent.length : 0);
+        } else if (atStart) {
+            range.setStartBefore(reference);
+        } else {
+            range.setStartAfter(reference);
+        }
+        range.collapse(true);
+    }
+
+    moveAcrossReference(selection, direction) {
+        if (!selection?.rangeCount) return false;
+        const range = selection.getRangeAt(0);
+        if (!this.editor.contains(range.startContainer)) return false;
+        const element = range.startContainer.nodeType === 1 ? range.startContainer : range.startContainer.parentElement;
+        const reference = range.collapsed
+            ? element.closest('sup[data-mdw-footnote-ref]') || this.getAdjacentReference(range, direction)
+            : this.getSelectedReference(range);
+        if (!reference) return false;
+        const caret = this.editor.ownerDocument.createRange();
+        this.setCaretAtReferenceEdge(caret, reference, direction === 'backward');
+        selection.removeAllRanges();
+        selection.addRange(caret);
+        return true;
+    }
+
     normalizeCaret() {
         const range = this.getRange();
         if (!range?.collapsed || !this.editor.contains(range.startContainer)) return false;
         const node = range.startContainer;
         const element = node.nodeType === 1 ? node : node.parentElement;
+        const reference = element.closest('sup[data-mdw-footnote-ref]');
+        if (reference) {
+            // Native caret probes can land inside the read-only number. Keep
+            // that position beside the reference instead of at the editor end.
+            const selection = this.editor.ownerDocument.defaultView.getSelection();
+            const corrected = this.editor.ownerDocument.createRange();
+            this.setCaretAtReferenceEdge(corrected, reference, range.startOffset === 0);
+            selection.removeAllRanges();
+            selection.addRange(corrected);
+            return true;
+        }
         const definition = element.closest('[data-mdw-footnote-definition]');
         if (!definition) return false;
         const content = definition.querySelector('.mdw-footnote-content');
@@ -462,7 +501,9 @@ export class FootnoteManager {
         let container = range.startContainer;
         let candidate;
         if (container.nodeType === 3) {
-            if (range.startOffset !== (backward ? 0 : container.textContent.length)) return null;
+            const remaining = backward ? container.textContent.slice(0, range.startOffset)
+                : container.textContent.slice(range.startOffset);
+            if (!/^[\u200B\u2060\uFEFF]*$/.test(remaining)) return null;
             candidate = sibling(container);
         } else {
             candidate = container.childNodes[range.startOffset + (backward ? -1 : 0)];
@@ -504,6 +545,12 @@ export class FootnoteManager {
             if (selected.length === 1 && selected[0].nodeType === 1 &&
                 selected[0].matches('sup[data-mdw-footnote-ref]')) return selected[0];
         }
+        // Chromium can express a selection of just the number using the end
+        // of the preceding text and the start of the following text.
+        const start = { startContainer: range.startContainer, startOffset: range.startOffset, collapsed: true };
+        const end = { startContainer: range.endContainer, startOffset: range.endOffset, collapsed: true };
+        const reference = this.getAdjacentReference(start, 'forward');
+        if (reference && this.getAdjacentReference(end, 'backward') === reference) return reference;
         return null;
     }
 
@@ -556,6 +603,17 @@ export class FootnoteManager {
     handleKeydown(event, isMac = false) {
         if (event.defaultPrevented || event.isComposing || event.keyCode === 229 ||
             event.metaKey || event.altKey) return false;
+        const key = event.key?.toLowerCase();
+        const horizontalDirection = !event.shiftKey && (
+            (!event.ctrlKey && event.key === 'ArrowLeft') || (isMac && event.ctrlKey && key === 'b')
+        ) ? 'backward' : !event.shiftKey && (
+            (!event.ctrlKey && event.key === 'ArrowRight') || (isMac && event.ctrlKey && key === 'f')
+        ) ? 'forward' : null;
+        if (horizontalDirection && this.moveAcrossReference(this.editor.ownerDocument.defaultView.getSelection(), horizontalDirection)) {
+            event.preventDefault();
+            event.stopPropagation();
+            return true;
+        }
         const ctrlH = isMac && event.ctrlKey && !event.shiftKey && event.key?.toLowerCase() === 'h';
         if (event.ctrlKey && !ctrlH) return false;
         const direction = event.key === 'Backspace' || ctrlH ? 'backward' : event.key === 'Delete' ? 'forward' : null;

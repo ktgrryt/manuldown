@@ -113,6 +113,92 @@ test('footnotes use reference order, share repeated numbers and update after del
         .map(node => node.getAttribute('data-mdw-footnote-definition')), ['a', 'b', 'unused']);
 });
 
+test('arrows and Mac Ctrl+B/Ctrl+F step across each reference as one atomic position', async () => {
+    const f = await fixture(`<p>Before${ref('a')}${ref('b')}After</p>${note('a')}${note('b')}`);
+    f.manager.refresh();
+    const [first, second] = Array.from(f.editor.querySelectorAll('sup'));
+    const before = first.previousSibling;
+    const after = second.nextSibling;
+    const original = f.editor.innerHTML;
+    for (const keys of [{ key: 'ArrowRight' }, { key: 'f', ctrlKey: true }]) {
+        f.select(before, before.textContent.length);
+        const event = { ...keys, preventDefault() {}, stopPropagation() {} };
+        assert.equal(f.manager.handleKeydown(event, true), true);
+        assert.equal(f.manager.getRange().startContainer, first.parentNode);
+        assert.equal(f.manager.getRange().startOffset, 2);
+        assert.equal(f.manager.handleKeydown(event, true), true);
+        assert.equal(f.manager.getRange().startContainer, after);
+        assert.equal(f.manager.getRange().startOffset, 0);
+    }
+    for (const keys of [{ key: 'ArrowLeft' }, { key: 'b', ctrlKey: true }]) {
+        f.select(after, 0);
+        const event = { ...keys, preventDefault() {}, stopPropagation() {} };
+        assert.equal(f.manager.handleKeydown(event, true), true);
+        assert.equal(f.manager.getRange().startContainer, second.parentNode);
+        assert.equal(f.manager.getRange().startOffset, 2);
+        assert.equal(f.manager.handleKeydown(event, true), true);
+        assert.equal(f.manager.getRange().startContainer, before);
+        assert.equal(f.manager.getRange().startOffset, before.textContent.length);
+    }
+    assert.equal(f.editor.innerHTML, original);
+    assert.equal(f.history.length, 0);
+    assert.equal(f.changes(), 0);
+});
+
+test('reference navigation preserves text selections, modified keys and active composition', async () => {
+    const f = await fixture(`<p>Before${ref('a')}After</p>${note('a')}`);
+    const reference = f.editor.querySelector('sup');
+    const before = reference.previousSibling;
+    for (const [keys, mac] of [
+        [{ key: 'ArrowRight', shiftKey: true }, true],
+        [{ key: 'ArrowRight', altKey: true }, true],
+        [{ key: 'ArrowRight', metaKey: true }, true],
+        [{ key: 'ArrowRight', ctrlKey: true }, true],
+        [{ key: 'ArrowRight', isComposing: true }, true],
+        [{ key: 'ArrowRight', keyCode: 229 }, true],
+        [{ key: 'f', ctrlKey: true }, false],
+    ]) {
+        f.select(before, before.textContent.length);
+        const range = f.manager.getRange();
+        assert.equal(f.manager.handleKeydown({ ...keys, preventDefault() {}, stopPropagation() {} }, mac), false);
+        assert.equal(f.manager.getRange(), range);
+    }
+    f.select(before, before.textContent.length, 0);
+    const selected = f.manager.getRange();
+    assert.equal(f.manager.moveAcrossReference(f.window.getSelection(), 'forward'), false);
+    assert.equal(f.manager.getRange(), selected);
+    for (const [direction, node, offset] of [
+        ['forward', reference.nextSibling, 0], ['backward', before, before.textContent.length],
+    ]) {
+        f.select(reference.firstChild.firstChild, 1, 0);
+        assert.equal(f.manager.moveAcrossReference(f.window.getSelection(), direction), true);
+        assert.equal(f.manager.getRange().startContainer, node);
+        assert.equal(f.manager.getRange().startOffset, offset);
+    }
+});
+
+test('a caret inside a reference recovers to its local edge in both body text and note text', async () => {
+    for (const nested of [false, true]) {
+        const paragraph = `<p>Before${ref('b')}After</p>`;
+        const f = await fixture(nested ? `<div data-mdw-footnote-definition="a"><div class="mdw-footnote-content">${paragraph}</div></div>${note('b')}` : paragraph + note('b'));
+        const reference = f.editor.querySelector('sup');
+        const number = reference.firstChild.firstChild;
+        for (const [offset, target, targetOffset] of [
+            [0, reference.previousSibling, 6], [1, reference.nextSibling, 0],
+        ]) {
+            f.select(number, offset);
+            assert.equal(f.manager.normalizeCaret(), true);
+            assert.equal(f.manager.getRange().startContainer, target);
+            assert.equal(f.manager.getRange().startOffset, targetOffset);
+        }
+        f.select(number, 1, 0);
+        const selected = f.manager.getRange();
+        assert.equal(f.manager.normalizeCaret(), false);
+        assert.equal(f.manager.getRange(), selected);
+        assert.equal(f.history.length, 0);
+    }
+});
+
 test('copying a reference includes its note and local paste keeps the shared annotation', async () => {
     const f = await fixture(`<p>Body${ref('a')}</p>${note('a')}`);
     f.manager.refresh();

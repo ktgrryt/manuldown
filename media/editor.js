@@ -1498,7 +1498,9 @@ const {
     const codeBlockGapManager = new CodeBlockGapManager(editor);
     const cursorManager = new CursorManager(editor, domUtils, {
         moveToCodeBlockGap: (pre, direction, selection) =>
-            codeBlockGapManager.moveToGap(pre, direction, selection)
+            codeBlockGapManager.moveToGap(pre, direction, selection),
+        moveAcrossFootnoteReference: (selection, direction) =>
+            footnoteManager.moveAcrossReference(selection, direction)
     });
     const listManager = new ListManager(editor, domUtils);
     const markdownConverter = new MarkdownConverter(editor, domUtils, {
@@ -13489,7 +13491,26 @@ const {
         return true;
     }
 
+    function moveCursorUpFromFootnoteToCodeGap() {
+        return codeBlockGapManager.moveUpFromFootnote(window.getSelection(), (range, content) => {
+            const firstRange = document.createRange();
+            footnoteManager.setCaretAtContentEdge(firstRange, content, true);
+            const firstRect = cursorManager._getVisualCaretRectForRange(firstRange);
+            const caretRect = cursorManager._getVisualCaretRectForRange(range);
+            if (firstRect?.height > 0 && caretRect?.height > 0) {
+                return cursorManager._isSameVisualLine(firstRect, caretRect);
+            }
+            return range.startContainer === firstRange.startContainer && range.startOffset === firstRange.startOffset;
+        });
+    }
+
     function handleArrowKeydown(e) {
+        if (e.key === 'ArrowUp' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey &&
+            moveCursorUpFromFootnoteToCodeGap()) {
+            e.preventDefault();
+            e.stopPropagation();
+            return true;
+        }
         if (e.key === 'ArrowLeft' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey &&
             moveCaretToCheckboxFromTextStart(e)) {
             return true;

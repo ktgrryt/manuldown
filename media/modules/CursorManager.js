@@ -30,6 +30,7 @@ export class CursorManager {
         this.editor = editor;
         this.domUtils = domUtils;
         this.moveToCodeBlockGap = options.moveToCodeBlockGap || null;
+        this.moveAcrossFootnoteReference = options.moveAcrossFootnoteReference || null;
         this._forwardImageStep = null;
         this._inlineCodeLeftBoundaryState = null;
     }
@@ -7298,6 +7299,11 @@ export class CursorManager {
     moveCursorForward(notifyCallback) {
         const selection = window.getSelection();
         if (!selection || !selection.rangeCount) return false;
+        if (this.moveAcrossFootnoteReference?.(selection, 'forward')) {
+            this.clearInlineCodeBoundaryState();
+            this._clearForwardImageStep();
+            return true;
+        }
         let range = selection.getRangeAt(0);
         let node = range.startContainer;
         let offset = range.startOffset;
@@ -8169,6 +8175,11 @@ export class CursorManager {
     moveCursorBackward(notifyCallback) {
         const selection = window.getSelection();
         if (!selection || !selection.rangeCount) return false;
+        if (this.moveAcrossFootnoteReference?.(selection, 'backward')) {
+            this.clearInlineCodeBoundaryState();
+            this._clearForwardImageStep();
+            return true;
+        }
         if (this._consumeInlineCodeLeftBoundaryBackward(selection)) {
             return true;
         }
