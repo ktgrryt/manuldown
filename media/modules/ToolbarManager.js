@@ -13,13 +13,18 @@ export class ToolbarManager {
         this.onInsertCodeBlock = options.onInsertCodeBlock || null;
         this.onInsertCheckbox = options.onInsertCheckbox || null;
         this.onInsertLink = options.onInsertLink || null;
+        this.onInsertImage = options.onInsertImage || null;
         this.commandButtons = new Map();
+        this.overflowButtons = new Map();
+        this.overflowSelection = null;
+        this.overflowLayoutFrame = null;
         this.activeStateCommands = new Map([
             ['bold', 'bold'],
             ['italic', 'italic'],
             ['strikethrough', 'strikeThrough'],
         ]);
         this.contextStateCommands = new Set([
+            'inlinecode',
             'ul',
             'ol',
             'checkbox',
@@ -58,13 +63,12 @@ export class ToolbarManager {
      */
     setup() {
         const buttons = document.querySelectorAll('.toolbar > .toolbar-btn');
-        buttons.forEach(button => {
+        Array.from(buttons).forEach(button => {
             const command = button.getAttribute('data-command');
-            if (command) {
-                this.commandButtons.set(command, button);
-                if (this.activeStateCommands.has(command) || this.contextStateCommands.has(command)) {
-                    button.setAttribute('aria-pressed', 'false');
-                }
+            if (!command) return;
+            this.commandButtons.set(command, button);
+            if (this.activeStateCommands.has(command) || this.contextStateCommands.has(command)) {
+                button.setAttribute('aria-pressed', 'false');
             }
             // Keep caret/selection in the editor when clicking toolbar buttons.
             button.addEventListener('mousedown', (e) => {
@@ -75,15 +79,18 @@ export class ToolbarManager {
                 const command = button.getAttribute('data-command');
                 this.executeCommand(command);
                 // ダイアログを開くコマンドはダイアログ側でフォーカスを管理するため、ここではスキップ
-                if (command !== 'table' && command !== 'link') {
+                if (command !== 'table' && command !== 'link' && command !== 'image') {
                     setTimeout(() => this.editor.focus(), 0);
                 }
             });
         });
 
+        this.setupOverflow();
+
         const updateAvailability = () => {
             this.updateCommandAvailability();
             this.updateCommandContextStates();
+            this.updateOverflowMenuState();
         };
         const updateToolbarState = () => this.updateToolbarState();
         document.addEventListener('selectionchange', updateAvailability);
@@ -96,12 +103,229 @@ export class ToolbarManager {
         this.updateToolbarState();
     }
 
+    setupOverflow() {
+        this.toolbar = document.querySelector('.toolbar');
+        this.overflowToggle = this.toolbar?.querySelector('.toolbar-overflow-toggle');
+        this.overflowMenu = this.toolbar?.querySelector('.toolbar-overflow-menu');
+        if (!this.overflowToggle || !this.overflowMenu) return;
+
+        this.toolbarItems = Array.from(this.toolbar.children).filter((item) =>
+            item.hasAttribute('data-command') || item.classList.contains('toolbar-separator')
+        );
+        this.toolbarButtons = this.toolbarItems.filter((item) => item.hasAttribute('data-command'));
+        this.overflowSeparators = new Map();
+        this.toolbarItems.forEach((item) => {
+            if (item.classList.contains('toolbar-separator')) {
+                const separator = document.createElement('div');
+                separator.className = 'toolbar-overflow-separator';
+                separator.setAttribute('role', 'separator');
+                this.overflowMenu.appendChild(separator);
+                this.overflowSeparators.set(item, separator);
+                return;
+            }
+            const command = item.getAttribute('data-command');
+            const menuItem = document.createElement('button');
+            menuItem.type = 'button';
+            menuItem.className = 'toolbar-overflow-item';
+            menuItem.setAttribute('data-command', command);
+            menuItem.tabIndex = -1;
+            menuItem.addEventListener('mousedown', (event) => event.preventDefault());
+            menuItem.addEventListener('click', (event) => {
+                event.preventDefault();
+                if (menuItem.disabled) return;
+                this.closeOverflowMenu({ restoreSelection: true });
+                this.executeCommand(command);
+                if (command !== 'table' && command !== 'link' && command !== 'image') {
+                    setTimeout(() => this.editor.focus(), 0);
+                }
+            });
+            this.overflowMenu.appendChild(menuItem);
+            this.overflowButtons.set(command, menuItem);
+        });
+
+        this.overflowToggle.addEventListener('mousedown', (event) => event.preventDefault());
+        this.overflowToggle.addEventListener('click', (event) => {
+            event.preventDefault();
+            if (this.overflowMenu.hidden) this.openOverflowMenu(event.detail === 0);
+            else this.closeOverflowMenu();
+        });
+        this.overflowToggle.addEventListener('keydown', (event) => {
+            if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+            event.preventDefault();
+            this.openOverflowMenu(false);
+            this.focusOverflowItem(event.key === 'ArrowUp' ? -1 : 0);
+        });
+        this.overflowMenu.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape') {
+                event.preventDefault();
+                event.stopPropagation();
+                this.closeOverflowMenu({ restoreSelection: true, focusToggle: true });
+            } else if (event.key === 'Tab') {
+                this.closeOverflowMenu({ focusToggle: true });
+            } else if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+                event.preventDefault();
+                const items = this.getEnabledOverflowItems();
+                const current = items.indexOf(document.activeElement);
+                const index = event.key === 'Home' ? 0 : event.key === 'End' ? -1 :
+                    (current + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+                this.focusOverflowItem(index);
+            }
+        });
+        document.addEventListener('mousedown', (event) => {
+            if (!this.overflowMenu.hidden && !this.overflowMenu.contains(event.target) &&
+                !this.overflowToggle.contains(event.target)) {
+                this.closeOverflowMenu();
+            }
+        });
+        document.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape' && !this.overflowMenu.hidden) {
+                event.preventDefault();
+                this.closeOverflowMenu({ restoreSelection: true, focusToggle: true });
+            }
+        });
+
+        const scheduleLayout = () => {
+            if (this.overflowLayoutFrame !== null) return;
+            this.overflowLayoutFrame = requestAnimationFrame(() => {
+                this.overflowLayoutFrame = null;
+                this.updateOverflowLayout();
+            });
+        };
+        if (typeof ResizeObserver === 'function') {
+            this.overflowResizeObserver = new ResizeObserver(scheduleLayout);
+            this.overflowResizeObserver.observe(this.toolbar);
+        }
+        window.addEventListener('resize', scheduleLayout);
+        this.updateOverflowLayout();
+    }
+
+    getVisibleToolbarItems(buttonCount) {
+        const visible = new Set(this.toolbarButtons.slice(0, buttonCount));
+        return this.toolbarItems.filter((item, index) => {
+            if (item.hasAttribute('data-command')) return visible.has(item);
+            return this.toolbarItems.slice(0, index).some((before) => visible.has(before)) &&
+                this.toolbarItems.slice(index + 1).some((after) => visible.has(after));
+        });
+    }
+
+    updateOverflowLayout() {
+        if (!this.overflowToggle) return;
+        if (this.toolbar.clientWidth === 0) {
+            this.closeOverflowMenu();
+            return;
+        }
+        const style = window.getComputedStyle(this.toolbar);
+        const available = this.toolbar.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+        const gap = parseFloat(style.columnGap) || 0;
+        const widths = new Map();
+        this.toolbarItems.forEach((item) => {
+            item.hidden = false;
+            const itemStyle = window.getComputedStyle(item);
+            widths.set(item, item.getBoundingClientRect().width +
+                (parseFloat(itemStyle.marginLeft) || 0) + (parseFloat(itemStyle.marginRight) || 0));
+        });
+        const widthOf = (items) => items.reduce((width, item) => width + widths.get(item), 0) +
+            Math.max(0, items.length - 1) * gap;
+        const needsOverflow = widthOf(this.toolbarItems) > available;
+        this.overflowToggle.hidden = !needsOverflow;
+        let count = this.toolbarButtons.length;
+        if (needsOverflow) {
+            const toggleWidth = this.overflowToggle.getBoundingClientRect().width;
+            while (count > 0 && widthOf(this.getVisibleToolbarItems(count)) + gap + toggleWidth > available) {
+                count--;
+            }
+        }
+        const visible = new Set(this.getVisibleToolbarItems(count));
+        this.toolbarItems.forEach((item) => { item.hidden = !visible.has(item); });
+        this.updateOverflowMenuState();
+        if (!needsOverflow) this.closeOverflowMenu({ restoreSelection: !this.overflowMenu.hidden });
+        else if (!this.overflowMenu.hidden) this.positionOverflowMenu();
+    }
+
+    updateOverflowMenuState() {
+        this.overflowButtons.forEach((menuItem, command) => {
+            const button = this.commandButtons.get(command);
+            if (!button) return;
+            menuItem.hidden = !button.hidden;
+            menuItem.disabled = button.disabled;
+            menuItem.title = button.title;
+            menuItem.textContent = (button.getAttribute('aria-label') || button.title || button.textContent.trim())
+                .replace(/^Insert\s+/, '').replace(/\s+\([^)]*\)$/, '');
+            const pressed = button.getAttribute('aria-pressed');
+            menuItem.setAttribute('role', pressed === null ? 'menuitem' : 'menuitemcheckbox');
+            menuItem.classList.toggle('is-active', pressed === 'true');
+            if (pressed === null) menuItem.removeAttribute('aria-checked');
+            else menuItem.setAttribute('aria-checked', pressed);
+        });
+        this.overflowSeparators?.forEach((separator, original) => {
+            const index = this.toolbarItems.indexOf(original);
+            separator.hidden = !(
+                this.toolbarItems.slice(0, index).some((item) => item.hasAttribute('data-command') && item.hidden) &&
+                this.toolbarItems.slice(index + 1).some((item) => item.hasAttribute('data-command') && item.hidden)
+            );
+        });
+    }
+
+    openOverflowMenu(focusFirst = false) {
+        if (this.overflowToggle.hidden || this.overflowToggle.disabled) return;
+        const selection = window.getSelection();
+        const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
+        this.overflowSelection = range && this.editor.contains(range.startContainer) &&
+            this.editor.contains(range.endContainer) ? range.cloneRange() : null;
+        this.updateToolbarState();
+        this.overflowMenu.hidden = false;
+        this.overflowToggle.setAttribute('aria-expanded', 'true');
+        this.positionOverflowMenu();
+        if (focusFirst) this.focusOverflowItem(0);
+    }
+
+    closeOverflowMenu({ restoreSelection = false, focusToggle = false } = {}) {
+        if (!this.overflowMenu) return;
+        this.overflowMenu.hidden = true;
+        this.overflowToggle.setAttribute('aria-expanded', 'false');
+        const range = this.overflowSelection;
+        this.overflowSelection = null;
+        if (restoreSelection && range && this.editor.contains(range.startContainer) && this.editor.contains(range.endContainer)) {
+            this.editor.focus({ preventScroll: true });
+            const selection = window.getSelection();
+            selection.removeAllRanges();
+            selection.addRange(range);
+        }
+        if (focusToggle && !this.overflowToggle.hidden) this.overflowToggle.focus({ preventScroll: true });
+    }
+
+    positionOverflowMenu() {
+        const anchor = this.overflowToggle.getBoundingClientRect();
+        const width = this.overflowMenu.getBoundingClientRect().width;
+        const top = Math.min(anchor.bottom + 4, window.innerHeight - 60);
+        this.overflowMenu.style.left = `${Math.max(8, Math.min(anchor.right - width, window.innerWidth - width - 8))}px`;
+        this.overflowMenu.style.top = `${Math.max(8, top)}px`;
+        this.overflowMenu.style.maxHeight = `${Math.max(40, window.innerHeight - Math.max(8, top) - 8)}px`;
+    }
+
+    getEnabledOverflowItems() {
+        return Array.from(this.overflowButtons.values()).filter((item) => !item.hidden && !item.disabled);
+    }
+
+    focusOverflowItem(index) {
+        const items = this.getEnabledOverflowItems();
+        const item = items[index < 0 ? items.length - 1 : index];
+        item?.focus({ preventScroll: true });
+        item?.scrollIntoView({ block: 'nearest' });
+    }
+
     /**
      * フォーマットコマンドを実行
      * @param {string} command - 実行するコマンド
      */
     executeCommand(command) {
         this.editor.focus();
+
+        if (command === 'inlinecode') {
+            this.toggleInlineCode();
+            this.updateToolbarState();
+            return;
+        }
 
         const isTableCellRestrictedCommand =
             !!command && this.tableCellRestrictedCommands.has(command);
@@ -120,6 +344,11 @@ export class ToolbarManager {
         }
 
         if (command === 'codeblock' && this.isSelectionInCodeBlockContext()) {
+            this.updateToolbarState();
+            return;
+        }
+
+        if (command === 'image' && (this.isSelectionInCodeBlockContext() || this.isSelectionTouchingInlineCode())) {
             this.updateToolbarState();
             return;
         }
@@ -146,6 +375,11 @@ export class ToolbarManager {
 
         if (command === 'link' && this.onInsertLink) {
             this.onInsertLink();
+            return;
+        }
+
+        if (command === 'image' && this.onInsertImage) {
+            this.onInsertImage();
             return;
         }
 
@@ -200,6 +434,7 @@ export class ToolbarManager {
         this.updateCommandAvailability();
         this.updateCommandContextStates();
         this.updateCommandActiveStates();
+        this.updateOverflowMenuState();
     }
 
     updateCommandAvailability() {
@@ -219,12 +454,17 @@ export class ToolbarManager {
             const disabledByList = this.listRestrictedCommands.has(command) && inListContext;
             const disabledCodeBlockInCodeBlock = command === 'codeblock' && inCodeBlockContext;
             const disabledLinkInCodeBlock = command === 'link' && inCodeBlockContext;
+            const disabledInlineCode = command === 'inlinecode' && !this.canToggleInlineCode();
+            const disabledImageInCode = command === 'image' &&
+                (inCodeBlockContext || this.isSelectionTouchingInlineCode());
             const isDisabled =
                 disabledByTable ||
                 disabledBoldInHeading ||
                 disabledByList ||
                 disabledCodeBlockInCodeBlock ||
-                disabledLinkInCodeBlock;
+                disabledLinkInCodeBlock ||
+                disabledInlineCode ||
+                disabledImageInCode;
             button.disabled = isDisabled;
             button.classList.toggle('is-disabled', isDisabled);
             button.classList.toggle('is-current-heading', isCurrentHeadingLevel);
@@ -270,6 +510,7 @@ export class ToolbarManager {
 
     getContextCommandStates() {
         const states = {
+            inlinecode: this.isInlineCodeActive(),
             ul: false,
             ol: false,
             checkbox: false,
@@ -324,6 +565,193 @@ export class ToolbarManager {
         }
 
         return states;
+    }
+
+    _getInlineCode(node) {
+        const element = this._getElementFromNode(node);
+        const code = element?.closest('code');
+        return code && !code.closest('pre') && this.editor.contains(code) ? code : null;
+    }
+
+    _getSelectedTextNodes(range) {
+        const root = range.commonAncestorContainer || this.editor;
+        const nodes = [];
+        if (root.nodeType === Node.TEXT_NODE) {
+            nodes.push(root);
+        } else {
+            const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+            let node;
+            while ((node = walker.nextNode())) nodes.push(node);
+        }
+        return nodes.filter((node) => {
+            if (node.parentElement.closest('[contenteditable="false"], [data-exclude-from-markdown="true"]') ||
+                !range.intersectsNode(node)) {
+                return false;
+            }
+            const start = node === range.startContainer ? range.startOffset : 0;
+            const end = node === range.endContainer ? range.endOffset : node.length;
+            return node.data.slice(start, end).replace(/[\u200B\u2060\uFEFF]/g, '').length > 0;
+        });
+    }
+
+    canToggleInlineCode() {
+        const selection = window.getSelection();
+        if (!selection || selection.rangeCount !== 1) return false;
+        const range = selection.getRangeAt(0);
+        if (!this.editor.contains(range.startContainer) || !this.editor.contains(range.endContainer)) {
+            return false;
+        }
+        if ([range.startContainer, range.endContainer].some((node) =>
+            this._getElementFromNode(node)?.closest('pre, [contenteditable="false"], [data-exclude-from-markdown="true"]')
+        )) {
+            return false;
+        }
+        if (!range.collapsed) {
+            // A selection can cross a code block even when both ends are paragraphs.
+            if (Array.from(this.editor.querySelectorAll('pre')).some((pre) => range.intersectsNode(pre))) {
+                return false;
+            }
+            return this._getSelectedTextNodes(range).length > 0;
+        }
+        return true;
+    }
+
+    isInlineCodeActive() {
+        const selection = window.getSelection();
+        if (!selection || selection.rangeCount !== 1) return false;
+        const range = selection.getRangeAt(0);
+        if (!this.editor.contains(range.startContainer) || !this.editor.contains(range.endContainer)) {
+            return false;
+        }
+        if (range.collapsed) return !!this._getInlineCode(range.startContainer);
+        const nodes = this._getSelectedTextNodes(range);
+        return nodes.length > 0 && nodes.every((node) => !!this._getInlineCode(node));
+    }
+
+    isSelectionTouchingInlineCode() {
+        const selection = window.getSelection();
+        if (!selection || selection.rangeCount === 0) return false;
+        const range = selection.getRangeAt(0);
+        return !!this._getInlineCode(range.startContainer) || !!this._getInlineCode(range.endContainer) ||
+            (!range.collapsed && this._getSelectedTextNodes(range).some((node) => !!this._getInlineCode(node)));
+    }
+
+    toggleInlineCode() {
+        if (!this.canToggleInlineCode()) return false;
+
+        const selection = window.getSelection();
+        const range = selection.getRangeAt(0);
+        const wasCollapsed = range.collapsed;
+        const removeCode = this.isInlineCodeActive();
+        this.stateManager.saveState();
+
+        if (wasCollapsed && !removeCode) {
+            const code = document.createElement('code');
+            code.setAttribute('data-is-new', 'true');
+            const text = document.createTextNode('\u200B');
+            code.appendChild(text);
+            range.insertNode(code);
+            range.setStart(text, text.length);
+            range.collapse(true);
+        } else {
+            // Bookmarks survive splitting code elements and formatting across blocks.
+            const start = document.createComment('inline-code-start');
+            const end = document.createComment('inline-code-end');
+            const endRange = range.cloneRange();
+            endRange.collapse(false);
+            endRange.insertNode(end);
+            const startRange = range.cloneRange();
+            startRange.collapse(true);
+            startRange.insertNode(start);
+            const selectedRange = document.createRange();
+            selectedRange.setStartAfter(start);
+            selectedRange.setEndBefore(end);
+
+            if (removeCode) {
+                const codes = wasCollapsed
+                    ? [this._getInlineCode(start)]
+                    : [...new Set(this._getSelectedTextNodes(selectedRange).map((node) => this._getInlineCode(node)))];
+                codes.filter(Boolean).forEach((code) => {
+                    const replacement = document.createDocumentFragment();
+                    // Keep unselected prefixes and suffixes in their own code spans.
+                    if (!wasCollapsed && code.contains(start)) {
+                        const before = document.createRange();
+                        before.selectNodeContents(code);
+                        before.setEndBefore(start);
+                        const prefix = code.cloneNode(false);
+                        prefix.appendChild(before.extractContents());
+                        if (prefix.textContent) replacement.appendChild(prefix);
+                    }
+                    let suffix = null;
+                    if (!wasCollapsed && code.contains(end)) {
+                        const after = document.createRange();
+                        after.selectNodeContents(code);
+                        after.setStartAfter(end);
+                        suffix = code.cloneNode(false);
+                        suffix.appendChild(after.extractContents());
+                    }
+                    while (code.firstChild) replacement.appendChild(code.firstChild);
+                    if (suffix?.textContent) replacement.appendChild(suffix);
+                    code.replaceWith(replacement);
+                });
+            } else {
+                const codes = new Set();
+                this._getSelectedTextNodes(selectedRange).forEach((node) => {
+                    let code = this._getInlineCode(node);
+                    if (!code) {
+                        code = document.createElement('code');
+                        node.replaceWith(code);
+                        code.appendChild(node);
+                    }
+                    codes.add(code);
+                });
+                // Adjacent code spans serialize as one Markdown code span. Carry
+                // the bookmarks along so the original selection stays intact.
+                // Include a neighboring prefix so applying code next to an
+                // existing span also merges that pair, without scanning the document.
+                Array.from(codes).forEach((code) => {
+                    let previous = code.previousSibling;
+                    while (previous && (previous === start || previous === end ||
+                        (previous.nodeType === Node.TEXT_NODE && previous.length === 0))) {
+                        previous = previous.previousSibling;
+                    }
+                    if (previous?.nodeType === Node.ELEMENT_NODE && previous.tagName === 'CODE') {
+                        codes.add(previous);
+                    }
+                });
+                codes.forEach((code) => {
+                    let next = code.nextSibling;
+                    while (next) {
+                        const between = [];
+                        let candidate = next;
+                        while (candidate && (candidate === start || candidate === end ||
+                            (candidate.nodeType === Node.TEXT_NODE && candidate.length === 0))) {
+                            between.push(candidate);
+                            candidate = candidate.nextSibling;
+                        }
+                        if (candidate?.nodeType !== Node.ELEMENT_NODE || candidate.tagName !== 'CODE') break;
+                        between.forEach((node) => code.appendChild(node));
+                        while (candidate.firstChild) code.appendChild(candidate.firstChild);
+                        candidate.remove();
+                        next = code.nextSibling;
+                    }
+                });
+            }
+
+            range.setStartAfter(start);
+            range.setEndBefore(end);
+            start.remove();
+            end.remove();
+            // Bookmark insertion can leave an empty text node between the
+            // boundaries. Keep a caret operation collapsed after unwrapping.
+            if (wasCollapsed) range.collapse(true);
+        }
+
+        selection.removeAllRanges();
+        selection.addRange(range);
+        this._dispatchEditorInputEvent();
+        this.stateManager.commitStateAfterChange?.();
+        return true;
     }
 
     isSelectionInTableCellContext() {

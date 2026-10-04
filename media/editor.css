@@ -186,23 +186,14 @@ body.toc-resizing {
     border-bottom: 1px solid var(--vscode-editorGroup-border);
     flex-shrink: 0;
     gap: 4px;
-    overflow-x: auto;
-    scrollbar-width: thin;
+    min-width: 0;
     position: relative;
     z-index: 1200;
 }
 
-.toolbar::-webkit-scrollbar {
-    height: 4px;
-}
-
-.toolbar::-webkit-scrollbar-thumb {
-    background-color: var(--vscode-scrollbarSlider-background);
-    border-radius: 2px;
-}
-
-.toolbar::-webkit-scrollbar-thumb:hover {
-    background-color: var(--vscode-scrollbarSlider-hoverBackground);
+.toolbar > [hidden],
+.toolbar-overflow-menu > [hidden] {
+    display: none !important;
 }
 
 .toolbar-btn {
@@ -222,6 +213,78 @@ body.toc-resizing {
 .toolbar-btn:hover {
     background-color: var(--vscode-list-hoverBackground);
     border-color: var(--vscode-editorGroup-border);
+}
+
+.toolbar-btn-list {
+    min-width: 30px;
+    padding: 6px 6px;
+}
+
+.toolbar-btn-list[data-command="checkbox"] {
+    font-size: 16px;
+    line-height: 15px;
+}
+
+.toolbar-overflow-toggle {
+    min-width: 30px;
+    padding: 6px;
+    font-size: 18px;
+    line-height: 15px;
+}
+
+.toolbar-overflow-menu {
+    position: fixed;
+    z-index: 1201;
+    width: 220px;
+    max-width: calc(100vw - 16px);
+    padding: 4px;
+    overflow-y: auto;
+    border: 1px solid var(--vscode-menu-border, var(--vscode-editorGroup-border, #454545));
+    border-radius: 4px;
+    background: var(--vscode-menu-background, var(--vscode-editor-background, #1e1e1e));
+    color: var(--vscode-menu-foreground, var(--vscode-editor-foreground, #d4d4d4));
+    box-shadow: 0 4px 12px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.3));
+}
+
+.toolbar-overflow-item {
+    display: block;
+    position: relative;
+    width: 100%;
+    padding: 7px 10px 7px 28px;
+    border: 0;
+    border-radius: 3px;
+    background: transparent;
+    color: inherit;
+    text-align: left;
+    font-family: inherit;
+    font-size: 13px;
+    cursor: pointer;
+}
+
+.toolbar-overflow-item:hover,
+.toolbar-overflow-item:focus-visible {
+    outline: none;
+    background: var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground, #2a2d2e));
+    color: var(--vscode-menu-selectionForeground, inherit);
+}
+
+.toolbar-overflow-item.is-active::before {
+    content: '\2713';
+    position: absolute;
+    left: 9px;
+}
+
+.toolbar-overflow-item:disabled {
+    opacity: 0.45;
+    background: transparent;
+    color: inherit;
+    cursor: not-allowed;
+}
+
+.toolbar-overflow-separator {
+    height: 1px;
+    margin: 4px 6px;
+    background: var(--vscode-menu-separatorBackground, var(--vscode-editorGroup-border, #454545));
 }
 
 .toolbar-btn:active {

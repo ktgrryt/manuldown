@@ -1060,6 +1060,14 @@ const {
 
         textNodes.forEach((textNode) => {
             const raw = textNode.textContent || '';
+            const newInlineCode = textNode.parentElement?.closest('code[data-is-new="true"]');
+            if (newInlineCode && !newInlineCode.closest('pre') && range?.collapsed &&
+                newInlineCode.contains(range.startContainer) &&
+                newInlineCode.textContent.replace(controlCharPattern, '') === '') {
+                // Keep the empty toolbar insertion editable until its first input.
+                // Chromium moves typing outside a code span with no text anchor.
+                return;
+            }
             if (!controlCharPattern.test(raw)) return;
             controlCharPattern.lastIndex = 0;
             if (startInfo && startInfo.node === textNode) {
@@ -1458,7 +1466,10 @@ const {
     const syncToolbarBulletLabel = () => {
         const ulBtn = document.querySelector('.toolbar-btn[data-command="ul"]');
         if (ulBtn) {
-            ulBtn.textContent = settingsState.listDashStyle ? '– List' : '• List';
+            const label = settingsState.listDashStyle ? 'Dash List' : 'Bullet List';
+            ulBtn.textContent = settingsState.listDashStyle ? '–' : '•';
+            ulBtn.title = label;
+            ulBtn.setAttribute('aria-label', label);
         }
     };
 
@@ -1527,8 +1538,14 @@ const {
         onInsertQuote: () => insertToolbarQuote(),
         onInsertCodeBlock: () => insertToolbarCodeBlock(),
         onInsertCheckbox: () => insertSlashCheckbox(),
-        onInsertLink: () => requestWorkspaceLink()
+        onInsertLink: () => requestWorkspaceLink(),
+        onInsertImage: () => requestImageFile()
     });
+
+    function requestImageFile() {
+        const requestId = beginImageInsertionRequest();
+        vscode.postMessage({ type: 'requestImageFile', requestId });
+    }
 
     function getNodeElement(node) {
         if (!node) return null;
@@ -1736,6 +1753,7 @@ const {
         codeBlockManager.setThemeMode(settingsState.editorThemeMode);
         applyTocPanelWidth();
         syncToolbarBulletLabel();
+        toolbarManager.updateOverflowLayout();
         tocManager.setEnabled(settingsState.tocEnabled);
         if (shouldRefreshImagePolicy) {
             reapplyImageSecurityPolicy();

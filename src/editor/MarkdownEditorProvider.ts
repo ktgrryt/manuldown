@@ -50,6 +50,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     private static readonly maxCustomSlashTemplateBytes = 128 * 1024;
     private static readonly customSlashCommandCacheTtlMs = 2000;
     private static readonly maxImportedImageBytes = 20 * 1024 * 1024;
+    private static readonly imageInsertionRequestIdPattern = /^image-insert-\d{1,16}-\d{1,10}$/;
     private static readonly remoteImageTimeoutMs = 15_000;
     private static readonly maxInternalHeadingMarkerLength = 1024;
     private static readonly maxInternalListIndent = 1024;
@@ -60,6 +61,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     private currentListIndent = '  ';
     private webviewPanels = new Map<string, vscode.WebviewPanel>();
     private pendingImageSavePaths = new Set<string>();
+    private imagePickerOpen = false;
     private lastActivePanel: vscode.WebviewPanel | null = null;
     private customSlashCommandCache: { loadedAt: number; items: CustomSlashCommandTemplate[] } | null = null;
     private tocPanelWidthPx = MarkdownEditorProvider.defaultTocPanelWidthPx;
@@ -1557,6 +1559,13 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     case 'openImage':
                         // Open the image file in VSCode
                         await this.openImageFile(message.src, document);
+                        break;
+                    case 'requestImageFile':
+                        await this.pickImageForInsertion(
+                            document,
+                            webviewPanel.webview,
+                            typeof message.requestId === 'string' ? message.requestId : ''
+                        );
                         break;
                     case 'saveImage':
                         // Save the pasted image as a file
@@ -3542,6 +3551,57 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         }
     }
 
+    private async pickImageForInsertion(
+        document: vscode.TextDocument,
+        webview: vscode.Webview,
+        requestId: string
+    ): Promise<void> {
+        if (!MarkdownEditorProvider.imageInsertionRequestIdPattern.test(requestId)) {
+            return;
+        }
+        if (this.imagePickerOpen) {
+            void webview.postMessage({ type: 'imageInsertFailed', requestId });
+            return;
+        }
+
+        this.imagePickerOpen = true;
+        let inserted = false;
+        try {
+            const selected = await vscode.window.showOpenDialog({
+                title: 'Insert Image',
+                openLabel: 'Insert Image',
+                canSelectFiles: true,
+                canSelectFolders: false,
+                canSelectMany: false,
+                defaultUri: this.getDocumentDirectoryUri(document),
+                filters: {
+                    images: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'avif', 'ico', 'heic', 'heif', 'tif', 'tiff']
+                }
+            });
+            const imageUri = selected?.[0];
+            if (!imageUri) {
+                return;
+            }
+
+            const sourceStat = await vscode.workspace.fs.stat(imageUri);
+            this.assertImportedImageSize(sourceStat.size);
+            const bytes = await vscode.workspace.fs.readFile(imageUri);
+            await this.saveImageBytes(bytes, this.getImageMimeTypeFromPath(imageUri.path), document, webview, {
+                requestId,
+                altText: path.posix.parse(imageUri.path).name || 'image'
+            });
+            inserted = true;
+        } catch (error) {
+            const message = error instanceof ImageImportError ? error.message : 'Failed to insert selected image.';
+            void vscode.window.showErrorMessage(message);
+        } finally {
+            this.imagePickerOpen = false;
+            if (!inserted) {
+                void webview.postMessage({ type: 'imageInsertFailed', requestId });
+            }
+        }
+    }
+
     private async saveImageFromDataUrl(
         dataUrl: string,
         mimeType: string,
@@ -4295,26 +4355,26 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         <button class="toolbar-btn" data-command="strikethrough" title="Strikethrough">
             <s>S</s>
         </button>
+        <button class="toolbar-btn" data-command="inlinecode" title="Inline Code" aria-label="Inline Code">
+            &lt;/&gt;
+        </button>
         <div class="toolbar-separator"></div>
         <button class="toolbar-btn" data-command="h1" title="Heading 1">H1</button>
         <button class="toolbar-btn" data-command="h2" title="Heading 2">H2</button>
         <button class="toolbar-btn" data-command="h3" title="Heading 3">H3</button>
         <div class="toolbar-separator"></div>
-        <button class="toolbar-btn" data-command="ul" title="Bullet List">
-            ${settings.listDashStyle ? '– List' : '• List'}
+        <button class="toolbar-btn toolbar-btn-list" data-command="ul" title="${settings.listDashStyle ? 'Dash List' : 'Bullet List'}" aria-label="${settings.listDashStyle ? 'Dash List' : 'Bullet List'}">
+            ${settings.listDashStyle ? '–' : '•'}
         </button>
-        <button class="toolbar-btn" data-command="ol" title="Numbered List">
-            1. List
+        <button class="toolbar-btn toolbar-btn-list" data-command="ol" title="Numbered List" aria-label="Numbered List">
+            1.
         </button>
-        <button class="toolbar-btn" data-command="checkbox" title="Task List">
-            &#9745; List
+        <button class="toolbar-btn toolbar-btn-list" data-command="checkbox" title="Task List" aria-label="Task List">
+            &#9745;&#65038;
         </button>
         <div class="toolbar-separator"></div>
-        <button class="toolbar-btn" data-command="link" title="Insert Link (Cmd/Ctrl+K)">
-            Link
-        </button>
         <button class="toolbar-btn" data-command="quote" title="Quote">
-            &gt; Quote
+            Quote
         </button>
         <button class="toolbar-btn" data-command="codeblock" title="Insert Code Block">
             Code
@@ -4322,6 +4382,17 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         <button class="toolbar-btn" data-command="table" title="Insert Table">
             Table
         </button>
+        <div class="toolbar-separator"></div>
+        <button class="toolbar-btn" data-command="image" title="Insert Image">
+            Image
+        </button>
+        <button class="toolbar-btn" data-command="link" title="Insert Link (Cmd/Ctrl+K)">
+            Link
+        </button>
+        <button class="toolbar-btn toolbar-overflow-toggle" type="button" title="More tools" aria-label="More tools" aria-haspopup="menu" aria-expanded="false" aria-controls="toolbar-overflow-menu" hidden>
+            &hellip;
+        </button>
+        <div id="toolbar-overflow-menu" class="toolbar-overflow-menu" role="menu" aria-label="More tools" hidden></div>
     </div>
     <div class="editor-container" data-editor-content inert aria-hidden="true" aria-busy="true">
         <div id="editor-sync-warning" role="alert" hidden></div>

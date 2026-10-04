@@ -704,8 +704,8 @@ export class DOMUtils {
                 // 内容が空の場合
                 if (code.getAttribute('data-is-new') === 'true') {
                     // 新規作成されたばかりの場合は保持する（カーソル配置用）
-                    if (rawText !== '' || code.childNodes.length !== 1) {
-                        code.textContent = '';
+                    if (rawText !== '\u200B' || code.childNodes.length !== 1) {
+                        code.textContent = '\u200B';
                     }
                 } else {
                     // 空で新規作成でない場合は削除

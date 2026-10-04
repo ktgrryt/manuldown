@@ -39,10 +39,14 @@ ManulDown is a VSCode extension that lets you edit Markdown files in a WYSIWYG e
 
 - **B**: Bold
 - **I**: Italic
+- **&lt;/&gt;**: Toggle inline code on selected text. With no selection, insert an inline code span to type in, or remove code formatting when the caret is inside one.
 - **H1, H2, H3**: Heading levels
-- **• List**: Unordered list
-- **1\. List**: Ordered list
+- **• / 1. / ☑**: Unordered list, ordered list, and task list. Hover over each button to see its name.
 - **Link**: Open the inline link field for a URL, an absolute workspace path, or workspace file search
+- **Code**: Insert a code block
+- **Image**: Choose an image file to copy into the document's image folder and insert at the original selection. Image and Link follow the other buttons in the left-aligned toolbar.
+
+When the editor is narrow, buttons that do not fit are available in the **…** menu. Widening the editor returns them to the toolbar. You can navigate the menu with the arrow keys and close it with Escape.
 
 Select text and use the Link button, `/link`, `Cmd+K`, or `Ctrl+K` to open the same inline link popover used for existing links. Paste an HTTP, HTTPS, or `mailto:` URL directly, paste an absolute path or an explicit `./` / `../` path to an existing file in the current workspace, or type at least two characters such as `test3` to see matching workspace files below the field. Choosing a suggestion fills the field with its relative path; press **Apply** or Enter to confirm it. Absolute paths are stored as relative Markdown links.
 
