@@ -185,6 +185,8 @@ function createDomUtils(editor) {
     return {
         getParentElement,
         getTextNodes: collectTextNodes,
+        getCaretAnchorOffset: node => node?.mdwCaretAnchor?.text === node?.textContent
+            ? node.mdwCaretAnchor.offset : -1,
         getFirstTextNode: (element) => collectTextNodes(element)[0] || null,
         getLastTextNode: (element) => collectTextNodes(element).at(-1) || null,
         getNextTextNode: (node) => {
@@ -268,6 +270,7 @@ function describeCaret(fixture) {
     const range = fixture.selection.getRangeAt(0);
     const node = range.startContainer;
     const offset = range.startOffset;
+    const boundary = fixture.manager._getInlineCodeBoundaryElement(fixture.code);
     if (fixture.code.contains(node)) {
         const textBeforeCaret = node === fixture.code
             ? Array.from(fixture.code.childNodes || [])
@@ -281,10 +284,10 @@ function describeCaret(fixture) {
         return `code:${logicalOffset}`;
     }
     if (node.nodeType === 3 && node.data.replace(/[\u200B\u2060\uFEFF]/g, '') === '') {
-        if (node.nextSibling === fixture.code) {
+        if (node.nextSibling === boundary) {
             return 'outside-left';
         }
-        if (node.previousSibling === fixture.code) {
+        if (node.previousSibling === boundary) {
             return 'outside-right';
         }
     }
@@ -295,11 +298,11 @@ function describeCaret(fixture) {
             trailingBoundaryStart--;
         }
         const nextSibling = node.nextSibling;
-        const inlineCodeAfterBoundary = nextSibling === fixture.code || (
+        const inlineCodeAfterBoundary = nextSibling === boundary || (
             nextSibling &&
             nextSibling.nodeType === 3 &&
             nextSibling.data.replace(/[\u200B\u2060\uFEFF]/g, '') === '' &&
-            nextSibling.nextSibling === fixture.code
+            nextSibling.nextSibling === boundary
         );
         if (inlineCodeAfterBoundary && offset >= trailingBoundaryStart) {
             return 'outside-left';
@@ -470,7 +473,7 @@ test('clicks beside inline code are corrected on mouseup for table cells and gap
     const tableRoute = editorSource.indexOf('if (tableManager.handleMouseDown(e)) {', mouseDown);
     const gapRoute = editorSource.indexOf('if (!e.shiftKey && isEditorGapClick) {', mouseDown);
     const mouseUp = editorSource.indexOf("document.addEventListener('mouseup', (e) => {", mouseDown);
-    const applyClick = editorSource.indexOf('placeCaretOutsideInlineCodeAfterClick(', mouseUp);
+    const applyClick = editorSource.indexOf('placeCaretAtInlineCodeAfterClick(', mouseUp);
 
     assert.notEqual(mouseDown, -1);
     assert.notEqual(recordClick, -1);
@@ -756,3 +759,173 @@ test('left arrow reverses through both sides of each inline-code boundary', asyn
         fixture.restoreGlobals();
     }
 });
+
+for (const codeText of ['', '\u200B']) {
+    test(`arrows cross an empty inline code in both directions (${JSON.stringify(codeText)})`, async () => {
+        const fixture = await createInlineCodeFixture({ codeText });
+        try {
+            if (codeText) {
+                fixture.code.setAttribute('data-is-new', 'true');
+                fixture.code.firstChild.mdwCaretAnchor = codeText;
+            }
+            const forward = [describeCaret(fixture)];
+            for (let i = 0; i < 4; i++) {
+                assert.equal(fixture.manager.moveCursorForward(), true);
+                forward.push(describeCaret(fixture));
+            }
+            assert.deepEqual(forward, [
+                'a:0', 'outside-left', 'code:0', 'outside-right', 'd:1',
+            ]);
+
+            const backward = [describeCaret(fixture)];
+            for (let i = 0; i < 4; i++) {
+                assert.equal(fixture.manager.moveCursorBackward(), true);
+                backward.push(describeCaret(fixture));
+            }
+            assert.deepEqual(backward, forward.toReversed());
+        } finally {
+            fixture.restoreGlobals();
+        }
+    });
+
+    test(`left arrow enters an empty inline code before visiting the preceding text (${JSON.stringify(codeText)})`, async () => {
+        const fixture = await createInlineCodeFixture({ codeText });
+        try {
+            const endRange = new TestRange();
+            endRange.setStart(fixture.paragraph.lastChild, 1);
+            endRange.collapse(true);
+            fixture.selection.removeAllRanges();
+            fixture.selection.addRange(endRange);
+
+            const positions = [describeCaret(fixture)];
+            for (let i = 0; i < 4; i++) {
+                assert.equal(fixture.manager.moveCursorBackward(), true);
+                positions.push(describeCaret(fixture));
+            }
+            assert.deepEqual(positions, [
+                'd:1', 'outside-right', 'code:0', 'outside-left', 'a:0',
+            ]);
+        } finally {
+            fixture.restoreGlobals();
+        }
+    });
+
+    test(`an empty code-only line keeps one inside position between its outside edges (${JSON.stringify(codeText)})`, async () => {
+        const fixture = await createInlineCodeFixture({ before: '', codeText, after: '' });
+        try {
+            fixture.manager._placeCursorBeforeInlineCodeElement(fixture.code, fixture.selection);
+            const positions = [describeCaret(fixture)];
+            for (let i = 0; i < 2; i++) {
+                assert.equal(fixture.manager.moveCursorForward(), true);
+                positions.push(describeCaret(fixture));
+            }
+            assert.deepEqual(positions, ['outside-left', 'code:0', 'outside-right']);
+            for (let i = 0; i < 2; i++) {
+                assert.equal(fixture.manager.moveCursorBackward(), true);
+                assert.equal(describeCaret(fixture), positions[1 - i]);
+            }
+        } finally {
+            fixture.restoreGlobals();
+        }
+    });
+}
+
+test('first-line arrows use custom navigation for the step reaching an inline-code boundary', async () => {
+    const fixture = await createInlineCodeFixture({ before: 'abc', codeText: '', after: 'def' });
+    try {
+        const start = editorSource.indexOf('    function isCaretAdjacentToInlineCode(');
+        const end = editorSource.indexOf('    function moveVerticallyAcrossBlockImages(', start);
+        const shouldUseNativeArrowForTopLine = new Function('editor', 'domUtils', 'cursorManager', `
+            ${editorSource.slice(start, end)}
+            const isInlineCodeNode = node => node?.tagName === 'CODE';
+            const isCursorOnCheckbox = () => false;
+            const isHRSelected = () => false;
+            const getTopLevelBlock = () => editor.firstChild;
+            const isAtEscapedMarkdownLineHead = () => false;
+            const isCaretNearBlockTop = () => true;
+            const getPreviousTopLevelNavigableSibling = () => null;
+            const isRangeOnFirstLogicalLineInTopLevelNode = () => true;
+            return shouldUseNativeArrowForTopLine;
+        `)(fixture.editor, createDomUtils(fixture.editor), fixture.manager);
+
+        for (const [node, offset, key, expected] of [
+            [fixture.paragraph.firstChild, 2, 'ArrowRight', false],
+            [fixture.paragraph.lastChild, 1, 'ArrowLeft', false],
+            [fixture.paragraph.firstChild, 0, 'ArrowRight', true],
+            [fixture.paragraph.lastChild, 2, 'ArrowLeft', true],
+        ]) {
+            const range = new TestRange();
+            range.setStart(node, offset);
+            range.collapse(true);
+            fixture.selection.removeAllRanges();
+            fixture.selection.addRange(range);
+            assert.equal(shouldUseNativeArrowForTopLine({ key }), expected);
+        }
+    } finally {
+        fixture.restoreGlobals();
+    }
+});
+
+test('inline-code arrows move by whole graphemes, including emoji, accents and joined emoji', async () => {
+    const codeText = '🙂e\u0301👨‍👩‍👧‍👦';
+    const fixture = await createInlineCodeFixture({ codeText });
+    try {
+        const expected = ['a:0', 'outside-left', 'code:0', 'code:2', 'code:4', `code:${codeText.length}`, 'outside-right', 'd:1'];
+        const positions = [describeCaret(fixture)];
+        for (let i = 1; i < expected.length; i++) {
+            assert.equal(fixture.manager.moveCursorForward(), true);
+            positions.push(describeCaret(fixture));
+        }
+        assert.deepEqual(positions, expected);
+        for (const position of expected.slice(0, -1).reverse()) {
+            assert.equal(fixture.manager.moveCursorBackward(), true);
+            assert.equal(describeCaret(fixture), position);
+        }
+    } finally {
+        fixture.restoreGlobals();
+    }
+});
+
+for (const tag of ['strong', 'em', 'a']) {
+    test(`code inside ${tag} retains every boundary in both directions`, async () => {
+        const fixture = await createInlineCodeFixture();
+        try {
+            const wrapper = document.createElement(tag);
+            fixture.paragraph.replaceChild(wrapper, fixture.code);
+            wrapper.appendChild(fixture.code);
+            const expected = ['a:0', 'outside-left', 'code:0', 'code:1', 'code:2', 'outside-right', 'd:1'];
+            const positions = [describeCaret(fixture)];
+            for (let i = 1; i < expected.length; i++) {
+                assert.equal(fixture.manager.moveCursorForward(), true);
+                positions.push(describeCaret(fixture));
+            }
+            assert.deepEqual(positions, expected);
+            for (const position of expected.slice(0, -1).reverse()) {
+                assert.equal(fixture.manager.moveCursorBackward(), true);
+                assert.equal(describeCaret(fixture), position);
+            }
+        } finally {
+            fixture.restoreGlobals();
+        }
+    });
+}
+
+for (const direction of ['forward', 'backward']) {
+    test(`${direction} arrow collapses selected code at the selection edge before moving`, async () => {
+        const fixture = await createInlineCodeFixture();
+        try {
+            const range = new TestRange();
+            range.setStart(fixture.code.firstChild, 0);
+            range.setEnd(fixture.code.firstChild, 2);
+            fixture.selection.removeAllRanges();
+            fixture.selection.addRange(range);
+            const move = direction === 'forward' ? 'moveCursorForward' : 'moveCursorBackward';
+            assert.equal(fixture.manager[move](), true);
+            assert.equal(describeCaret(fixture), direction === 'forward' ? 'code:2' : 'code:0');
+            assert.equal(fixture.manager[move](), true);
+            assert.equal(describeCaret(fixture), direction === 'forward' ? 'outside-right' : 'outside-left');
+        } finally {
+            fixture.restoreGlobals();
+        }
+    });
+}

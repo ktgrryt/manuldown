@@ -553,3 +553,177 @@ test('right arrow into a cell starting with inline code falls back to the cell s
         harness.restoreGlobals();
     }
 });
+
+async function createCellDeletionHarness() {
+    const f = await createInlineCodeCellHarness();
+    const cleared = [];
+    let checkpoints = 0;
+    const manager = f.manager;
+    manager._isMac = true;
+    manager._normalizeStructureSelection = () => null;
+    manager._isTableEmpty = () => false;
+    manager._getEdgeFromSelection = () => null;
+    manager._syncSelectionHandleContextFromSelection = () => {};
+    manager._clearCellContent = cell => { cleared.push(cell); };
+    manager.stateManager = { saveState: () => checkpoints++ };
+    manager.notifyChange = null;
+    manager.selectedCells = [];
+    const selectCells = cells => {
+        manager.selectedCells = cells;
+        cells.forEach(cell => cell.classList.add('md-table-cell-selected'));
+    };
+    return { ...f, selectCells, cleared, get checkpoints() { return checkpoints; } };
+}
+
+for (const [key, ctrlKey] of [['Backspace', false], ['Delete', false], ['h', true]]) {
+    test(`${key} after clicking cell text edits at the caret instead of clearing the whole cell`, async () => {
+        const f = await createCellDeletionHarness();
+        try {
+            const text = f.code.firstChild;
+            const range = f.placeCaret(text, 1);
+            range.setEnd(text, 1);
+            let prevented = false;
+            const e = { key, ctrlKey, preventDefault: () => { prevented = true; } };
+            assert.equal(f.manager.handleBackspaceKeydown(e), false);
+            assert.equal(f.getRange(), range);
+            assert.equal(f.code.textContent, 'ab');
+            assert.equal(prevented, false);
+            assert.deepEqual(f.cleared, []);
+            assert.deepEqual(f.manager.selectedCells, []);
+            assert.equal(f.checkpoints, 0);
+        } finally {
+            f.restoreGlobals();
+        }
+    });
+}
+
+test('Delete preserves native text selection without a cell highlight', async () => {
+    const f = await createCellDeletionHarness();
+    try {
+        const text = f.code.firstChild;
+        const range = f.placeCaret(text, 0);
+        range.setEnd(text, 1);
+        range.collapsed = false;
+        assert.equal(f.manager.handleBackspaceKeydown({ key: 'Delete', preventDefault: () => assert.fail('native text deletion') }), false);
+        assert.equal(f.getRange(), range);
+        assert.deepEqual(f.cleared, []);
+    } finally {
+        f.restoreGlobals();
+    }
+});
+
+for (const multiple of [false, true]) {
+    test(`Backspace clears an explicit ${multiple ? 'multiple-cell' : 'cell-only'} selection`, async () => {
+        const f = await createCellDeletionHarness();
+        try {
+            const cells = multiple ? [f.beforeCell, f.codeCell] : [f.codeCell];
+            const range = f.placeCaret(f.code.firstChild, 1);
+            range.setEnd(f.code.firstChild, 1);
+            f.selectCells(cells);
+            let prevented = false;
+            assert.equal(f.manager.handleBackspaceKeydown({ key: 'Backspace', preventDefault: () => { prevented = true; } }), true);
+            assert.equal(prevented, true);
+            assert.deepEqual(f.cleared, cells);
+            assert.equal(f.checkpoints, 1);
+            assert.deepEqual(f.manager.selectedCells, []);
+        } finally {
+            f.restoreGlobals();
+        }
+    });
+}
+
+async function createCellClickHarness() {
+    const f = await createCellDeletionHarness();
+    const manager = f.manager;
+    const table = f.codeCell.closest('table');
+    Object.defineProperty(table, 'rows', { value: [{ cells: [f.beforeCell, f.codeCell, f.afterCell] }] });
+    manager._getStructureHandleInfoFromTarget = () => null;
+    manager.hasStructureSelection = () => false;
+    manager.clearStructureSelection = () => {};
+    manager._clearInsertHover = () => {};
+    manager._getEdgeFromTarget = () => null;
+    manager._getCellFromPoint = () => manager.pointerCell;
+    manager._setCursorToCellStart = cell => {
+        const text = cell.querySelector('code')?.firstChild || cell.firstChild;
+        const range = f.placeCaret(text, 0);
+        range.setEnd(text, 0);
+    };
+    return {
+        ...f, get checkpoints() { return f.checkpoints; },
+        click(cell, shiftKey = false) {
+            manager.pointerCell = cell;
+            let prevented = false;
+            manager.handleMouseDown({ button: 0, target: cell, shiftKey, clientX: 0, clientY: 0,
+                preventDefault: () => { prevented = true; } });
+            manager._handleMouseUp({ button: 0 });
+            return prevented;
+        },
+    };
+}
+
+test('ordinary cell clicks clear prior cell selection and preserve the native text caret', async () => {
+    const f = await createCellClickHarness();
+    try {
+        const range = f.placeCaret(f.code.firstChild, 1);
+        range.setEnd(f.code.firstChild, 1);
+        f.selectCells([f.beforeCell, f.codeCell]);
+        assert.equal(f.click(f.codeCell), false);
+        assert.equal(f.getRange(), range);
+        assert.equal(f.manager.hasCellSelection(), false);
+        assert.equal(f.codeCell.classList.contains('md-table-cell-selected'), false);
+        assert.equal(f.beforeCell.classList.contains('md-table-cell-selected'), false);
+        assert.equal(f.manager.isMouseDown, false);
+    } finally {
+        f.restoreGlobals();
+    }
+});
+
+test('Shift-click selects exactly the clicked cell and Backspace clears its entire contents', async () => {
+    const f = await createCellClickHarness();
+    try {
+        assert.equal(f.click(f.codeCell, true), true);
+        assert.deepEqual(f.manager.selectedCells, [f.codeCell]);
+        assert.equal(f.codeCell.classList.contains('md-table-cell-selected'), true);
+        let prevented = false;
+        assert.equal(f.manager.handleBackspaceKeydown({ key: 'Backspace', preventDefault: () => { prevented = true; } }), true);
+        assert.equal(prevented, true);
+        assert.deepEqual(f.cleared, [f.codeCell]);
+        assert.equal(f.checkpoints, 1);
+        assert.equal(f.manager.hasCellSelection(), false);
+    } finally {
+        f.restoreGlobals();
+    }
+});
+
+test('an ordinary click after Shift-click returns to text editing without a cell highlight', async () => {
+    const f = await createCellClickHarness();
+    try {
+        f.click(f.codeCell, true);
+        const range = f.placeCaret(f.afterCell.firstChild, 1);
+        range.setEnd(f.afterCell.firstChild, 1);
+        assert.equal(f.click(f.afterCell), false);
+        assert.equal(f.getRange(), range);
+        assert.equal(f.manager.hasCellSelection(), false);
+        assert.equal(f.codeCell.classList.contains('md-table-cell-selected'), false);
+    } finally {
+        f.restoreGlobals();
+    }
+});
+
+test('dragging from a normally clicked cell across cells still selects a cell range', async () => {
+    const f = await createCellClickHarness();
+    try {
+        f.manager.pointerCell = f.beforeCell;
+        f.manager.handleMouseDown({ button: 0, target: f.beforeCell, clientX: 0, clientY: 0,
+            preventDefault: () => assert.fail('ordinary click stays native') });
+        assert.equal(f.manager.hasCellSelection(), false);
+        f.manager.pointerCell = f.afterCell;
+        f.manager._handleDragMove({ clientX: 100, clientY: 0 });
+        assert.deepEqual(f.manager.selectedCells, [f.beforeCell, f.codeCell, f.afterCell]);
+        f.manager._handleMouseUp({ button: 0 });
+        assert.equal(f.manager.hasCellSelection(), true);
+        assert.equal(f.getRange().startContainer, f.afterCell.firstChild);
+    } finally {
+        f.restoreGlobals();
+    }
+});

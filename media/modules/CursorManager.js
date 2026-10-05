@@ -12,6 +12,8 @@
 const INLINE_CODE_LEFT_CARET_ANCHOR = '\uFEFF';
 const INLINE_CODE_RIGHT_CARET_ANCHOR = '\u200B';
 const INLINE_CODE_LEFT_CARET_MARKER_ATTRIBUTE = 'data-inline-code-left-caret-anchor';
+const INLINE_CODE_WRAPPER_TAGS = new Set(['A', 'STRONG', 'B', 'EM', 'I', 'DEL', 'S', 'SPAN', 'U', 'MARK']);
+const inlineCodeGraphemeSegmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
 export function shouldRouteHorizontalArrowAfterComposition(event, compositionActive = false) {
     return !!(
@@ -41,6 +43,23 @@ export class CursorManager {
         range.collapse(true);
         selection.removeAllRanges();
         selection.addRange(range);
+    }
+
+    _collapseTextSelectionForNavigation(selection, direction) {
+        if (selection.isCollapsed) return false;
+        const range = selection.getRangeAt(0);
+        if (this._getSelectedImageNode(range)) return false;
+        const caret = range.cloneRange();
+        caret.collapse(direction === 'backward');
+        selection.removeAllRanges();
+        selection.addRange(caret);
+        this.clearInlineCodeBoundaryState();
+        const code = this.domUtils.getParentElement(caret.startContainer, 'CODE');
+        if (code && !this.domUtils.getParentElement(code, 'PRE') &&
+            this._getInlineCodeCursorInfo(caret, code)?.offset === 0) {
+            this._placeCursorInsideInlineCodeStart(code, selection);
+        }
+        return true;
     }
 
     _isRangeAtCodeBlockEnd(codeBlock, range) {
@@ -284,10 +303,7 @@ export class CursorManager {
         }
 
         const isInlineCodeElement = (candidate) => {
-            if (!candidate || candidate.nodeType !== Node.ELEMENT_NODE || candidate.tagName !== 'CODE') {
-                return false;
-            }
-            return !this.domUtils.getParentElement(candidate, 'PRE');
+            return !!this._getLeadingInlineCodeElement(candidate) || !!this._getTrailingInlineCodeElement(candidate);
         };
 
         return isInlineCodeElement(node.previousSibling) || isInlineCodeElement(node.nextSibling);
@@ -609,9 +625,11 @@ export class CursorManager {
     }
 
     _getLeadingInlineCodeElement(block) {
-        if (!block || block.nodeType !== Node.ELEMENT_NODE || !this.domUtils.isBlockElement(block)) {
+        if (!block || block.nodeType !== Node.ELEMENT_NODE) {
             return null;
         }
+        if (block.tagName === 'CODE') return this.domUtils.getParentElement(block, 'PRE') ? null : block;
+        if (!this.domUtils.isBlockElement(block) && !INLINE_CODE_WRAPPER_TAGS.has(block.tagName)) return null;
         const children = Array.from(block.childNodes || []);
         for (const child of children) {
             if (!child) continue;
@@ -634,6 +652,7 @@ export class CursorManager {
             if (child.tagName === 'CODE' && !this.domUtils.getParentElement(child, 'PRE')) {
                 return child;
             }
+            if (INLINE_CODE_WRAPPER_TAGS.has(child.tagName)) return this._getLeadingInlineCodeElement(child);
             return null;
         }
         return null;
@@ -657,8 +676,9 @@ export class CursorManager {
         if (!code.parentElement) {
             return false;
         }
-        const parent = code.parentElement;
-        const prevSibling = code.previousSibling;
+        const boundaryElement = this._getInlineCodeBoundaryElement(code);
+        const parent = boundaryElement.parentElement;
+        const prevSibling = boundaryElement.previousSibling;
 
         // When visible text is immediately before inline code, its end already
         // *is* the outside-left caret requested by the editing model. Adding a
@@ -705,7 +725,7 @@ export class CursorManager {
         } else {
             anchor = document.createTextNode(INLINE_CODE_LEFT_CARET_ANCHOR);
             anchor.mdwCaretAnchor = { character: INLINE_CODE_LEFT_CARET_ANCHOR, text: INLINE_CODE_LEFT_CARET_ANCHOR, offset: 0 };
-            parent.insertBefore(anchor, code);
+            parent.insertBefore(anchor, boundaryElement);
         }
         this._placeCollapsedCaret(selection, anchor, (anchor.textContent || '').length);
         this._setInlineCodeLeftBoundaryState(code, 'outside-left');
@@ -713,9 +733,11 @@ export class CursorManager {
     }
 
     _getTrailingInlineCodeElement(block) {
-        if (!block || block.nodeType !== Node.ELEMENT_NODE || !this.domUtils.isBlockElement(block)) {
+        if (!block || block.nodeType !== Node.ELEMENT_NODE) {
             return null;
         }
+        if (block.tagName === 'CODE') return this.domUtils.getParentElement(block, 'PRE') ? null : block;
+        if (!this.domUtils.isBlockElement(block) && !INLINE_CODE_WRAPPER_TAGS.has(block.tagName)) return null;
         const children = Array.from(block.childNodes || []);
         for (let i = children.length - 1; i >= 0; i--) {
             const child = children[i];
@@ -739,6 +761,7 @@ export class CursorManager {
             if (child.tagName === 'CODE' && !this.domUtils.getParentElement(child, 'PRE')) {
                 return child;
             }
+            if (INLINE_CODE_WRAPPER_TAGS.has(child.tagName)) return this._getTrailingInlineCodeElement(child);
             return null;
         }
         return null;
@@ -749,16 +772,35 @@ export class CursorManager {
             return false;
         }
         const code = this._getTrailingInlineCodeElement(block);
+        return this._placeCursorAfterInlineCodeElement(code, selection);
+    }
+
+    _getInlineCodeBoundaryElement(code) {
+        let boundary = code;
+        while (boundary?.parentElement && INLINE_CODE_WRAPPER_TAGS.has(boundary.parentElement.tagName)) {
+            const parent = boundary.parentElement;
+            if (!Array.from(parent.childNodes).every(node => node === boundary ||
+                (node.nodeType === Node.TEXT_NODE && (node.mdwCaretAnchor || node.textContent === '') &&
+                    (node.textContent || '').replace(/[\u200B\u2060\uFEFF]/g, '') === '') ||
+                this._isNavigationExcludedElement(node))) break;
+            boundary = parent;
+        }
+        return boundary;
+    }
+
+    _placeCursorAfterInlineCodeElement(code, selection) {
+        if (!selection) return false;
         if (!code || !code.parentElement) {
             return false;
         }
-        const parent = code.parentElement;
+        const boundaryElement = this._getInlineCodeBoundaryElement(code);
+        const parent = boundaryElement.parentElement;
         const hasOnlyCaretPlaceholders = (text) => {
             return (text || '').replace(/[\u200B\u2060\uFEFF\u00A0\s]/g, '') === '';
         };
 
         let anchor = null;
-        const nextSibling = code.nextSibling;
+        const nextSibling = boundaryElement.nextSibling;
         if (nextSibling &&
             nextSibling.nodeType === Node.TEXT_NODE &&
             (nextSibling.mdwCaretAnchor || nextSibling.textContent === '') &&
@@ -779,6 +821,7 @@ export class CursorManager {
         }
 
         this._placeCollapsedCaret(selection, anchor, (anchor.textContent || '').length);
+        this.clearInlineCodeBoundaryState();
         return true;
     }
 
@@ -1580,11 +1623,25 @@ export class CursorManager {
             return null;
         }
         const text = startPos.node.textContent || '';
-        const targetOffset = Math.min(startPos.offset + 1, text.length);
+        // Empty code has a single inside caret. Its editable placeholder is not
+        // a character to advance through before leaving the code.
+        if (this._getFirstNonZwspOffset(text) === null) {
+            return null;
+        }
+        const targetOffset = this._getAdjacentInlineCodeTextOffset(text, startPos.offset, 'forward');
         return {
             node: startPos.node,
             offset: targetOffset
         };
+    }
+
+    _getAdjacentInlineCodeTextOffset(text, offset, direction) {
+        for (const { index, segment } of inlineCodeGraphemeSegmenter.segment(text)) {
+            const end = index + segment.length;
+            if (direction === 'forward' && end > offset) return end;
+            if (direction === 'backward' && end >= offset) return index;
+        }
+        return direction === 'forward' ? text.length : 0;
     }
 
     _placeCursorInsideInlineCodeStart(code, selection) {
@@ -1621,15 +1678,32 @@ export class CursorManager {
             firstTextNode = document.createTextNode(visibleCodeText);
             code.appendChild(firstTextNode);
         }
+        if (firstTextNode.textContent === '') {
+            // An empty Text node cannot keep native input inside inline code.
+            // Restore the editable anchor when returning after another block edit.
+            firstTextNode.textContent = INLINE_CODE_RIGHT_CARET_ANCHOR;
+            firstTextNode.mdwCaretAnchor = {
+                character: INLINE_CODE_RIGHT_CARET_ANCHOR,
+                text: INLINE_CODE_RIGHT_CARET_ANCHOR,
+                offset: 0
+            };
+        }
         if (code.firstChild !== marker) {
             code.insertBefore(marker, code.firstChild || null);
         }
 
         const range = document.createRange();
-        // The real child boundary after an atomic marker remains inside <code> in
-        // Chromium. Unlike a default-ignorable FEFF text offset, WebView cannot
-        // lift this boundary to the visually identical outside of the element.
-        range.setStart(code, 1);
+        const anchorOffset = this.domUtils.getCaretAnchorOffset?.(firstTextNode) ?? -1;
+        if (anchorOffset === 0 && firstTextNode.textContent.length === 1) {
+            // Start empty-code input after its editable anchor. Starting before
+            // it can make Chromium abandon the first IME composition when text
+            // precedes the code, leaving the uncommitted text beside the commit.
+            range.setStart(firstTextNode, 1);
+        } else {
+            // The atomic child boundary keeps the left edge of nonempty code
+            // inside the code instead of lifting it to the element's outside.
+            range.setStart(code, 1);
+        }
         range.collapse(true);
         selection.removeAllRanges();
         selection.addRange(range);
@@ -1680,12 +1754,13 @@ export class CursorManager {
 
         const container = range.startContainer;
         const offset = range.startOffset;
+        const boundaryElement = this._getInlineCodeBoundaryElement(code);
         if (container === code && offset === 0) {
             return false;
         }
 
         if (container && container.nodeType === Node.TEXT_NODE) {
-            if (this._isInlineCodeBoundaryPlaceholder(container) && container.nextSibling === code) {
+            if (this._isInlineCodeBoundaryPlaceholder(container) && container.nextSibling === boundaryElement) {
                 return true;
             }
             const text = container.textContent || '';
@@ -1694,9 +1769,9 @@ export class CursorManager {
                 nextSibling &&
                 nextSibling.nodeType === Node.TEXT_NODE &&
                 this._isInlineCodeBoundaryPlaceholder(nextSibling) &&
-                nextSibling.nextSibling === code
+                nextSibling.nextSibling === boundaryElement
             ) ? nextSibling : null;
-            if (container.nextSibling === code) {
+            if (container.nextSibling === boundaryElement) {
                 // If the caret is inside trailing boundary chars (ZWSP/WJ/FEFF) just before code,
                 // treat it as outside-left so the logical boundary state can enter inside-left reliably.
                 let trailingBoundaryStart = text.length;
@@ -1726,7 +1801,7 @@ export class CursorManager {
         }
 
         const candidate = container.childNodes[offset] || null;
-        if (candidate === code) {
+        if (candidate === boundaryElement) {
             return true;
         }
         if (candidate &&
@@ -1739,7 +1814,7 @@ export class CursorManager {
         if (candidate &&
             candidate.nodeType === Node.TEXT_NODE &&
             this._isInlineCodeBoundaryPlaceholder(candidate) &&
-            candidate.nextSibling === code) {
+            candidate.nextSibling === boundaryElement) {
             return true;
         }
         return false;
@@ -1997,7 +2072,8 @@ export class CursorManager {
             if (candidate.nodeType === Node.ELEMENT_NODE && candidate.tagName === 'CODE') {
                 codeElement = candidate;
             } else {
-                codeElement = this.domUtils.getParentElement(candidate, 'CODE');
+                codeElement = this._getTrailingInlineCodeElement(candidate) ||
+                    this.domUtils.getParentElement(candidate, 'CODE');
             }
         }
 
@@ -7307,6 +7383,7 @@ export class CursorManager {
             this._clearForwardImageStep();
             return true;
         }
+        if (this._collapseTextSelectionForNavigation(selection, 'forward')) return true;
         let range = selection.getRangeAt(0);
         let node = range.startContainer;
         let offset = range.startOffset;
@@ -7445,9 +7522,8 @@ export class CursorManager {
                 const nextSibling = currentContainer.nextSibling;
                 if (nextSibling &&
                     nextSibling.nodeType === Node.ELEMENT_NODE &&
-                    nextSibling.tagName === 'CODE' &&
-                    !this.domUtils.getParentElement(nextSibling, 'PRE')) {
-                    targetInlineCode = nextSibling;
+                    this._getLeadingInlineCodeElement(nextSibling)) {
+                    targetInlineCode = this._getLeadingInlineCodeElement(nextSibling);
                 } else if (
                     nextSibling &&
                     nextSibling.nodeType === Node.TEXT_NODE &&
@@ -7456,9 +7532,8 @@ export class CursorManager {
                     const nextCode = nextSibling.nextSibling;
                     if (nextCode &&
                         nextCode.nodeType === Node.ELEMENT_NODE &&
-                        nextCode.tagName === 'CODE' &&
-                        !this.domUtils.getParentElement(nextCode, 'PRE')) {
-                        targetInlineCode = nextCode;
+                        this._getLeadingInlineCodeElement(nextCode)) {
+                        targetInlineCode = this._getLeadingInlineCodeElement(nextCode);
                     }
                 }
             } else if (currentContainer && currentContainer.nodeType === Node.ELEMENT_NODE) {
@@ -7573,8 +7648,7 @@ export class CursorManager {
             this._isInlineCodeBoundaryPlaceholder(node) &&
             node.previousSibling &&
             node.previousSibling.nodeType === Node.ELEMENT_NODE &&
-            node.previousSibling.tagName === 'CODE' &&
-            !this.domUtils.getParentElement(node.previousSibling, 'PRE')
+            this._getTrailingInlineCodeElement(node.previousSibling)
         );
         const nextNavigableSiblingFromPlaceholder = isInlineCodeOutsideRightPlaceholder
             ? this._getNextSiblingForNavigation(node)
@@ -7750,33 +7824,11 @@ export class CursorManager {
                 this._isRangeAtInlineCodeEnd(range, codeElement) ||
                 this._isRangeNearInlineCodeEnd(range, codeElement);
             if (atInlineCodeEnd) {
-                const parent = codeElement.parentElement;
-                if (!parent) return false;
-                const immediateNext = codeElement.nextSibling;
-                let placeholder = null;
-                if (immediateNext && immediateNext.nodeType === Node.TEXT_NODE) {
-                    const text = immediateNext.textContent || '';
-                    if ((immediateNext.mdwCaretAnchor || text === '') &&
-                        text.replace(/[\u200B\u2060\uFEFF]/g, '') === '') {
-                        placeholder = immediateNext;
-                    }
-                }
-                if (!placeholder) {
-                    placeholder = document.createTextNode(INLINE_CODE_RIGHT_CARET_ANCHOR);
-                    placeholder.mdwCaretAnchor = { character: INLINE_CODE_RIGHT_CARET_ANCHOR, text: INLINE_CODE_RIGHT_CARET_ANCHOR, offset: 0 };
-                    if (immediateNext) {
-                        parent.insertBefore(placeholder, immediateNext);
-                    } else {
-                        parent.appendChild(placeholder);
-                    }
-                } else if ((placeholder.textContent || '') !== INLINE_CODE_RIGHT_CARET_ANCHOR) {
-                    placeholder.textContent = INLINE_CODE_RIGHT_CARET_ANCHOR;
-                    placeholder.mdwCaretAnchor = { character: INLINE_CODE_RIGHT_CARET_ANCHOR, text: INLINE_CODE_RIGHT_CARET_ANCHOR, offset: 0 };
-                }
-                const fallbackRange = document.createRange();
-                fallbackRange.setStart(placeholder, placeholder.textContent.length);
-                fallbackRange.collapse(true);
-                applyRange(fallbackRange);
+                return this._placeCursorAfterInlineCodeElement(codeElement, selection);
+            }
+            if (node.nodeType === Node.TEXT_NODE) {
+                this._placeCollapsedCaret(selection, node,
+                    this._getAdjacentInlineCodeTextOffset(node.textContent || '', offset, 'forward'));
                 return true;
             }
         }
@@ -8186,6 +8238,7 @@ export class CursorManager {
             this._clearForwardImageStep();
             return true;
         }
+        if (this._collapseTextSelectionForNavigation(selection, 'backward')) return true;
         if (this._consumeInlineCodeLeftBoundaryBackward(selection)) {
             return true;
         }
@@ -8237,11 +8290,22 @@ export class CursorManager {
             this._placeCursorAtListItemLogicalEnd(listItem, selection);
         const moveToBlockEnd = (block) => this.placeCursorAtBlockEnd(block, selection);
         const setRangeToInlineCodeEnd = (targetRange, codeElement) => {
-            if (!targetRange || !codeElement || codeElement.nodeType !== Node.ELEMENT_NODE || codeElement.tagName !== 'CODE') {
-                return false;
-            }
+            if (!targetRange || !codeElement || codeElement.nodeType !== Node.ELEMENT_NODE) return false;
+            codeElement = this._getTrailingInlineCodeElement(codeElement);
+            if (!codeElement) return false;
             if (this.domUtils.getParentElement(codeElement, 'PRE')) {
                 return false;
+            }
+            // The start and end of empty code are the same editing position.
+            // Use the stable inside boundary even when no text node exists.
+            if ((codeElement.textContent || '').replace(/[\u200B\u2060\uFEFF]/g, '') === '') {
+                if (!this._placeCursorInsideInlineCodeStart(codeElement, selection)) {
+                    return false;
+                }
+                const insideRange = selection.getRangeAt(0);
+                targetRange.setStart(insideRange.startContainer, insideRange.startOffset);
+                targetRange.collapse(true);
+                return true;
             }
             const textNode = this.domUtils.getLastTextNode(codeElement);
             if (!textNode) {
@@ -8272,7 +8336,8 @@ export class CursorManager {
             if (this.domUtils.getParentElement(inlineCodeElement, 'PRE')) {
                 return false;
             }
-            const parent = inlineCodeElement.parentElement;
+            const boundaryElement = this._getInlineCodeBoundaryElement(inlineCodeElement);
+            const parent = boundaryElement.parentElement;
             if (!parent || textNode.parentNode !== parent) {
                 return false;
             }
@@ -8282,7 +8347,7 @@ export class CursorManager {
                 placeholder.nodeType === Node.TEXT_NODE &&
                 (placeholder.mdwCaretAnchor || placeholder.textContent === '') &&
                 this._isInlineCodeBoundaryPlaceholder(placeholder) &&
-                placeholder.previousSibling === inlineCodeElement)) {
+                placeholder.previousSibling === boundaryElement)) {
                 placeholder = document.createTextNode(INLINE_CODE_RIGHT_CARET_ANCHOR);
                 placeholder.mdwCaretAnchor = { character: INLINE_CODE_RIGHT_CARET_ANCHOR, text: INLINE_CODE_RIGHT_CARET_ANCHOR, offset: 0 };
                 parent.insertBefore(placeholder, textNode);
@@ -8307,13 +8372,7 @@ export class CursorManager {
                 this._isInlineCodeBoundaryPlaceholder(prev)) {
                 prev = prev.previousSibling;
             }
-            if (!prev ||
-                prev.nodeType !== Node.ELEMENT_NODE ||
-                prev.tagName !== 'CODE' ||
-                this.domUtils.getParentElement(prev, 'PRE')) {
-                return null;
-            }
-            return prev;
+            return this._getTrailingInlineCodeElement(prev);
         };
         const isTextOffsetAtLogicalStart = (textNode, targetOffset) => {
             if (!textNode || textNode.nodeType !== Node.TEXT_NODE) {
@@ -8392,6 +8451,19 @@ export class CursorManager {
                 if (this._placeCursorBeforeInlineCodeElement(codeElement, selection)) {
                     return true;
                 }
+            }
+            const textNode = node.nodeType === Node.TEXT_NODE ? node
+                : node === codeElement ? this.domUtils.getLastTextNode(codeElement) : null;
+            if (textNode) {
+                const text = textNode.textContent || '';
+                const fromOffset = node === textNode ? offset : text.length;
+                const targetOffset = this._getAdjacentInlineCodeTextOffset(text, fromOffset, 'backward');
+                const startOffset = this._getFirstNonZwspOffset(text) ?? 0;
+                if (targetOffset <= startOffset) {
+                    return this._placeCursorInsideInlineCodeStart(codeElement, selection);
+                }
+                this._placeCollapsedCaret(selection, textNode, targetOffset);
+                return true;
             }
         }
 

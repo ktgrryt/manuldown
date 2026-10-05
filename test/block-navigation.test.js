@@ -255,6 +255,77 @@ function loadEditorFunctions(fixture, names, stubs = {}) {
     );
 }
 
+test('vertical entry from a list establishes an editable caret inside an empty code-only line', async () => {
+    for (const codeContent of ['', '\u200B', '<span data-inline-code-left-caret-anchor="true" contenteditable="false"></span>']) {
+        for (const trailingBreak of ['', '<br>']) {
+            for (const landing of ['before-code', 'after-code', 'inside-code']) {
+                const fixture = await createFixture(
+                    `<p><code data-is-new="true">${codeContent}</code>${trailingBreak}</p><ul><li>item</li></ul>`
+                );
+                try {
+                    const code = fixture.editor.querySelector('code');
+                    if (code.firstChild?.nodeType === Node.TEXT_NODE) {
+                        code.firstChild.mdwCaretAnchor = '\u200B';
+                    }
+                    const beforeRange = fixture.placeCaret(fixture.editor.querySelector('li').firstChild, 1).cloneRange();
+                    if (landing === 'inside-code') {
+                        fixture.placeCaret(code, code.childNodes.length);
+                    } else {
+                        fixture.placeCaret(code.parentElement, landing === 'before-code' ? 0 : 1);
+                    }
+                    const navigation = loadEditorFunctions(fixture, ['normalizeVerticalEntryAtInlineCode']);
+                    assert.equal(navigation.normalizeVerticalEntryAtInlineCode(beforeRange), true);
+                    const range = fixture.selection.getRangeAt(0);
+                    assert.equal(range.startContainer, code.lastChild);
+                    assert.equal(range.startOffset, 1);
+                    assert.equal(code.lastChild.nodeType, Node.TEXT_NODE);
+                    assert.equal(code.lastChild.textContent, '\u200B');
+                    assert.equal(fixture.domUtils.getCaretAnchorOffset(code.lastChild), 0);
+                    assert.doesNotMatch(fixture.domUtils.getCleanedHTML(), /\u200B/);
+                } finally {
+                    fixture.restoreGlobals();
+                }
+            }
+        }
+    }
+});
+
+test('vertical inline-code normalization preserves nonempty code boundaries and unrelated caret positions', async () => {
+    for (const [html, landing, expected] of [
+        ['<p><code>value</code></p><ul><li>item</li></ul>', 'inside-code', true],
+        ['<p><code data-is-new="true"></code>after</p><ul><li>item</li></ul>', 'after-code', false],
+        ['<p><code data-is-new="true"></code><img src="image.png"></p><ul><li>item</li></ul>', 'after-code', false],
+        ['<p><code data-is-new="true"></code></p><ul><li>item</li></ul>', 'unchanged', false],
+        ['<pre><code></code></pre><ul><li>item</li></ul>', 'inside-code', false],
+    ]) {
+        const fixture = await createFixture(html);
+        try {
+            const code = fixture.editor.querySelector('code');
+            const beforeRange = fixture.placeCaret(fixture.editor.querySelector('li').firstChild, 1).cloneRange();
+            if (landing === 'inside-code') {
+                fixture.placeCaret(code, 0);
+            } else {
+                fixture.placeCaret(code.parentElement, 1);
+            }
+            const landedRange = fixture.selection.getRangeAt(0).cloneRange();
+            const navigation = loadEditorFunctions(fixture, ['normalizeVerticalEntryAtInlineCode']);
+            assert.equal(navigation.normalizeVerticalEntryAtInlineCode(
+                landing === 'unchanged' ? landedRange : beforeRange
+            ), expected, html);
+            const range = fixture.selection.getRangeAt(0);
+            if (expected) {
+                assert.equal(range.startContainer, code.previousSibling);
+                assert.equal(fixture.cursorManager._inlineCodeLeftBoundaryState?.zone, 'outside-left');
+            } else {
+                assert.equal(range.startContainer, landedRange.startContainer);
+                assert.equal(range.startOffset, landedRange.startOffset);
+            }
+        } finally {
+            fixture.restoreGlobals();
+        }
+    }
+});
+
 const CODE_BLOCK_NAVIGATION = [
     'enterCodeBlockFromAbove',
     'selectCodeBlockLanguageLabel',

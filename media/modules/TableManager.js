@@ -36,7 +36,6 @@ export class TableManager {
         this.isDragging = false;
         this.anchorCell = null;
         this.focusCell = null;
-        this.pendingCellSelectionToggle = null;
 
         this.clipboardMatrix = null;
 
@@ -296,7 +295,6 @@ export class TableManager {
 
     handleMouseDown(e) {
         if (e.button !== 0) return false;
-        this.pendingCellSelectionToggle = null;
 
         const structureHandleInfo = this._getStructureHandleInfoFromTarget(e.target);
         if (structureHandleInfo) {
@@ -434,23 +432,18 @@ export class TableManager {
         }
 
         this._clearInsertHover();
-        const wasSelectedCellClick = !e.shiftKey && cell.classList.contains('md-table-cell-selected');
-        if (wasSelectedCellClick) {
-            // Immediately clear existing selection to avoid a temporary single-cell highlight
-            // before mouseup toggles selection off.
-            this.clearCellSelection();
-            this.isMouseDown = true;
-            this.isDragging = false;
-            this.anchorCell = cell;
-            this.focusCell = cell;
-            this.pendingCellSelectionToggle = cell;
-            return true;
-        }
+        this.clearCellSelection();
         this.isMouseDown = true;
         this.isDragging = false;
         this.anchorCell = cell;
         this.focusCell = cell;
-        this.selectCellRange(cell, cell);
+        if (e.shiftKey) {
+            // Shift-click explicitly selects the cell; an ordinary click leaves
+            // native text placement and selection to the browser.
+            e.preventDefault();
+            this.selectCellRange(cell, cell);
+            this._setCursorToCellStart(cell);
+        }
         return true;
     }
 
@@ -1612,18 +1605,9 @@ export class TableManager {
         }
 
         const wasDragging = this.isDragging;
-        const shouldToggleCellSelectionOff = !!(this.pendingCellSelectionToggle && !wasDragging);
-        this.pendingCellSelectionToggle = null;
         if (this.isMouseDown) {
             this.isMouseDown = false;
             this.isDragging = false;
-        }
-        if (shouldToggleCellSelectionOff) {
-            this.clearCellSelection();
-            this.anchorCell = null;
-            this.focusCell = null;
-            setTimeout(() => this.editor.focus(), 0);
-            return;
         }
         if (this.hasCellSelection()) {
             const selectedCells = this.selectedCells && this.selectedCells.length
@@ -1639,21 +1623,10 @@ export class TableManager {
             } else if (selectedCount === 1) {
                 const targetCell = selectedCells[0] || this.focusCell || this.anchorCell;
                 const selection = window.getSelection();
-                const hasRangeSelectionInTargetCell = !!(
-                    selection &&
-                    selection.rangeCount &&
-                    !selection.isCollapsed &&
-                    targetCell &&
-                    targetCell.contains(selection.getRangeAt(0).startContainer) &&
-                    targetCell.contains(selection.getRangeAt(0).endContainer)
-                );
                 const hasCaretInTargetCell =
                     !!(selection && selection.rangeCount && selection.isCollapsed &&
                         targetCell && targetCell.contains(selection.getRangeAt(0).startContainer));
-                if (hasRangeSelectionInTargetCell) {
-                    // Prefer native text-range selection inside a cell over table-cell selection mode.
-                    this.clearCellSelection();
-                } else if (targetCell && !hasCaretInTargetCell) {
+                if (targetCell && !hasCaretInTargetCell) {
                     // Fallback only when browser did not keep the click position.
                     this._setCursorToCellStart(targetCell);
                 }

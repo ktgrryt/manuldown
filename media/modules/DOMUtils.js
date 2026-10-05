@@ -756,9 +756,30 @@ export class DOMUtils {
         }
     }
 
-    /**
-     * インラインコード要素のゼロ幅スペースを整理
-     */
+    /** Clear consumed insertion flags and code shells left by native edits. */
+    normalizeInlineCodeAfterInput() {
+        const selection = window.getSelection();
+        this.editor.querySelectorAll('code:not(pre code)').forEach(code => {
+            if (this.getTextWithoutCaretAnchors(code) !== '') {
+                code.removeAttribute('data-is-new');
+                return;
+            }
+            if (code.getAttribute('data-is-new') === 'true') return;
+            const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
+            const caretWasInside = range?.collapsed && code.contains(range.startContainer);
+            const emptyText = document.createTextNode('');
+            code.replaceWith(emptyText);
+            if (caretWasInside) {
+                const caret = document.createRange();
+                caret.setStart(emptyText, 0);
+                caret.collapse(true);
+                selection.removeAllRanges();
+                selection.addRange(caret);
+            }
+        });
+    }
+
+    /** インラインコード要素のゼロ幅スペースを整理 */
     ensureInlineCodeSpaces() {
         const inlineCodes = this.editor.querySelectorAll('code:not(pre code)');
         const selection = window.getSelection();
