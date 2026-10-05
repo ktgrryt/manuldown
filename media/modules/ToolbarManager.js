@@ -114,7 +114,10 @@ export class ToolbarManager {
         this.toolbarItems = Array.from(this.toolbar.children).filter((item) =>
             item.hasAttribute('data-command') || item.classList.contains('toolbar-separator')
         );
-        this.toolbarButtons = this.toolbarItems.filter((item) => item.hasAttribute('data-command'));
+        this.toolbarButtons = this.toolbarItems.filter((item) =>
+            item.hasAttribute('data-command') && !item.hasAttribute('data-overflow-only')
+        );
+        this.hasOverflowOnlyCommands = this.toolbarItems.some((item) => item.hasAttribute('data-overflow-only'));
         this.overflowSeparators = new Map();
         this.toolbarItems.forEach((item) => {
             if (item.classList.contains('toolbar-separator')) {
@@ -221,14 +224,16 @@ export class ToolbarManager {
         const gap = parseFloat(style.columnGap) || 0;
         const widths = new Map();
         this.toolbarItems.forEach((item) => {
-            item.hidden = false;
+            item.hidden = item.hasAttribute('data-overflow-only');
+            if (item.hidden) return;
             const itemStyle = window.getComputedStyle(item);
             widths.set(item, item.getBoundingClientRect().width +
                 (parseFloat(itemStyle.marginLeft) || 0) + (parseFloat(itemStyle.marginRight) || 0));
         });
         const widthOf = (items) => items.reduce((width, item) => width + widths.get(item), 0) +
             Math.max(0, items.length - 1) * gap;
-        const needsOverflow = widthOf(this.toolbarItems) > available;
+        const needsOverflow = this.hasOverflowOnlyCommands ||
+            widthOf(this.getVisibleToolbarItems(this.toolbarButtons.length)) > available;
         this.overflowToggle.hidden = !needsOverflow;
         let count = this.toolbarButtons.length;
         if (needsOverflow) {

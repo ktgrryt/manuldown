@@ -4427,13 +4427,13 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             Table
         </button>
         <div class="toolbar-separator"></div>
-        <button class="toolbar-btn" data-command="image" title="Insert Image">
+        <button class="toolbar-btn" data-command="image" data-overflow-only title="Insert Image" hidden>
             Image
         </button>
-        <button class="toolbar-btn" data-command="link" title="Insert Link (Cmd/Ctrl+K)">
+        <button class="toolbar-btn" data-command="link" data-overflow-only title="Insert Link (Cmd/Ctrl+K)" hidden>
             Link
         </button>
-        <button class="toolbar-btn" data-command="footnote" title="Insert Footnote" aria-label="Insert Footnote">
+        <button class="toolbar-btn" data-command="footnote" data-overflow-only title="Insert Footnote" aria-label="Insert Footnote" hidden>
             Footnote
         </button>
         <button class="toolbar-btn toolbar-overflow-toggle" type="button" title="More tools" aria-label="More tools" aria-haspopup="menu" aria-expanded="false" aria-controls="toolbar-overflow-menu" hidden>
