@@ -37,6 +37,31 @@ export class StateManager {
         }
     }
 
+    captureCaretAnchors() {
+        const anchors = [];
+        const visit = (node, path) => {
+            const anchor = node.mdwCaretAnchor;
+            if (anchor && node.nodeType === 3 && node.textContent[anchor.offset] === anchor.character) {
+                anchors.push({ path, character: anchor.character, offset: anchor.offset });
+            }
+            Array.from(node.childNodes || []).forEach((child, index) => visit(child, [...path, index]));
+        };
+        visit(this.editor, []);
+        return anchors.length ? anchors : null;
+    }
+
+    restoreCaretAnchors(anchors) {
+        // These paths came from our in-memory snapshot, not document/clipboard
+        // attributes. Restoring innerHTML alone loses private Text properties.
+        for (const anchor of anchors || []) {
+            let node = this.editor;
+            for (const index of anchor.path) node = node?.childNodes?.[index];
+            if (node?.nodeType === 3 && node.textContent[anchor.offset] === anchor.character) {
+                node.mdwCaretAnchor = { character: anchor.character, offset: anchor.offset, text: node.textContent };
+            }
+        }
+    }
+
     getCurrentComparableHtml() {
         if (this.getComparableHtml) {
             try {
@@ -76,7 +101,7 @@ export class StateManager {
         state.comparableHtml = comparableHtml === state.html ? null : comparableHtml;
         state.byteSize = (String(state.html || '').length * 2) +
             (typeof state.comparableHtml === 'string' ? state.comparableHtml.length * 2 : 0) +
-            this.estimateSelectionBytes(state.selection);
+            this.estimateSelectionBytes(state.selection) + this.estimateSelectionBytes(state.caretAnchors);
         this.undoHistoryBytes += state.byteSize - previousByteSize;
         this.trimHistory();
         return true;
@@ -87,14 +112,16 @@ export class StateManager {
         // restorable DOM only after producing the UI-independent comparison HTML.
         const comparableHtml = this.getCurrentComparableHtml();
         const html = this.editor.innerHTML;
+        const caretAnchors = this.captureCaretAnchors();
         const storedComparableHtml = comparableHtml === html ? null : comparableHtml;
         return {
             html,
             comparableHtml: storedComparableHtml,
             selection,
+            caretAnchors,
             byteSize: (html.length * 2) +
                 (storedComparableHtml ? storedComparableHtml.length * 2 : 0) +
-                this.estimateSelectionBytes(selection)
+                this.estimateSelectionBytes(selection) + this.estimateSelectionBytes(caretAnchors)
         };
     }
 
@@ -105,7 +132,7 @@ export class StateManager {
         }
         return (String(state.html || '').length * 2) +
             (typeof state.comparableHtml === 'string' ? state.comparableHtml.length * 2 : 0) +
-            this.estimateSelectionBytes(state.selection);
+            this.estimateSelectionBytes(state.selection) + this.estimateSelectionBytes(state.caretAnchors);
     }
 
     clearRedoHistory() {
@@ -540,6 +567,7 @@ export class StateManager {
         const changeSelection = currentState.selection;
         const fallbackSelection = state.selection || liveSelection;
         this.editor.innerHTML = state.html;
+        this.restoreCaretAnchors(state.caretAnchors);
         // Some normalization steps inspect the active caret, so restore once before
         // the callback. Save that mapped target-DOM position for all later restores.
         const mappedSelection = this.mapHistorySelectionToCurrentDom(
@@ -584,6 +612,7 @@ export class StateManager {
         const changeSelection = state.selection;
         const fallbackSelection = (previousState && previousState.selection) || liveSelection;
         this.editor.innerHTML = state.html;
+        this.restoreCaretAnchors(state.caretAnchors);
         const mappedSelection = this.mapHistorySelectionToCurrentDom(
             changeSelection,
             fallbackSelection

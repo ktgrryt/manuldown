@@ -14,7 +14,7 @@ export class MarkdownConverter {
     }
 
     isIgnorableText(text) {
-        return (text || '').replace(/[\u200B\u2060\u00A0]/g, '').trim() === '';
+        return (text || '').replace(/[^\S\uFEFF]/g, '') === '';
     }
 
     trimBoundaryNodes(nodes, { trimLeadingBreak = false, trimTrailingBreak = false } = {}) {
@@ -166,12 +166,13 @@ export class MarkdownConverter {
 
     /**
      * Offset in rawText of the character at normalizedOffset, where the
-     * normalized text drops caret controls and no-break spaces.
+     * normalized text drops browser no-break spaces. User zero-width characters
+     * remain content; editor-owned controls were removed before conversion.
      */
     toRawOffset(rawText, normalizedOffset) {
         let kept = 0;
         for (let i = 0; i < rawText.length; i++) {
-            if (/[​⁠ ]/.test(rawText[i])) continue;
+            if (rawText[i] === '\u00A0') continue;
             if (kept === normalizedOffset) return i;
             kept++;
         }
@@ -179,14 +180,13 @@ export class MarkdownConverter {
     }
 
     /**
-     * The raw text between two normalized offsets with only the caret controls
-     * removed: no-break spaces are user text (Chromium inserts them for
-     * consecutive spaces) and must survive a conversion.
+     * The raw text between two normalized offsets. No-break spaces are user
+     * text (Chromium inserts them for consecutive spaces) and must survive.
      */
     rawSlice(rawText, normalizedStart, normalizedEnd) {
         const start = this.toRawOffset(rawText, normalizedStart);
         const end = normalizedEnd === undefined ? rawText.length : this.toRawOffset(rawText, normalizedEnd);
-        return rawText.slice(start, end).replace(/[​⁠]/g, '');
+        return rawText.slice(start, end);
     }
 
     splitParagraphAndInsertBlock(textNode, blockElement) {
@@ -332,12 +332,21 @@ export class MarkdownConverter {
         if (rawText[markerIndex - 1] !== '\\') return false;
         if (markerIndex - 2 >= 0 && rawText[markerIndex - 2] === '\\') return false;
 
-        const nextText = rawText.slice(0, markerIndex - 1) + rawText.slice(markerIndex);
-        textNode.textContent = nextText;
+        // Keep the escaped character separate from text subsequently typed at
+        // its right. Otherwise the next space turns an escaped "\-" into a list.
+        const fragment = document.createDocumentFragment();
+        const before = rawText.slice(0, markerIndex - 1);
+        if (before) fragment.appendChild(document.createTextNode(before));
+        const literal = document.createElement('span');
+        literal.setAttribute('data-mdw-escaped-character', 'true');
+        literal.textContent = marker;
+        fragment.appendChild(literal);
+        const after = document.createTextNode(rawText.slice(cursorOffset));
+        fragment.appendChild(after);
+        textNode.replaceWith(fragment);
 
-        const nextOffset = Math.max(0, cursorOffset - 1);
         const range = document.createRange();
-        range.setStart(textNode, Math.min(nextOffset, nextText.length));
+        range.setStart(after, 0);
         range.collapse(true);
         selection.removeAllRanges();
         selection.addRange(range);
@@ -367,8 +376,7 @@ export class MarkdownConverter {
         let cursorOffset = null;
         const isMeaningfulTextNode = (node) => {
             if (!node || node.nodeType !== 3) return false;
-            const text = (node.textContent || '').replace(/[\u200B\u2060\u00A0]/g, '');
-            return text.trim() !== '';
+            return !this.isIgnorableText(node.textContent || '');
         };
         const findDirectTextNode = (element) => {
             if (!element) return null;
@@ -431,14 +439,14 @@ export class MarkdownConverter {
         if (!textNode || textNode.nodeType !== 3 || cursorOffset === null) return false;
 
         // Code holds literal text; what is typed there is never formatting.
-        if (this.isInsideCode(textNode)) return false;
+        if (this.isInsideCode(textNode) || textNode.parentElement?.closest('[data-mdw-escaped-character]')) return false;
 
         const rawText = textNode.textContent || '';
         if (this.applySingleCharacterEscapeAtCursor(textNode, cursorOffset, selection, notifyCallback)) {
             return true;
         }
-        const normalizedText = rawText.replace(/[\u200B\u2060\u00A0]/g, '');
-        const normalizedCursorOffset = rawText.slice(0, cursorOffset).replace(/[\u200B\u2060\u00A0]/g, '').length;
+        const normalizedText = rawText.replace(/\u00A0/g, '');
+        const normalizedCursorOffset = rawText.slice(0, cursorOffset).replace(/\u00A0/g, '').length;
         const isInTableCell = !!(
             this.domUtils.getParentElement(textNode, 'TD') ||
             this.domUtils.getParentElement(textNode, 'TH')
@@ -458,7 +466,6 @@ export class MarkdownConverter {
         // the inserted text must leave the marker alone before the caret. Text
         // such as an escaped "\# title", or " - " later in a line, stays text.
         const toMarkerText = (value) => String(value || '')
-            .replace(/[​⁠]/g, '')
             .replace(/ /g, ' ');
         const textBeforeCaret = toMarkerText(rawText.slice(0, cursorOffset));
         const insertedText = typeof options.insertedText === 'string'

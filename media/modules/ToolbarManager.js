@@ -659,6 +659,7 @@ export class ToolbarManager {
             const code = document.createElement('code');
             code.setAttribute('data-is-new', 'true');
             const text = document.createTextNode('\u200B');
+            text.mdwCaretAnchor = { character: '\u200B', text: '\u200B', offset: 0 };
             code.appendChild(text);
             range.insertNode(code);
             range.setStart(text, text.length);

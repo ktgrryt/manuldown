@@ -149,6 +149,50 @@ test('shortcuts never fire inside code', async () => {
     assert.equal(result.html, codeBlock);
 });
 
+test('typing an escaped block marker keeps it literal when the next space is typed', async () => {
+    for (const marker of ['-', '*', '#', '>']) {
+        const escaped = await convertAt(`<p>\\${marker}</p>`, editor => editor.querySelector('p').firstChild, undefined, marker);
+        assert.equal(escaped.converted, true);
+        assert.equal(escaped.editor.querySelector('[data-mdw-escaped-character]').textContent, marker);
+        const continued = await convertAt(escaped.html.replace('</p>', ' </p>'),
+            editor => editor.querySelector('p').lastChild, undefined, ' ');
+        assert.equal(continued.converted, false);
+        assert.equal(continued.editor.querySelector('p').textContent, marker + ' ');
+        assert.ok(!continued.editor.querySelector('ul,h1,blockquote'));
+    }
+});
+
+test('continuing to type inside an escaped-character span never turns it into formatting', async () => {
+    const html = '<p><span data-mdw-escaped-character="true">*literal*</span></p>';
+    const result = await convertAt(html, editor => editor.querySelector('span').firstChild, undefined, '*');
+    assert.equal(result.converted, false);
+    assert.equal(result.html, html);
+});
+
+test('inline shortcuts keep user zero-width characters in the prefix and formatted content', async () => {
+    const prefix = 'a\u200bb\u2060c\ufeffd ';
+    const body = 'x\u200by\u2060z';
+    for (const [delimiter, tag] of [['**', 'strong'], ['*', 'em'], ['`', 'code']]) {
+        const result = await convertAt(`<p>${prefix}${delimiter}${body}${delimiter}</p>`,
+            editor => editor.querySelector('p').firstChild, undefined, delimiter.slice(-1));
+        assert.equal(result.converted, true);
+        assert.equal(result.editor.querySelector('p').firstChild.textContent, prefix);
+        assert.equal(result.editor.querySelector(tag).textContent, body);
+    }
+});
+
+test('pasted list parsing preserves invisible characters in the item content', () => {
+    const source = fs.readFileSync(path.join(__dirname, '..', 'media/editor.js'), 'utf8');
+    const start = source.indexOf('        const clipboardVariationSelectorPattern =');
+    const end = source.indexOf('        const pastedTextLooksLikeList =', start);
+    const parse = new Function(`${source.slice(start, end)}\nreturn parsePastedListLine;`)();
+    const text = '\u200ba\u2060b\u200dc\ufeff';
+    for (const marker of ['-', '•', '1.']) {
+        assert.equal(parse(`${marker} ${text}`).content, text);
+        assert.equal(parse(`\u200b${marker} ${text}`).content, text);
+    }
+});
+
 test('--- on a later line of a paragraph keeps the earlier line', async () => {
     const result = await convertAt('<p>foo<br>---</p>', (editor) => editor.querySelector('p').lastChild, undefined, '-');
     assert.equal(result.converted, true);

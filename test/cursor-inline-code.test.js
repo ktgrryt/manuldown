@@ -510,7 +510,7 @@ test('only an idle plain horizontal arrow may pass a stale IME keyCode guard', a
     assert.equal(shouldRouteHorizontalArrowAfterComposition({ ...idleArrow, shiftKey: true }, false), false);
 });
 
-test('inside-left collapses legacy inner anchors to one stable address', async () => {
+test('inside-left uses one stable address without discarding unmarked zero-width text', async () => {
     const fixture = await createInlineCodeFixture();
     try {
         fixture.code.firstChild.data = INLINE_CODE_LEFT_CARET_ANCHOR;
@@ -530,7 +530,7 @@ test('inside-left collapses legacy inner anchors to one stable address', async (
             fixture.code.firstChild.getAttribute('data-inline-code-left-caret-anchor'),
             'true'
         );
-        assert.equal(fixture.code.lastChild.data, 'bc');
+        assert.equal(fixture.code.lastChild.data, INLINE_CODE_LEFT_CARET_ANCHOR + 'bc');
     } finally {
         fixture.restoreGlobals();
     }
@@ -561,11 +561,10 @@ test('a stale inline-code boundary state does not claim an unrelated selection',
     }
 });
 
-test('entering inline code preserves zero-width characters from the source', async () => {
+test('entering inline code preserves newly pasted zero-width characters without source attributes', async () => {
     const text = 'a\u200bb\u2060c\ufeffd';
     const fixture = await createInlineCodeFixture({ codeText: text });
     try {
-        fixture.code.setAttribute('data-mdw-source-zero-width', 'true');
         assert.equal(fixture.manager._placeCursorInsideInlineCodeStart(fixture.code, fixture.selection), true);
         assert.equal(fixture.code.textContent, text);
     } finally {

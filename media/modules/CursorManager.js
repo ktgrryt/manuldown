@@ -668,6 +668,7 @@ export class CursorManager {
         const redundantAnchor = (
             prevSibling &&
             prevSibling.nodeType === Node.TEXT_NODE &&
+            (prevSibling.mdwCaretAnchor || prevSibling.textContent === '') &&
             this._isInlineCodeBoundaryPlaceholder(prevSibling)
         ) ? prevSibling : null;
         const visiblePreviousText = redundantAnchor
@@ -692,15 +693,18 @@ export class CursorManager {
         let anchor = null;
         if (prevSibling &&
             prevSibling.nodeType === Node.TEXT_NODE &&
+            (prevSibling.mdwCaretAnchor || prevSibling.textContent === '') &&
             this._isInlineCodeBoundaryPlaceholder(prevSibling)) {
             anchor = prevSibling;
             // Keep an explicit non-rendering anchor so WebView does not normalize
             // outside-left directly into inline-code start.
             if ((anchor.textContent || '') !== INLINE_CODE_LEFT_CARET_ANCHOR) {
                 anchor.textContent = INLINE_CODE_LEFT_CARET_ANCHOR;
+                anchor.mdwCaretAnchor = { character: INLINE_CODE_LEFT_CARET_ANCHOR, text: INLINE_CODE_LEFT_CARET_ANCHOR, offset: 0 };
             }
         } else {
             anchor = document.createTextNode(INLINE_CODE_LEFT_CARET_ANCHOR);
+            anchor.mdwCaretAnchor = { character: INLINE_CODE_LEFT_CARET_ANCHOR, text: INLINE_CODE_LEFT_CARET_ANCHOR, offset: 0 };
             parent.insertBefore(anchor, code);
         }
         this._placeCollapsedCaret(selection, anchor, (anchor.textContent || '').length);
@@ -757,13 +761,16 @@ export class CursorManager {
         const nextSibling = code.nextSibling;
         if (nextSibling &&
             nextSibling.nodeType === Node.TEXT_NODE &&
+            (nextSibling.mdwCaretAnchor || nextSibling.textContent === '') &&
             hasOnlyCaretPlaceholders(nextSibling.textContent)) {
             anchor = nextSibling;
             if ((anchor.textContent || '') !== INLINE_CODE_RIGHT_CARET_ANCHOR) {
                 anchor.textContent = INLINE_CODE_RIGHT_CARET_ANCHOR;
+                anchor.mdwCaretAnchor = { character: INLINE_CODE_RIGHT_CARET_ANCHOR, text: INLINE_CODE_RIGHT_CARET_ANCHOR, offset: 0 };
             }
         } else {
             anchor = document.createTextNode(INLINE_CODE_RIGHT_CARET_ANCHOR);
+            anchor.mdwCaretAnchor = { character: INLINE_CODE_RIGHT_CARET_ANCHOR, text: INLINE_CODE_RIGHT_CARET_ANCHOR, offset: 0 };
             if (nextSibling) {
                 parent.insertBefore(anchor, nextSibling);
             } else {
@@ -1588,9 +1595,7 @@ export class CursorManager {
             return false;
         }
 
-        const rawCodeText = code.textContent || '';
-        const visibleCodeText = code.getAttribute('data-mdw-source-zero-width') === 'true'
-            ? rawCodeText : rawCodeText.replace(/[\u200B\u2060\uFEFF]/g, '');
+        const visibleCodeText = code.textContent || '';
         const existingMarkers = Array.from(code.childNodes || []).filter(node => (
             node &&
             node.nodeType === Node.ELEMENT_NODE &&
@@ -1615,10 +1620,6 @@ export class CursorManager {
             contentNodes.forEach(node => node.remove());
             firstTextNode = document.createTextNode(visibleCodeText);
             code.appendChild(firstTextNode);
-        } else if ((firstTextNode.textContent || '') !== visibleCodeText) {
-            // Strip legacy FEFF/ZWSP text anchors without replacing the live text
-            // node that selection/history bookmarks may still reference.
-            firstTextNode.textContent = visibleCodeText;
         }
         if (code.firstChild !== marker) {
             code.insertBefore(marker, code.firstChild || null);
@@ -3661,6 +3662,7 @@ export class CursorManager {
         }
 
         paragraph.textContent = '\u200B';
+        paragraph.firstChild.mdwCaretAnchor = { character: '\u200B', text: '\u200B', offset: 0 };
         const anchor = paragraph.firstChild;
         if (!anchor || anchor.nodeType !== Node.TEXT_NODE) {
             return false;
@@ -7754,12 +7756,14 @@ export class CursorManager {
                 let placeholder = null;
                 if (immediateNext && immediateNext.nodeType === Node.TEXT_NODE) {
                     const text = immediateNext.textContent || '';
-                    if (text.replace(/[\u200B\u2060\uFEFF]/g, '') === '') {
+                    if ((immediateNext.mdwCaretAnchor || text === '') &&
+                        text.replace(/[\u200B\u2060\uFEFF]/g, '') === '') {
                         placeholder = immediateNext;
                     }
                 }
                 if (!placeholder) {
                     placeholder = document.createTextNode(INLINE_CODE_RIGHT_CARET_ANCHOR);
+                    placeholder.mdwCaretAnchor = { character: INLINE_CODE_RIGHT_CARET_ANCHOR, text: INLINE_CODE_RIGHT_CARET_ANCHOR, offset: 0 };
                     if (immediateNext) {
                         parent.insertBefore(placeholder, immediateNext);
                     } else {
@@ -7767,6 +7771,7 @@ export class CursorManager {
                     }
                 } else if ((placeholder.textContent || '') !== INLINE_CODE_RIGHT_CARET_ANCHOR) {
                     placeholder.textContent = INLINE_CODE_RIGHT_CARET_ANCHOR;
+                    placeholder.mdwCaretAnchor = { character: INLINE_CODE_RIGHT_CARET_ANCHOR, text: INLINE_CODE_RIGHT_CARET_ANCHOR, offset: 0 };
                 }
                 const fallbackRange = document.createRange();
                 fallbackRange.setStart(placeholder, placeholder.textContent.length);
@@ -8275,12 +8280,15 @@ export class CursorManager {
             let placeholder = textNode.previousSibling;
             if (!(placeholder &&
                 placeholder.nodeType === Node.TEXT_NODE &&
+                (placeholder.mdwCaretAnchor || placeholder.textContent === '') &&
                 this._isInlineCodeBoundaryPlaceholder(placeholder) &&
                 placeholder.previousSibling === inlineCodeElement)) {
                 placeholder = document.createTextNode(INLINE_CODE_RIGHT_CARET_ANCHOR);
+                placeholder.mdwCaretAnchor = { character: INLINE_CODE_RIGHT_CARET_ANCHOR, text: INLINE_CODE_RIGHT_CARET_ANCHOR, offset: 0 };
                 parent.insertBefore(placeholder, textNode);
             } else if ((placeholder.textContent || '') !== INLINE_CODE_RIGHT_CARET_ANCHOR) {
                 placeholder.textContent = INLINE_CODE_RIGHT_CARET_ANCHOR;
+                placeholder.mdwCaretAnchor = { character: INLINE_CODE_RIGHT_CARET_ANCHOR, text: INLINE_CODE_RIGHT_CARET_ANCHOR, offset: 0 };
             }
 
             const targetRange = document.createRange();

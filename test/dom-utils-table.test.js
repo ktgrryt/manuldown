@@ -20,7 +20,7 @@ const pastedPathLinkDomModulePromise = import(
     `data:text/javascript;base64,${Buffer.from(pastedPathLinkDomSource).toString('base64')}`
 );
 
-async function cleanEditorHTML(editorHTML, options = {}) {
+async function cleanEditorHTML(editorHTML, options = {}, prepare = () => {}) {
     const window = domino.createWindow(
         `<div id="editor">${editorHTML}</div>`
     );
@@ -37,6 +37,7 @@ async function cleanEditorHTML(editorHTML, options = {}) {
     global.Node = window.Node;
 
     try {
+        prepare(editor);
         const { DOMUtils } = await domUtilsModulePromise;
         return new DOMUtils(editor).getCleanedHTML(options);
     } finally {
@@ -91,10 +92,29 @@ test('editor cleanup removes transient inline-code caret anchors', async () => {
         '<span class="md-inline-code-left-caret-anchor" ' +
         'data-inline-code-left-caret-anchor="true" ' +
         'data-exclude-from-markdown="true" contenteditable="false"></span>' +
-        'aaa</code>\u200B</p>'
+        'aaa</code>\u200B</p>',
+        {}, editor => {
+            const paragraph = editor.querySelector('p');
+            paragraph.firstChild.mdwCaretAnchor = '\uFEFF';
+            paragraph.lastChild.mdwCaretAnchor = '\u200B';
+        }
     );
 
     assert.equal(cleanedHTML, '<p><code>aaa</code></p>');
+});
+
+test('editor cleanup preserves unmarked zero-width characters adjacent to code', async () => {
+    const html = '<p>\uFEFF<code>aaa</code>\u200B\u2060</p>';
+    assert.equal(await cleanEditorHTML(html), html);
+});
+
+test('table line normalization preserves user zero-width text and code', async () => {
+    const text = 'a\u200bb\u2060c\ufeffd';
+    const result = await cleanTableCell(`<div>${text}</div><div><code>${text}</code></div>`);
+    assert.equal(result.text, `${text}<br>${text}`);
+    assert.ok(result.html.includes(`<code>${text}</code>`));
+    const bomOnly = await cleanTableCell('<div>\ufeff</div>');
+    assert.equal(bomOnly.text, '\ufeff');
 });
 
 test('live DOM cleanup preserves the inline-code caret marker', async () => {

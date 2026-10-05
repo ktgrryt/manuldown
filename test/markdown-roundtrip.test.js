@@ -98,14 +98,14 @@ async function withEditableDocument(source, callback) {
         const editorSource = fs.readFileSync(path.join(__dirname, '..', 'media', 'editor.js'), 'utf8');
         const start = editorSource.indexOf('    function normalizeLoadedEditorBoundaryWhitespace(');
         const end = editorSource.indexOf('    function stripListPlaceholderCharactersFromTextNode(', start);
-        const loadCleanup = new Function('editor', 'window', 'document', 'Node', 'NodeFilter',
-            `${editorSource.slice(start, end)}\nreturn () => { normalizeLoadedEditorBoundaryWhitespace(editor); stripEditorControlCharacters(editor, { preserveSelection: false }); };`
-        )(editor, window, window.document, window.Node, window.NodeFilter);
-        loadCleanup();
         const domUtils = new DOMUtils(editor);
+        const loadCleanup = new Function('editor', 'window', 'document', 'Node', 'NodeFilter', 'domUtils',
+            `${editorSource.slice(start, end)}\nreturn () => { normalizeLoadedEditorBoundaryWhitespace(editor); stripEditorControlCharacters(editor, { preserveSelection: false }); };`
+        )(editor, window, window.document, window.Node, window.NodeFilter, domUtils);
+        loadCleanup();
         domUtils.cleanupGhostStyles();
         domUtils.ensureInlineCodeSpaces();
-        return await callback(editor, domUtils, window.document);
+        return await callback(editor, domUtils, window.document, loadCleanup);
     } finally {
         Object.assign(global, previous);
     }
@@ -148,6 +148,84 @@ test('editing prose retains unchanged inline syntax and necessary escaping', asy
     });
 });
 
+test('replacing a selected anchor with the same Unicode character keeps the user replacement', async () => {
+    await withEditableDocument('Body\n', (editor, domUtils, document, cleanup) => {
+        const node = document.createTextNode('\u200b');
+        node.mdwCaretAnchor = '\u200b';
+        const paragraph = editor.querySelector('p');
+        paragraph.textContent = '';
+        paragraph.appendChild(node);
+        domUtils.recordCaretAnchorInput({
+            startContainer: node, endContainer: node, commonAncestorContainer: node,
+            startOffset: 0, endOffset: 1, collapsed: false,
+        }, 'insertFromPaste', '\u200b');
+        // Saving the beforeinput checkpoint still excludes the original anchor.
+        assert.equal(domUtils.getCleanedHTML(), '<p></p>');
+        node.nodeValue = '\u200b';
+        domUtils.commitCaretAnchorInput();
+        cleanup();
+        assert.equal(node.textContent, '\u200b');
+        assert.match(domUtils.getCleanedHTML(), /\u200b/);
+    });
+});
+
+test('typing before an anchor tracks its position without deleting a matching user character', async () => {
+    await withEditableDocument('Body\n', (editor, domUtils, document, cleanup) => {
+        const node = document.createTextNode('\u200b');
+        node.mdwCaretAnchor = '\u200b';
+        const paragraph = editor.querySelector('p');
+        paragraph.textContent = '';
+        paragraph.appendChild(node);
+        domUtils.recordCaretAnchorInput({
+            startContainer: node, endContainer: node, commonAncestorContainer: node,
+            startOffset: 0, endOffset: 0, collapsed: true,
+        }, 'insertText', '\u200btext');
+        assert.equal(domUtils.getCleanedHTML(), '<p></p>');
+        node.nodeValue = '\u200btext\u200b';
+        domUtils.commitCaretAnchorInput();
+        assert.equal(domUtils.getCleanedHTML(), '<p>\u200btext</p>');
+        cleanup();
+        assert.equal(node.textContent, '\u200btext');
+    });
+});
+
+test('Undo and Redo retain caret provenance without deleting user zero-width text', async () => {
+    const fs = require('node:fs');
+    const moduleSource = fs.readFileSync(path.join(__dirname, '..', 'media/modules/StateManager.js'), 'utf8');
+    const { StateManager } = await import(`data:text/javascript;base64,${Buffer.from(moduleSource).toString('base64')}`);
+    const source = '`a\u200bb\u2060c\ufeffd`\n\nBody\n';
+    await withEditableDocument(source, (editor, domUtils, document, cleanup) => {
+        const paragraph = editor.lastElementChild;
+        const node = document.createTextNode('\u200bBody');
+        node.mdwCaretAnchor = { character: '\u200b', text: '\u200b', offset: 0 };
+        paragraph.textContent = '';
+        paragraph.appendChild(node);
+        editor.focus = () => {};
+        const history = new StateManager(editor, {}, {
+            getComparableHtml: () => domUtils.getCleanedHTML({ historyComparable: true }),
+        });
+        history.saveSelection = () => null;
+        const provider = new MarkdownEditorProvider({});
+        const normalize = () => { cleanup(); domUtils.ensureInlineCodeSpaces(); };
+        const markdown = () => provider.htmlToMarkdown(domUtils.getCleanedHTML(), createTextDocument(source));
+        try {
+            history.seedState();
+            node.nodeValue = '\u200bEdited';
+            history.saveState();
+            for (let pass = 0; pass < 2; pass++) {
+                assert.equal(history.performUndo(normalize), true);
+                assert.equal(markdown(), source);
+                assert.equal(history.performRedo(normalize), true);
+                assert.equal(markdown(), source.replace('Body', 'Edited'));
+            }
+            assert.equal(history.undoHistoryBytes,
+                history.undoStack.reduce((bytes, state) => bytes + history.getStateByteSize(state), 0));
+        } finally {
+            history.clearHistory();
+        }
+    });
+});
+
 test('new literal punctuation remains literal instead of becoming Markdown structure', () => {
     const provider = new MarkdownEditorProvider({});
     for (const literal of ['- item', '`foo`', '[ ]', '[x]', 'foo\\_bar']) {
@@ -172,10 +250,155 @@ test('changing code preserves original zero-width characters while caret anchors
     const source = '`a\u200bb`\n\n```text\na\u2060b\ufeffc\n```\n';
     await withEditableDocument(source, (editor, domUtils, document) => {
         editor.querySelector('pre code').textContent += 'Changed\n';
-        editor.querySelector('p').appendChild(document.createTextNode('\u200b'));
+        const anchor = document.createTextNode('\u200b');
+        anchor.mdwCaretAnchor = '\u200b';
+        editor.querySelector('p').appendChild(anchor);
         const output = new MarkdownEditorProvider({}).htmlToMarkdown(domUtils.getCleanedHTML(), createTextDocument(source));
         assert.equal(output, '`a\u200bb`\n\n```text\na\u2060b\ufeffc\nChanged\n```\n');
     });
+});
+
+test('editing a table preserves pipes in unchanged code, emphasis, links and images', async () => {
+    for (const inline of ['`x\\|y`', '**x\\|y**', '[x\\|y](a.md)', '![x\\|y](a.png)']) {
+        const source = `| a | b |\n| --- | --- |\n| ${inline} | z |\n`;
+        await withEditableDocument(source, (editor, domUtils) => {
+            editor.querySelector('th').textContent = 'Changed';
+            const provider = new MarkdownEditorProvider({});
+            const snapshot = domUtils.getCleanedHTML();
+            const output = provider.htmlToMarkdown(snapshot, createTextDocument(source));
+            assert.equal(output, source.replace('| a |', '| Changed |'));
+            const rendered = require('@mixmark-io/domino').createWindow(convert(output).html).document;
+            assert.equal(rendered.querySelectorAll('td').length, 2);
+            assert.equal(rendered.querySelectorAll('td')[1].textContent, 'z');
+            assert.equal(provider.htmlToMarkdown(snapshot, createTextDocument(output)), output);
+        });
+    }
+});
+
+test('moving existing prose code into a table escapes its pipes for the new context', async () => {
+    const source = '`x|y`\n\n| a |\n| --- |\n| z |\n';
+    await withEditableDocument(source, (editor, domUtils) => {
+        const code = editor.querySelector('code');
+        const cell = editor.querySelector('td');
+        cell.textContent = '';
+        cell.appendChild(code.cloneNode(true));
+        const output = new MarkdownEditorProvider({}).htmlToMarkdown(domUtils.getCleanedHTML(), createTextDocument(source));
+        const rendered = require('@mixmark-io/domino').createWindow(convert(output).html).document;
+        assert.equal(rendered.querySelectorAll('td').length, 1);
+        assert.equal(rendered.querySelector('td code').textContent, 'x|y');
+    });
+});
+
+test('editing around underscore emphasis retains formatting after reload', async () => {
+    for (const [inline, tag] of [['_italic_', 'em'], ['__bold__', 'strong']]) {
+        for (const side of ['before', 'after']) {
+            const source = `a ${inline} b\n`;
+            await withEditableDocument(source, (editor, domUtils) => {
+                const paragraph = editor.querySelector('p');
+                if (side === 'before') paragraph.firstChild.nodeValue = 'a';
+                else paragraph.lastChild.nodeValue = 'b';
+                const provider = new MarkdownEditorProvider({});
+                const snapshot = domUtils.getCleanedHTML();
+                const output = provider.htmlToMarkdown(snapshot, createTextDocument(source));
+                const rendered = require('@mixmark-io/domino').createWindow(convert(output).html).document;
+                assert.equal(rendered.querySelector(tag).textContent, tag === 'em' ? 'italic' : 'bold');
+                assert.equal(rendered.querySelector('p').textContent, paragraph.textContent);
+                assert.equal(provider.htmlToMarkdown(snapshot, createTextDocument(output)), output);
+            });
+        }
+    }
+});
+
+test('list continuation breaks survive unrelated edits and editing the list itself', async () => {
+    for (const breakPrefix of ['', '  ', '\\']) {
+        const source = `- one${breakPrefix}\n  two\n\nEDIT TARGET\n`;
+        for (const editList of [false, true]) {
+            await withEditableDocument(source, (editor, domUtils) => {
+                if (editList) editor.querySelector('li').firstChild.nodeValue = 'Changed';
+                else editor.querySelector('p').textContent = 'Changed';
+                const output = new MarkdownEditorProvider({}).htmlToMarkdown(domUtils.getCleanedHTML(), createTextDocument(source));
+                assert.equal(output, source.replace(editList ? 'one' : 'EDIT TARGET', 'Changed'));
+                const rendered = require('@mixmark-io/domino').createWindow(convert(output).html).document;
+                assert.ok(rendered.querySelector('li br'));
+                assert.equal(rendered.querySelector('li').textContent, editList ? 'Changedtwo' : 'onetwo');
+            });
+        }
+    }
+});
+
+test('newly pasted zero-width characters survive input cleanup, code normalization and saving', async () => {
+    const text = 'a\u200bb\u2060c\ufeffd';
+    for (const [source, selector, expected] of [
+        ['ab\n', 'p', `${text}\n`],
+        ['`ab`\n', 'code', `\`${text}\`\n`],
+        ['```text\nab\n```\n', 'code', `\`\`\`text\n${text}\n\`\`\`\n`],
+        ['| H |\n| --- |\n| ab |\n', 'td', `| H |\n| --- |\n| ${text} |\n`],
+        ['| H |\n| --- |\n| `ab` |\n', 'code', `| H |\n| --- |\n| \`${text}\` |\n`],
+    ]) {
+        await withEditableDocument(source, (editor, domUtils, _document, cleanup) => {
+            editor.querySelector(selector).textContent = text + (source.startsWith('```') ? '\n' : '');
+            cleanup();
+            domUtils.ensureInlineCodeSpaces();
+            const snapshot = domUtils.getCleanedHTML();
+            const provider = new MarkdownEditorProvider({});
+            const output = provider.htmlToMarkdown(snapshot, createTextDocument(source));
+            assert.equal(output, expected);
+            assert.equal(provider.htmlToMarkdown(snapshot, createTextDocument(output)), output);
+        });
+    }
+});
+
+test('only the generated anchor is removed when user zero-width characters share its node', async () => {
+    const text = 'a\u200bb\u2060c\ufeffd';
+    await withEditableDocument('Body\n', (editor, domUtils, document, cleanup) => {
+        const node = document.createTextNode('\u200b' + text);
+        node.mdwCaretAnchor = '\u200b';
+        const paragraph = editor.querySelector('p');
+        paragraph.textContent = '';
+        paragraph.appendChild(node);
+        assert.equal(new MarkdownEditorProvider({}).htmlToMarkdown(domUtils.getCleanedHTML(), createTextDocument('Body\n')), text + '\n');
+        // A snapshot must not mutate the live caret or its provenance.
+        assert.equal(node.textContent, '\u200b' + text);
+        cleanup();
+        assert.equal(node.textContent, text);
+    });
+});
+
+test('new content containing only a zero-width character is preserved instead of treated as empty', async () => {
+    for (const character of ['\u200b', '\u2060', '\ufeff']) {
+        for (const [source, selector, expected] of [
+            ['Body\n', 'p', `${character}\n`],
+            ['`Body`\n', 'code', `\`${character}\`\n`],
+            ['[Body](./x)\n', 'a', `[${character}](./x)\n`],
+            ['- Body\n', 'li', `- ${character}\n`],
+            ['| H |\n| --- |\n| Body |\n', 'td', `| H |\n| --- |\n| ${character} |\n`],
+        ]) {
+            await withEditableDocument(source, (editor, domUtils, _document, cleanup) => {
+                editor.querySelector(selector).textContent = character;
+                cleanup();
+                domUtils.ensureInlineCodeSpaces();
+                const snapshot = domUtils.getCleanedHTML();
+                const provider = new MarkdownEditorProvider({});
+                const output = provider.htmlToMarkdown(snapshot, createTextDocument(source));
+                assert.equal(output, expected);
+                assert.equal(provider.htmlToMarkdown(snapshot, createTextDocument(output)), output);
+            });
+        }
+    }
+});
+
+test('escaped-character spans save as literal Markdown and survive cleanup', async () => {
+    for (const literal of ['-', '*', '_', '`', '[']) {
+        await withEditableDocument('Body\n', (editor, domUtils) => {
+            editor.querySelector('p').innerHTML = `<span data-mdw-escaped-character="true">${literal}</span> item`;
+            domUtils.cleanupGhostStyles();
+            assert.ok(editor.querySelector('[data-mdw-escaped-character]'));
+            const output = new MarkdownEditorProvider({}).htmlToMarkdown(domUtils.getCleanedHTML(), createTextDocument('Body\n'));
+            const rendered = require('@mixmark-io/domino').createWindow(convert(output).html).document;
+            assert.equal(rendered.querySelector('p').textContent, `${literal} item`);
+            assert.ok(!rendered.querySelector('ul,em,strong,code'));
+        });
+    }
 });
 
 test('edited tilde code fences retain backticks in info strings and enclose tilde runs safely', async () => {

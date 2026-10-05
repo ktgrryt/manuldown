@@ -107,6 +107,7 @@ export class CodeBlockGapManager {
         const paragraph = document.createElement('p');
         paragraph.setAttribute('data-mdw-code-gap', 'true');
         paragraph.textContent = '\u200B';
+        paragraph.firstChild.mdwCaretAnchor = { character: '\u200B', text: '\u200B', offset: 0 };
         anchor.parentElement.insertBefore(paragraph, direction === 'up' ? anchor : anchor.nextSibling);
         return this.placeCaret(paragraph, selection);
     }

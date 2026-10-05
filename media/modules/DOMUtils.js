@@ -7,6 +7,7 @@
 export class DOMUtils {
     constructor(editor) {
         this.editor = editor;
+        this.pendingCaretAnchorInputs = new Map();
     }
 
     /** The editable document containing a node, excluding footnote controls. */
@@ -167,9 +168,7 @@ export class DOMUtils {
         if (!cell) return;
 
         const ownerDocument = cell.ownerDocument || document;
-        const hasText = (cell.textContent || '')
-            .replace(/[\u200B\u2060\u00A0]/g, '')
-            .trim() !== '';
+        const hasText = this.getTextWithoutCaretAnchors(cell).replace(/[^\S\uFEFF]/g, '') !== '';
         const hasAtomicContent = !!cell.querySelector('img, input[type="checkbox"]');
         const hasProblematicStructure =
             !!cell.querySelector('br') ||
@@ -283,8 +282,7 @@ export class DOMUtils {
         let tokens = collectTokens(cell);
         tokens.forEach((token) => {
             if (token.kind !== 'text') return;
-            const withoutEditorMarkers = (token.node.textContent || '')
-                .replace(/[\u200B\u2060]/g, '');
+            const withoutEditorMarkers = this.getTextWithoutCaretAnchors(token.node);
             token.node.textContent = token.preserveWhitespace
                 ? withoutEditorMarkers
                 : withoutEditorMarkers
@@ -397,10 +395,92 @@ export class DOMUtils {
         });
     }
 
-    /**
-     * HTMLから不要な要素を除去してクリーンアップ
-     * @returns {string} クリーンアップされたHTML
-     */
+    /** Only live editor-created Text nodes carry caret provenance. */
+    getCaretAnchorOffset(node) {
+        let anchor = node?.mdwCaretAnchor;
+        if (!anchor) return -1;
+        if (typeof anchor === 'string') {
+            anchor = node.mdwCaretAnchor = { character: anchor, text: anchor, offset: 0 };
+        }
+        const text = node.textContent || '';
+        if (text !== anchor.text) {
+            // Follow an insertion/deletion before the control. If an edit
+            // replaces the control itself, the replacement is user text.
+            let prefix = 0;
+            while (prefix < text.length && prefix < anchor.text.length && text[prefix] === anchor.text[prefix]) prefix++;
+            let suffix = 0;
+            while (suffix < text.length - prefix && suffix < anchor.text.length - prefix &&
+                text[text.length - suffix - 1] === anchor.text[anchor.text.length - suffix - 1]) suffix++;
+            if (anchor.offset >= anchor.text.length - suffix) {
+                anchor.offset += text.length - anchor.text.length;
+            } else if (anchor.offset >= prefix) {
+                delete node.mdwCaretAnchor;
+                return -1;
+            }
+        }
+        anchor.text = text;
+        if (text[anchor.offset] !== anchor.character) {
+            delete node.mdwCaretAnchor;
+            return -1;
+        }
+        return anchor.offset;
+    }
+
+    recordCaretAnchorInput(range, inputType, insertedText) {
+        this.pendingCaretAnchorInputs.clear();
+        if (!range || !/^(insert|delete)/.test(inputType || '')) return;
+        const visit = node => {
+            if (node.nodeType !== 3) {
+                Array.from(node.childNodes || []).forEach(visit);
+                return;
+            }
+            const offset = this.getCaretAnchorOffset(node);
+            if (offset < 0) return;
+            const selected = !range.collapsed && (range.isPointInRange
+                ? range.isPointInRange(node, offset) && range.isPointInRange(node, offset + 1)
+                : node === range.startContainer && node === range.endContainer &&
+                    range.startOffset <= offset && range.endOffset > offset);
+            if (selected) {
+                this.pendingCaretAnchorInputs.set(node, { anchor: node.mdwCaretAnchor, replaced: true });
+            } else if (node === range.startContainer && node === range.endContainer && typeof insertedText === 'string') {
+                const text = node.textContent;
+                const start = range.startOffset;
+                const end = range.endOffset;
+                this.pendingCaretAnchorInputs.set(node, {
+                    anchor: node.mdwCaretAnchor,
+                    text: text.slice(0, start) + insertedText + text.slice(end),
+                    offset: offset >= end ? offset + insertedText.length - (end - start) : offset
+                });
+            }
+        };
+        visit(range.commonAncestorContainer || range.startContainer);
+    }
+
+    commitCaretAnchorInput() {
+        // beforeinput can save an Undo checkpoint. Keep the original control
+        // recognizable there, and apply its replacement only after native input.
+        this.pendingCaretAnchorInputs.forEach((input, node) => {
+            if (node.mdwCaretAnchor !== input.anchor) return;
+            if (input.replaced) {
+                delete node.mdwCaretAnchor;
+            } else if (node.textContent === input.text) {
+                input.anchor.offset = input.offset;
+                input.anchor.text = input.text;
+            }
+        });
+        this.pendingCaretAnchorInputs.clear();
+    }
+
+    getTextWithoutCaretAnchors(node) {
+        if (node.nodeType === 3) {
+            const text = node.textContent || '';
+            const offset = this.getCaretAnchorOffset(node);
+            return offset < 0 ? text : text.slice(0, offset) + text.slice(offset + 1);
+        }
+        return Array.from(node.childNodes || [], child => this.getTextWithoutCaretAnchors(child)).join('');
+    }
+
+    /** Remove editor UI while preserving document text in the outgoing HTML. */
     getCleanedHTML(options = {}) {
         const historyComparable = options.historyComparable === true;
         // チェックボックスのcheckedプロパティをHTML属性に同期
@@ -417,10 +497,23 @@ export class DOMUtils {
         // エディタの内容をクローン
         const clone = this.editor.cloneNode(true);
 
+        // Provenance is private to the live Text node, so clipboard/source HTML
+        // cannot label user characters as controls. Strip only the one character
+        // created for that caret position before the cloned tree is normalized.
+        const removeCaretAnchors = (original, copied) => {
+            if (original.nodeType === 3) {
+                copied.nodeValue = this.getTextWithoutCaretAnchors(original);
+                return;
+            }
+            Array.from(original.childNodes || []).forEach((child, index) =>
+                removeCaretAnchors(child, copied.childNodes[index]));
+        };
+        removeCaretAnchors(this.editor, clone);
+
         // Code-block gaps are temporary caret positions. Saving or comparing
         // history must not turn an untouched gap into a Markdown blank line.
         clone.querySelectorAll('[data-mdw-code-gap="true"]').forEach(paragraph => {
-            const hasText = (paragraph.textContent || '').replace(/[\u200B\u2060\uFEFF]/g, '') !== '';
+            const hasText = paragraph.textContent !== '';
             const hasContent = !!paragraph.querySelector('img,hr,table,pre,ul,ol,input,blockquote');
             if (!hasText && !hasContent) {
                 paragraph.remove();
@@ -535,14 +628,14 @@ export class DOMUtils {
             if (anchor.querySelector('img')) {
                 return;
             }
-            const text = (anchor.textContent || '').replace(/[\u200B\u2060\uFEFF\u00A0\s]/g, '');
+            const text = (anchor.textContent || '').replace(/[^\S\uFEFF]/g, '');
             if (text !== '') {
                 return;
             }
             const hasMeaningfulChild = Array.from(anchor.childNodes || []).some(child => {
                 if (!child) return false;
                 if (child.nodeType === Node.TEXT_NODE) {
-                    return (child.textContent || '').replace(/[\u200B\u2060\uFEFF\u00A0\s]/g, '') !== '';
+                    return (child.textContent || '').replace(/[^\S\uFEFF]/g, '') !== '';
                 }
                 if (child.nodeType !== Node.ELEMENT_NODE) return false;
                 return child.tagName !== 'BR';
@@ -560,8 +653,7 @@ export class DOMUtils {
             const hasMeaningfulInlineSibling = (node) => {
                 if (!node) return false;
                 if (node.nodeType === Node.TEXT_NODE) {
-                    const text = (node.textContent || '').replace(/[\u200B\u2060\uFEFF]/g, '');
-                    return text.trim() !== '';
+                    return (node.textContent || '').replace(/[^\S\uFEFF]/g, '') !== '';
                 }
                 if (node.nodeType !== Node.ELEMENT_NODE) return false;
                 const tag = node.tagName;
@@ -576,7 +668,6 @@ export class DOMUtils {
                 const raw = textNode.textContent || '';
                 if (raw === '') return false;
                 if (/[\r\n\t\f\v]/.test(raw)) return false;
-                if (raw.replace(/[\u200B\u2060\uFEFF]/g, '') === '') return false;
                 return hasMeaningfulInlineSibling(textNode.previousSibling) &&
                     hasMeaningfulInlineSibling(textNode.nextSibling);
             };
@@ -584,13 +675,14 @@ export class DOMUtils {
             // まず、空白のみのテキストノードとBRタグを削除
             const childNodesToRemove = [];
             for (let child of li.childNodes) {
-                if (child.nodeType === Node.TEXT_NODE && child.textContent.trim() === '') {
+                if (child.nodeType === Node.TEXT_NODE && child.textContent.replace(/[^\S\uFEFF]/g, '') === '') {
                     // Keep separator spaces between inline siblings (e.g. `code` + " " + `code`).
                     if (shouldPreserveWhitespaceSeparator(child)) {
                         continue;
                     }
                     childNodesToRemove.push(child);
-                } else if (child.nodeType === Node.ELEMENT_NODE && child.tagName === 'BR') {
+                } else if (child.nodeType === Node.ELEMENT_NODE && child.tagName === 'BR' &&
+                    li.childNodes.length === 1 && !child.hasAttribute('data-mdw-break-prefix')) {
                     childNodesToRemove.push(child);
                 }
             }
@@ -624,18 +716,6 @@ export class DOMUtils {
             // クリーンアップは行わない - サブリストのみを含む空のリストアイテムも有効な構造
         });
 
-        // Source characters are marked when Markdown is rendered. Only remove
-        // unmarked caret anchors; a global replacement also deleted code/text.
-        const removeCaretAnchors = (node) => {
-            if (node.nodeType === 3) {
-                if (!node.parentElement?.closest('[data-mdw-source-zero-width="true"]')) {
-                    node.nodeValue = node.nodeValue.replace(/[\u200B\u2060\uFEFF]/g, '');
-                }
-            } else {
-                Array.from(node.childNodes || []).forEach(removeCaretAnchors);
-            }
-        };
-        removeCaretAnchors(clone);
         return clone.innerHTML;
     }
 
@@ -696,8 +776,8 @@ export class DOMUtils {
                     tempRange.selectNodeContents(codeElement);
                     tempRange.setEnd(range.startContainer, range.startOffset);
                     const prefix = tempRange.toString();
-                    activeOffset = codeElement.getAttribute('data-mdw-source-zero-width') === 'true'
-                        ? prefix.length : prefix.replace(/[\u200B\u2060\uFEFF]/g, '').length;
+                    const anchorOffset = this.getCaretAnchorOffset(range.startContainer);
+                    activeOffset = prefix.length - (anchorOffset >= 0 && anchorOffset < range.startOffset ? 1 : 0);
                 } catch (e) {
                     activeCode = null;
                     activeOffset = null;
@@ -711,19 +791,18 @@ export class DOMUtils {
 
             const prevSibling = code.previousSibling;
             if (prevSibling && prevSibling.nodeType === Node.TEXT_NODE &&
-                prevSibling.textContent.replace(/[\u200B\u2060\uFEFF]/g, '') === '') {
+                this.getCaretAnchorOffset(prevSibling) >= 0 && this.getTextWithoutCaretAnchors(prevSibling) === '') {
                 prevSibling.remove();
             }
 
             const nextSibling = code.nextSibling;
             if (nextSibling && nextSibling.nodeType === Node.TEXT_NODE &&
-                nextSibling.textContent.replace(/[\u200B\u2060\uFEFF]/g, '') === '') {
+                this.getCaretAnchorOffset(nextSibling) >= 0 && this.getTextWithoutCaretAnchors(nextSibling) === '') {
                 nextSibling.remove();
             }
 
             const rawText = code.textContent || '';
-            const normalized = code.getAttribute('data-mdw-source-zero-width') === 'true'
-                ? rawText : rawText.replace(/[\u200B\u2060\uFEFF]/g, '');
+            const normalized = this.getTextWithoutCaretAnchors(code);
 
             if (normalized === '') {
                 // 内容が空の場合
@@ -732,6 +811,7 @@ export class DOMUtils {
                     if (rawText !== '\u200B' || code.childNodes.length !== 1) {
                         code.textContent = '\u200B';
                     }
+                    code.firstChild.mdwCaretAnchor = { character: '\u200B', text: '\u200B', offset: 0 };
                 } else {
                     // 空で新規作成でない場合は削除
                     // テキストノードとして空文字を挿入してカーソル位置を保持できるようにする
@@ -775,8 +855,7 @@ export class DOMUtils {
             const textNode = activeCode.firstChild;
             if (textNode && textNode.nodeType === Node.TEXT_NODE && textNode.isConnected) {
                 const rawText = textNode.textContent || '';
-                const normalizedLength = activeCode.getAttribute('data-mdw-source-zero-width') === 'true'
-                    ? rawText.length : rawText.replace(/[\u200B\u2060\uFEFF]/g, '').length;
+                const normalizedLength = this.getTextWithoutCaretAnchors(activeCode).length;
                 let targetOffset = normalizedLength === 0 ? rawText.length : Math.min(activeOffset, normalizedLength);
                 const newRange = document.createRange();
                 newRange.setStart(textNode, targetOffset);
@@ -853,6 +932,7 @@ export class DOMUtils {
                 isTableStructureHandle(element) ||
                 isInlineCodeCaretAnchor(element) ||
                 element.getAttribute('data-mdw-source-zero-width') === 'true' ||
+                element.hasAttribute('data-mdw-escaped-character') ||
                 isCodeBlockToolbarPart(element)) {
                 return;
             }

@@ -3531,11 +3531,14 @@ export class TableManager {
         let anchor = code.nextSibling;
         if (!anchor ||
             anchor.nodeType !== Node.TEXT_NODE ||
+            (anchor.textContent !== '' && !anchor.mdwCaretAnchor) ||
             (anchor.textContent || '').replace(/[\u200B\u2060\uFEFF]/g, '') !== '') {
             anchor = document.createTextNode(INLINE_CODE_RIGHT_CARET_ANCHOR);
+            anchor.mdwCaretAnchor = { character: INLINE_CODE_RIGHT_CARET_ANCHOR, text: INLINE_CODE_RIGHT_CARET_ANCHOR, offset: 0 };
             cell.insertBefore(anchor, code.nextSibling);
         } else if (anchor.textContent !== INLINE_CODE_RIGHT_CARET_ANCHOR) {
             anchor.textContent = INLINE_CODE_RIGHT_CARET_ANCHOR;
+            anchor.mdwCaretAnchor = { character: INLINE_CODE_RIGHT_CARET_ANCHOR, text: INLINE_CODE_RIGHT_CARET_ANCHOR, offset: 0 };
         }
 
         const range = document.createRange();

@@ -1039,16 +1039,14 @@ const {
 
     function stripEditorControlCharacters(root = editor, options = {}) {
         if (!root) return false;
-        const controlCharPattern = /[\u200B\u2060\uFEFF]/g;
         const selection = options.preserveSelection === false ? null : window.getSelection();
         const range = selection && selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
         const startInfo = range ? { node: range.startContainer, offset: range.startOffset } : null;
         const endInfo = range ? { node: range.endContainer, offset: range.endOffset } : null;
 
-        const adjustedOffset = (text, offset) => {
+        const adjustedOffset = (text, offset, anchorOffset) => {
             const safeOffset = Math.max(0, Math.min(offset, text.length));
-            const removedBeforeOffset = (text.slice(0, safeOffset).match(controlCharPattern) || []).length;
-            return Math.max(0, safeOffset - removedBeforeOffset);
+            return Math.max(0, safeOffset - (anchorOffset < safeOffset ? 1 : 0));
         };
 
         let changed = false;
@@ -1060,27 +1058,28 @@ const {
         }
 
         textNodes.forEach((textNode) => {
-            if (textNode.parentElement?.closest('[data-mdw-source-zero-width="true"], [data-mdw-opaque-source]')) {
+            const raw = textNode.textContent || '';
+            const anchorOffset = domUtils.getCaretAnchorOffset(textNode);
+            if (anchorOffset < 0) {
+                delete textNode.mdwCaretAnchor;
                 return;
             }
-            const raw = textNode.textContent || '';
             const newInlineCode = textNode.parentElement?.closest('code[data-is-new="true"]');
             if (newInlineCode && !newInlineCode.closest('pre') && range?.collapsed &&
                 newInlineCode.contains(range.startContainer) &&
-                newInlineCode.textContent.replace(controlCharPattern, '') === '') {
+                domUtils.getTextWithoutCaretAnchors(newInlineCode) === '') {
                 // Keep the empty toolbar insertion editable until its first input.
                 // Chromium moves typing outside a code span with no text anchor.
                 return;
             }
-            if (!controlCharPattern.test(raw)) return;
-            controlCharPattern.lastIndex = 0;
             if (startInfo && startInfo.node === textNode) {
-                startInfo.offset = adjustedOffset(raw, startInfo.offset);
+                startInfo.offset = adjustedOffset(raw, startInfo.offset, anchorOffset);
             }
             if (endInfo && endInfo.node === textNode) {
-                endInfo.offset = adjustedOffset(raw, endInfo.offset);
+                endInfo.offset = adjustedOffset(raw, endInfo.offset, anchorOffset);
             }
-            textNode.textContent = raw.replace(controlCharPattern, '');
+            textNode.textContent = raw.slice(0, anchorOffset) + raw.slice(anchorOffset + 1);
+            delete textNode.mdwCaretAnchor;
             changed = true;
         });
 
@@ -1110,7 +1109,7 @@ const {
         if (textNode.parentElement?.closest('[data-mdw-source-zero-width="true"]')) return false;
 
         const raw = textNode.textContent || '';
-        const cleaned = raw.replace(/[\u00A0\u200B\u2060]/g, '');
+        const cleaned = raw.replace(/\u00A0/g, '');
         if (cleaned === raw) return false;
 
         // Reassigning textContent resets Chromium's caret to the beginning of the
@@ -1127,7 +1126,7 @@ const {
         );
         const adjustOffset = (offset) =>
             raw.slice(0, Math.max(0, Math.min(offset, raw.length)))
-                .replace(/[\u00A0\u200B\u2060]/g, '')
+                .replace(/\u00A0/g, '')
                 .length;
         const startOffset = selectionIsInTextNode ? adjustOffset(range.startOffset) : 0;
         const endOffset = selectionIsInTextNode ? adjustOffset(range.endOffset) : 0;
@@ -9659,6 +9658,7 @@ const {
         }
 
         paragraph.textContent = '\u200B';
+        paragraph.firstChild.mdwCaretAnchor = { character: '\u200B', text: '\u200B', offset: 0 };
         const anchor = paragraph.firstChild;
         if (!anchor || anchor.nodeType !== Node.TEXT_NODE) {
             return false;
@@ -16993,12 +16993,14 @@ const {
         let placeholder = null;
         if (immediateNext && immediateNext.nodeType === Node.TEXT_NODE) {
             const text = immediateNext.textContent || '';
-            if (text.replace(/[\u200B\u2060\uFEFF]/g, '') === '') {
+            if ((immediateNext.mdwCaretAnchor || text === '') &&
+                text.replace(/[\u200B\u2060\uFEFF]/g, '') === '') {
                 placeholder = immediateNext;
             }
         }
         if (!placeholder) {
             placeholder = document.createTextNode(INLINE_CODE_RIGHT_CARET_ANCHOR);
+            placeholder.mdwCaretAnchor = { character: INLINE_CODE_RIGHT_CARET_ANCHOR, text: INLINE_CODE_RIGHT_CARET_ANCHOR, offset: 0 };
             if (immediateNext) {
                 parent.insertBefore(placeholder, immediateNext);
             } else {
@@ -17006,6 +17008,7 @@ const {
             }
         } else if ((placeholder.textContent || '') !== INLINE_CODE_RIGHT_CARET_ANCHOR) {
             placeholder.textContent = INLINE_CODE_RIGHT_CARET_ANCHOR;
+            placeholder.mdwCaretAnchor = { character: INLINE_CODE_RIGHT_CARET_ANCHOR, text: INLINE_CODE_RIGHT_CARET_ANCHOR, offset: 0 };
         }
         newRange.setStart(placeholder, placeholder.textContent.length);
         newRange.collapse(true);
@@ -18108,6 +18111,10 @@ const {
                 return;
             }
 
+            const anchorSelection = window.getSelection();
+            domUtils.recordCaretAnchorInput(anchorSelection?.rangeCount ? anchorSelection.getRangeAt(0) : null,
+                e.inputType, e.data);
+
             // The composition range belongs to the browser until compositionend.
             // Even harmless-looking cleanup can commit it or relocate its caret.
             if (isComposing || e.isComposing || e.inputType === 'insertCompositionText') {
@@ -18282,6 +18289,7 @@ const {
 
         editor.addEventListener('input', (e) => {
             if (!isUpdating) {
+                domUtils.commitCaretAnchorInput();
                 if (tableManager._compositionBlockedEdge) {
                     tableManager._compositionBlockedEdge.textContent = '\u00A0';
                     return;
@@ -20259,7 +20267,7 @@ const {
             return !!(char && char.trim() === '');
         };
         const isPastedBlankLine = (line) => {
-            return normalizeClipboardLineForParsing(line).trim() === '';
+            return String(line || '').replace(/[^\S\uFEFF]/g, '') === '';
         };
         const getListIndentLength = (indentValue) => {
             let length = 0;
@@ -20278,6 +20286,18 @@ const {
         const parsePastedListLine = (line) => {
             const normalizedLine = normalizeClipboardLineForParsing(line);
             if (!normalizedLine) return null;
+            // Invisible clipboard characters may surround a list marker. Ignore
+            // them when recognizing syntax, but retain the original item text.
+            const originalContentAt = (normalizedOffset) => {
+                const original = String(line || '');
+                let rawOffset = 0;
+                let parsedOffset = 0;
+                while (rawOffset < original.length && parsedOffset < normalizedOffset) {
+                    if (normalizeClipboardLineForParsing(original[rawOffset]) !== '') parsedOffset++;
+                    rawOffset++;
+                }
+                return original.slice(rawOffset).replace(/[^\S\uFEFF]+$/g, '');
+            };
 
             let cursor = 0;
             while (cursor < normalizedLine.length && isClipboardWhitespaceChar(normalizedLine[cursor])) {
@@ -20302,7 +20322,7 @@ const {
                     indentLength: getListIndentLength(indent),
                     listType: 'ol',
                     startNumber: Math.max(1, parseInt(orderedMatch[1], 10) || 1),
-                    content: normalizeClipboardLineForParsing(rest.slice(markerEnd)).trimEnd()
+                    content: originalContentAt(cursor + markerEnd)
                 };
             }
 
@@ -20331,7 +20351,7 @@ const {
                 indentLength: getListIndentLength(indent),
                 listType: 'ul',
                 startNumber: 1,
-                content: normalizeClipboardLineForParsing(rest.slice(contentStart)).trimEnd()
+                content: originalContentAt(cursor + contentStart)
             };
         };
         const pastedTextLooksLikeList = (rawText) => {

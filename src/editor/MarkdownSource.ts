@@ -1,4 +1,5 @@
 import { getNonce } from '../utils/getNonce';
+import { marked } from 'marked';
 
 const { createWindow } = require('@mixmark-io/domino');
 
@@ -16,7 +17,7 @@ function fingerprint(node: any): string {
             /^(DIV|UL|OL|BLOCKQUOTE|TABLE|THEAD|TBODY|TR|PRE)$/.test(node.parentNode?.nodeName)) {
             return '';
         }
-        if (node.parentNode?.nodeName === 'LI' && /^\s*$/.test(node.nodeValue) &&
+        if (node.parentNode?.nodeName === 'LI' && /^[^\S\uFEFF]*$/.test(node.nodeValue) &&
             !(node.previousSibling?.nodeType === 1 && node.nextSibling?.nodeType === 1)) {
             return '';
         }
@@ -60,6 +61,57 @@ function fingerprint(node: any): string {
 
 function root(html: string): any {
     return createWindow(`<div id="mdw-source-root">${html}</div>`).document.getElementById('mdw-source-root');
+}
+
+function inlineNeighbor(node: any, backwards: boolean): string {
+    const siblingKey = backwards ? 'previousSibling' : 'nextSibling';
+    while (node) {
+        const sibling = node[siblingKey];
+        if (sibling) {
+            if (sibling.nodeName === 'BR') {
+                return '';
+            }
+            const text = sibling.textContent || '';
+            if (text !== '') {
+                const characters = Array.from<string>(text);
+                return characters[backwards ? characters.length - 1 : 0];
+            }
+            node = sibling;
+        } else {
+            node = node.parentNode;
+            if (!node || /^(P|DIV|LI|H[1-6]|TD|TH|BLOCKQUOTE)$/.test(node.nodeName)) {
+                return '';
+            }
+        }
+    }
+    return '';
+}
+
+function canReuseInlineSource(node: any, block: MarkdownSourceBlock): boolean {
+    // Marked has already unescaped table pipes in inline token.raw. Let the
+    // table serializer escape them, including content copied from prose.
+    if (node.closest('td,th') && /[|\r\n]/.test(block.source)) {
+        return false;
+    }
+    if (!/^(EM|STRONG|DEL|S)$/.test(node.nodeName)) {
+        return true;
+    }
+    // A delimiter valid in the old paragraph may cease to be emphasis after
+    // neighboring text changes (e.g. "a _word_" -> "a_word_").
+    const before = inlineNeighbor(node, true);
+    const after = inlineNeighbor(node, false);
+    const escape = (value: string): string => value.replace(/([\\`*_{}\[\]()#+.!|>~-])/g, '\\$1');
+    const expected = root(block.html);
+    if (before) {
+        expected.insertBefore(expected.ownerDocument.createTextNode(before), expected.firstChild);
+    }
+    if (after) {
+        expected.appendChild(expected.ownerDocument.createTextNode(after));
+    }
+    const rendered = root(marked.Parser.parseInline(marked.Lexer.lexInline(
+        escape(before) + block.source + escape(after)
+    )));
+    return fingerprint(rendered) === fingerprint(expected);
 }
 
 export function preserveMarkdownSource(html: string, source: string, originalHtml: string,
@@ -144,7 +196,8 @@ export function preserveMarkdownSource(html: string, source: string, originalHtm
     for (const block of sourceBlocks.filter(block => block.inline)) {
         const original = root(block.html);
         const expected = Array.from<any>(original.childNodes).map(fingerprint).join('');
-        const candidate = inlineNodes.get(expected)?.find(node => submitted.contains(node));
+        const candidate = inlineNodes.get(expected)?.find(node =>
+            submitted.contains(node) && canReuseInlineSource(node, block));
         if (candidate) {
             const marker = `${namespace}INLINE${inlineEntries.length}END`;
             candidate.replaceWith(submitted.ownerDocument.createTextNode(marker));

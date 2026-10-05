@@ -15,6 +15,9 @@ async function fixture(t, html, offset) {
     const document = window.document;
     const editor = document.getElementById('editor');
     const code = editor.querySelector('code');
+    if (code.hasAttribute('data-is-new') && code.firstChild?.textContent.startsWith('\u200B')) {
+        code.firstChild.mdwCaretAnchor = '\u200B';
+    }
     let range = {
         startContainer: code.firstChild || code, endContainer: code.firstChild || code,
         startOffset: offset, endOffset: offset, collapsed: true,
@@ -52,10 +55,11 @@ async function fixture(t, html, offset) {
         else prototype.forEach = originalForEach;
     });
     const { DOMUtils } = await domUtilsModule;
-    const strip = new Function('editor', 'window', 'document', 'Node', 'NodeFilter',
+    const domUtils = new DOMUtils(editor);
+    const strip = new Function('editor', 'window', 'document', 'Node', 'NodeFilter', 'domUtils',
         `${editorSource.slice(stripStart, stripEnd)}\nreturn stripEditorControlCharacters;`
-    )(editor, window, document, window.Node, window.NodeFilter);
-    return { code, strip, domUtils: new DOMUtils(editor), get range() { return range; } };
+    )(editor, window, document, window.Node, window.NodeFilter, domUtils);
+    return { code, strip, domUtils, get range() { return range; } };
 }
 
 test('the active empty toolbar code retains its text anchor before typing', async (t) => {
@@ -81,11 +85,12 @@ test('the first typed text removes the placeholder and keeps the caret after the
     assert.equal(f.code.hasAttribute('data-is-new'), false);
 });
 
-test('inline code still removes unmarked caret anchors', async (t) => {
+test('inline code preserves newly pasted zero-width text without source attributes', async (t) => {
     const f = await fixture(t, '<p><code>\u200Bvalue</code></p>', 6);
-    assert.equal(f.strip(), true);
-    assert.equal(f.code.textContent, 'value');
-    assert.equal(f.range.startOffset, 5);
+    assert.equal(f.strip(), false);
+    f.domUtils.ensureInlineCodeSpaces();
+    assert.equal(f.code.textContent, '\u200Bvalue');
+    assert.equal(f.range.startOffset, 6);
 });
 
 test('loading and input cleanup preserve source zero-width characters in text and code', async (t) => {

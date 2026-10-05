@@ -201,6 +201,11 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         });
 
         const provider = this;
+        this.turndownService.addRule('escapedCharacter', {
+            filter: (node: any) => node.nodeName === 'SPAN' &&
+                node.hasAttribute('data-mdw-escaped-character') && /^[`*_{}\[\]()#+.!|>~-]$/.test(node.textContent),
+            replacement: (_content: string, node: any) => '\\' + node.textContent
+        });
         this.turndownService.addRule('image', {
             filter: 'img',
             replacement: (_content: string, node: any) => {
@@ -3048,6 +3053,13 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             const protectedOpaqueSources = this.protectOpaqueMarkdownSources(html, documentText, footnoteContext.trustedBodySource);
             html = protectedOpaqueSources.html;
 
+            // The Webview has removed its own caret controls. Everything left
+            // is document text, including FEFF (which JavaScript/Turndown trim
+            // as whitespace). Keep it opaque until structural cleanup finishes.
+            const zeroWidthNamespace = this.createPlaceholderNamespace(html + documentText, 'ZERO_WIDTH');
+            html = html.replace(/[\u200B\u2060\uFEFF]/g,
+                character => `${zeroWidthNamespace}${character.charCodeAt(0).toString(16)}END`);
+
             // Restore markdown hard break for image lines that were split into
             // separate paragraphs for stable caret navigation in the webview.
             html = html.replace(
@@ -3405,9 +3417,13 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             if (!markdown.endsWith('\n')) {
                 markdown += '\n';
             }
-            const restoredMarkdown = preservedSource.restore(protectedFootnotes.restore(
+            const restoredContent = preservedSource.restore(protectedFootnotes.restore(
                 protectedOpaqueSources.restore(protectedFencedMarkdown.restore(markdown))
             ));
+            const restoredMarkdown = restoredContent.replace(
+                new RegExp(`${this.escapeRegExp(zeroWidthNamespace)}(200b|2060|feff)END`, 'g'),
+                (_match, characterCode) => String.fromCharCode(parseInt(characterCode, 16))
+            );
             this.assertNoLeakedPlaceholderMarkers(restoredMarkdown, documentText);
             return restoredMarkdown;
         } catch (error) {
