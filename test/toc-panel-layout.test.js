@@ -109,3 +109,55 @@ test('the body threshold editor.css reads is 400px or a lower dragged limit', as
     assert.equal(getTocBodyMinWidth(300), 300);
     assert.equal(getTocBodyMinWidth(450), 400);
 });
+
+test('toggling collapses an open panel and brings back the same width', async () => {
+    const { fitTocPanelWidth, toggleTocPanelCollapsed } = await layoutModulePromise;
+    const render = (layout) => fitTocPanelWidth(
+        layout.containerWidth,
+        layout.collapsed ? 0 : layout.preferredWidth,
+        layout.bodyMinWidth
+    );
+
+    for (const open of [
+        { containerWidth: 900, preferredWidth: 150, bodyMinWidth: null, collapsed: false },
+        { containerWidth: 500, preferredWidth: 150, bodyMinWidth: null, collapsed: false },
+        { containerWidth: 500, preferredWidth: 200, bodyMinWidth: 300, collapsed: false },
+    ]) {
+        const collapsed = { containerWidth: open.containerWidth, ...toggleTocPanelCollapsed(open, 150) };
+        assert.equal(collapsed.collapsed, true);
+        assert.equal(render(collapsed), 0);
+
+        const reopened = { containerWidth: open.containerWidth, ...toggleTocPanelCollapsed(collapsed, 150) };
+        assert.deepEqual(reopened, open);
+        assert.equal(render(reopened), render(open));
+    }
+});
+
+test('toggling a panel a narrow editor closed opens it at the chosen width', async () => {
+    const { fitTocPanelWidth, toggleTocPanelCollapsed } = await layoutModulePromise;
+
+    const closedByWidth = { containerWidth: 350, preferredWidth: 150, bodyMinWidth: null, collapsed: false };
+    assert.deepEqual(toggleTocPanelCollapsed(closedByWidth, 150), {
+        preferredWidth: 150,
+        bodyMinWidth: 200,
+        collapsed: false
+    });
+    assert.equal(fitTocPanelWidth(350, 150, 200), 150);
+
+    // Collapsed while wide, then the editor got narrow.
+    const collapsedThenNarrowed = { ...closedByWidth, collapsed: true };
+    assert.deepEqual(toggleTocPanelCollapsed(collapsedThenNarrowed, 150), {
+        preferredWidth: 150,
+        bodyMinWidth: 200,
+        collapsed: false
+    });
+});
+
+test('toggling a zero-width panel opens it at the default width', async () => {
+    const { toggleTocPanelCollapsed } = await layoutModulePromise;
+
+    assert.deepEqual(
+        toggleTocPanelCollapsed({ containerWidth: 900, preferredWidth: 0, bodyMinWidth: null, collapsed: false }, 150),
+        { preferredWidth: 150, bodyMinWidth: null, collapsed: false }
+    );
+});

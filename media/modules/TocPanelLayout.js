@@ -57,3 +57,33 @@ export function releaseTocBodyMinWidth(containerWidth, preferredWidth, bodyMinWi
     if (bodyMinWidth === null) return null;
     return containerWidth - preferredWidth >= TOC_BODY_MIN_WIDTH ? null : bodyMinWidth;
 }
+
+/**
+ * Collapses an open panel, or brings back the width a collapsed panel had.
+ * When nothing would come back (a narrow editor or a zero width closed the
+ * panel), the panel opens at the chosen width, or the default one.
+ *
+ * @param {Object} layout
+ * @param {number} layout.containerWidth - Width shared by the body and the panel.
+ * @param {number} layout.preferredWidth - The panel width the user chose.
+ * @param {number|null} layout.bodyMinWidth - The current body limit.
+ * @param {boolean} layout.collapsed - Whether the panel is collapsed.
+ * @param {number} defaultWidth - The panel width to open a zero-width panel at.
+ * @returns {{ preferredWidth: number, bodyMinWidth: number|null, collapsed: boolean }}
+ */
+export function toggleTocPanelCollapsed(layout, defaultWidth) {
+    const { containerWidth, preferredWidth, bodyMinWidth, collapsed } = layout;
+    const openWidth = fitTocPanelWidth(containerWidth, preferredWidth, bodyMinWidth);
+    if (!collapsed && openWidth > 0) {
+        return { preferredWidth, bodyMinWidth, collapsed: true };
+    }
+    if (openWidth > 0) {
+        return { preferredWidth, bodyMinWidth, collapsed: false };
+    }
+    const width = preferredWidth > 0 ? preferredWidth : defaultWidth;
+    return {
+        preferredWidth: width,
+        bodyMinWidth: fitTocBodyMinWidth(containerWidth, width),
+        collapsed: false
+    };
+}

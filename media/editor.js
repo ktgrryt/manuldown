@@ -16,7 +16,8 @@ import {
     fitTocBodyMinWidth,
     fitTocPanelWidth,
     getTocBodyMinWidth,
-    releaseTocBodyMinWidth
+    releaseTocBodyMinWidth,
+    toggleTocPanelCollapsed
 } from './modules/TocPanelLayout.js';
 import {
     getWorkspaceLinkSuggestionQuery,
@@ -1468,21 +1469,30 @@ const {
     syncBodySettings();
     document.body.dataset.tocVisible = 'false';
 
-    // A body limit set by dragging only fits this editor's width, so it lives
-    // in the Webview state (kept while the tab is hidden), not in the shared
+    // A body limit set by dragging only fits this editor's width, and a
+    // collapsed panel is a choice for this editor, so both live in the
+    // Webview state (kept while the tab is hidden), not in the shared
     // settings.
-    const readTocBodyMinWidthState = () => {
-        const value = (vscode.getState() || {}).tocBodyMinWidth;
-        return typeof value === 'number' && Number.isFinite(value) && value >= 0
-            ? Math.round(value)
-            : null;
-    };
-    let tocBodyMinWidth = readTocBodyMinWidthState();
-
-    const saveTocBodyMinWidthState = () => {
+    const readTocLayoutState = () => {
         const state = vscode.getState() || {};
-        if ((state.tocBodyMinWidth ?? null) === tocBodyMinWidth) return;
-        vscode.setState({ ...state, tocBodyMinWidth });
+        const bodyMinWidth = state.tocBodyMinWidth;
+        return {
+            bodyMinWidth: typeof bodyMinWidth === 'number' && Number.isFinite(bodyMinWidth) && bodyMinWidth >= 0
+                ? Math.round(bodyMinWidth)
+                : null,
+            collapsed: state.tocCollapsed === true
+        };
+    };
+    const storedTocLayout = readTocLayoutState();
+    let tocBodyMinWidth = storedTocLayout.bodyMinWidth;
+    let tocCollapsed = storedTocLayout.collapsed;
+
+    const saveTocLayoutState = () => {
+        const state = vscode.getState() || {};
+        if ((state.tocBodyMinWidth ?? null) === tocBodyMinWidth && (state.tocCollapsed === true) === tocCollapsed) {
+            return;
+        }
+        vscode.setState({ ...state, tocBodyMinWidth, tocCollapsed });
     };
 
     // The editor spans the Webview: the width editor.css reads as 100vw.
@@ -1492,24 +1502,36 @@ const {
     // editor.css narrows the preferred width to what the editor width allows
     // (see TocPanelLayout.js), so the panel follows the editor edge in the
     // same layout as the body.
+    // A collapsed panel keeps its chosen width to come back to.
+    const getTocPreferredWidth = () => (tocCollapsed ? 0 : settingsState.tocPanelWidth);
+
     const applyTocPanelWidth = () => {
-        document.body.style.setProperty('--toc-preferred-width', `${settingsState.tocPanelWidth}px`);
+        document.body.style.setProperty('--toc-preferred-width', `${getTocPreferredWidth()}px`);
         document.body.style.setProperty('--toc-body-min-width', `${getTocBodyMinWidth(tocBodyMinWidth)}px`);
     };
     applyTocPanelWidth();
 
     const getRenderedTocPanelWidth = () =>
-        fitTocPanelWidth(getTocLayoutContainerWidth(), settingsState.tocPanelWidth, tocBodyMinWidth);
+        fitTocPanelWidth(getTocLayoutContainerWidth(), getTocPreferredWidth(), tocBodyMinWidth);
 
-    // Applies a width chosen by dragging or with the keyboard. When that
-    // leaves the body narrower than TOC_BODY_MIN_WIDTH, a lower body limit
-    // keeps the panel at the chosen width.
+    // Applies a width chosen by dragging or with the keyboard, which also
+    // opens a collapsed panel. When that leaves the body narrower than
+    // TOC_BODY_MIN_WIDTH, a lower body limit keeps the panel at the chosen
+    // width.
     const setTocPanelWidthFromUser = (width) => {
         const nextWidth = normalizeTocPanelWidth(width);
-        const nextBodyMinWidth = fitTocBodyMinWidth(getTocLayoutContainerWidth(), nextWidth);
-        if (nextWidth === settingsState.tocPanelWidth && nextBodyMinWidth === tocBodyMinWidth) {
+        if (tocCollapsed && nextWidth === 0) {
             return false;
         }
+        const nextBodyMinWidth = fitTocBodyMinWidth(getTocLayoutContainerWidth(), nextWidth);
+        if (
+            !tocCollapsed &&
+            nextWidth === settingsState.tocPanelWidth &&
+            nextBodyMinWidth === tocBodyMinWidth
+        ) {
+            return false;
+        }
+        tocCollapsed = false;
         settingsState.tocPanelWidth = nextWidth;
         tocBodyMinWidth = nextBodyMinWidth;
         applyTocPanelWidth();
@@ -1529,7 +1551,7 @@ const {
         if (nextBodyMinWidth === tocBodyMinWidth) return;
         tocBodyMinWidth = nextBodyMinWidth;
         applyTocPanelWidth();
-        saveTocBodyMinWidthState();
+        saveTocLayoutState();
     };
     releaseTocBodyMinWidthIfWide();
 
@@ -1546,6 +1568,37 @@ const {
         }, 200);
         releaseTocBodyMinWidthIfWide();
     });
+
+    // Double-clicking the panel edge collapses the panel or brings it back
+    // (see toggleTocPanelCollapsed). It switches at once, without the
+    // transitions on positions derived from the panel width.
+    const toggleTocPanel = () => {
+        const previousWidth = settingsState.tocPanelWidth;
+        const next = toggleTocPanelCollapsed({
+            containerWidth: getTocLayoutContainerWidth(),
+            preferredWidth: settingsState.tocPanelWidth,
+            bodyMinWidth: tocBodyMinWidth,
+            collapsed: tocCollapsed
+        }, TOC_PANEL_DEFAULT_WIDTH);
+        settingsState.tocPanelWidth = next.preferredWidth;
+        tocBodyMinWidth = next.bodyMinWidth;
+        tocCollapsed = next.collapsed;
+
+        document.body.classList.add('toc-fitting');
+        applyTocPanelWidth();
+        void document.body.offsetWidth;
+        if (tocResizeSettleTimeout === null) {
+            document.body.classList.remove('toc-fitting');
+        }
+        scheduleEditorOverflowStateUpdate();
+        saveTocLayoutState();
+        if (settingsState.tocPanelWidth !== previousWidth) {
+            vscode.postMessage({
+                type: 'tocPanelWidthChanged',
+                width: settingsState.tocPanelWidth
+            });
+        }
+    };
 
     const isTocVisible = () => document.body.dataset.tocVisible === 'true';
 
@@ -18106,14 +18159,9 @@ const {
         }
 
         if (tocResizer) {
-            const applyTocWidthFromClientX = (clientX) => {
-                const editorContainer = editor.parentElement;
-                if (!editorContainer) {
-                    return false;
-                }
-                const containerRect = editorContainer.getBoundingClientRect();
-                return setTocPanelWidthFromUser(containerRect.right - clientX);
-            };
+            // The panel edge follows the pointer only after it moved this far,
+            // so the clicks of a double-click never resize the panel.
+            const TOC_RESIZE_DRAG_THRESHOLD_PX = 3;
 
             const stopTocResize = (commit = true) => {
                 if (!tocResizeState) return;
@@ -18121,7 +18169,7 @@ const {
                 tocResizeState = null;
                 document.body.classList.remove('toc-resizing');
                 if (shouldCommit) {
-                    saveTocBodyMinWidthState();
+                    saveTocLayoutState();
                     vscode.postMessage({
                         type: 'tocPanelWidthChanged',
                         width: settingsState.tocPanelWidth
@@ -18135,7 +18183,12 @@ const {
 
                 hideImageResizeOverlay();
                 clearImageSelectionForLayoutResize();
-                tocResizeState = { changed: false };
+                tocResizeState = {
+                    changed: false,
+                    dragging: false,
+                    startX: e.clientX,
+                    startWidth: getRenderedTocPanelWidth()
+                };
                 document.body.classList.add('toc-resizing');
 
                 e.preventDefault();
@@ -18148,10 +18201,26 @@ const {
                     stopTocResize(true);
                     return;
                 }
-                if (applyTocWidthFromClientX(e.clientX)) {
+                const deltaX = tocResizeState.startX - e.clientX;
+                if (!tocResizeState.dragging && Math.abs(deltaX) < TOC_RESIZE_DRAG_THRESHOLD_PX) {
+                    e.preventDefault();
+                    return;
+                }
+                tocResizeState.dragging = true;
+                if (setTocPanelWidthFromUser(tocResizeState.startWidth + deltaX)) {
                     tocResizeState.changed = true;
                 }
                 e.preventDefault();
+            });
+
+            tocResizer.addEventListener('dblclick', (e) => {
+                if (e.button !== 0) return;
+                if (!settingsState.tocEnabled || !isTocVisible()) return;
+                hideImageResizeOverlay();
+                clearImageSelectionForLayoutResize();
+                toggleTocPanel();
+                e.preventDefault();
+                e.stopPropagation();
             });
 
             document.addEventListener('mouseup', () => stopTocResize(true));
@@ -18185,7 +18254,7 @@ const {
                     return;
                 }
 
-                saveTocBodyMinWidthState();
+                saveTocLayoutState();
                 vscode.postMessage({
                     type: 'tocPanelWidthChanged',
                     width: settingsState.tocPanelWidth
