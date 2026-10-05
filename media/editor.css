@@ -1607,7 +1607,7 @@ body.toc-resizing #toc-resizer::before {
     flex-direction: column;
     align-items: stretch;
     gap: 6px;
-    width: min(560px, calc(100vw - 16px));
+    width: min(420px, calc(100vw - 16px));
     min-width: min(300px, calc(100vw - 16px));
     box-sizing: border-box;
 }
@@ -1906,7 +1906,6 @@ body.image-resizing * {
 
 /* Search bar container */
 .search-bar {
-    --search-bar-actions-width: min(126px, 100%);
     position: absolute;
     top: 0;
     right: calc(var(--search-bar-edge-gap) + var(--toc-content-offset));
@@ -1917,7 +1916,7 @@ body.image-resizing * {
     justify-content: flex-start;
     column-gap: clamp(3px, 0.5vw, 4px);
     row-gap: clamp(3px, 0.4vw, 4px);
-    width: min(400px, calc(100% - (var(--search-bar-edge-gap) * 2) - var(--toc-content-offset)));
+    width: min(340px, calc(100% - (var(--search-bar-edge-gap) * 2) - var(--toc-content-offset)));
     max-width: calc(100% - (var(--search-bar-edge-gap) * 2) - var(--toc-content-offset));
     padding: clamp(4px, 0.75vw, 6px);
     background-color: var(--vscode-editorWidget-background, var(--vscode-editor-background));
@@ -1927,21 +1926,25 @@ body.image-resizing * {
     box-shadow: 0 5px 14px rgba(0, 0, 0, 0.16);
     font-size: 12px;
     transition: none;
+    container: search-bar / inline-size;
 }
 
-.search-bar-row {
-    display: flex;
-    flex-wrap: wrap;
+.search-bar-fields {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) max-content;
     align-items: center;
     gap: clamp(3px, 0.5vw, 4px);
     width: 100%;
     min-width: 0;
 }
 
+.search-bar-row {
+    display: contents;
+}
+
 .search-bar-input-container {
     display: flex;
     align-items: center;
-    flex: 1 1 auto;
     min-width: min(120px, 100%);
     background: var(--vscode-input-background);
     border: 1px solid var(--vscode-input-border, var(--vscode-editorGroup-border));
@@ -1973,12 +1976,15 @@ body.image-resizing * {
     display: flex;
     align-items: center;
     justify-content: flex-end;
-    gap: inherit;
-    flex: 0 0 var(--search-bar-actions-width);
+    gap: clamp(3px, 0.5vw, 4px);
     flex-wrap: nowrap;
-    width: var(--search-bar-actions-width);
-    min-width: var(--search-bar-actions-width);
-    margin-left: auto;
+    min-width: 0;
+    max-width: 100%;
+    margin-left: 0;
+}
+
+.search-bar-actions > .search-bar-btn {
+    flex: 1 0 auto;
 }
 
 .search-bar-btn {
@@ -2033,14 +2039,32 @@ body.image-resizing * {
     font-size: 11px;
     color: var(--vscode-descriptionForeground);
     white-space: nowrap;
-    min-width: clamp(40px, 7vw, 46px);
-    text-align: right;
+    min-width: 0;
+    text-align: left;
     padding: 0 2px;
     line-height: 1;
 }
 
 .search-bar-match-count.no-results {
     color: var(--vscode-inputValidation-errorForeground, #f48771);
+}
+
+.search-bar-match-count:empty {
+    display: none;
+}
+
+@container search-bar (max-width: 280px) {
+    .search-bar-fields {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .search-bar-actions {
+        flex-wrap: wrap;
+    }
+
+    .search-bar-actions > .search-bar-btn {
+        flex: 0 0 auto;
+    }
 }
 
 @media (max-width: 480px) {
@@ -2050,7 +2074,6 @@ body.image-resizing * {
 
     .search-bar-match-count {
         font-size: 10px;
-        min-width: 40px;
     }
 }
 /* Footnote labels are controls; their bodies inherit normal editor formatting. */

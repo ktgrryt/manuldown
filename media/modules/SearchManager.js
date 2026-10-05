@@ -349,8 +349,11 @@ export class SearchManager {
         replaceRow.appendChild(replaceInputContainer);
         replaceRow.appendChild(replaceActions);
 
-        this.searchBar.appendChild(searchRow);
-        this.searchBar.appendChild(replaceRow);
+        const fields = document.createElement('div');
+        fields.className = 'search-bar-fields';
+        fields.appendChild(searchRow);
+        fields.appendChild(replaceRow);
+        this.searchBar.appendChild(fields);
 
         // Append inside .editor-container so it's positioned below the toolbar
         const editorContainer = document.querySelector('.editor-container');
