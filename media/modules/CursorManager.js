@@ -3562,6 +3562,10 @@ export class CursorManager {
     }
 
     setCodeBlockCursorOffset(codeBlock, selection, offset) {
+        const pre = codeBlock?.parentElement;
+        if (pre?.getAttribute('data-mermaid-view') === 'diagram') {
+            return this._selectCodeBlockLanguageLabel(pre, selection);
+        }
         const safeOffset = Math.max(0, offset);
         let currentOffset = 0;
         let placed = false;

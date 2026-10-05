@@ -541,6 +541,11 @@ export class DOMUtils {
         codeBlocks.forEach(codeBlock => {
             codeBlock.textContent = this.getCodeBlockText(codeBlock);
         });
+        // Mermaid's display choice is presentation state, including for history
+        // comparisons. Keep the source in the saved document in either view.
+        clone.querySelectorAll('pre[data-mermaid-view]').forEach(pre => {
+            pre.removeAttribute('data-mermaid-view');
+        });
 
         // テーブル選択用のクラスを削除
         const selectedCells = clone.querySelectorAll('.md-table-cell-selected');

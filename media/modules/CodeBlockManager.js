@@ -259,6 +259,17 @@ export class CodeBlockManager {
         return (language || '').toLowerCase() === 'mermaid';
     }
 
+    _getMermaidView(pre) {
+        return pre.getAttribute('data-mermaid-view') === 'code' ? 'code' : 'diagram';
+    }
+
+    _setMermaidView(pre, view) {
+        pre.setAttribute('data-mermaid-view', view);
+        pre.querySelectorAll('.code-block-view-btn').forEach((button) => {
+            button.setAttribute('aria-pressed', String(button.getAttribute('data-mermaid-view') === view));
+        });
+    }
+
     _getMermaidCode(codeBlock) {
         if (!codeBlock) {
             return '';
@@ -321,6 +332,11 @@ export class CodeBlockManager {
         if (preview) {
             preview.remove();
         }
+        const handle = this.mermaidRenderHandles.get(pre);
+        if (handle) {
+            clearTimeout(handle);
+            this.mermaidRenderHandles.delete(pre);
+        }
         this.mermaidCache.delete(pre);
         this.mermaidRenderTokens.delete(pre);
     }
@@ -329,15 +345,17 @@ export class CodeBlockManager {
         if (!pre || !codeBlock) {
             return;
         }
+        const existingHandle = this.mermaidRenderHandles.get(pre);
+        if (existingHandle) {
+            clearTimeout(existingHandle);
+            this.mermaidRenderHandles.delete(pre);
+        }
         if (immediate) {
             this._renderMermaid(pre, codeBlock);
             return;
         }
-        const existingHandle = this.mermaidRenderHandles.get(pre);
-        if (existingHandle) {
-            clearTimeout(existingHandle);
-        }
         const handle = setTimeout(() => {
+            this.mermaidRenderHandles.delete(pre);
             this._renderMermaid(pre, codeBlock);
         }, 150);
         this.mermaidRenderHandles.set(pre, handle);
@@ -362,6 +380,9 @@ export class CodeBlockManager {
         this._initMermaid();
         if (typeof window === 'undefined' || !window.mermaid) {
             if (this._requestMermaidLibrary()) {
+                const preview = this._ensureMermaidPreview(pre);
+                preview.classList.remove('mermaid-error');
+                preview.textContent = 'Loading Mermaid diagram…';
                 return;
             }
             const preview = this._ensureMermaidPreview(pre);
@@ -373,6 +394,7 @@ export class CodeBlockManager {
         const code = this._getMermaidCode(codeBlock);
         if (code.trim() === '') {
             this._clearMermaidPreview(pre);
+            this._ensureMermaidPreview(pre).textContent = 'No Mermaid diagram to display.';
             return;
         }
 
@@ -592,8 +614,11 @@ export class CodeBlockManager {
         if (!toolbar.querySelector('.code-block-copy-btn')) {
             return false;
         }
-        if (this._isMermaidLanguage(language) && toolbar.querySelectorAll('.code-block-export-btn').length < 2) {
-            return false;
+        if (this._isMermaidLanguage(language)) {
+            if (toolbar.querySelectorAll('.code-block-export-btn').length < 2 ||
+                toolbar.querySelectorAll('.code-block-view-btn').length !== 2) {
+                return false;
+            }
         }
         return true;
     }
@@ -639,6 +664,8 @@ export class CodeBlockManager {
                 node.classList.contains('code-block-toolbar') ||
                 node.classList.contains('code-block-language') ||
                 node.classList.contains('code-block-actions') ||
+                node.classList.contains('code-block-view-toggle') ||
+                node.classList.contains('code-block-view-btn') ||
                 node.classList.contains('code-block-copy-btn') ||
                 node.classList.contains('code-block-export-btn')
             );
@@ -1143,6 +1170,7 @@ export class CodeBlockManager {
         }
         
         if (!isMermaid) {
+            pre.removeAttribute('data-mermaid-view');
             this._clearMermaidPreview(pre);
         }
 
@@ -1499,6 +1527,43 @@ export class CodeBlockManager {
 
         const actionGroup = document.createElement('div');
         actionGroup.className = 'code-block-actions';
+
+        if (isMermaid) {
+            const viewToggle = document.createElement('div');
+            viewToggle.className = 'code-block-view-toggle';
+            viewToggle.setAttribute('role', 'group');
+            viewToggle.setAttribute('aria-label', 'Mermaid display');
+            ['code', 'diagram'].forEach((view) => {
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.className = 'code-block-view-btn';
+                button.setAttribute('data-mermaid-view', view);
+                button.textContent = view === 'code' ? 'Code' : 'Diagram';
+                button.title = `Show Mermaid ${view}`;
+                button.addEventListener('mousedown', (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                });
+                button.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const code = pre.querySelector('code');
+                    const selection = window.getSelection();
+                    // A hidden source must not retain an editable caret.
+                    if (view === 'diagram' && code && selection && selection.rangeCount > 0 &&
+                        code.contains(selection.getRangeAt(0).startContainer)) {
+                        selection.removeAllRanges();
+                        button.focus({ preventScroll: true });
+                    }
+                    this._setMermaidView(pre, view);
+                    if (view === 'diagram' && code) {
+                        this._scheduleMermaidRender(pre, code, true);
+                    }
+                });
+                viewToggle.appendChild(button);
+            });
+            actionGroup.appendChild(viewToggle);
+        }
         
         // コピーボタンを追加
         const copyBtn = document.createElement('button');
@@ -1585,6 +1650,7 @@ export class CodeBlockManager {
         pre.insertBefore(toolbar, pre.firstChild);
 
         if (isMermaid) {
+            this._setMermaidView(pre, this._getMermaidView(pre));
             const code = pre.querySelector('code');
             if (code) {
                 this._scheduleMermaidRender(pre, code, true);
@@ -1602,6 +1668,10 @@ export class CodeBlockManager {
         if (!code) return;
 
         const isMermaid = this._isMermaidLanguage(newLang);
+        if (isMermaid && !this._isMermaidLanguage(this._getCodeBlockLanguage(code))) {
+            // Choosing Mermaid while editing should leave the source ready to edit.
+            this._setMermaidView(pre, 'code');
+        }
         
         // 古い言語クラスを削除
         const oldClasses = Array.from(code.classList).filter(cls => cls.startsWith('language-'));

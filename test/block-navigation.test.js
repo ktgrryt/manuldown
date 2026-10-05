@@ -1171,6 +1171,46 @@ function selectedNode(fixture) {
 const CODE_BLOCK =
     '<pre><div class="code-block-toolbar"><span class="code-block-language">plaintext</span></div>' +
     '<code>mvn liberty:dev\n</code></pre>';
+
+test('keyboard entry into a Mermaid diagram selects its label instead of hidden source', async () => {
+    const fixture = await createFixture(CODE_BLOCK.replace('<pre>', '<pre data-mermaid-view="diagram">'));
+    try {
+        const code = fixture.editor.querySelector('code');
+        assert.equal(fixture.cursorManager.setCodeBlockCursorOffset(code, fixture.selection, 0), true);
+        assert.equal(selectedNode(fixture), 'SPAN.code-block-language');
+        assert.equal(fixture.editor.querySelector('pre').getAttribute('data-mermaid-view'), 'diagram');
+    } finally {
+        fixture.restoreGlobals();
+    }
+});
+
+test('moving down from a Mermaid diagram label skips its hidden source', async () => {
+    for (const suffix of ['<p>after</p>', '', '<hr>']) {
+        const fixture = await createFixture(
+            CODE_BLOCK.replace('<pre>', '<pre data-mermaid-view="diagram">') + suffix);
+        try {
+            const navigation = loadEditorFunctions(fixture, [
+                'moveCursorIntoCodeBlockFromLabel', 'getNextNavigableNodeAfter', 'getNextNavigableSibling',
+                ...CODE_BLOCK_NAVIGATION,
+            ]);
+            const label = fixture.editor.querySelector('.code-block-language');
+            const range = new TestRange();
+            range.selectNode(label);
+            fixture.selection.addRange(range);
+            assert.equal(navigation.moveCursorIntoCodeBlockFromLabel(label), true);
+            if (suffix === '<hr>') {
+                assert.equal(selectedNode(fixture), 'HR');
+            } else {
+                const caret = fixture.selection.getRangeAt(0).startContainer;
+                assert.equal(caret.parentElement.tagName, 'P');
+                assert.equal(caret.textContent, suffix ? 'after' : '\u200B');
+            }
+        } finally {
+            fixture.restoreGlobals();
+        }
+    }
+});
+
 const LIST_ABOVE_CODE_BLOCK =
     '<h2>Deploying the Application to Liberty</h2>\n' +
     '<p>To deploy the application on Liberty you can do one of the following:</p>\n' +

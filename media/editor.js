@@ -10711,6 +10711,27 @@ const {
         if (!pre || !code) return false;
         const selection = window.getSelection();
         if (!selection) return false;
+        if (pre.getAttribute('data-mermaid-view') === 'diagram') {
+            if (codeBlockGapManager.moveToGap(pre, 'down', selection, true)) {
+                setCodeBlockLanguageNavSelection(null);
+                return true;
+            }
+            const next = getNextNavigableNodeAfter(pre);
+            if (!next) return false;
+            if (next.nodeType === Node.ELEMENT_NODE && next.tagName === 'PRE') {
+                return selectCodeBlockLanguageLabel(next);
+            }
+            if (next.nodeType === Node.ELEMENT_NODE && next.tagName === 'HR') {
+                const range = document.createRange();
+                range.selectNode(next);
+                selection.removeAllRanges();
+                selection.addRange(range);
+            } else if (!placeCursorAtElementBoundary(next, 'start')) {
+                return false;
+            }
+            setCodeBlockLanguageNavSelection(null);
+            return true;
+        }
         if (cursorManager.setCodeBlockCursorOffset(code, selection, 0)) {
             setCodeBlockLanguageNavSelection(null);
             editor.focus();

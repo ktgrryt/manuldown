@@ -946,6 +946,38 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
     gap: 6px;
 }
 
+.code-block-view-toggle {
+    display: flex;
+    border: 1px solid var(--vscode-editorGroup-border);
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+.code-block-view-btn {
+    padding: 2px 6px;
+    font-size: 11px;
+    font-weight: 500;
+    background: transparent;
+    color: var(--vscode-descriptionForeground);
+    border: none;
+    cursor: pointer;
+}
+
+.code-block-view-btn:hover {
+    background-color: var(--vscode-button-secondaryHoverBackground);
+    color: var(--vscode-button-secondaryForeground, var(--vscode-editor-foreground));
+}
+
+.code-block-view-btn[aria-pressed="true"] {
+    background-color: var(--vscode-button-secondaryBackground, var(--vscode-list-hoverBackground));
+    color: var(--vscode-button-secondaryForeground, var(--vscode-editor-foreground));
+}
+
+.code-block-view-btn:focus-visible {
+    outline: 1px solid var(--vscode-focusBorder);
+    outline-offset: -1px;
+}
+
 /* Language label */
 .code-block-language {
     font-size: 11px;
@@ -1160,6 +1192,15 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
     background-color: var(--md-mermaid-preview-background);
     overflow-x: auto;
     color: var(--md-mermaid-preview-foreground);
+}
+
+#editor pre[data-mermaid-view="diagram"] > code,
+#editor pre[data-mermaid-view="code"] > .mermaid-preview {
+    display: none;
+}
+
+#editor pre[data-mermaid-view="diagram"] > .mermaid-preview {
+    margin-top: 0;
 }
 
 #editor pre .mermaid-preview svg {
