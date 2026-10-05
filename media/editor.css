@@ -448,7 +448,9 @@ body[data-theme-mode="dark"] #editor-sync-warning {
 body.toc-resizing #editor,
 body.toc-resizing #editor-scrollbar-indicator,
 body.toc-resizing #toc-container,
-body.toc-resizing #toc-resizer {
+body.toc-resizing #toc-resizer,
+body.toc-fitting #editor-scrollbar-indicator,
+body.toc-fitting #toc-resizer {
     transition: none;
 }
 
@@ -1490,6 +1492,7 @@ body.toc-resizing #toc-resizer::before {
 
 #toc-content {
     flex: 1;
+    overflow-x: hidden;
     overflow-y: auto;
     padding: 12px 0 12px 0;
 }
