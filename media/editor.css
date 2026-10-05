@@ -13,7 +13,14 @@ body {
     background-color: var(--vscode-editor-background);
     color: var(--vscode-editor-foreground);
     position: relative;
-    --toc-panel-width: 150px;
+    /* editor.js sets the inputs; the formula is fitTocPanelWidth() in
+       modules/TocPanelLayout.js. The editor spans the viewport. */
+    --toc-preferred-width: 150px;
+    --toc-body-min-width: 400px;
+    --toc-panel-width: min(
+        var(--toc-preferred-width),
+        max(0px, calc(100vw - var(--toc-body-min-width)))
+    );
     --toc-resizer-hit-width: 8px;
     --toc-content-offset: 0px;
     --search-bar-edge-gap: clamp(12px, 2.8vw, 20px);

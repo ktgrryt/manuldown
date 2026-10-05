@@ -101,3 +101,11 @@ test('the body limit is released once the body can be 400px again', async () => 
     assert.equal(releaseTocBodyMinWidth(600, 200, 200), null);
     assert.equal(releaseTocBodyMinWidth(300, 150, null), null);
 });
+
+test('the body threshold editor.css reads is 400px or a lower dragged limit', async () => {
+    const { getTocBodyMinWidth } = await layoutModulePromise;
+
+    assert.equal(getTocBodyMinWidth(null), 400);
+    assert.equal(getTocBodyMinWidth(300), 300);
+    assert.equal(getTocBodyMinWidth(450), 400);
+});

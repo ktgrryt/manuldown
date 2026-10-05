@@ -10,10 +10,18 @@
  * or with the keyboard) records the body width as a lower limit, so the panel
  * stays where it was dropped. The editor drops the limit again once it is
  * wide enough for the chosen panel width and a TOC_BODY_MIN_WIDTH body.
+ *
+ * editor.css computes the rendered width with the same formula as
+ * fitTocPanelWidth(), so the panel follows the editor edge within the
+ * browser's own layout of each frame.
  */
 export const TOC_BODY_MIN_WIDTH = 400;
 
-function getBodyMinWidth(bodyMinWidth) {
+/**
+ * @param {number|null} bodyMinWidth - A lower body limit from fitTocBodyMinWidth().
+ * @returns {number} The body width below which the panel shrinks.
+ */
+export function getTocBodyMinWidth(bodyMinWidth) {
     return bodyMinWidth === null ? TOC_BODY_MIN_WIDTH : Math.min(TOC_BODY_MIN_WIDTH, bodyMinWidth);
 }
 
@@ -24,7 +32,7 @@ function getBodyMinWidth(bodyMinWidth) {
  * @returns {number} The panel width to render.
  */
 export function fitTocPanelWidth(containerWidth, preferredWidth, bodyMinWidth = null) {
-    const availableWidth = containerWidth - getBodyMinWidth(bodyMinWidth);
+    const availableWidth = containerWidth - getTocBodyMinWidth(bodyMinWidth);
     return Math.max(0, Math.min(preferredWidth, Math.round(availableWidth)));
 }
 

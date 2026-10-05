@@ -15,6 +15,7 @@ import { TypingUndoGroup } from './modules/TypingUndoGroup.js';
 import {
     fitTocBodyMinWidth,
     fitTocPanelWidth,
+    getTocBodyMinWidth,
     releaseTocBodyMinWidth
 } from './modules/TocPanelLayout.js';
 import {
@@ -1477,7 +1478,6 @@ const {
             : null;
     };
     let tocBodyMinWidth = readTocBodyMinWidthState();
-    let appliedTocPanelWidth = null;
 
     const saveTocBodyMinWidthState = () => {
         const state = vscode.getState() || {};
@@ -1485,43 +1485,21 @@ const {
         vscode.setState({ ...state, tocBodyMinWidth });
     };
 
-    const getTocLayoutContainerWidth = () => {
-        const container = editor.parentElement;
-        return container ? container.clientWidth : 0;
-    };
+    // The editor spans the Webview: the width editor.css reads as 100vw.
+    // Reading it from the window never forces a layout.
+    const getTocLayoutContainerWidth = () => window.innerWidth;
 
-    // Renders the preferred width, narrowed to what the editor width allows
-    // (see TocPanelLayout.js). Only a resize releases the body limit: a
-    // settings echo of an older width must not drop the limit of a newer one.
-    const applyTocPanelWidth = ({ containerResized = false } = {}) => {
-        const containerWidth = getTocLayoutContainerWidth();
-        if (containerResized) {
-            const nextBodyMinWidth = releaseTocBodyMinWidth(
-                containerWidth,
-                settingsState.tocPanelWidth,
-                tocBodyMinWidth
-            );
-            if (nextBodyMinWidth !== tocBodyMinWidth) {
-                tocBodyMinWidth = nextBodyMinWidth;
-                saveTocBodyMinWidthState();
-            }
-        }
-        const width = fitTocPanelWidth(containerWidth, settingsState.tocPanelWidth, tocBodyMinWidth);
-        if (width === appliedTocPanelWidth) return false;
-        appliedTocPanelWidth = width;
-        if (!containerResized) {
-            document.body.style.setProperty('--toc-panel-width', `${width}px`);
-            return true;
-        }
-        // Keep the panel edge on the editor edge while the editor is resized,
-        // without the transitions that animate reveals and settings changes.
-        document.body.classList.add('toc-fitting');
-        document.body.style.setProperty('--toc-panel-width', `${width}px`);
-        void document.body.offsetWidth;
-        document.body.classList.remove('toc-fitting');
-        return true;
+    // editor.css narrows the preferred width to what the editor width allows
+    // (see TocPanelLayout.js), so the panel follows the editor edge in the
+    // same layout as the body.
+    const applyTocPanelWidth = () => {
+        document.body.style.setProperty('--toc-preferred-width', `${settingsState.tocPanelWidth}px`);
+        document.body.style.setProperty('--toc-body-min-width', `${getTocBodyMinWidth(tocBodyMinWidth)}px`);
     };
-    applyTocPanelWidth({ containerResized: true });
+    applyTocPanelWidth();
+
+    const getRenderedTocPanelWidth = () =>
+        fitTocPanelWidth(getTocLayoutContainerWidth(), settingsState.tocPanelWidth, tocBodyMinWidth);
 
     // Applies a width chosen by dragging or with the keyboard. When that
     // leaves the body narrower than TOC_BODY_MIN_WIDTH, a lower body limit
@@ -1539,16 +1517,35 @@ const {
         return true;
     };
 
-    const handleTocLayoutContainerResize = () => {
-        if (applyTocPanelWidth({ containerResized: true })) {
-            scheduleEditorOverflowStateUpdate();
-        }
+    // Only the editor width releases the body limit: a settings echo of an
+    // older width must not drop the limit of a newer one. Releasing it never
+    // changes the layout.
+    const releaseTocBodyMinWidthIfWide = () => {
+        const nextBodyMinWidth = releaseTocBodyMinWidth(
+            getTocLayoutContainerWidth(),
+            settingsState.tocPanelWidth,
+            tocBodyMinWidth
+        );
+        if (nextBodyMinWidth === tocBodyMinWidth) return;
+        tocBodyMinWidth = nextBodyMinWidth;
+        applyTocPanelWidth();
+        saveTocBodyMinWidthState();
     };
-    if (typeof ResizeObserver === 'function' && editor.parentElement) {
-        new ResizeObserver(handleTocLayoutContainerResize).observe(editor.parentElement);
-    } else {
-        window.addEventListener('resize', handleTocLayoutContainerResize);
-    }
+    releaseTocBodyMinWidthIfWide();
+
+    // While the editor is resized, positions derived from the panel width
+    // skip the transitions that animate reveals and settings changes. The
+    // resize event comes before the frame's layout, so none of them starts.
+    let tocResizeSettleTimeout = null;
+    window.addEventListener('resize', () => {
+        document.body.classList.add('toc-fitting');
+        clearTimeout(tocResizeSettleTimeout);
+        tocResizeSettleTimeout = setTimeout(() => {
+            tocResizeSettleTimeout = null;
+            document.body.classList.remove('toc-fitting');
+        }, 200);
+        releaseTocBodyMinWidthIfWide();
+    });
 
     const isTocVisible = () => document.body.dataset.tocVisible === 'true';
 
@@ -18183,7 +18180,7 @@ const {
                 hideImageResizeOverlay();
                 clearImageSelectionForLayoutResize();
                 // Step from the rendered width, which a narrow editor shrinks.
-                if (!setTocPanelWidthFromUser(appliedTocPanelWidth + delta)) {
+                if (!setTocPanelWidthFromUser(getRenderedTocPanelWidth() + delta)) {
                     e.preventDefault();
                     return;
                 }
