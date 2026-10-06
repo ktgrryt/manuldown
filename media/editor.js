@@ -7017,6 +7017,33 @@ const {
         }
     }
 
+    // Some structural edits place the caret on the next frame. Input that
+    // arrives before that frame must not start in the old position: an IME
+    // composition started there is committed when the deferred placement moves
+    // the caret, so typing "moji" gave "mおじ". The next key, input or
+    // composition runs the placement first instead.
+    let pendingCaretPlacement = null;
+
+    function deferCaretPlacement(place) {
+        const pending = { place, frame: 0 };
+        pending.frame = requestAnimationFrame(() => {
+            if (pendingCaretPlacement === pending) {
+                pendingCaretPlacement = null;
+            }
+            place();
+        });
+        pendingCaretPlacement = pending;
+    }
+
+    function flushPendingCaretPlacement() {
+        const pending = pendingCaretPlacement;
+        if (!pending) return false;
+        pendingCaretPlacement = null;
+        cancelAnimationFrame(pending.frame);
+        pending.place();
+        return true;
+    }
+
     function getCodeBlockCursorOffset(codeBlock, range) {
         const offset = cursorManager.getCodeBlockCursorOffset(codeBlock, range);
         if (offset !== null) {
@@ -7967,7 +7994,7 @@ const {
 
                     // カーソル位置とフォーカスを復元
                     // DOMが更新されるまで待つためにrequestAnimationFrameを使用
-                    requestAnimationFrame(() => {
+                    deferCaretPlacement(() => {
                         // エディタにフォーカスを確保
                         editor.focus();
 
@@ -8062,7 +8089,7 @@ const {
                 }
 
                 // カーソル位置を復元
-                requestAnimationFrame(() => {
+                deferCaretPlacement(() => {
                     editor.focus();
                     const newRange = document.createRange();
                     const firstNode = domUtils.getFirstTextNode(newP);
@@ -8805,7 +8832,7 @@ const {
             textNode.parentNode.replaceChild(pre, textNode);
         }
 
-        requestAnimationFrame(() => {
+        deferCaretPlacement(() => {
             editor.focus();
             const newRange = document.createRange();
             const codeTextNode = code.firstChild;
@@ -9068,7 +9095,7 @@ const {
                     });
                     activeListItem.remove();
 
-                    requestAnimationFrame(() => {
+                    deferCaretPlacement(() => {
                         editor.focus();
                         const targetItem = liftedItems[0];
                         const targetIsCheckbox = hasCheckbox(targetItem);
@@ -9172,7 +9199,7 @@ const {
                         parentList.appendChild(nextListItem);
                     }
 
-                    requestAnimationFrame(() => {
+                    deferCaretPlacement(() => {
                         const newRange = document.createRange();
                         const startOffset = isCheckboxItem ? getCheckboxTextMinOffset(nextListItem) : 0;
                         newRange.setStart(emptyTextNode, Math.min(startOffset, emptyTextNode.textContent.length));
@@ -9200,7 +9227,7 @@ const {
                     }
 
                     // Set cursor in new list item
-                    requestAnimationFrame(() => {
+                    deferCaretPlacement(() => {
                         const newRange = document.createRange();
                         const startOffset = isCheckboxItem ? getCheckboxTextMinOffset(newListItem) : 0;
                         newRange.setStart(textNode, startOffset);
@@ -9271,7 +9298,7 @@ const {
                     }
 
                     // カーソルは変換後の段落の先頭に配置
-                    requestAnimationFrame(() => {
+                    deferCaretPlacement(() => {
                         const newRange = document.createRange();
                         const firstNode = domUtils.getFirstTextNode(p);
                         if (firstNode) {
@@ -18500,6 +18527,15 @@ const {
             finalizeComposition();
         });
 
+        // A key must act where the previous edit put the caret. For IME input
+        // this keydown precedes compositionstart, so moving the caret here
+        // cannot commit the composition.
+        editor.addEventListener('keydown', (e) => {
+            if (!e.isComposing && !isComposing) {
+                flushPendingCaretPlacement();
+            }
+        }, true);
+
         // Caret moves, shortcuts, clicks and IME input end the current typing
         // run, so the next keystroke starts its own undo step.
         editor.addEventListener('keydown', (e) => {
@@ -18521,6 +18557,9 @@ const {
             }, 0);
         });
         editor.addEventListener('compositionstart', () => {
+            // Compositions without a keydown (e.g. dictation) still have to
+            // start where the previous edit put the caret.
+            flushPendingCaretPlacement();
             typingUndoGroup.break();
             // Record the committed text before the composition changes the DOM,
             // so undo never lands on half-typed (uncommitted) IME text.
@@ -18528,6 +18567,9 @@ const {
         }, true);
 
         editor.addEventListener('beforeinput', (e) => {
+            if (!isComposing && !e.isComposing) {
+                flushPendingCaretPlacement();
+            }
             if (cursorManager && typeof cursorManager.clearInlineCodeBoundaryState === 'function') {
                 cursorManager.clearInlineCodeBoundaryState();
             }
