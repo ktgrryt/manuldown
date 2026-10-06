@@ -10917,6 +10917,23 @@ const {
         return true;
     }
 
+    // A math block in preview and a Mermaid diagram hide their source. Native
+    // movement (ArrowRight on the first line uses it) or a click can still leave
+    // a caret in such a block, e.g. after the rendered formula. Select the label
+    // instead, as keyboard entry from any other line does.
+    function normalizeCaretInHiddenSourceCodeBlock() {
+        const selection = window.getSelection();
+        if (!selection || !selection.rangeCount || !selection.isCollapsed) return false;
+        const node = selection.getRangeAt(0).startContainer;
+        const element = node && (node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement);
+        const pre = element && element.closest('pre');
+        if (!pre || !editor.contains(pre) || element.closest('.code-block-toolbar')) return false;
+        if (pre.getAttribute('data-math-view') !== 'preview' && pre.getAttribute('data-mermaid-view') !== 'diagram') {
+            return false;
+        }
+        return selectCodeBlockLanguageLabel(pre);
+    }
+
     function moveCursorIntoCodeBlockFromLabel(label) {
         if (!label) return false;
         const pre = label.closest('pre');
@@ -13715,6 +13732,25 @@ const {
         return false;
     }
 
+    // Native ArrowRight from the end of a block skips a Mermaid diagram and
+    // stops after a math preview, as their source is hidden. Custom navigation
+    // selects their label, as it does from every other line.
+    function isRangeAtEndBeforeHiddenSourceCodeBlock(range, block) {
+        let next = block.nextSibling;
+        while (next && next.nodeType === Node.TEXT_NODE && /^\s*$/.test(next.textContent || '')) {
+            next = next.nextSibling;
+        }
+        if (!next || next.nodeType !== Node.ELEMENT_NODE || next.tagName !== 'PRE' ||
+            (next.getAttribute('data-mermaid-view') !== 'diagram' &&
+                next.getAttribute('data-math-view') !== 'preview')) {
+            return false;
+        }
+        const rest = document.createRange();
+        rest.setStart(range.startContainer, range.startOffset);
+        rest.setEnd(block, block.childNodes.length);
+        return rest.toString().replace(/[​⁠﻿]/g, '') === '';
+    }
+
     function shouldUseNativeArrowForTopLine(e) {
         if (e.key !== 'ArrowUp' && e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') {
             return false;
@@ -13815,6 +13851,9 @@ const {
             return false;
         }
         if (getPreviousTopLevelNavigableSibling(topLevelBlock)) {
+            return false;
+        }
+        if (e.key === 'ArrowRight' && isRangeAtEndBeforeHiddenSourceCodeBlock(range, topLevelBlock)) {
             return false;
         }
         return isRangeOnFirstLogicalLineInTopLevelNode(range, topLevelBlock);
@@ -23879,6 +23918,7 @@ const {
             if (!isUpdating && !isComposing && !compositionUpdateGate.composing) {
                 footnoteManager.normalizeCaret();
                 mathManager.normalizeCaret();
+                normalizeCaretInHiddenSourceCodeBlock();
             }
             if (!isUpdating) {
                 codeBlockGapManager.reconcile(window.getSelection(), isComposing || compositionUpdateGate.composing);

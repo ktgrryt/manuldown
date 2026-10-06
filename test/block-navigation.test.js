@@ -1212,6 +1212,70 @@ test('moving down from a Mermaid diagram label skips its hidden source', async (
     }
 });
 
+test('a caret left in a math preview or a Mermaid diagram selects the label', async () => {
+    const preview = '<div class="math-preview" contenteditable="false" data-exclude-from-markdown="true"></div>';
+    const names = ['normalizeCaretInHiddenSourceCodeBlock', ...CODE_BLOCK_NAVIGATION];
+    for (const view of ['data-math-view="preview"', 'data-mermaid-view="diagram"']) {
+        const fixture = await createFixture('<p>First line</p>' +
+            CODE_BLOCK.replace('<pre>', `<pre ${view}>`).replace('</pre>', `${preview}</pre>`));
+        try {
+            const navigation = loadEditorFunctions(fixture, names);
+            const pre = fixture.editor.querySelector('pre');
+            // Native ArrowRight from the first line stops after the formula.
+            fixture.placeCaret(pre, pre.childNodes.length);
+            assert.equal(navigation.normalizeCaretInHiddenSourceCodeBlock(), true, view);
+            assert.equal(selectedNode(fixture), 'SPAN.code-block-language');
+            fixture.placeCaret(pre.querySelector('code').firstChild, 2);
+            assert.equal(navigation.normalizeCaretInHiddenSourceCodeBlock(), true, view);
+            assert.equal(selectedNode(fixture), 'SPAN.code-block-language');
+            // The selected label itself is left alone.
+            assert.equal(navigation.normalizeCaretInHiddenSourceCodeBlock(), false, view);
+        } finally {
+            fixture.restoreGlobals();
+        }
+    }
+    const fixture = await createFixture('<p>First line</p>' + CODE_BLOCK.replace('<pre>', '<pre data-math-view="code">'));
+    try {
+        const navigation = loadEditorFunctions(fixture, names);
+        fixture.placeCaret(fixture.editor.querySelector('code').firstChild, 2);
+        assert.equal(navigation.normalizeCaretInHiddenSourceCodeBlock(), false, 'visible TeX is editable');
+        fixture.placeCaret(fixture.editor.querySelector('p').firstChild, 3);
+        assert.equal(navigation.normalizeCaretInHiddenSourceCodeBlock(), false);
+    } finally {
+        fixture.restoreGlobals();
+    }
+});
+
+test('ArrowRight at the end of the first line enters a hidden-source block with custom navigation', async () => {
+    // Native ArrowRight skips a Mermaid diagram and stops after a math preview.
+    const textAfterCaret = {
+        createRange: () => ({
+            setStart(node, offset) { this.text = node.textContent.slice(offset); },
+            setEnd() {},
+            toString() { return this.text; },
+        }),
+    };
+    for (const [view, expected] of [
+        ['data-mermaid-view="diagram"', true],
+        ['data-math-view="preview"', true],
+        ['data-math-view="code"', false],
+        ['', false],
+    ]) {
+        const fixture = await createFixture('<p>First line</p>' + CODE_BLOCK.replace('<pre>', `<pre ${view}>`));
+        try {
+            const { isRangeAtEndBeforeHiddenSourceCodeBlock } = loadEditorFunctions(
+                fixture, ['isRangeAtEndBeforeHiddenSourceCodeBlock'], { document: textAfterCaret });
+            const paragraph = fixture.editor.querySelector('p');
+            const atEnd = fixture.placeCaret(paragraph.firstChild, paragraph.textContent.length);
+            assert.equal(isRangeAtEndBeforeHiddenSourceCodeBlock(atEnd, paragraph), expected, view || 'plain code');
+            const midLine = fixture.placeCaret(paragraph.firstChild, 3);
+            assert.equal(isRangeAtEndBeforeHiddenSourceCodeBlock(midLine, paragraph), false, view || 'plain code');
+        } finally {
+            fixture.restoreGlobals();
+        }
+    }
+});
+
 const LIST_ABOVE_CODE_BLOCK =
     '<h2>Deploying the Application to Liberty</h2>\n' +
     '<p>To deploy the application on Liberty you can do one of the following:</p>\n' +
