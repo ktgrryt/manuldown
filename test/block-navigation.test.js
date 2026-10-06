@@ -445,6 +445,7 @@ function loadCheckboxNavigation(fixture, nativeTopLine = true) {
             const isComposing = false;
             const compositionUpdateGate = { composing: false };
             const codeBlockGapManager = { reconcile() {} };
+            const mathManager = { normalizeCaret: () => false };
             const revealCaretAfterKeyboardNavigation = () => {};
             ${editorSource.slice(keydownStart, keydownEnd)}
         };

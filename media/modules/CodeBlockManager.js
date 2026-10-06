@@ -14,7 +14,7 @@ export class CodeBlockManager {
             'php', 'ruby', 'go', 'rust', 'swift', 'kotlin', 'scala',
             'html', 'css', 'scss', 'sass', 'less',
             'json', 'xml', 'yaml', 'toml',
-            'markdown', 'latex', 'mermaid',
+            'markdown', 'latex', 'math', 'mermaid',
             'sql', 'graphql',
             'bash', 'shell', 'powershell',
             'dockerfile', 'makefile',
@@ -39,6 +39,8 @@ export class CodeBlockManager {
         this.mermaidIdCounter = 0;
         this.mermaidThemeKey = null;
         this.mermaidLoadState = 'idle';
+        this.mathRenderer = null;
+        this.mathRenderHandles = new WeakMap();
         this.editorThemeMode = this._normalizeThemeMode(themeMode);
         this.clipboardWriteRequestSeq = 0;
         this.copyButtonStateReconcilerHandle = null;
@@ -58,6 +60,30 @@ export class CodeBlockManager {
         }
         this._observeCodeBlockControlMutations();
         this._initMermaid();
+        // A math block's source is TeX; highlight it as LaTeX.
+        if (typeof Prism !== 'undefined' && Prism.languages?.latex && !Prism.languages.math) {
+            Prism.languages.math = Prism.languages.latex;
+        }
+        if (this.editor && typeof this.editor.addEventListener === 'function') {
+            // Clicking a rendered formula opens its source.
+            this.editor.addEventListener('mousedown', (e) => {
+                if (e.button === 0 && e.target?.closest?.('.math-preview')) {
+                    e.preventDefault();
+                }
+            });
+            this.editor.addEventListener('click', (e) => {
+                const pre = e.target?.closest?.('.math-preview')?.closest('pre');
+                if (!pre || !this.editor.contains(pre)) return;
+                e.preventDefault();
+                this._editMathSource(pre);
+            });
+        }
+    }
+
+    /** @param {{ render(target: Element, tex: string, displayMode: boolean): boolean }} renderer */
+    setMathRenderer(renderer) {
+        this.mathRenderer = renderer;
+        this._rerenderMathBlocks();
     }
 
     setThemeMode(themeMode) {
@@ -275,6 +301,114 @@ export class CodeBlockManager {
             return '';
         }
         return this._getCodeBlockText(codeBlock).replace(/[\u200B\u2060]/g, '');
+    }
+
+    _isMathLanguage(language) {
+        return (language || '').toLowerCase() === 'math';
+    }
+
+    // "code" shows the TeX with the formula below it; "preview" shows only the formula.
+    _getMathView(pre) {
+        return pre.getAttribute('data-math-view') === 'code' ? 'code' : 'preview';
+    }
+
+    _setMathView(pre, view) {
+        pre.setAttribute('data-math-view', view);
+        pre.querySelectorAll('.code-block-view-btn').forEach((button) => {
+            button.setAttribute('aria-pressed', String(button.getAttribute('data-math-view') === view));
+        });
+    }
+
+    /** Show a math block's source and put the caret at its end. */
+    _editMathSource(pre) {
+        const code = pre && pre.querySelector('code');
+        if (!code) {
+            return;
+        }
+        this._setMathView(pre, 'code');
+        const selection = window.getSelection();
+        if (!selection) {
+            return;
+        }
+        const text = this._getCodeBlockText(code);
+        const offset = text.endsWith('\n') ? text.length - 1 : text.length;
+        if (!this.cursorManager || !this.cursorManager.setCodeBlockCursorOffset(code, selection, offset)) {
+            const range = document.createRange();
+            range.selectNodeContents(code);
+            range.collapse(false);
+            selection.removeAllRanges();
+            selection.addRange(range);
+        }
+        if (typeof this.editor.focus === 'function') {
+            this.editor.focus({ preventScroll: true });
+        }
+    }
+
+    _ensureMathPreview(pre) {
+        let preview = Array.from(pre.children).find((child) => child.classList.contains('math-preview'));
+        if (!preview) {
+            preview = document.createElement('div');
+            preview.className = 'math-preview';
+            preview.contentEditable = 'false';
+            preview.setAttribute('data-exclude-from-markdown', 'true');
+            preview.title = 'Click to edit';
+            pre.appendChild(preview);
+        }
+        return preview;
+    }
+
+    _clearMathPreview(pre) {
+        if (!pre) {
+            return;
+        }
+        pre.querySelectorAll('.math-preview').forEach((preview) => preview.remove());
+        const handle = this.mathRenderHandles.get(pre);
+        if (handle) {
+            clearTimeout(handle);
+            this.mathRenderHandles.delete(pre);
+        }
+    }
+
+    _renderMathPreview(pre, codeBlock) {
+        const preview = this._ensureMathPreview(pre);
+        const tex = this._getCodeBlockText(codeBlock).replace(/[\u200B\u2060]/g, '');
+        if (!this.mathRenderer || !this.mathRenderer.render(preview, tex, true)) {
+            preview.textContent = tex;
+        }
+    }
+
+    _scheduleMathRender(pre, codeBlock, immediate = false) {
+        if (!pre || !codeBlock) {
+            return;
+        }
+        const existingHandle = this.mathRenderHandles.get(pre);
+        if (existingHandle) {
+            clearTimeout(existingHandle);
+            this.mathRenderHandles.delete(pre);
+        }
+        if (immediate) {
+            this._renderMathPreview(pre, codeBlock);
+            return;
+        }
+        const handle = setTimeout(() => {
+            this.mathRenderHandles.delete(pre);
+            if (pre.isConnected) {
+                this._renderMathPreview(pre, codeBlock);
+            }
+        }, 60);
+        this.mathRenderHandles.set(pre, handle);
+    }
+
+    _rerenderMathBlocks() {
+        if (!this.editor || typeof this.editor.querySelectorAll !== 'function') {
+            return;
+        }
+        this.editor.querySelectorAll('pre code[class*="language-math"]').forEach((codeBlock) => {
+            const pre = codeBlock.parentElement;
+            if (pre && this._isMathLanguage(this._getCodeBlockLanguage(codeBlock))) {
+                this._scheduleMathRender(pre, codeBlock, true);
+            }
+        });
     }
 
     _getCodeBlockText(codeBlock) {
@@ -619,6 +753,10 @@ export class CodeBlockManager {
                 toolbar.querySelectorAll('.code-block-view-btn').length !== 2) {
                 return false;
             }
+        }
+        if (this._isMathLanguage(language) &&
+            toolbar.querySelectorAll('.code-block-view-btn[data-math-view]').length !== 2) {
+            return false;
         }
         return true;
     }
@@ -1052,6 +1190,10 @@ export class CodeBlockManager {
             return;
         }
 
+        if (this._isMathLanguage(language) && codeBlock.parentElement) {
+            this._scheduleMathRender(codeBlock.parentElement, codeBlock);
+        }
+
         if (typeof Prism === 'undefined') {
             return;
         }
@@ -1159,7 +1301,8 @@ export class CodeBlockManager {
      */
     addCodeBlockControls(pre, language) {
         const isMermaid = this._isMermaidLanguage(language);
-        
+        const isMath = this._isMathLanguage(language);
+
         // 既存のコントロールを削除
         const existingToolbar = pre.querySelector('.code-block-toolbar');
         if (existingToolbar) {
@@ -1168,10 +1311,14 @@ export class CodeBlockManager {
                 parent.removeChild(existingToolbar);
             }
         }
-        
+
         if (!isMermaid) {
             pre.removeAttribute('data-mermaid-view');
             this._clearMermaidPreview(pre);
+        }
+        if (!isMath) {
+            pre.removeAttribute('data-math-view');
+            this._clearMathPreview(pre);
         }
 
         // ツールバーを作成
@@ -1564,7 +1711,48 @@ export class CodeBlockManager {
             });
             actionGroup.appendChild(viewToggle);
         }
-        
+
+        if (isMath) {
+            const viewToggle = document.createElement('div');
+            viewToggle.className = 'code-block-view-toggle';
+            viewToggle.setAttribute('role', 'group');
+            viewToggle.setAttribute('aria-label', 'Math display');
+            [['code', 'TeX', 'Edit the TeX source'], ['preview', 'Preview', 'Show only the formula']].forEach(([view, label, title]) => {
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.className = 'code-block-view-btn';
+                button.setAttribute('data-math-view', view);
+                button.textContent = label;
+                button.title = title;
+                button.addEventListener('mousedown', (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                });
+                button.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const code = pre.querySelector('code');
+                    if (view === 'code') {
+                        this._editMathSource(pre);
+                        return;
+                    }
+                    const selection = window.getSelection();
+                    // A hidden source must not retain an editable caret.
+                    if (code && selection && selection.rangeCount > 0 &&
+                        code.contains(selection.getRangeAt(0).startContainer)) {
+                        selection.removeAllRanges();
+                        button.focus({ preventScroll: true });
+                    }
+                    this._setMathView(pre, view);
+                    if (code) {
+                        this._scheduleMathRender(pre, code, true);
+                    }
+                });
+                viewToggle.appendChild(button);
+            });
+            actionGroup.appendChild(viewToggle);
+        }
+
         // コピーボタンを追加
         const copyBtn = document.createElement('button');
         copyBtn.className = 'code-block-copy-btn';
@@ -1656,6 +1844,14 @@ export class CodeBlockManager {
                 this._scheduleMermaidRender(pre, code, true);
             }
         }
+
+        if (isMath) {
+            this._setMathView(pre, this._getMathView(pre));
+            const code = pre.querySelector('code');
+            if (code) {
+                this._scheduleMathRender(pre, code, true);
+            }
+        }
     }
 
     /**
@@ -1671,6 +1867,9 @@ export class CodeBlockManager {
         if (isMermaid && !this._isMermaidLanguage(this._getCodeBlockLanguage(code))) {
             // Choosing Mermaid while editing should leave the source ready to edit.
             this._setMermaidView(pre, 'code');
+        }
+        if (this._isMathLanguage(newLang) && !this._isMathLanguage(this._getCodeBlockLanguage(code))) {
+            this._setMathView(pre, 'code');
         }
         
         // 古い言語クラスを削除

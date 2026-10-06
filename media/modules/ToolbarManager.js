@@ -16,6 +16,9 @@ export class ToolbarManager {
         this.onInsertImage = options.onInsertImage || null;
         this.onInsertFootnote = options.onInsertFootnote || null;
         this.canInsertFootnote = options.canInsertFootnote || (() => true);
+        this.onInsertMath = options.onInsertMath || null;
+        this.canInsertMath = options.canInsertMath || (() => true);
+        this.onInsertMathBlock = options.onInsertMathBlock || null;
         this.commandButtons = new Map();
         this.overflowButtons = new Map();
         this.overflowSelection = null;
@@ -43,6 +46,7 @@ export class ToolbarManager {
             'checkbox',
             'quote',
             'codeblock',
+            'mathblock',
             'table',
         ]);
         this.headingLevelCommands = new Set([
@@ -56,6 +60,7 @@ export class ToolbarManager {
             'h3',
             'quote',
             'codeblock',
+            'mathblock',
             'table',
         ]);
     }
@@ -81,7 +86,8 @@ export class ToolbarManager {
                 const command = button.getAttribute('data-command');
                 this.executeCommand(command);
                 // ダイアログを開くコマンドはダイアログ側でフォーカスを管理するため、ここではスキップ
-                if (command !== 'table' && command !== 'link' && command !== 'image' && command !== 'footnote') {
+                if (command !== 'table' && command !== 'link' && command !== 'image' && command !== 'footnote' &&
+                    command !== 'math') {
                     setTimeout(() => this.editor.focus(), 0);
                 }
             });
@@ -140,7 +146,8 @@ export class ToolbarManager {
                 if (menuItem.disabled) return;
                 this.closeOverflowMenu({ restoreSelection: true });
                 this.executeCommand(command);
-                if (command !== 'table' && command !== 'link' && command !== 'image' && command !== 'footnote') {
+                if (command !== 'table' && command !== 'link' && command !== 'image' && command !== 'footnote' &&
+                    command !== 'math') {
                     setTimeout(() => this.editor.focus(), 0);
                 }
             });
@@ -334,6 +341,12 @@ export class ToolbarManager {
             return;
         }
 
+        if (command === 'math') {
+            if (this.canInsertMath() && this.onInsertMath) this.onInsertMath();
+            this.updateToolbarState();
+            return;
+        }
+
         if (command === 'inlinecode') {
             this.toggleInlineCode();
             this.updateToolbarState();
@@ -356,7 +369,7 @@ export class ToolbarManager {
             return;
         }
 
-        if (command === 'codeblock' && this.isSelectionInCodeBlockContext()) {
+        if ((command === 'codeblock' || command === 'mathblock') && this.isSelectionInCodeBlockContext()) {
             this.updateToolbarState();
             return;
         }
@@ -378,6 +391,11 @@ export class ToolbarManager {
 
         if (command === 'codeblock' && this.onInsertCodeBlock) {
             this.onInsertCodeBlock();
+            return;
+        }
+
+        if (command === 'mathblock' && this.onInsertMathBlock) {
+            this.onInsertMathBlock();
             return;
         }
 
@@ -465,12 +483,13 @@ export class ToolbarManager {
                 !!activeHeadingCommand &&
                 activeHeadingCommand === command;
             const disabledByList = this.listRestrictedCommands.has(command) && inListContext;
-            const disabledCodeBlockInCodeBlock = command === 'codeblock' && inCodeBlockContext;
+            const disabledCodeBlockInCodeBlock = (command === 'codeblock' || command === 'mathblock') && inCodeBlockContext;
             const disabledLinkInCodeBlock = command === 'link' && inCodeBlockContext;
             const disabledInlineCode = command === 'inlinecode' && !this.canToggleInlineCode();
             const disabledImageInCode = command === 'image' &&
                 (inCodeBlockContext || this.isSelectionTouchingInlineCode());
             const disabledFootnote = command === 'footnote' && !this.canInsertFootnote();
+            const disabledMath = command === 'math' && !this.canInsertMath();
             const isDisabled =
                 disabledByTable ||
                 disabledBoldInHeading ||
@@ -479,7 +498,8 @@ export class ToolbarManager {
                 disabledLinkInCodeBlock ||
                 disabledInlineCode ||
                 disabledImageInCode ||
-                disabledFootnote;
+                disabledFootnote ||
+                disabledMath;
             button.disabled = isDisabled;
             button.classList.toggle('is-disabled', isDisabled);
             button.classList.toggle('is-current-heading', isCurrentHeadingLevel);

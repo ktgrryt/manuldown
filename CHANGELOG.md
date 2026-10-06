@@ -7,6 +7,7 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 ## [Unreleased]
 
 ### Added
+- Math: write TeX as `$…$` and `$$…$$`, rendered with KaTeX. Type `$tex$` or `$$` + Enter, use `/math` or `/inline-math`, or the Math and Math Block toolbar items. Inline formulas are edited in a popover with a live result and TeX errors; math blocks are edited like code blocks with a TeX/Preview toggle, and ```` ```math ```` fences render the same way. KaTeX loads only for documents with a formula.
 - Unified inline link popover from the toolbar, `/link`, `Cmd+K`, or `Ctrl+K`.
 - Host-validated HTTP, HTTPS, email URL, and absolute or explicit relative workspace-path input in the same field.
 - Inline workspace file suggestions while typing in the URL/path field, with keyboard navigation and relative-path completion.

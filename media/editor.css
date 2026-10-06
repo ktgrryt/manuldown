@@ -1842,6 +1842,106 @@ body.image-resizing * {
     opacity: 0.9;
 }
 
+/* Math. KaTeX draws each formula in its shadow root (MathManager). */
+#editor span.mdw-math {
+    cursor: pointer;
+    border-radius: 3px;
+}
+
+#editor span.mdw-math:hover {
+    background-color: rgba(128, 128, 128, 0.15);
+}
+
+/* "$$…$$" inside a paragraph is a display formula on its own line. */
+#editor span.mdw-math[data-mdw-math="display"] {
+    display: inline-block;
+    width: 100%;
+    vertical-align: middle;
+}
+
+#editor pre .math-preview {
+    padding: 4px 0;
+    overflow-x: auto;
+    white-space: normal;
+    color: var(--vscode-editor-foreground);
+    cursor: pointer;
+}
+
+#editor pre .math-preview:hover {
+    background-color: rgba(128, 128, 128, 0.08);
+}
+
+#editor pre[data-math-view="preview"] > code {
+    display: none;
+}
+
+#editor pre[data-math-view="code"] > .math-preview {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px dashed var(--vscode-editorGroup-border);
+}
+
+.math-popover {
+    position: fixed;
+    z-index: 1000;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    width: min(420px, calc(100vw - 16px));
+    box-sizing: border-box;
+    padding: 8px;
+    background-color: var(--vscode-dropdown-background);
+    border: 1px solid var(--vscode-dropdown-border);
+    border-radius: 4px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.math-popover[hidden] {
+    display: none;
+}
+
+.math-popover-input {
+    width: 100%;
+    min-height: 26px;
+    box-sizing: border-box;
+    padding: 4px 8px;
+    resize: none;
+    font-family: var(--vscode-editor-font-family, monospace);
+    font-size: 12px;
+    background-color: var(--vscode-input-background);
+    color: var(--vscode-input-foreground);
+    border: 1px solid var(--vscode-input-border, var(--vscode-editorGroup-border));
+    border-radius: 3px;
+    outline: none;
+}
+
+.math-popover-input:focus {
+    border-color: var(--vscode-focusBorder);
+}
+
+.math-popover-error {
+    color: var(--vscode-errorForeground);
+    font-size: 11px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.math-popover-footer {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.math-popover-hint {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    color: var(--vscode-descriptionForeground);
+    font-size: 11px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 /* Slash Command Menu */
 .slash-command-menu {
     position: absolute;

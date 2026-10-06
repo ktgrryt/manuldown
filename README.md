@@ -22,6 +22,7 @@ ManulDown is a VSCode extension that lets you edit Markdown files in a WYSIWYG e
 - **Image support**: Paste and drag-and-drop images.
 - **Links**: Insert HTTP, HTTPS, and email links, or safely encoded links to files in the current workspace folder.
 - **Footnotes**: Render and edit `[^label]` references and `[^label]: note` definitions. Numbers and notes follow reference order; click a number to edit its note and click ↩ to return to the text.
+- **Math**: Write TeX formulas as `$…$` (inline) or `$$…$$` (block), rendered with KaTeX. See [Math](#math).
 - **Table of contents**: Auto-generated from headings.
 - **Two-way sync**: Changes in the editor are reflected in the Markdown file immediately.
 - **Toolbar**: Quick access buttons for common formatting.
@@ -40,7 +41,7 @@ ManulDown is a VSCode extension that lets you edit Markdown files in a WYSIWYG e
 
 Opening a file leaves its source unchanged. When editing, unchanged blocks and inline formatting retain their original Markdown, including underscore emphasis, list markers, code fences, links, table spacing, and blank lines. Edited blocks are serialized with the escaping needed to preserve their meaning. Footnotes follow reference order on screen while existing definitions keep their source order.
 
-Unsupported math expressions (`$…$` / `$$…$$`) and GitHub alert markers such as `[!NOTE]` are shown as read-only source and kept intact. Front matter, raw HTML, and reference definitions also retain their source.
+GitHub alert markers such as `[!NOTE]` are shown as read-only source and kept intact. Front matter, raw HTML, and reference definitions also retain their source.
 
 ### Toolbar Buttons
 
@@ -56,6 +57,7 @@ Edit note text directly. Hover over a note to show × at its right edge, then cl
 Backspace or Delete on a reference removes that occurrence. Deleting the last reference also removes its note.
 Copying or moving annotated text preserves its notes. Notes can use reference-style links and images defined in the document. Nested footnote definitions are editable up to four levels; deeper definitions retain their original Markdown as read-only source.
 - **Code**: Insert a code block
+- **Math** / **Math Block** (in the **…** menu): Insert an inline formula or a math block. With text selected, Math turns the selection into a formula.
 - **Image**: Choose an image file to copy into the document's image folder and insert at the original selection. Image and Link follow the other buttons in the left-aligned toolbar.
 
 When the editor is narrow, buttons that do not fit are available in the **…** menu. Widening the editor returns them to the toolbar. You can navigate the menu with the arrow keys and close it with Escape.
@@ -65,6 +67,15 @@ Select text and use the Link button, `/link`, `Cmd+K`, or `Ctrl+K` to open the s
 Pasting an absolute local path directly over selected text also creates a relative link. Invalid, missing, symbolic-link, remote, and out-of-workspace targets remain an ordinary plain-text paste.
 
 Place the caret inside a link and press `Cmd+Enter` on macOS or `Ctrl+Enter` on Windows/Linux to open its URL, workspace file, or heading in the current document. `Cmd+Click` / `Ctrl+Click` also opens links.
+
+### Math
+
+Formulas use TeX syntax and are rendered with [KaTeX](https://katex.org/supported.html). KaTeX is loaded only for documents that contain a formula.
+
+- **Inline formulas**: Type `$E = mc^2$`; the formula renders when you type the closing `$`. As when a file is opened, the TeX must not start or end with a space, so `$5 and $10` stays text. Click a formula (or select it and press Enter) to edit its TeX in a small field: the formula updates as you type, a TeX error is shown below the field, Enter finishes, and Escape restores the previous TeX. The arrow keys step over a formula, and Backspace or Delete removes it.
+- **Math blocks**: Type `$$` on an empty line and press Enter, use `/math`, or choose **Math Block**. A math block is edited like a code block: **TeX** shows the source with the formula below it, and **Preview** shows only the formula. Click a rendered formula to edit its TeX. A ```` ```math ```` fence is shown the same way, and choosing `math` as a code block's language turns it into one.
+
+Formulas are saved as `$…$` and `$$` blocks. Unchanged formulas keep their original source. TeX that `$$` delimiters cannot hold, such as a blank line, is saved as a ```` ```math ```` fence instead.
 
 ### Slash Commands
 
@@ -78,6 +89,8 @@ Type `/` in the editor to open the slash command menu. You can narrow results by
 | `/table` | Insert a 2x2 table |
 | `/quote` | Convert the current block into a quote (or insert an empty quote block if conversion is not possible) |
 | `/code` | Insert a code block and focus the language label for editing |
+| `/math` | Insert a math block (`$$…$$`) and focus its TeX |
+| `/inline-math` | Insert an inline formula (`$…$`) and open its editor |
 | `/checkbox` | Create a checklist item (task list) |
 
 Custom slash commands:
@@ -91,7 +104,7 @@ For example, ~/.manuldown/meeting-minutes.md can be inserted with /meeting-minut
 Notes for custom command names:
 
 - Command IDs are normalized from file names (`spaces` -> `-`, leading `/` removed, lowercase).
-- Built-in command IDs (`link`, `toc`, `footnote`, `table`, `quote`, `code`, `checkbox`) are reserved.
+- Built-in command IDs (`link`, `toc`, `footnote`, `table`, `quote`, `code`, `math`, `inline-math`, `checkbox`) are reserved.
 - Duplicate normalized command IDs are ignored.
 
 Menu controls:
@@ -193,6 +206,8 @@ The editor automatically converts the following Markdown patterns:
 - `- item` -> Unordered list
 - `1. item` -> Ordered list
 - `` ```javascript `` -> Code block (type a language after `` ``` `` and press `Enter`)
+- `$tex$` -> Inline formula
+- `$$` -> Math block (press `Enter` on a line with only `$$`)
 
 ## Development
 
@@ -216,6 +231,7 @@ manuldown/
 |       |-- DOMUtils.js
 |       |-- ListManager.js
 |       |-- MarkdownConverter.js
+|       |-- MathManager.js
 |       |-- SearchManager.js
 |       |-- StateManager.js
 |       |-- TableManager.js
@@ -244,6 +260,7 @@ manuldown/
 - **marked**: Markdown-to-HTML conversion
 - **turndown**: HTML-to-Markdown conversion
 - **Prism.js**: Syntax highlighting
+- **KaTeX**: Math rendering
 - **contenteditable**: WYSIWYG editing behavior
 
 ## License

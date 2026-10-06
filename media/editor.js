@@ -10,6 +10,7 @@ import { ToolbarManager } from './modules/ToolbarManager.js';
 import { TableManager } from './modules/TableManager.js';
 import { SearchManager } from './modules/SearchManager.js';
 import { FootnoteManager } from './modules/FootnoteManager.js';
+import { MathManager } from './modules/MathManager.js';
 import { CompositionUpdateGate } from './modules/CompositionUpdateGate.js';
 import { TypingUndoGroup } from './modules/TypingUndoGroup.js';
 import {
@@ -1177,6 +1178,8 @@ const {
         assignStableHeadingIds(editor.querySelectorAll('h1, h2, h3, h4, h5, h6'));
         footnoteManager.cancelPendingDelete();
         footnoteManager.refresh();
+        // The formula being edited, if any, was replaced with the document.
+        mathManager.dismissEditor();
     }
 
     function setEditorLoadFailureState(failed) {
@@ -1636,7 +1639,8 @@ const {
         moveToCodeBlockGap: (pre, direction, selection) =>
             codeBlockGapManager.moveToGap(pre, direction, selection),
         moveAcrossFootnoteReference: (selection, direction) =>
-            footnoteManager.moveAcrossReference(selection, direction)
+            footnoteManager.moveAcrossReference(selection, direction) ||
+            mathManager.moveAcrossFormula(selection, direction)
     });
     const listManager = new ListManager(editor, domUtils);
     const markdownConverter = new MarkdownConverter(editor, domUtils, {
@@ -1675,6 +1679,12 @@ const {
         }
     });
     const footnoteManager = new FootnoteManager(editor, stateManager, { onChange: () => notifyChange() });
+    const mathManager = new MathManager(editor, stateManager, {
+        onChange: () => notifyChange(),
+        scriptSrc: document.body?.dataset?.katexScriptSrc || '',
+        styleHref: document.body?.dataset?.katexStyleHref || ''
+    });
+    codeBlockManager.setMathRenderer(mathManager);
     const toolbarManager = new ToolbarManager(editor, stateManager, {
         onInsertTable: () => tableManager.openTableDialog(),
         onInsertQuote: () => insertToolbarQuote(),
@@ -1683,7 +1693,10 @@ const {
         onInsertLink: () => requestWorkspaceLink(),
         onInsertImage: () => requestImageFile(),
         onInsertFootnote: () => footnoteManager.insert(),
-        canInsertFootnote: () => footnoteManager.canInsert()
+        canInsertFootnote: () => footnoteManager.canInsert(),
+        onInsertMath: () => mathManager.insert(),
+        canInsertMath: () => mathManager.canInsert(),
+        onInsertMathBlock: () => insertMathBlock()
     });
 
     function requestImageFile() {
@@ -2827,6 +2840,9 @@ const {
             if (element.tagName === 'IMG') {
                 return createMarkdownImageSyntaxFromElement(element);
             }
+            if (element.matches?.('span[data-mdw-math]')) {
+                return mathManager.toMarkdown(element);
+            }
             if (element.tagName === 'BR') {
                 return '\n';
             }
@@ -2947,6 +2963,10 @@ const {
             }
             if (el.tagName === 'IMG') {
                 output += createMarkdownImageSyntaxFromElement(el);
+                return;
+            }
+            if (el.matches?.('span[data-mdw-math]')) {
+                output += mathManager.toMarkdown(el);
                 return;
             }
             if (el.tagName === 'BR') {
@@ -5346,6 +5366,53 @@ const {
         insertSlashCodeBlock();
     }
 
+    /** A code block for TeX, saved with "$$" delimiters, opened for editing. */
+    function createMathBlock() {
+        const pre = document.createElement('pre');
+        const code = document.createElement('code');
+        code.className = 'language-math';
+        code.setAttribute('data-mdw-math-delimiter', '$$');
+        code.textContent = '\n';
+        pre.appendChild(code);
+        pre.setAttribute('data-math-view', 'code');
+        codeBlockManager.addCodeBlockControls(pre, 'math');
+        return pre;
+    }
+
+    function placeCaretAtCodeBlockStart(code, selection) {
+        const newRange = document.createRange();
+        const textNode = code.firstChild;
+        if (textNode && textNode.nodeType === Node.TEXT_NODE) {
+            newRange.setStart(textNode, 0);
+        } else {
+            newRange.setStart(code, 0);
+        }
+        newRange.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(newRange);
+    }
+
+    function insertMathBlock() {
+        if (isSelectionInListItem()) return;
+
+        const selection = window.getSelection();
+        if (!selection || !selection.rangeCount) return;
+
+        const range = selection.getRangeAt(0);
+        stateManager.saveState();
+
+        const pre = createMathBlock();
+        tableManager._insertNodeAsBlock(range, pre);
+
+        requestAnimationFrame(() => {
+            const sel = window.getSelection();
+            if (!sel) return;
+            placeCaretAtCodeBlockStart(pre.querySelector('code'), sel);
+            editor.focus();
+            notifyChange();
+        });
+    }
+
     function insertSlashCodeBlock() {
         if (isSelectionInListItem()) return;
 
@@ -5848,10 +5915,12 @@ const {
         { id: 'table', source: 'builtin', description: 'Insert a 2x2 table', action: insertSlashTable },
         { id: 'quote', source: 'builtin', description: 'Insert a quote block', action: insertSlashQuote },
         { id: 'code', source: 'builtin', description: 'Insert a code block', action: insertSlashCodeBlock },
+        { id: 'math', source: 'builtin', description: 'Insert a math block ($$…$$)', action: insertMathBlock },
+        { id: 'inline-math', source: 'builtin', description: 'Insert an inline formula ($…$)', action: () => mathManager.insert() },
         { id: 'checkbox', source: 'builtin', description: 'Create a checklist item', action: insertSlashCheckbox }
     ];
     const builtInSlashCommandIdSet = new Set(builtInSlashCommands.map((cmd) => cmd.id.toLowerCase()));
-    const listRestrictedSlashCommandIds = new Set(['table', 'quote', 'code', 'toc']);
+    const listRestrictedSlashCommandIds = new Set(['table', 'quote', 'code', 'math', 'toc']);
 
     function getAllSlashCommands() {
         return builtInSlashCommands.concat(customSlashCommands);
@@ -8677,7 +8746,8 @@ const {
         const rawText = textNode.textContent || '';
         const normalizedText = rawText.replace(/[\u200B\u2060]/g, '');
         const fenceMatch = normalizedText.match(/^\s*```\s*([A-Za-z0-9_-]+)?\s*$/);
-        if (!fenceMatch) {
+        const isMathFence = !fenceMatch && /^\s*\$\$\s*$/.test(normalizedText);
+        if (!fenceMatch && !isMathFence) {
             return false;
         }
 
@@ -8708,15 +8778,25 @@ const {
 
         stateManager.saveState();
 
-        const language = (fenceMatch[1] || '').toLowerCase();
-        const pre = document.createElement('pre');
-        const code = document.createElement('code');
-        if (language) {
-            code.className = `language-${language}`;
+        let pre;
+        if (isMathFence) {
+            pre = createMathBlock();
+        } else {
+            const language = (fenceMatch[1] || '').toLowerCase();
+            pre = document.createElement('pre');
+            const fencedCode = document.createElement('code');
+            if (language) {
+                fencedCode.className = `language-${language}`;
+            }
+            fencedCode.textContent = '\n';
+            pre.appendChild(fencedCode);
+            codeBlockManager.addCodeBlockControls(pre, language);
+            if (codeBlockManager._isMathLanguage(language)) {
+                // A "```math" fence starts with its source open, like "$$".
+                codeBlockManager._setMathView(pre, 'code');
+            }
         }
-        code.textContent = '\n';
-        pre.appendChild(code);
-        codeBlockManager.addCodeBlockControls(pre, language);
+        const code = pre.querySelector('code');
 
         const parent = textNode.parentElement;
         if (parent && parent !== editor) {
@@ -10844,7 +10924,7 @@ const {
         if (!pre || !code) return false;
         const selection = window.getSelection();
         if (!selection) return false;
-        if (pre.getAttribute('data-mermaid-view') === 'diagram') {
+        if (pre.getAttribute('data-mermaid-view') === 'diagram' || pre.getAttribute('data-math-view') === 'preview') {
             if (codeBlockGapManager.moveToGap(pre, 'down', selection, true)) {
                 setCodeBlockLanguageNavSelection(null);
                 return true;
@@ -17520,6 +17600,10 @@ const {
             return;
         }
 
+        if (mathManager.handleKeydown(e, isMac)) {
+            return;
+        }
+
         if (handleWorkspaceLinkShortcutKeydown(e)) {
             return;
         }
@@ -19793,9 +19877,11 @@ const {
             return true;
         };
 
+        // Footnote numbers and formulas have no editable text position.
+        const atomicInlineSelector = 'sup[data-mdw-footnote-ref], span[data-mdw-math]';
         const setCaretToEndOfInsertedNode = (selection, node) => {
             if (!selection || !node) return;
-            if (node.nodeType === Node.ELEMENT_NODE && node.matches('sup[data-mdw-footnote-ref]')) {
+            if (node.nodeType === Node.ELEMENT_NODE && node.matches(atomicInlineSelector)) {
                 setCaretAfterNode(selection, node);
                 return;
             }
@@ -19811,7 +19897,7 @@ const {
 
             const lastTextNode = domUtils.getLastTextNode(node);
             if (lastTextNode) {
-                const reference = lastTextNode.parentElement?.closest('sup[data-mdw-footnote-ref]');
+                const reference = lastTextNode.parentElement?.closest(atomicInlineSelector);
                 if (reference) {
                     setCaretAfterNode(selection, reference);
                     return;
@@ -19854,7 +19940,8 @@ const {
             }
 
             const preparedFootnotes = footnoteManager.prepareClipboardImport(rawHtml);
-            const container = createSanitizedContainerFromHtml(preparedFootnotes.html, {
+            const preparedMath = mathManager.prepareClipboardImport(preparedFootnotes.html);
+            const container = createSanitizedContainerFromHtml(preparedMath.html, {
                 allowLocalImageResolution: false
             });
             container.querySelectorAll('[data-exclude-from-markdown="true"]').forEach((node) => node.remove());
@@ -19990,6 +20077,7 @@ const {
             }
             autoLinkUrlTextNodesInContainer(container);
             const importedFootnotes = footnoteManager.restoreClipboardImport(container, preparedFootnotes, trustedFootnotes);
+            mathManager.restoreClipboardImport(container, preparedMath);
             const nodes = Array.from(container.childNodes || []);
             if (nodes.length === 0) {
                 if (importedFootnotes.length) {
@@ -21568,7 +21656,7 @@ const {
         // so that pasting them keeps their structure and formatting.
         const clipboardPayloadHasStructure = (selection, payload, plainText) => (
             selectionContainsListStructure(selection) ||
-            /data-mdw-footnote-(?:ref|definition)=/.test(payload.html || '') ||
+            /data-mdw-(?:footnote-(?:ref|definition)|math)=/.test(payload.html || '') ||
             plainText.includes('\n') ||
             (
                 typeof payload.html === 'string' &&
@@ -21642,7 +21730,10 @@ const {
             } else {
                 handleKeydown(e);
             }
-            if (!isImeInteractionKeydown(e)) footnoteManager.normalizeCaret();
+            if (!isImeInteractionKeydown(e)) {
+                footnoteManager.normalizeCaret();
+                mathManager.normalizeCaret();
+            }
             codeBlockGapManager.reconcile(window.getSelection(), isComposing || compositionUpdateGate.composing);
             // selectionchange is queued by the browser; update before it can
             // paint a normal text caret at the checkbox boundary.
@@ -23787,6 +23878,7 @@ const {
         document.addEventListener('selectionchange', () => {
             if (!isUpdating && !isComposing && !compositionUpdateGate.composing) {
                 footnoteManager.normalizeCaret();
+                mathManager.normalizeCaret();
             }
             if (!isUpdating) {
                 codeBlockGapManager.reconcile(window.getSelection(), isComposing || compositionUpdateGate.composing);
@@ -23969,6 +24061,7 @@ const {
     // 初期化
     function init() {
         footnoteManager.setup();
+        mathManager.setup();
         toolbarManager.setup();
         tableManager.setup({ notifyChange });
         setupEditor();

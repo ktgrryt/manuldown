@@ -320,7 +320,7 @@
   },
   "scripts": {
     "vscode:prepublish": "npm run bundle:webview && tsc -p ./ && node scripts/bundle-host.js --minify",
-    "bundle:webview": "esbuild media/vendor/mermaid-entry.js --bundle --platform=browser --format=iife --minify --legal-comments=inline --outfile=media/vendor/mermaid.bundle.js && node scripts/bundle-prism.js",
+    "bundle:webview": "esbuild media/vendor/mermaid-entry.js --bundle --platform=browser --format=iife --minify --legal-comments=inline --outfile=media/vendor/mermaid.bundle.js && node scripts/bundle-prism.js && node scripts/bundle-katex.js",
     "bundle:host": "node scripts/bundle-host.js",
     "compile": "npm run bundle:webview && tsc -p ./ && npm run bundle:host",
     "watch": "npm run bundle:webview && tsc -watch -p ./",
@@ -338,6 +338,7 @@
     "@typescript-eslint/parser": "^8.56.0",
     "esbuild": "^0.28.1",
     "eslint": "^10.0.0",
+    "katex": "^0.16.47",
     "mermaid": "^11.16.0",
     "typescript": "^5.3.3"
   },

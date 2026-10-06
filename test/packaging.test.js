@@ -54,6 +54,22 @@ test('the Webview page does not load Mermaid up front', () => {
     assert.match(providerSource, /data-mermaid-script-src="\$\{mermaidUri\}"/);
 });
 
+test('KaTeX ships as WOFF2 fonts and loads only for documents with formulas', () => {
+    assert.doesNotMatch(providerSource, /<script[^>]*src="\$\{katexScriptUri\}"/);
+    assert.doesNotMatch(providerSource, /<link[^>]*href="\$\{katexStyleUri\}"/);
+    assert.match(providerSource, /data-katex-script-src="\$\{katexScriptUri\}"/);
+    assert.match(providerSource, /data-katex-style-href="\$\{katexStyleUri\}"/);
+    const katexDirectory = path.join(repositoryRoot, 'media', 'vendor', 'katex');
+    assert.match(readRepositoryFile('media', 'vendor', 'katex', 'katex.min.js'), /^\/\*! KaTeX /);
+    const stylesheet = readRepositoryFile('media', 'vendor', 'katex', 'katex.min.css');
+    const fonts = [...stylesheet.matchAll(/url\((fonts\/[^)]+)\)/g)].map((match) => match[1]);
+    assert.ok(fonts.length > 0);
+    for (const font of fonts) {
+        assert.match(font, /\.woff2$/);
+        assert.ok(fs.existsSync(path.join(katexDirectory, font)), font);
+    }
+});
+
 function withFakeDocument(callback) {
     const appendedScripts = [];
     global.window = {};

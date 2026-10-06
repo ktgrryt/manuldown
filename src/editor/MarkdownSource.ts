@@ -30,6 +30,10 @@ function fingerprint(node: any): string {
     if (node.hasAttribute('data-mdw-footnote-backref') && node.closest('[data-mdw-footnote-definition]')) {
         return '';
     }
+    // A formula holds its TeX as text. It must not compare equal to that text.
+    if (tag === 'SPAN' && node.hasAttribute('data-mdw-math')) {
+        return `MATH(${node.getAttribute('data-mdw-math')})${JSON.stringify(node.textContent)}`;
+    }
     if (tag === 'SPAN' || node.classList.contains('table-wrapper')) {
         return Array.from(node.childNodes, fingerprint).join('');
     }
@@ -38,7 +42,8 @@ function fingerprint(node: any): string {
     }
     const attributes = ['href', 'src', 'alt', 'title', 'start', 'type', 'checked',
         'data-mdw-soft-break', 'data-mdw-break-prefix', 'data-mdw-image-hardbreak',
-        'data-mdw-image-hardbreak-prefix', 'data-mdw-opaque-source', 'data-mdw-footnote-definition'];
+        'data-mdw-image-hardbreak-prefix', 'data-mdw-opaque-source', 'data-mdw-footnote-definition',
+        'data-mdw-math-delimiter'];
     const values = attributes.map(name => {
         let value = node.getAttribute(name);
         if (name === 'src') {
@@ -185,7 +190,7 @@ export function preserveMarkdownSource(html: string, source: string, originalHtm
     }
     const inlineEntries: Array<{ source: string; marker: string }> = [];
     const inlineNodes = new Map<string, any[]>();
-    for (const node of Array.from<any>(submitted.querySelectorAll('em,strong,code,a,img,del,s,sup'))) {
+    for (const node of Array.from<any>(submitted.querySelectorAll('em,strong,code,a,img,del,s,sup,span[data-mdw-math]'))) {
         if (!node.closest('[data-mdw-footnote-definition]')) {
             const signature = fingerprint(node);
             const candidates = inlineNodes.get(signature) || [];

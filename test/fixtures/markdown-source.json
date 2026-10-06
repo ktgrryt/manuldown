@@ -368,6 +368,30 @@
     "source": "**$x_y$**\n"
   },
   {
+    "name": "math block between paragraphs",
+    "source": "Intro\n$$\n\\frac{a}{b}\n$$\nAfter\n"
+  },
+  {
+    "name": "single-line math block",
+    "source": "$$ x + y $$\n"
+  },
+  {
+    "name": "math fence",
+    "source": "```math\nx^2\n```\n"
+  },
+  {
+    "name": "display math in text",
+    "source": "a $$x$$ b\n"
+  },
+  {
+    "name": "math block in list",
+    "source": "- $$\n  x\n  $$\n"
+  },
+  {
+    "name": "math in table",
+    "source": "| a |\n|---|\n| $x\\|y$ |\n"
+  },
+  {
     "name": "GFM alert",
     "source": "> [!NOTE]\n> text\n"
   }

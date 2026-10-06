@@ -40,7 +40,7 @@ class ImageImportError extends Error {
 
 export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     private static readonly viewType = 'manulDown.editor';
-    private static readonly builtInSlashCommandIds = new Set(['table', 'quote', 'code', 'checkbox', 'link', 'toc', 'footnote']);
+    private static readonly builtInSlashCommandIds = new Set(['table', 'quote', 'code', 'checkbox', 'link', 'toc', 'footnote', 'math', 'inline-math']);
     private static readonly workspaceLinkRequestIdPattern = /^workspace-link-\d{1,16}-\d{1,10}$/;
     private static readonly workspaceLinkSuggestionRequestIdPattern =
         /^workspace-link-suggest-\d{1,16}-\d{1,10}$/;
@@ -69,6 +69,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     private customSlashCommandCache: { loadedAt: number; items: CustomSlashCommandTemplate[] } | null = null;
     private tocPanelWidthPx = MarkdownEditorProvider.defaultTocPanelWidthPx;
     private currentEmptyListItemMarker: string | null = null;
+    private currentMathBlockFenceInfo: string | null = null;
     // Text of the document being converted by htmlToMarkdown (see escapeHtmlLikeText).
     private currentConversionDocumentText: string | null = null;
     private sourceCache: { text: string; html: string; blocks?: MarkdownSourceBlock[] } | undefined;
@@ -205,6 +206,12 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             filter: (node: any) => node.nodeName === 'SPAN' &&
                 node.hasAttribute('data-mdw-escaped-character') && /^[`*_{}\[\]()#+.!|>~-]$/.test(node.textContent),
             replacement: (_content: string, node: any) => '\\' + node.textContent
+        });
+        // A formula's text is TeX, not prose: write it without Markdown escapes.
+        this.turndownService.addRule('math', {
+            filter: (node: any) => node.nodeName === 'SPAN' && node.hasAttribute('data-mdw-math'),
+            replacement: (_content: string, node: any) =>
+                provider.serializeInlineMath(node.textContent || '', node.getAttribute('data-mdw-math') === 'display')
         });
         this.turndownService.addRule('image', {
             filter: 'img',
@@ -559,6 +566,19 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 const fence = storedInfo.includes('`')
                     ? '~'.repeat(Math.max(3, longestTildeRun + 1))
                     : '`'.repeat(Math.max(3, longestBacktickRun + 1));
+                const mathBlockInfo = provider.currentMathBlockFenceInfo;
+                if (
+                    mathBlockInfo &&
+                    language === 'math' &&
+                    codeNode.getAttribute('data-mdw-math-delimiter') === '$$' &&
+                    provider.canWriteDollarMathBlock(code)
+                ) {
+                    // Write a fence for now, so the line-based cleanup after
+                    // Turndown leaves the TeX alone. restoreDollarMathBlocks
+                    // turns it back into "$$" delimiters.
+                    const body = code.trim() === '' ? '' : codeContent;
+                    return '\n\n' + fence + mathBlockInfo + '\n' + body + fence + '\n\n';
+                }
                 // Keep the rest of the fence's info string (e.g. title="a.js")
                 // while the language is unchanged. A backtick fence's info
                 // string cannot hold backticks or line breaks.
@@ -575,6 +595,46 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 return result;
             }
         });
+    }
+
+    /**
+     * "$tex$" (or "$$tex$$") that MarkdownDocument parses back to the same
+     * formula: on one line, without surrounding spaces, and with every
+     * unescaped "$" inside escaped so it cannot close the formula early.
+     */
+    private serializeInlineMath(tex: string, display: boolean): string {
+        let body = '';
+        const text = tex.replace(/\s*\n\s*/g, ' ').trim();
+        for (let index = 0; index < text.length; index++) {
+            const character = text[index];
+            if (character === '\\' && index + 1 < text.length) {
+                body += character + text[++index];
+            } else {
+                body += character === '$' ? '\\$' : character;
+            }
+        }
+        if (body === '') {
+            return '';
+        }
+        return display ? `$$${body}$$` : `$${body}$`;
+    }
+
+    /** Whether "$$" delimiters can hold this TeX without changing its parse. */
+    private canWriteDollarMathBlock(code: string): boolean {
+        const tex = code.replace(/\n$/, '');
+        // Like a paragraph, a "$$" block ends at a blank line.
+        return tex.trim() === '' || (!tex.includes('$$') && !/^[ \t]*$/m.test(tex));
+    }
+
+    private restoreDollarMathBlocks(markdown: string, info: string): string {
+        const pattern = new RegExp(
+            `^(.*?)(\`{3,}|~{3,})${this.escapeRegExp(info)}\\n(?:([\\s\\S]*?)\\n)?([ \\t>]*)\\2[ \\t]*$`,
+            'gm'
+        );
+        return markdown.replace(pattern, (_match, openingPrefix: string, _fence: string, body: string | undefined, closingPrefix: string) =>
+            `${openingPrefix}$$\n${body === undefined ? '' : `${body}\n`}${closingPrefix}$$`)
+            // A fence that no longer has its closing line stays a "```math" fence.
+            .split(info).join('math');
     }
 
     private sanitizeTableCellText(value: string): string {
@@ -2996,12 +3056,15 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         const imageHardBreakTailMarker = `${placeholderNamespace}IMAGEHARDBREAKEND`;
         const emptyCodeMarkerPrefix = `${placeholderNamespace}EMPTYCODE`;
         const emptyCodeMarkerSuffix = 'END';
+        const mathBlockFenceInfo = `${placeholderNamespace}DOLLARMATH`;
         const previousEmptyListItemMarker = this.currentEmptyListItemMarker;
+        const previousMathBlockFenceInfo = this.currentMathBlockFenceInfo;
         const previousConversionDocumentText = this.currentConversionDocumentText;
         // The conversion is synchronous, so the document cannot change while it
         // runs. Read its text once; getText() joins every line on each call.
         const documentText = document.getText();
         this.currentEmptyListItemMarker = emptyListItemMarker;
+        this.currentMathBlockFenceInfo = mathBlockFenceInfo;
         this.currentConversionDocumentText = documentText;
         try {
             const unorderedListMarker = this.getPreferredUnorderedListMarker(documentText);
@@ -3186,6 +3249,11 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     const className = classMatch ? classMatch[1] : '';
                     const languageMatch = className.match(/(?:^|\s)language-([^\s]+)/i);
                     const language = languageMatch ? languageMatch[1] : '';
+                    if (language === 'math' && /\sdata-mdw-math-delimiter\s*=\s*(["'])\$\$\1/.test(codeAttrs)) {
+                        // The marker below resolves to a "```" fence. Give an empty
+                        // "$$" block one line feed so the code rule writes "$$".
+                        return `<pre><code${codeAttrs} data-mdw-whitespace-code="0a">MDW_WHITESPACE_CODE</code></pre>`;
+                    }
                     const markerLanguage = language || 'NOLANG';
                     // Add a special marker that Turndown will preserve
                     return `<pre><code${codeAttrs}>${emptyCodeMarkerPrefix}${markerLanguage}${emptyCodeMarkerSuffix}</code></pre>`;
@@ -3418,7 +3486,10 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 markdown += '\n';
             }
             const restoredContent = preservedSource.restore(protectedFootnotes.restore(
-                protectedOpaqueSources.restore(protectedFencedMarkdown.restore(markdown))
+                protectedOpaqueSources.restore(this.restoreDollarMathBlocks(
+                    protectedFencedMarkdown.restore(markdown),
+                    mathBlockFenceInfo
+                ))
             ));
             const restoredMarkdown = restoredContent.replace(
                 new RegExp(`${this.escapeRegExp(zeroWidthNamespace)}(200b|2060|feff)END`, 'g'),
@@ -3431,6 +3502,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             throw error;
         } finally {
             this.currentEmptyListItemMarker = previousEmptyListItemMarker;
+            this.currentMathBlockFenceInfo = previousMathBlockFenceInfo;
             this.currentConversionDocumentText = previousConversionDocumentText;
         }
     }
@@ -4271,13 +4343,20 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         const mermaidUri = webview.asWebviewUri(
             vscode.Uri.joinPath(this.context.extensionUri, 'media', 'vendor', 'mermaid.bundle.js')
         );
+        // Likewise, MathManager loads KaTeX only when the document has a formula.
+        const katexScriptUri = webview.asWebviewUri(
+            vscode.Uri.joinPath(this.context.extensionUri, 'media', 'vendor', 'katex', 'katex.min.js')
+        );
+        const katexStyleUri = webview.asWebviewUri(
+            vscode.Uri.joinPath(this.context.extensionUri, 'media', 'vendor', 'katex', 'katex.min.css')
+        );
 
         return `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src 'none'; frame-src 'none'; object-src 'none'; media-src 'none'; worker-src 'none'; child-src 'none'; form-action 'none'; base-uri 'none'; style-src ${webview.cspSource} 'unsafe-inline'; style-src-attr 'unsafe-inline'; script-src 'nonce-${nonce}'; script-src-elem 'nonce-${nonce}'; script-src-attr 'none'; img-src ${imageSources};">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src 'none'; frame-src 'none'; object-src 'none'; media-src 'none'; worker-src 'none'; child-src 'none'; form-action 'none'; base-uri 'none'; style-src ${webview.cspSource} 'unsafe-inline'; style-src-attr 'unsafe-inline'; font-src ${webview.cspSource}; script-src 'nonce-${nonce}'; script-src-elem 'nonce-${nonce}'; script-src-attr 'none'; img-src ${imageSources};">
     <style nonce="${nonce}">
         html,
         body {
@@ -4384,7 +4463,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     <link href="${prismCssUri}" rel="stylesheet">
     <title>ManulDown</title>
 </head>
-<body data-toolbar-visible="${toolbarVisibleAttr}" data-toc-enabled="${tocEnabledAttr}" data-theme-mode="${themeModeAttr}" data-mermaid-script-src="${mermaidUri}" data-editor-state="loading">
+<body data-toolbar-visible="${toolbarVisibleAttr}" data-toc-enabled="${tocEnabledAttr}" data-theme-mode="${themeModeAttr}" data-mermaid-script-src="${mermaidUri}" data-katex-script-src="${katexScriptUri}" data-katex-style-href="${katexStyleUri}" data-editor-state="loading">
     <div id="editor-loading" role="status" aria-live="polite" aria-atomic="true">
         <div class="editor-loading-spinner" aria-hidden="true"></div>
         <div class="editor-loading-label">Loading ManulDown&hellip;</div>
@@ -4435,6 +4514,12 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         </button>
         <button class="toolbar-btn" data-command="footnote" data-overflow-only title="Insert Footnote" aria-label="Insert Footnote" hidden>
             Footnote
+        </button>
+        <button class="toolbar-btn" data-command="math" data-overflow-only title="Insert Inline Math ($…$)" aria-label="Insert Inline Math" hidden>
+            Math
+        </button>
+        <button class="toolbar-btn" data-command="mathblock" data-overflow-only title="Insert Math Block ($$…$$)" aria-label="Insert Math Block" hidden>
+            Math Block
         </button>
         <button class="toolbar-btn toolbar-overflow-toggle" type="button" title="More tools" aria-label="More tools" aria-haspopup="menu" aria-expanded="false" aria-controls="toolbar-overflow-menu" hidden>
             &hellip;

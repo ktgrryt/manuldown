@@ -693,6 +693,47 @@ export class MarkdownConverter {
             return true;
         }
 
+        // インライン数式構文をチェック $tex$（閉じる "$" を入力した時）
+        // As when the document is opened, the TeX must not start or end with
+        // whitespace ("$5 and $" stays text), and "$$" never closes it.
+        const mathMatch = insertedText === '$'
+            ? beforeCursorText.match(/(^|[^$\\])\$([^$\s](?:[^$]*[^$\s\\])?)\$$/)
+            : null;
+        if (mathMatch) {
+            const mathStart = beforeCursorText.length - mathMatch[0].length + mathMatch[1].length;
+            const beforeText = this.rawSlice(rawText, 0, mathStart);
+            const tex = this.rawSlice(rawText, mathStart + 1, beforeCursorText.length - 1)
+                .replace(/ /g, ' ');
+            const afterText = this.rawSlice(rawText, normalizedCursorOffset);
+
+            const fragment = document.createDocumentFragment();
+            if (beforeText) {
+                fragment.appendChild(document.createTextNode(beforeText));
+            }
+            // MathManager renders the formula; the element itself holds the TeX.
+            const formula = document.createElement('span');
+            formula.className = 'mdw-math';
+            formula.setAttribute('data-mdw-math', 'inline');
+            formula.setAttribute('contenteditable', 'false');
+            formula.textContent = tex;
+            fragment.appendChild(formula);
+            const spacer = document.createTextNode('');
+            fragment.appendChild(spacer);
+            if (afterText) {
+                fragment.appendChild(document.createTextNode(afterText));
+            }
+            textNode.parentNode.replaceChild(fragment, textNode);
+
+            const newRange = document.createRange();
+            newRange.setStart(spacer, 0);
+            newRange.collapse(true);
+            selection.removeAllRanges();
+            selection.addRange(newRange);
+
+            if (notifyCallback) notifyCallback();
+            return true;
+        }
+
         // 水平線構文をチェック --- (3つ以上のハイフンのみ)
         const hrMatch = normalizedText.match(/^-{3,}$/);
         // An <hr> cannot live inside a list item or heading; there "---" stays text.

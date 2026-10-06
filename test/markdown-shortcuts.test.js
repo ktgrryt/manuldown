@@ -273,3 +273,26 @@ test('typing is grouped into word-sized undo steps', async () => {
     assert.equal(group.shouldCheckpoint({ inputType: 'insertParagraph', collapsed: true }), true);
     assert.equal(group.shouldCheckpoint({ inputType: 'insertFromPaste', collapsed: true }), true);
 });
+
+test('typing the closing "$" turns "$tex$" into a formula', async () => {
+    const first = (editor) => editor.querySelector('p').firstChild;
+    const typed = await convertAt('<p>Energy $E = mc^2$ here</p>', first, 'Energy $E = mc^2$'.length, '$');
+    assert.equal(typed.converted, true);
+    assert.equal(typed.notified, 1);
+    assert.equal(
+        typed.html,
+        '<p>Energy <span class="mdw-math" data-mdw-math="inline" contenteditable="false">E = mc^2</span> here</p>'
+    );
+});
+
+test('dollar text that would not open as a formula stays text', async () => {
+    const first = (editor) => editor.querySelector('p').firstChild;
+    for (const text of ['costs $5 and $', 'a $ b$', 'escaped \\$x$', 'display $$x$', 'trailing $x\\$']) {
+        const result = await convertAt(`<p>${text}</p>`, first, undefined, '$');
+        assert.equal(result.converted, false, text);
+        assert.doesNotMatch(result.html, /mdw-math/, text);
+    }
+    // Only a typed "$" closes a formula, not other input such as a paste.
+    const pasted = await convertAt('<p>$x$</p>', first, undefined, null);
+    assert.doesNotMatch(pasted.html, /mdw-math/);
+});

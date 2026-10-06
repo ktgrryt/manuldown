@@ -58,11 +58,60 @@ function imageAltAttribute(raw: string, fallback: string): string {
     return escapeAttribute(fallback);
 }
 
+// "$$" on a line of its own (up to three spaces of indentation) opens a display
+// formula that runs to the next "$$" at the end of a line. Like a paragraph,
+// it cannot span a blank line.
+const mathBlockPattern = / {0,3}\$\$((?:(?!\n[ \t]*\n)[\s\S])*?)\$\$[ \t]*(?=\n|$)/y;
+
+function matchMathBlock(source: string, index: number): RegExpExecArray | null {
+    mathBlockPattern.lastIndex = index;
+    return mathBlockPattern.exec(source);
+}
+
+/** The TeX of a "$$" block, without the line breaks after/before its delimiters. */
+function mathBlockTex(content: string): string {
+    const tex = content.replace(/^[ \t]*\n/, '').replace(/\n[ \t]*$/, '');
+    return tex.includes('\n') ? tex : tex.trim();
+}
+
+function renderMath(tex: string, mode: 'inline' | 'display'): string {
+    return `<span class="mdw-math" data-mdw-math="${mode}" contenteditable="false">${escapeOpaqueSourceForHtml(tex)}</span>`;
+}
+
 marked.use({
     breaks: true,
     gfm: true,
     pedantic: false,
     extensions: [
+        {
+            name: 'mathBlock',
+            level: 'block',
+            start(source: string) {
+                // Marked cuts the current paragraph where this returns, and a
+                // cut it cannot use corrupts the paragraph's raw source. Report
+                // only a later line where a complete block actually starts.
+                // Marked passes the rest of the document for every paragraph,
+                // so look only at "$$" occurrences rather than at every line.
+                for (let index = source.indexOf('$$'); index >= 0; index = source.indexOf('$$', index + 2)) {
+                    const lineStart = source.lastIndexOf('\n', index) + 1;
+                    if (lineStart > 0 && /^ {0,3}$/.test(source.slice(lineStart, index)) &&
+                        matchMathBlock(source, lineStart)) {
+                        return lineStart;
+                    }
+                }
+                return undefined;
+            },
+            tokenizer(source: string) {
+                const match = matchMathBlock(source, 0);
+                return match ? { type: 'mathBlock', raw: match[0], tex: mathBlockTex(match[1]) } : undefined;
+            },
+            renderer(token) {
+                // The same HTML as a "```math" fence, which the editor shows as a
+                // formula. The attribute keeps the "$$" delimiters on save.
+                const code = `${String(token.tex)}\n`;
+                return `<pre><code class="language-math" data-mdw-math-delimiter="$$">${escapeOpaqueSourceForHtml(code)}</code></pre>\n`;
+            }
+        },
         {
             name: 'mathSource',
             level: 'inline',
@@ -74,7 +123,12 @@ marked.use({
                 }
                 return undefined;
             },
-            renderer(token) { return renderOpaqueSource(token.raw, 'math', false); }
+            renderer(token) {
+                const raw = String(token.raw);
+                return raw.startsWith('$$')
+                    ? renderMath(raw.slice(2, -2), 'display')
+                    : renderMath(raw.slice(1, -1), 'inline');
+            }
         },
         {
             name: 'alertSource',
@@ -603,14 +657,22 @@ export class MarkdownDocument {
             parserContentColumn: number;
         }>>();
         const parserNestedIndent = this.detectListIndentSize(markdown) ?? 2;
+        let mathBlockEnd = -1;
 
-        for (const segment of segments) {
+        for (let index = 0; index < segments.length; index++) {
+            const segment = segments[index];
             const lineEnding = segment.endsWith('\r\n')
                 ? '\r\n'
                 : (segment.endsWith('\n') ? '\n' : '');
             const lineWithoutEnding = lineEnding
                 ? segment.slice(0, -lineEnding.length)
                 : segment;
+
+            // TeX lines such as "+ c" or "- x" in a "$$" block are not items.
+            if (index <= mathBlockEnd) {
+                output.push(segment);
+                continue;
+            }
 
             const fenceMatch = lineWithoutEnding.match(/^ {0,3}(`{3,}|~{3,})/);
             if (fenceMatch) {
@@ -632,6 +694,8 @@ export class MarkdownDocument {
                 output.push(segment);
                 continue;
             }
+
+            mathBlockEnd = this.findMathBlockEnd(segments, index);
 
             const trimmed = lineWithoutEnding.trim();
             if (/^([*-])(?:\s*\1){2,}\s*$/.test(trimmed)) {
@@ -733,6 +797,30 @@ export class MarkdownDocument {
         }
 
         return output.join('');
+    }
+
+    /**
+     * When the line at index (in a quote or after a list marker) opens a "$$"
+     * block that closes on a later line, the index of its closing line.
+     * Otherwise -1. Like the mathBlock tokenizer, a blank line ends the search.
+     */
+    private findMathBlockEnd(segments: string[], index: number): number {
+        const contentOf = (segment: string): string =>
+            segment.replace(/\r?\n$/, '').replace(/^(?:[ \t]*>[ \t]?)*/, '');
+        const opening = contentOf(segments[index]).replace(/^[ \t]*(?:(?:[*+-]|\d+[.)])[ \t]+(?:\[[ xX]\][ \t]+)?)?/, '');
+        if (!opening.startsWith('$$') || /\$\$[ \t]*$/.test(opening.slice(2))) {
+            return -1;
+        }
+        for (let end = index + 1; end < segments.length; end++) {
+            const line = contentOf(segments[end]);
+            if (line.trim() === '') {
+                return -1;
+            }
+            if (/\$\$[ \t]*$/.test(line)) {
+                return end;
+            }
+        }
+        return -1;
     }
 
     private applyListItemSourceIndentMarkers(

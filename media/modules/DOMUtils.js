@@ -546,6 +546,9 @@ export class DOMUtils {
         clone.querySelectorAll('pre[data-mermaid-view]').forEach(pre => {
             pre.removeAttribute('data-mermaid-view');
         });
+        clone.querySelectorAll('pre[data-math-view]').forEach(pre => {
+            pre.removeAttribute('data-math-view');
+        });
 
         // テーブル選択用のクラスを削除
         const selectedCells = clone.querySelectorAll('.md-table-cell-selected');
@@ -959,6 +962,7 @@ export class DOMUtils {
                 isInlineCodeCaretAnchor(element) ||
                 element.getAttribute('data-mdw-source-zero-width') === 'true' ||
                 element.hasAttribute('data-mdw-escaped-character') ||
+                (element.tagName === 'SPAN' && element.hasAttribute('data-mdw-math')) ||
                 isCodeBlockToolbarPart(element)) {
                 return;
             }

@@ -210,3 +210,8 @@ test('remote images enabled after load stay blocked until the editor is reopened
         /const remoteImagesPermittedByCsp = settingsState\.allowRemoteImages;/
     );
 });
+
+test('Webview CSP loads fonts, such as the KaTeX fonts, only from the extension', () => {
+    const csp = providerSource.match(/Content-Security-Policy" content="([^"]+)"/)[1];
+    assert.match(csp, /font-src \$\{webview\.cspSource\};/);
+});
