@@ -60,6 +60,18 @@ test('the footnote toolbar command dispatches insertion only in an allowed conte
     assert.equal(savedStates.length, 0);
 });
 
+test('opening the insert menu delegates focus and creates no document history entry', async () => {
+    const { manager, savedStates } = await createToolbarManager();
+    let opened = 0;
+    manager.onOpenInsertMenu = () => { opened++; };
+    manager.canOpenInsertMenu = () => true;
+    manager.executeCommand('insert-menu');
+    manager.canOpenInsertMenu = () => false;
+    manager.executeCommand('insert-menu');
+    assert.equal(opened, 1);
+    assert.equal(savedStates.length, 0);
+});
+
 test('the active heading button remains enabled and exposes its pressed state', async () => {
     const { manager } = await createToolbarManager();
     const classes = new Set();

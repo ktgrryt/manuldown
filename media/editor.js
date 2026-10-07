@@ -10,6 +10,7 @@ import { ToolbarManager } from './modules/ToolbarManager.js';
 import { TableManager } from './modules/TableManager.js';
 import { SearchManager } from './modules/SearchManager.js';
 import { FootnoteManager } from './modules/FootnoteManager.js';
+import { InsertCommandMenu, isInsertMenuShortcut } from './modules/InsertCommandMenu.js';
 import { MathManager } from './modules/MathManager.js';
 import { CompositionUpdateGate } from './modules/CompositionUpdateGate.js';
 import { TypingUndoGroup } from './modules/TypingUndoGroup.js';
@@ -1689,6 +1690,12 @@ const {
     });
     codeBlockManager.setMathRenderer(mathManager);
     const toolbarManager = new ToolbarManager(editor, stateManager, {
+        isMac,
+        onOpenInsertMenu: () => openInsertCommandMenu(),
+        canOpenInsertMenu: () => {
+            const selection = window.getSelection();
+            return canOpenInsertCommandMenu(selection?.rangeCount ? selection.getRangeAt(0) : null);
+        },
         onInsertTable: () => tableManager.openTableDialog(),
         onInsertQuote: () => insertToolbarQuote(),
         onInsertCodeBlock: () => insertToolbarCodeBlock(),
@@ -5037,6 +5044,34 @@ const {
     let slashMenuPointerHoverActive = false;
     let applyTextInsertionWithPasteRules = null;
     let pendingSlashCheckboxCaretListItem = null;
+    const insertCommandMenu = new InsertCommandMenu(editor, {
+        isMac,
+        canOpen: canOpenInsertCommandMenu,
+        getCommands: (query, range) => getFilteredSlashCommands(query, range),
+        position: positionSlashMenu,
+        onExecute: (command) => {
+            hideSlashCommandMenu();
+            command.action();
+            requestAnimationFrame(() => stateManager.commitStateAfterChange());
+        }
+    });
+
+    function canOpenInsertCommandMenu(range) {
+        if (isUpdating || editorLoadFailed || isComposing || compositionUpdateGate.composing ||
+            compositionUpdateGate.finalizing || !range) return false;
+        return [range.startContainer, range.endContainer].every(node => {
+            if (!editor.contains(node)) return false;
+            const element = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+            return !!element && !element.closest('pre, code, td, th, [contenteditable="false"]');
+        });
+    }
+
+    function openInsertCommandMenu() {
+        if (!insertCommandMenu.open()) return false;
+        hideSlashCommandMenu();
+        requestCustomSlashCommands(false);
+        return true;
+    }
 
     function insertSlashTable() {
         if (isSelectionInListItem()) return;
@@ -5349,12 +5384,12 @@ const {
         insertEmptyQuote();
     }
 
-    function isSelectionInListItem() {
+    function isSelectionInListItem(insertionRange = null) {
         const selection = window.getSelection();
-        if (!selection || !selection.rangeCount) return false;
+        if (!insertionRange && (!selection || !selection.rangeCount)) return false;
 
-        for (let i = 0; i < selection.rangeCount; i++) {
-            const range = selection.getRangeAt(i);
+        for (let i = 0; i < (insertionRange ? 1 : selection.rangeCount); i++) {
+            const range = insertionRange || selection.getRangeAt(i);
             const nodes = [range.startContainer, range.endContainer];
             for (const node of nodes) {
                 const element = node && node.nodeType === Node.ELEMENT_NODE
@@ -6089,10 +6124,14 @@ const {
         return { textNode, offset, slashIndex, query, range };
     }
 
-    function getFilteredSlashCommands(query) {
+    function getFilteredSlashCommands(query, insertionRange = null) {
         const q = (query || '').toLowerCase();
         const allSlashCommands = getAllSlashCommands().filter((cmd) => {
-            if (!isSelectionInListItem()) return true;
+            if (insertionRange && cmd.source === 'builtin') {
+                if (cmd.id === 'footnote' && !footnoteManager.canInsert(insertionRange)) return false;
+                if (cmd.id === 'inline-math' && !mathManager.canInsert(insertionRange)) return false;
+            }
+            if (!isSelectionInListItem(insertionRange)) return true;
             return !(cmd.source === 'builtin' && listRestrictedSlashCommandIds.has(cmd.id));
         });
         if (!q) return allSlashCommands;
@@ -6122,29 +6161,42 @@ const {
         return true;
     }
 
-    function positionSlashMenu(range) {
-        if (!slashMenu || !range) return;
+    function positionSlashMenu(range, menu = slashMenu) {
+        if (!menu || !range) return;
 
         const rects = range.getClientRects();
-        const caretRect = rects.length > 0 ? rects[0] : range.getBoundingClientRect();
+        let caretRect = rects.length > 0 ? rects[0] : range.getBoundingClientRect();
         if (!caretRect) return;
 
-        let top = caretRect.bottom + window.scrollY + 4;
-        let left = caretRect.left + window.scrollX;
-
-        slashMenu.style.top = `${top}px`;
-        slashMenu.style.left = `${left}px`;
-
-        const menuRect = slashMenu.getBoundingClientRect();
-        if (menuRect.right > window.innerWidth - 8) {
-            left = Math.max(8, window.innerWidth - menuRect.width - 8);
+        // Empty blocks can report a zero rectangle at the page origin.
+        if (caretRect.top === 0 && caretRect.bottom === 0) {
+            const element = getNodeElement(range.startContainer) || editor;
+            const rect = element.getBoundingClientRect();
+            const style = window.getComputedStyle(element);
+            const top = rect.top + (parseFloat(style.paddingTop) || 0);
+            caretRect = {
+                left: rect.left + (parseFloat(style.paddingLeft) || 0),
+                top,
+                bottom: top + (parseFloat(style.lineHeight) || 20)
+            };
         }
-        if (menuRect.bottom > window.innerHeight - 8) {
-            top = Math.max(8, caretRect.top + window.scrollY - menuRect.height - 4);
-        }
 
-        slashMenu.style.top = `${top}px`;
-        slashMenu.style.left = `${left}px`;
+        // Keep both menus inside the editor, below the toolbar, even when
+        // scrolling or a short viewport leaves too little room above the caret.
+        const margin = 8;
+        const editorRect = editor.getBoundingClientRect();
+        const minTop = Math.max(margin, editorRect.top + margin);
+        const maxBottom = Math.min(window.innerHeight, editorRect.bottom) - margin;
+        menu.style.setProperty('--slash-menu-available-height', `${Math.max(0, maxBottom - minTop)}px`);
+        const menuRect = menu.getBoundingClientRect();
+        const maxTop = Math.max(minTop, maxBottom - menuRect.height);
+        let top = caretRect.bottom + 4;
+        if (top > maxTop) {
+            top = caretRect.top - menuRect.height - 4;
+        }
+        const maxLeft = Math.max(margin, window.innerWidth - menuRect.width - margin);
+        menu.style.top = `${window.scrollY + Math.max(minTop, Math.min(top, maxTop))}px`;
+        menu.style.left = `${window.scrollX + Math.max(margin, Math.min(caretRect.left, maxLeft))}px`;
     }
 
     function repositionSlashCommandMenu() {
@@ -6229,6 +6281,10 @@ const {
     }
 
     function updateSlashCommandMenu() {
+        if (insertCommandMenu.visible) {
+            insertCommandMenu.refresh();
+            return;
+        }
         if (isUpdating || isComposing) {
             hideSlashCommandMenu();
             return;
@@ -8731,6 +8787,16 @@ const {
         }
         // The contributed VS Code command opens the native picker. Suppress only
         // Chromium's contenteditable behavior here so the command runs once.
+        e.preventDefault();
+        return true;
+    }
+
+    function handleInsertMenuShortcutKeydown(e) {
+        if (isImeInteractionKeydown(e) || compositionUpdateGate.composing ||
+            compositionUpdateGate.finalizing || !isInsertMenuShortcut(e, isMac)) return false;
+        // Run in document capture so native input is suppressed even when focus
+        // is in the menu's search field or a child stops bubbling. Keep forwarding
+        // to VS Code, which executes the contributed command exactly once.
         e.preventDefault();
         return true;
     }
@@ -17757,6 +17823,10 @@ const {
             return;
         }
 
+        if (handleInsertMenuShortcutKeydown(e)) {
+            return;
+        }
+
         if (handleOpenLinkShortcutKeydown(e)) {
             return;
         }
@@ -18167,6 +18237,8 @@ const {
     function setupEditor() {
         setupImageRemovalSyncObserver();
 
+        document.addEventListener('keydown', handleInsertMenuShortcutKeydown, true);
+
         // VS Code owns the Cmd/Ctrl+Z keybinding while ManulDown owns the actual
         // history. Suppress Chromium's parallel undo path without stopping the
         // key event from reaching the workbench command dispatcher.
@@ -18507,6 +18579,7 @@ const {
                 !e.shiftKey &&
                 (e.key || '').toLowerCase() === 'k';
             if (!isCtrlK || isUpdating) return;
+            if (e.target?.classList?.contains('insert-command-search')) return;
 
             const selection = window.getSelection();
             if (!selection || !selection.rangeCount) return;
@@ -24425,12 +24498,16 @@ const {
             case 'customSlashCommands':
                 isCustomSlashCommandRequestInFlight = false;
                 setCustomSlashCommands(message.commands);
+                insertCommandMenu.refresh();
                 if (slashMenuState.visible) {
                     updateSlashCommandMenu();
                 }
                 break;
             case 'openWorkspaceLinkPicker':
                 requestWorkspaceLink();
+                break;
+            case 'openInsertMenu':
+                openInsertCommandMenu();
                 break;
             case 'openLinkAtCursor':
                 requestOpenLinkAtCursor();
@@ -24480,7 +24557,9 @@ const {
                     }
                     break;
                 }
-                performEditorHistoryCommand(message.direction);
+                if (!insertCommandMenu.performHistory(message.direction)) {
+                    performEditorHistoryCommand(message.direction);
+                }
                 break;
             case 'resolvedImageSrc':
                 {
@@ -24709,6 +24788,7 @@ const {
                 tableManager.executeTableCommand(message.command);
                 break;
             case 'cursorMove':
+                if (insertCommandMenu.handleCursorMove(message.direction)) break;
                 lastCaretIntentSource = 'keyboard';
                 if (message.direction === 'up') {
                     if (shouldSuppressCommandNav('up')) {

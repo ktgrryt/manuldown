@@ -1957,9 +1957,48 @@ body.image-resizing * {
     padding: 6px;
     min-width: 220px;
     max-width: 320px;
-    max-height: 200px;
+    max-height: min(200px, var(--slash-menu-available-height, 200px));
     overflow-y: auto;
     display: none;
+}
+
+.insert-command-menu {
+    flex-direction: column;
+    max-height: var(--slash-menu-available-height, none);
+    overflow: hidden;
+}
+
+.insert-command-search {
+    box-sizing: border-box;
+    flex-shrink: 0;
+    width: 100%;
+    padding: 6px 8px;
+    margin-bottom: 6px;
+    border: 1px solid var(--vscode-input-border, transparent);
+    border-radius: 3px;
+    background: var(--vscode-input-background);
+    color: var(--vscode-input-foreground);
+    font: inherit;
+    font-size: 12px;
+}
+
+.insert-command-search:focus {
+    outline: 1px solid var(--vscode-focusBorder);
+    outline-offset: -1px;
+}
+
+.insert-command-list {
+    min-height: 0;
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+.insert-command-hint,
+.insert-command-empty {
+    flex-shrink: 0;
+    padding: 6px 8px;
+    font-size: 11px;
+    color: var(--vscode-descriptionForeground);
 }
 
 .slash-command-menu::-webkit-scrollbar {

@@ -131,6 +131,15 @@ export function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(insertWorkspaceLinkCommand);
 
+    const openInsertMenuCommand = vscode.commands.registerCommand(
+        'manulDown.openInsertMenu',
+        () => {
+            provider.postMessageToActiveEditor({ type: 'openInsertMenu' });
+        }
+    );
+
+    context.subscriptions.push(openInsertMenuCommand);
+
     const openLinkAtCursorCommand = vscode.commands.registerCommand(
         'manulDown.openLinkAtCursor',
         () => {

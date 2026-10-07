@@ -79,6 +79,11 @@
         "category": "ManulDown"
       },
       {
+        "command": "manulDown.openInsertMenu",
+        "title": "Open Insert Command Menu",
+        "category": "ManulDown"
+      },
+      {
         "command": "manulDown.openLinkAtCursor",
         "title": "Open Link at Cursor",
         "category": "ManulDown"
@@ -167,6 +172,12 @@
         "key": "ctrl+k",
         "mac": "cmd+k",
         "when": "activeCustomEditorId == 'manulDown.editor'"
+      },
+      {
+        "command": "manulDown.openInsertMenu",
+        "key": "alt+/",
+        "mac": "ctrl+/",
+        "when": "activeCustomEditorId == 'manulDown.editor' && !accessibleViewIsShown"
       },
       {
         "command": "manulDown.openLinkAtCursor",

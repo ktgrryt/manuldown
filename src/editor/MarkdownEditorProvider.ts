@@ -4481,10 +4481,10 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         <div class="editor-loading-label">Loading ManulDown&hellip;</div>
     </div>
     <div class="toolbar" data-editor-content inert aria-hidden="true" aria-busy="true">
-        <button class="toolbar-btn" data-command="bold" title="Bold (Ctrl+B)">
+        <button class="toolbar-btn" data-command="bold" data-shortcut-key="B" title="Bold">
             <strong>B</strong>
         </button>
-        <button class="toolbar-btn" data-command="italic" title="Italic (Ctrl+I)">
+        <button class="toolbar-btn" data-command="italic" data-shortcut-key="I" title="Italic">
             <em>I</em>
         </button>
         <button class="toolbar-btn" data-command="strikethrough" title="Strikethrough">
@@ -4518,15 +4518,19 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             Table
         </button>
         <div class="toolbar-separator"></div>
+        <button class="toolbar-btn" data-command="insert-menu" data-shortcut-mac="Control+/" data-shortcut-other="Alt+/" data-overflow-only title="Insert Command Menu" aria-label="Insert Command Menu" hidden>
+            Insert…
+        </button>
+        <button class="toolbar-btn" data-command="link" data-shortcut-key="K" data-overflow-only title="Insert Link" hidden>
+            Link
+        </button>
         <button class="toolbar-btn" data-command="image" data-overflow-only title="Insert Image" hidden>
             Image
-        </button>
-        <button class="toolbar-btn" data-command="link" data-overflow-only title="Insert Link (Cmd/Ctrl+K)" hidden>
-            Link
         </button>
         <button class="toolbar-btn" data-command="footnote" data-overflow-only title="Insert Footnote" aria-label="Insert Footnote" hidden>
             Footnote
         </button>
+        <div class="toolbar-separator"></div>
         <button class="toolbar-btn" data-command="math" data-overflow-only title="Insert Inline Math ($…$)" aria-label="Insert Inline Math" hidden>
             Math
         </button>

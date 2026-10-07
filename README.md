@@ -84,7 +84,9 @@ Formulas are saved as `$…$` and `$$` blocks. Unchanged formulas keep their ori
 
 ### Slash Commands
 
-Type `/` in the editor to open the slash command menu. You can narrow results by typing a prefix such as `/ta`.
+Type `/` at the start of a line or after whitespace in the editor to open the slash command menu. You can narrow results by typing a prefix such as `/ta`.
+
+To insert a footnote or another command directly after text, focus the document and press `Control+/` on macOS (`Alt+/` on Windows/Linux), or choose **More tools → Command Menu** in the toolbar. Type a prefix such as `fo` in the search field, choose a command with the arrow keys or Tab, and press Enter to insert it. Search text stays out of the document. Escape cancels and restores the original cursor position. The shortcut is disabled while the accessibility view is shown.
 
 | Command | Action |
 | --- | --- |
@@ -140,6 +142,7 @@ Notes:
 | Action | Mac | Windows / Linux |
 | --- | --- | --- |
 | Insert link | `Cmd+K` | `Ctrl+K` |
+| Open insert command menu | `Control+/` | `Alt+/` |
 | Open link at cursor | `Cmd+Enter` | `Ctrl+Enter` |
 | Undo | `Cmd+Z` | `Ctrl+Z` |
 | Redo | `Cmd+Shift+Z` | `Ctrl+Shift+Z` |

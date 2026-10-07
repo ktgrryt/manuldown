@@ -23,41 +23,46 @@ function rect(left, top, width, height) {
     return { left, top, right: left + width, bottom: top + height, width, height };
 }
 
-function fixture() {
+function fixture({ menuHeight = 200, toolbarHeight = 46 } = {}) {
     const caretRect = rect(320, 760, 0, 22);
     const range = { getClientRects: () => [caretRect] };
     let match = { range, query: '' };
     const listeners = {};
-    const editor = { addEventListener: (name, callback) => { listeners[name] = callback; } };
+    const editor = {
+        addEventListener: (name, callback) => { listeners[name] = callback; },
+        getBoundingClientRect: () => rect(0, toolbarHeight, window.innerWidth, window.innerHeight - toolbarHeight)
+    };
+    range.startContainer = editor;
     const window = {
         innerWidth: 1280, innerHeight: 720, scrollX: 0, scrollY: 0,
-        addEventListener: (name, callback) => { listeners[name] = callback; }
+        addEventListener: (name, callback) => { listeners[name] = callback; },
+        getComputedStyle: () => ({ paddingLeft: '20px', paddingTop: '40px', lineHeight: '22.4px' })
     };
     const menu = {
-        style: { display: 'block' },
+        style: { display: 'block', setProperty(name, value) { this[name] = value; } },
         getBoundingClientRect: () => rect(
             parseFloat(menu.style.left) - window.scrollX,
             parseFloat(menu.style.top) - window.scrollY,
-            220, 200
+            220, Math.min(menuHeight, parseFloat(menu.style['--slash-menu-available-height']))
         )
     };
     const items = [{ id: 'link' }, { id: 'toc' }];
     const state = { visible: true, match, items, activeIndex: 1, query: '' };
     const noop = () => {};
     const position = new Function(
-        'editor', 'window', 'slashMenu', 'slashMenuState', 'getSlashCommandMatch', 'hideSlashCommandMenu',
+        'editor', 'window', 'getNodeElement', 'slashMenu', 'slashMenuState', 'getSlashCommandMatch', 'hideSlashCommandMenu',
         'syncImageResizeOverlayPosition', 'repositionLinkPopoverWithinViewport', 'scheduleEditorOverflowStateUpdate',
         `${extractFunction('positionSlashMenu')}
         ${extractFunction('repositionSlashCommandMenu')}
         ${extractListener('editor', 'scroll')}
         ${extractListener('window', 'resize')}
         return positionSlashMenu;`
-    )(editor, window, menu, state, () => match, () => {
+    )(editor, window, node => node, menu, state, () => match, () => {
         state.visible = false;
         menu.style.display = 'none';
     }, noop, noop, noop);
     position(range);
-    return { menu, state, items, window, caretRect, listeners, setMatch(next) { match = next; } };
+    return { menu, state, items, editor, window, caretRect, listeners, range, position, setMatch(next) { match = next; } };
 }
 
 test('auto-scroll after typing / at the document end keeps the command menu visible above the caret', () => {
@@ -116,4 +121,45 @@ test('resizing keeps a visible menu above the bottom caret and within the horizo
     assert.equal(f.state.visible, true);
     assert.equal(f.menu.style.top, '176px');
     assert.equal(f.menu.style.left, '172px');
+});
+
+test('insert menu in a short viewport stays below the toolbar and fits the editor', () => {
+    const f = fixture({ menuHeight: 280 });
+    f.window.innerHeight = 260;
+    f.caretRect.top = 150;
+    f.caretRect.bottom = 172;
+    f.position(f.range, f.menu);
+    const bounds = f.menu.getBoundingClientRect();
+    assert.ok(bounds.top >= f.editor.getBoundingClientRect().top + 8);
+    assert.ok(bounds.bottom <= f.window.innerHeight - 8);
+    assert.ok(bounds.height < 280, 'the menu shrinks to the available editor height');
+    f.window.innerHeight = 720;
+    f.position(f.range, f.menu);
+    assert.equal(f.menu.getBoundingClientRect().height, 280, 'growing the viewport restores the menu height');
+});
+
+test('an empty editor anchors the menu at its padded first line instead of the toolbar', () => {
+    const f = fixture({ menuHeight: 280 });
+    Object.assign(f.caretRect, rect(0, 0, 0, 0));
+    f.position(f.range, f.menu);
+    assert.equal(f.menu.style.left, '20px');
+    assert.equal(f.menu.style.top, '112.4px');
+});
+
+test('scrolling a caret outside the visible editor cannot move the menu over the toolbar or viewport edge', () => {
+    const f = fixture({ menuHeight: 280 });
+    for (const top of [-200, 0, 900]) {
+        Object.assign(f.caretRect, rect(20, top, 0, 22));
+        f.listeners.scroll();
+        const bounds = f.menu.getBoundingClientRect();
+        assert.ok(bounds.top >= f.editor.getBoundingClientRect().top + 8);
+        assert.ok(bounds.bottom <= f.window.innerHeight - 8);
+    }
+});
+
+test('a hidden toolbar leaves the full viewport available to the menu', () => {
+    const f = fixture({ menuHeight: 280, toolbarHeight: 0 });
+    Object.assign(f.caretRect, rect(20, -100, 0, 22));
+    f.position(f.range, f.menu);
+    assert.equal(f.menu.style.top, '8px');
 });

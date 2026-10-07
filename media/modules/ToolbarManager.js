@@ -8,6 +8,9 @@ export class ToolbarManager {
     constructor(editor, stateManager, options = {}) {
         this.editor = editor;
         this.stateManager = stateManager;
+        this.shortcutModifier = options.isMac ? 'Cmd' : 'Ctrl';
+        this.onOpenInsertMenu = options.onOpenInsertMenu || null;
+        this.canOpenInsertMenu = options.canOpenInsertMenu || (() => true);
         this.onInsertTable = options.onInsertTable || null;
         this.onInsertQuote = options.onInsertQuote || null;
         this.onInsertCodeBlock = options.onInsertCodeBlock || null;
@@ -75,6 +78,14 @@ export class ToolbarManager {
         Array.from(buttons).forEach(button => {
             const command = button.getAttribute('data-command');
             if (!command) return;
+            const shortcutKey = button.getAttribute('data-shortcut-key');
+            const fullShortcut = button.getAttribute(this.shortcutModifier === 'Cmd'
+                ? 'data-shortcut-mac' : 'data-shortcut-other');
+            if (fullShortcut) {
+                button.title = `${button.title} (${fullShortcut})`;
+            } else if (shortcutKey) {
+                button.title = `${button.title} (${this.shortcutModifier}+${shortcutKey})`;
+            }
             this.commandButtons.set(command, button);
             if (this.activeStateCommands.has(command) || this.contextStateCommands.has(command)) {
                 button.setAttribute('aria-pressed', 'false');
@@ -90,7 +101,7 @@ export class ToolbarManager {
                 this.executeCommand(command);
                 // ダイアログを開くコマンドはダイアログ側でフォーカスを管理するため、ここではスキップ
                 if (command !== 'table' && command !== 'link' && command !== 'image' && command !== 'footnote' &&
-                    command !== 'math' && command !== 'settings') {
+                    command !== 'math' && command !== 'settings' && command !== 'insert-menu') {
                     setTimeout(() => this.editor.focus(), 0);
                 }
             });
@@ -154,7 +165,7 @@ export class ToolbarManager {
                 this.closeOverflowMenu({ restoreSelection: true });
                 this.executeCommand(command);
                 if (command !== 'table' && command !== 'link' && command !== 'image' && command !== 'footnote' &&
-                    command !== 'math' && command !== 'settings') {
+                    command !== 'math' && command !== 'settings' && command !== 'insert-menu') {
                     setTimeout(() => this.editor.focus(), 0);
                 }
             });
@@ -354,6 +365,12 @@ export class ToolbarManager {
 
         this.editor.focus();
 
+        if (command === 'insert-menu') {
+            if (this.canOpenInsertMenu() && this.onOpenInsertMenu) this.onOpenInsertMenu();
+            this.updateToolbarState();
+            return;
+        }
+
         if (command === 'footnote') {
             if (this.canInsertFootnote() && this.onInsertFootnote) this.onInsertFootnote();
             this.updateToolbarState();
@@ -510,6 +527,7 @@ export class ToolbarManager {
                 (inCodeBlockContext || this.isSelectionTouchingInlineCode());
             const disabledFootnote = command === 'footnote' && !this.canInsertFootnote();
             const disabledMath = command === 'math' && !this.canInsertMath();
+            const disabledInsertMenu = command === 'insert-menu' && !this.canOpenInsertMenu();
             const isDisabled =
                 (onFootnoteNumber && command !== 'settings') ||
                 disabledByTable ||
@@ -520,7 +538,7 @@ export class ToolbarManager {
                 disabledInlineCode ||
                 disabledImageInCode ||
                 disabledFootnote ||
-                disabledMath;
+                disabledMath || disabledInsertMenu;
             button.disabled = isDisabled;
             button.classList.toggle('is-disabled', isDisabled);
             button.classList.toggle('is-current-heading', isCurrentHeadingLevel);
