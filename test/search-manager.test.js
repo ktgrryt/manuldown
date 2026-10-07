@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
+const domino = require('@mixmark-io/domino');
 
 const searchManagerSource = fs.readFileSync(
     path.join(__dirname, '..', 'media', 'modules', 'SearchManager.js'),
@@ -37,6 +38,86 @@ async function createManager() {
     manager._ensureSearchIsCurrent = () => {};
     return manager;
 }
+
+async function createSearchBarFixture(isMac) {
+    const window = domino.createWindow('<div class="search-bar"><input id="find"><input id="replace"></div>');
+    const document = window.document;
+    const manager = await createManager();
+    manager._isMac = isMac;
+    manager.searchBar = document.querySelector('.search-bar');
+    manager.searchInput = document.getElementById('find');
+    manager.replaceInput = document.getElementById('replace');
+    manager._composingInputs = new WeakSet();
+    manager._lastCompositionEndByInput = new WeakMap();
+    manager._compositionEndGraceMs = 100;
+    for (const name of ['nextButton', 'prevButton', 'replaceButton', 'replaceAllButton', 'closeButton', 'caseSensitiveButton']) {
+        manager[name] = document.createElement('button');
+        manager.searchBar.appendChild(manager[name]);
+    }
+    manager._bindEvents();
+
+    return {
+        manager,
+        window,
+        key(input, key, modifiers = {}) {
+            const event = new window.Event('keydown', { bubbles: true, cancelable: true });
+            Object.assign(event, { key, ...modifiers });
+            input.dispatchEvent(event);
+            return event;
+        }
+    };
+}
+
+for (const isMac of [true, false]) {
+    for (const field of ['searchInput', 'replaceInput']) {
+        test(`${isMac ? 'Cmd' : 'Ctrl'} clipboard shortcuts in ${field} reach the VS Code dispatcher`, async () => {
+            const fixture = await createSearchBarFixture(isMac);
+            const received = [];
+            fixture.window.document.addEventListener('keydown', event => received.push(event));
+            const modifier = isMac ? { metaKey: true } : { ctrlKey: true };
+            const shortcuts = [
+                ['v', modifier],
+                ['c', modifier],
+                ['x', modifier],
+                ['V', { ...modifier, shiftKey: true }],
+                ['Insert', { shiftKey: true }],
+                ['Insert', { ctrlKey: true }]
+            ];
+
+            for (const [key, modifiers] of shortcuts) {
+                const event = fixture.key(fixture.manager[field], key, modifiers);
+                assert.ok(received.at(-1) === event, `${key} must reach the host`);
+                assert.equal(event.defaultPrevented, false, `${key} must remain available to the host`);
+            }
+            assert.equal(received.length, shortcuts.length);
+        });
+    }
+}
+
+test('find, navigation and editing keys stay inside the search bar', async () => {
+    const fixture = await createSearchBarFixture(true);
+    const { manager } = fixture;
+    const received = [];
+    const actions = [];
+    fixture.window.document.addEventListener('keydown', event => received.push(event));
+    manager.goToNext = () => actions.push('next');
+    manager.goToPrevious = () => actions.push('previous');
+    manager.replaceCurrent = () => actions.push('replace');
+    manager.close = () => actions.push('close');
+    manager.searchInput.select = () => actions.push('select');
+
+    assert.equal(fixture.key(manager.searchInput, 'f', { metaKey: true }).defaultPrevented, true);
+    assert.equal(fixture.key(manager.searchInput, 'Enter').defaultPrevented, true);
+    assert.equal(fixture.key(manager.searchInput, 'Enter', { shiftKey: true }).defaultPrevented, true);
+    assert.equal(fixture.key(manager.replaceInput, 'Enter').defaultPrevented, true);
+    assert.equal(fixture.key(manager.replaceInput, 'Escape').defaultPrevented, true);
+    for (const key of ['a', 'v', 'ArrowDown', 'Backspace', 'Tab']) {
+        assert.equal(fixture.key(manager.searchInput, key).defaultPrevented, false);
+    }
+
+    assert.deepEqual(actions, ['select', 'next', 'previous', 'replace', 'close']);
+    assert.deepEqual(received, []);
+});
 
 test('replaceCurrent replaces the active match and searches after inserted text', async () => {
     const manager = await createManager();

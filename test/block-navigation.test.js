@@ -1173,6 +1173,106 @@ const CODE_BLOCK =
     '<pre><div class="code-block-toolbar"><span class="code-block-language">plaintext</span></div>' +
     '<code>mvn liberty:dev\n</code></pre>';
 
+test('Up beside display math rejects native jumps to the document start, including scrolled jumps', async () => {
+    for (const nativeScroll of [false, true]) {
+        const fixture = await createFixture('<p>First line</p><p>Immediately above</p>' +
+            '<p><span data-mdw-math="display" contenteditable="false">E=mc^2</span>&nbsp;</p>' +
+            CODE_BLOCK.replace('<pre>', '<pre data-mermaid-view="diagram">'));
+        try {
+            const [first, previous, formulaLine] = Array.from(fixture.editor.querySelectorAll('p'));
+            const { cursorManager, editor, selection } = fixture;
+            editor.scrollTop = 1000;
+            fixture.placeCaret(formulaLine.lastChild, 1);
+            const beforeHtml = editor.innerHTML;
+            cursorManager._getVisualCaretRectForRange = range => {
+                const contentTop = first.contains(range.startContainer) ? 95 :
+                    previous.contains(range.startContainer) ? 1030 : 1050;
+                const top = contentTop - editor.scrollTop;
+                return { left: 20, right: 20, top, bottom: top + 20, x: 20, y: top, width: 0, height: 20 };
+            };
+            let nativeCalls = 0;
+            selection.modify = (alter, direction, granularity) => {
+                nativeCalls++;
+                assert.deepEqual([alter, direction, granularity], ['move', 'backward', 'line']);
+                fixture.placeCaret(first.firstChild, 0);
+                // The viewport delta now looks like just one line of movement.
+                if (nativeScroll) editor.scrollTop = 65;
+            };
+
+            cursorManager.moveCursorUp();
+
+            assert.equal(nativeCalls, 1);
+            assert.ok(previous.contains(selection.getRangeAt(0).startContainer), 'Up visits the preceding block');
+            assert.equal(editor.scrollTop, 1000, 'a rejected native probe restores the scroll position');
+            assert.equal(editor.innerHTML, beforeHtml, 'navigation does not edit the document');
+        } finally {
+            fixture.restoreGlobals();
+        }
+    }
+});
+
+test('Up preserves a native one-line move when it scrolls the editor', async () => {
+    const fixture = await createFixture('<p>First line</p><p>Previous line</p><p>Current line</p>');
+    try {
+        const [, previous, current] = Array.from(fixture.editor.querySelectorAll('p'));
+        const { cursorManager, editor, selection } = fixture;
+        editor.scrollTop = 1000;
+        fixture.placeCaret(current.firstChild, 4);
+        cursorManager._getVisualCaretRectForRange = range => {
+            const contentTop = previous.contains(range.startContainer) ? 1030 : 1050;
+            const top = contentTop - editor.scrollTop;
+            return { left: 40, right: 40, top, bottom: top + 20, x: 40, y: top, width: 0, height: 20 };
+        };
+        selection.modify = () => {
+            fixture.placeCaret(previous.firstChild, 4);
+            editor.scrollTop = 980;
+        };
+
+        cursorManager.moveCursorUp();
+
+        assert.ok(selection.getRangeAt(0).startContainer === previous.firstChild);
+        assert.equal(selection.getRangeAt(0).startOffset, 4, 'native horizontal placement is preserved');
+        assert.equal(editor.scrollTop, 980, 'a valid native scroll is preserved');
+    } finally {
+        fixture.restoreGlobals();
+    }
+});
+
+test('Up beside display math does not mistake the current caret for the line above', async () => {
+    for (const atLineStart of [true, false]) {
+        const fixture = await createFixture('<p>Above the formula</p>' +
+            '<p><span data-mdw-math="display" contenteditable="false">E=mc^2</span>&nbsp;</p>');
+        try {
+            const [previous, formulaLine] = Array.from(fixture.editor.querySelectorAll('p'));
+            const { cursorManager, selection } = fixture;
+            const range = fixture.placeCaret(formulaLine.lastChild, 0);
+            const left = atLineStart ? 20 : 40;
+            const caretRect = { left, right: left, top: 102, bottom: 122, x: left, y: 102, width: 0, height: 20 };
+            cursorManager._getVisualLinesForBlock = () => [
+                { left: 20, right: 200, top: 20, bottom: 100 },
+                { left: 20, right: 40, top: 102, bottom: 122 },
+            ];
+            cursorManager._getVisualCaretRectForRange = () => caretRect;
+            // The space is within the previous line's hit-test tolerance. Both
+            // the character scan and point lookup can rediscover the same caret.
+            document.caretRangeFromPoint = () => range.cloneRange();
+            document.createRange = () => {
+                const probe = new TestRange();
+                const emptyRect = probe.getBoundingClientRect();
+                probe.getBoundingClientRect = () => probe.startContainer === formulaLine.lastChild
+                    ? { ...caretRect, width: 4, right: left + 4 } : emptyRect;
+                return probe;
+            };
+
+            cursorManager.moveCursorUp();
+
+            assert.ok(previous.contains(selection.getRangeAt(0).startContainer), 'Up continues above the formula');
+        } finally {
+            fixture.restoreGlobals();
+        }
+    }
+});
+
 test('keyboard entry into a Mermaid diagram selects its label instead of hidden source', async () => {
     const fixture = await createFixture(CODE_BLOCK.replace('<pre>', '<pre data-mermaid-view="diagram">'));
     try {

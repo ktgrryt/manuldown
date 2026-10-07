@@ -67,6 +67,8 @@ async function createFixture(html, onNativeDelete = () => {}) {
     window.getSelection = () => selection;
     let nativeDeletes = 0;
     let changes = 0;
+    const history = [];
+    const editedMathBlocks = [];
     document.execCommand = (command) => {
         assert.equal(command, 'delete');
         nativeDeletes++;
@@ -76,13 +78,18 @@ async function createFixture(html, onNativeDelete = () => {}) {
         'handleBackspace', 'isEffectivelyEmptyBlock', 'placeCollapsedCaret',
         'hasDirectTextContent', 'getDirectTextContent', 'isRangeAtListItemStart',
         'hasCheckboxAtStart', 'hasCheckbox', 'getCheckboxInListItemDirectContent',
-        'getFirstDirectTextNode'
+        'getFirstDirectTextNode', 'handleBackspaceAfterMathBlock', 'getClosestBlockElement',
+        'isAtBlockStartForRange'
     ];
     const backspace = new Function('window', 'editor', 'domUtils', 'notifyChange', 'requestAnimationFrame',
+        'cursorManager', 'codeBlockManager', 'stateManager',
         `${names.map(extractFunction).join('\n')}\nreturn handleBackspace;`
-    )(window, editor, new DOMUtils(editor), () => changes++, () => {});
+    )(window, editor, new DOMUtils(editor), () => changes++, () => {},
+        { getCodeBlockText: code => code.textContent },
+        { _editMathSource: pre => editedMathBlocks.push(pre) },
+        { saveState: () => history.push('save'), saveStateDebounced: () => history.push('commit') });
     return {
-        editor, selection, backspace,
+        editor, selection, backspace, history, editedMathBlocks,
         get nativeDeletes() { return nativeDeletes; },
         get changes() { return changes; },
         caret(node, offset = 0) { range = new TestRange(); range.setStart(node, offset); },
@@ -106,6 +113,67 @@ test('Backspace deletes only the preceding blank line and preserves every headin
                 assert.equal(fixture.changes, 1);
             } finally { fixture.restore(); }
         }
+    }
+});
+
+function mathBlock(tex, view = 'preview') {
+    return `<pre data-math-view="${view}"><div class="code-block-toolbar" contenteditable="false">math TeX Preview</div>` +
+        `<code class="language-math" data-mdw-math-delimiter="$$">${tex}</code>` +
+        '<div class="math-preview" contenteditable="false" data-exclude-from-markdown="true">Empty formula</div></pre>';
+}
+
+test('Backspace after an empty math block removes only the formula and preserves formatted text', async () => {
+    for (const view of ['preview', 'code']) {
+        for (const tex of ['', '\n', ' \t\n\u200B\u2060\uFEFF']) {
+            for (const line of ['<p><strong># Project Notes</strong></p>', '<h1><strong>Project Notes</strong></h1>',
+                '<p><code>Project Notes</code></p>', '<p><br></p>']) {
+                const fixture = await createFixture(mathBlock(tex, view) + line);
+                try {
+                    const block = fixture.editor.lastElementChild;
+                    const caret = block.querySelector('strong')?.firstChild || block;
+                    fixture.caret(caret);
+                    assert.equal(fixture.backspace(), true);
+                    assert.equal(fixture.editor.innerHTML, line);
+                    assert.equal(fixture.editor.firstElementChild, block);
+                    assert.equal(fixture.selection.getRangeAt(0).startContainer, caret);
+                    assert.equal(fixture.selection.getRangeAt(0).startOffset, 0);
+                    assert.equal(fixture.nativeDeletes, 0);
+                    assert.equal(fixture.changes, 1);
+                    assert.deepEqual(fixture.history, ['save', 'commit']);
+                } finally { fixture.restore(); }
+            }
+        }
+    }
+});
+
+test('Backspace after a nonempty math block opens its source without merging the following text', async () => {
+    const html = mathBlock('x^2\n') + '<p><strong># Project Notes</strong></p>';
+    const fixture = await createFixture(html);
+    try {
+        fixture.caret(fixture.editor.querySelector('strong').firstChild);
+        assert.equal(fixture.backspace(), true);
+        assert.equal(fixture.editor.innerHTML, html);
+        assert.equal(fixture.editedMathBlocks.length, 1);
+        assert.ok(fixture.editedMathBlocks[0] === fixture.editor.querySelector('pre'));
+        assert.equal(fixture.nativeDeletes, 0);
+        assert.equal(fixture.changes, 0);
+        assert.deepEqual(fixture.history, []);
+    } finally { fixture.restore(); }
+});
+
+test('Backspace beside math keeps ordinary character deletion and selected-text deletion', async () => {
+    for (const [text, offset, collapsed] of [['Project Notes', 3, true], [' Project Notes', 1, true],
+        ['Project Notes', 0, false]]) {
+        const html = mathBlock('\n') + `<p><strong>${text}</strong></p>`;
+        const fixture = await createFixture(html);
+        try {
+            fixture.caret(fixture.editor.querySelector('strong').firstChild, offset);
+            fixture.selection.getRangeAt(0).collapsed = collapsed;
+            fixture.backspace();
+            assert.equal(fixture.nativeDeletes, 1);
+            assert.equal(fixture.editor.innerHTML, html);
+            assert.deepEqual(fixture.editedMathBlocks, []);
+        } finally { fixture.restore(); }
     }
 });
 

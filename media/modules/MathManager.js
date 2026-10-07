@@ -17,6 +17,9 @@ const KATEX_OPTIONS = {
 };
 
 const SHADOW_STYLES = `
+:host([data-mdw-math="inline"]) .output {
+    display: inline-block;
+}
 .output.is-pending,
 .output.is-error {
     font-family: var(--vscode-editor-font-family, monospace);
@@ -26,10 +29,21 @@ const SHADOW_STYLES = `
 .output.is-pending { opacity: 0.7; }
 .output.is-error { color: var(--vscode-errorForeground, #f14c4c); }
 .output.is-empty { font-style: italic; opacity: 0.6; }
-.output.is-active {
+.output.is-active,
+.output.is-selected {
     outline: 1px solid var(--vscode-focusBorder, #007fd4);
     outline-offset: 1px;
     border-radius: 2px;
+}
+.output.is-selected {
+    background-color: var(--vscode-editor-selectionBackground, #add6ff);
+}
+/* The whole formula has its own selection background. Suppress the native
+   text selection inside KaTeX so each glyph is not highlighted again. */
+.output.is-selected::selection,
+.output.is-selected *::selection {
+    background-color: transparent;
+    color: inherit;
 }
 .katex-display {
     margin: 0;
@@ -54,6 +68,8 @@ export class MathManager {
         this.observer = null;
         this.popover = null;
         this.session = null;
+        this.selectedFormula = null;
+        this.pointerDown = null;
     }
 
     get document() {
@@ -156,7 +172,9 @@ export class MathManager {
             root.appendChild(output);
         }
         const active = output.classList.contains('is-active');
+        const selected = output.classList.contains('is-selected');
         output.className = active ? 'output is-active' : 'output';
+        output.classList.toggle('is-selected', selected);
         output.removeAttribute('title');
         const katex = this.window.katex;
         if (tex.trim() === '') {
@@ -229,12 +247,36 @@ export class MathManager {
         this.observe();
         this.renderAll();
         this.editor.addEventListener('mousedown', event => {
+            this.pointerDown = event.button === 0 && event.detail <= 1 &&
+                !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey && this.isEditable()
+                ? { x: event.clientX, y: event.clientY, moved: false,
+                    formula: this.getFormulaRightEdgeAtPoint(event.clientX, event.clientY, event.target) }
+                : null;
             if (event.button !== 0 || !this.getFormula(event.target)) return;
             // Keep the native caret out of the formula's hidden TeX text.
             event.preventDefault();
             event.stopImmediatePropagation();
         }, true);
+        this.document.addEventListener('mousemove', event => {
+            const pointer = this.pointerDown;
+            if (pointer && Math.hypot(event.clientX - pointer.x, event.clientY - pointer.y) > 3) {
+                pointer.moved = true;
+            }
+        });
         this.editor.addEventListener('click', event => {
+            const pointer = this.pointerDown;
+            this.pointerDown = null;
+            if (event.detail === 1 && pointer?.formula && !pointer.moved &&
+                Math.hypot(event.clientX - pointer.x, event.clientY - pointer.y) <= 3 &&
+                !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey && this.isEditable()) {
+                event.preventDefault();
+                event.stopImmediatePropagation();
+                // Focus first: leaving a TeX input may commit or remove its formula.
+                this.editor.focus({ preventScroll: true });
+                if (this.editor.contains(pointer.formula)) this.placeCaretBeside(pointer.formula, false);
+                this.syncSelection();
+                return;
+            }
             const formula = this.getFormula(event.target);
             if (!formula) return;
             event.preventDefault();
@@ -243,6 +285,9 @@ export class MathManager {
         }, true);
         this.editor.addEventListener('scroll', () => this.positionPopover(), { passive: true });
         this.window.addEventListener('resize', () => this.positionPopover());
+        this.document.addEventListener('selectionchange', () => this.syncSelection());
+        this.editor.addEventListener('focusin', () => this.syncSelection());
+        this.editor.addEventListener('focusout', () => this.setSelectedFormula(null));
     }
 
     // ---- Inserting and editing -------------------------------------------
@@ -316,6 +361,7 @@ export class MathManager {
         };
         input.value = this.session.original;
         popover.hidden = false;
+        this.setSelectedFormula(null);
         this.setActive(formula, true);
         this.resizeInput(input);
         this.showError(formula);
@@ -504,7 +550,62 @@ export class MathManager {
         formula.shadowRoot?.querySelector('.output')?.classList.toggle('is-active', active);
     }
 
+    setSelectedFormula(formula) {
+        this.selectedFormula?.shadowRoot?.querySelector('.output')?.classList.remove('is-selected');
+        this.selectedFormula = formula;
+        formula?.shadowRoot?.querySelector('.output')?.classList.add('is-selected');
+    }
+
+    syncSelection() {
+        const focused = this.editor.contains(this.document.activeElement);
+        this.setSelectedFormula(focused && !this.session ? this.getSelectedFormula(this.getRange()) : null);
+    }
+
     // ---- Caret movement and deletion -------------------------------------
+
+    /** A small strip at the right edge, plus blank space after a line's last formula. */
+    getFormulaRightEdgeAtPoint(x, y, target) {
+        const element = target?.nodeType === 1 ? target : target?.parentElement;
+        if (!element || !this.editor.contains(element)) return null;
+        const clickedFormula = this.getFormula(element);
+        if (!clickedFormula && element.closest('a, button, input, textarea, select, pre, code, [contenteditable="false"]')) {
+            return null;
+        }
+        const block = element.closest('p, li, td, th, h1, h2, h3, h4, h5, h6, blockquote, div');
+        if (!block || !this.editor.contains(block)) return null;
+        let pointRange;
+        const candidates = [];
+        for (const formula of block.querySelectorAll('span[data-mdw-math="inline"]')) {
+            // KaTeX can extend above and below the host span's text line box.
+            const output = formula.shadowRoot?.querySelector('.output') || formula;
+            const rect = output.getBoundingClientRect();
+            const hostRect = formula.getBoundingClientRect();
+            if (rect.width <= 0 || y < Math.min(rect.top, hostRect.top) - 2 ||
+                y > Math.max(rect.bottom, hostRect.bottom) + 2 || x < rect.right - Math.min(4, rect.width / 4)) continue;
+            if (x > rect.right + 6) {
+                if (clickedFormula) continue;
+                if (pointRange === undefined) {
+                    pointRange = this.document.caretRangeFromPoint?.(x, y) || null;
+                    if (!pointRange && this.document.caretPositionFromPoint) {
+                        const position = this.document.caretPositionFromPoint(x, y);
+                        if (position) {
+                            pointRange = this.document.createRange();
+                            pointRange.setStart(position.offsetNode, position.offset);
+                            pointRange.collapse(true);
+                        }
+                    }
+                }
+                // Chrome sometimes puts clicks in trailing space before an atomic
+                // formula. Only correct that boundary, never later visible text.
+                if (this.getFormula(pointRange?.startContainer) !== formula &&
+                    this.getAdjacentFormula(pointRange, 'forward') !== formula &&
+                    this.getAdjacentFormula(pointRange, 'backward') !== formula) continue;
+            }
+            candidates.push({ formula, distance: Math.abs(x - rect.right) });
+        }
+        candidates.sort((a, b) => a.distance - b.distance);
+        return candidates[0]?.formula || null;
+    }
 
     setCaretAtFormulaEdge(range, formula, atStart) {
         const sibling = atStart ? formula.previousSibling : formula.nextSibling;
@@ -591,7 +692,7 @@ export class MathManager {
         return formula && this.getAdjacentFormula(end, 'backward') === formula ? formula : null;
     }
 
-    /** Move the caret over a formula as if it were one character. */
+    /** Stop on the whole formula before moving to the text on either side. */
     moveAcrossFormula(selection, direction) {
         if (!selection?.rangeCount) return false;
         const range = selection.getRangeAt(0);
@@ -601,9 +702,11 @@ export class MathManager {
             : this.getSelectedFormula(range);
         if (!formula) return false;
         const caret = this.document.createRange();
-        this.setCaretAtFormulaEdge(caret, formula, direction === 'backward');
+        if (range.collapsed) caret.selectNode(formula);
+        else this.setCaretAtFormulaEdge(caret, formula, direction === 'backward');
         selection.removeAllRanges();
         selection.addRange(caret);
+        this.syncSelection();
         return true;
     }
 

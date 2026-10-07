@@ -48,6 +48,10 @@ function createRangeClass() {
         }
         setStartBefore(node) { this.setStart(node.parentNode, indexOf(node)); }
         setStartAfter(node) { this.setStart(node.parentNode, indexOf(node) + 1); }
+        selectNode(node) {
+            this.setStartBefore(node);
+            this.setEnd(node.parentNode, indexOf(node) + 1);
+        }
         selectNodeContents(node) {
             this.startContainer = this.endContainer = node;
             this.startOffset = 0;
@@ -96,6 +100,7 @@ async function fixture(html, options = {}) {
         Object.defineProperty(this, 'shadowRoot', { configurable: true, value: root });
         return root;
     };
+    Object.defineProperty(document, 'activeElement', { value: editor, writable: true });
     elementPrototype.focus = function () {};
     elementPrototype.setSelectionRange = function () {};
     elementPrototype.getBoundingClientRect = () => ({ left: 0, right: 0, top: 0, bottom: 0, width: 0, height: 0 });
@@ -279,12 +284,16 @@ test('formulas cannot be inserted into code', async () => {
     assert.equal(f.manager.insert(), false);
 });
 
-test('the caret steps over a formula, and Backspace or Delete removes it in one step', async () => {
+test('the caret selects a formula before stepping past it, and deletion removes it in one step', async () => {
     const f = await fixture(`<p>a${formulaHtml('x')}b</p>`);
     const [before, formula, after] = Array.from(f.editor.querySelector('p').childNodes);
     f.select(before, 1);
     assert.equal(f.manager.handleKeydown(key('ArrowRight')), true);
+    assert.ok(f.manager.getSelectedFormula(f.range) === formula);
+    assert.equal(f.manager.handleKeydown(key('ArrowRight')), true);
     assert.ok(f.caretAt(after, 0));
+    assert.equal(f.manager.handleKeydown(key('ArrowLeft')), true);
+    assert.ok(f.manager.getSelectedFormula(f.range) === formula);
     assert.equal(f.manager.handleKeydown(key('ArrowLeft')), true);
     assert.ok(f.caretAt(before, 1));
     assert.equal(f.manager.handleKeydown(key('ArrowLeft')), false, 'text before the caret moves natively');
@@ -312,6 +321,273 @@ test('Enter on a selected formula opens its editor', async () => {
     assert.equal(f.manager.handleKeydown(key('Enter')), true);
     assert.equal(f.manager.popover.hidden, false);
     assert.equal(f.input().value, 'x');
+});
+
+for (const [name, navigation, side, isMac] of [
+    ['Right', key('ArrowRight'), 'before', false],
+    ['Left', key('ArrowLeft'), 'after', false],
+    ['Ctrl+F', key('f', { ctrlKey: true }), 'before', true],
+    ['Ctrl+B', key('b', { ctrlKey: true }), 'after', true],
+]) {
+    test(`${name} selects the whole formula and Enter reopens its TeX for editing`, async () => {
+        const f = await fixture(`<p>a${formulaHtml('x^2')}b</p>`);
+        const [before, formula, after] = Array.from(f.editor.querySelector('p').childNodes);
+        f.manager.setup();
+        f.editor.focus();
+        f.select(side === 'before' ? before : after, side === 'before' ? 1 : 0);
+        const original = f.editor.innerHTML;
+        assert.equal(f.manager.handleKeydown(navigation, isMac), true);
+        assert.ok(f.manager.getSelectedFormula(f.range) === formula);
+        assert.ok(f.output(formula).classList.contains('is-selected'));
+        assert.equal(f.editor.innerHTML, original, 'selection UI stays out of saved HTML');
+        assert.deepEqual(f.history, []);
+        assert.equal(f.changes, 0);
+        f.manager.renderFormula(formula, true);
+        assert.ok(f.output(formula).classList.contains('is-selected'));
+
+        assert.equal(f.manager.handleKeydown(key('Enter')), true);
+        assert.equal(f.manager.popover.hidden, false);
+        assert.equal(f.input().value, 'x^2');
+        assert.ok(!f.output(formula).classList.contains('is-selected'));
+        f.input().value = 'x^3';
+        f.manager.handleInput();
+        f.manager.handleInputKeydown(key('Enter'));
+        assert.equal(formula.textContent, 'x^3');
+        assert.ok(f.caretAt(after, 0));
+        assert.deepEqual(f.history, ['begin', 'commit']);
+
+        assert.equal(f.manager.handleKeydown(key('ArrowLeft')), true);
+        assert.equal(f.manager.handleKeydown(key('Enter')), true);
+        assert.equal(f.input().value, 'x^3');
+        f.input().value = 'cancelled';
+        f.manager.handleInput();
+        f.manager.handleInputKeydown(key('Escape'));
+        assert.equal(formula.textContent, 'x^3');
+    });
+}
+
+test('arrow navigation can leave a selected formula on either side without editing', async () => {
+    const f = await fixture(`<p>a${formulaHtml('x')}b</p>`);
+    const [before, formula, after] = Array.from(f.editor.querySelector('p').childNodes);
+    f.manager.renderAll();
+    f.editor.focus();
+    for (const exitKey of ['ArrowLeft', 'ArrowRight']) {
+        f.select(before, 1);
+        f.manager.handleKeydown(key('ArrowRight'));
+        assert.ok(f.output(formula).classList.contains('is-selected'));
+        assert.equal(f.manager.handleKeydown(key(exitKey)), true);
+        assert.ok(exitKey === 'ArrowLeft' ? f.caretAt(before, 1) : f.caretAt(after, 0));
+        assert.ok(!f.output(formula).classList.contains('is-selected'));
+    }
+    assert.equal(f.changes, 0);
+});
+
+for (const html of [
+    `<p>${formulaHtml('x')}</p>`,
+    `<p>a<strong>${formulaHtml('x')}</strong>b</p>`,
+    `<p>a\u200B${formulaHtml('x')}\u200B</p>`,
+    `<ul><li>${formulaHtml('x')}</li></ul>`,
+    `<table><tr><td>${formulaHtml('x')}</td></tr></table>`,
+]) {
+    test(`formula selection works at boundaries and inside formatting: ${html}`, async () => {
+        const f = await fixture(html);
+        const formula = f.formula();
+        for (const [atStart, direction] of [[true, 'forward'], [false, 'backward']]) {
+            f.manager.placeCaretBeside(formula, atStart);
+            assert.equal(f.manager.moveAcrossFormula(f.window.getSelection(), direction), true);
+            assert.ok(f.manager.getSelectedFormula(f.range) === formula);
+            assert.equal(f.manager.normalizeCaret(), false, 'normalization keeps the whole-formula selection');
+        }
+    });
+}
+
+test('adjacent formulas are selected individually', async () => {
+    const f = await fixture(`<p>${formulaHtml('a')}${formulaHtml('b')}</p>`);
+    const [first, second] = Array.from(f.editor.querySelector('p').children);
+    f.manager.placeCaretBeside(first, true);
+    for (const formula of [first, second]) {
+        assert.equal(f.manager.handleKeydown(key('ArrowRight')), true);
+        assert.ok(f.manager.getSelectedFormula(f.range) === formula);
+        assert.equal(f.manager.handleKeydown(key('ArrowRight')), true);
+        assert.equal(f.range.collapsed, true);
+    }
+});
+
+test('selection highlighting follows native selection and clears when focus leaves the editor', async () => {
+    const f = await fixture(`<p>a${formulaHtml('x')}b</p>`);
+    f.manager.setup();
+    f.editor.focus();
+    const paragraph = f.editor.querySelector('p');
+    f.select(paragraph, 1, paragraph, 2);
+    const change = () => {
+        const event = f.document.createEvent('Event');
+        event.initEvent('selectionchange', false, false);
+        f.document.dispatchEvent(event);
+    };
+    change();
+    assert.ok(f.output(f.formula()).classList.contains('is-selected'));
+    f.select(paragraph.firstChild, 0);
+    change();
+    assert.ok(!f.output(f.formula()).classList.contains('is-selected'));
+    f.select(paragraph, 1, paragraph, 2);
+    change();
+    f.document.activeElement = f.document.body;
+    const blur = f.document.createEvent('Event');
+    blur.initEvent('focusout', true, false);
+    f.editor.dispatchEvent(blur);
+    assert.ok(!f.output(f.formula()).classList.contains('is-selected'));
+});
+
+test('Shift navigation and selections containing other text retain native behavior', async () => {
+    const f = await fixture(`<p>a${formulaHtml('x')}b</p>`);
+    const paragraph = f.editor.querySelector('p');
+    f.select(paragraph.firstChild, 1);
+    assert.equal(f.manager.handleKeydown(key('ArrowRight', { shiftKey: true })), false);
+    f.select(paragraph, 0, paragraph, 2);
+    assert.equal(f.manager.handleKeydown(key('ArrowRight')), false);
+    assert.equal(f.manager.handleKeydown(key('Enter')), false);
+    assert.equal(f.manager.popover, null);
+});
+
+for (const deletion of ['Backspace', 'Delete']) {
+    test(`${deletion} removes a keyboard-selected formula in one history step`, async () => {
+        const f = await fixture(`<p>a${formulaHtml('x')}b</p>`);
+        f.select(f.editor.querySelector('p').firstChild, 1);
+        f.manager.handleKeydown(key('ArrowRight'));
+        assert.equal(f.manager.handleKeydown(key(deletion)), true);
+        assert.equal(f.editor.innerHTML, '<p>ab</p>');
+        assert.deepEqual(f.history, ['save', 'commit']);
+    });
+}
+
+test('clicking an existing formula reopens the last committed TeX', async () => {
+    const f = await fixture(`<p>${formulaHtml('x')}</p>`);
+    f.manager.setup();
+    f.formula().click();
+    assert.equal(f.input().value, 'x');
+    f.input().value = 'y';
+    f.manager.handleInput();
+    f.manager.handleInputKeydown(key('Enter'));
+    f.formula().click();
+    assert.equal(f.manager.popover.hidden, false);
+    assert.equal(f.input().value, 'y');
+});
+
+async function pointerFixture(html) {
+    const f = await fixture(html);
+    f.manager.setup();
+    const formula = f.formula();
+    Object.defineProperty(formula, 'getBoundingClientRect', {
+        value: () => ({ left: 10, right: 70, top: 45, bottom: 62, width: 60, height: 17 }),
+    });
+    Object.defineProperty(f.output(formula), 'getBoundingClientRect', {
+        value: () => ({ left: 10, right: 70, top: 40, bottom: 75, width: 60, height: 35 }),
+    });
+    f.pointer = (type, target, x, y, modifiers = {}) => {
+        const event = f.document.createEvent('Event');
+        event.initEvent(type, true, true);
+        Object.assign(event, {
+            button: 0, detail: 1, clientX: x, clientY: y,
+            shiftKey: false, ctrlKey: false, metaKey: false, altKey: false, ...modifiers,
+        });
+        target.dispatchEvent(event);
+        return event;
+    };
+    return f;
+}
+
+test('clicking the rendered right edge places the caret after the formula, including its superscript height', async () => {
+    const f = await pointerFixture(`<p>A ${formulaHtml('x^2')} after</p>`);
+    const formula = f.formula();
+    const original = f.editor.innerHTML;
+    for (const [target, x, y] of [[formula, 68, 41], [formula, 69, 74], [formula.parentNode, 74, 55]]) {
+        f.select(formula.previousSibling, 0);
+        f.pointer('mousedown', target, x, y);
+        const click = f.pointer('click', target, x, y);
+        assert.equal(click.defaultPrevented, true);
+        assert.ok(f.caretAt(formula.nextSibling, 0));
+        assert.equal(f.manager.popover, null);
+    }
+    assert.equal(f.editor.innerHTML, original);
+    assert.deepEqual(f.history, []);
+    assert.equal(f.changes, 0);
+});
+
+for (const usePositionAPI of [false, true]) {
+    test(`clicking trailing space after a formula corrects a native caret before it (${usePositionAPI ? 'position' : 'range'} API)`, async () => {
+        const f = await pointerFixture(`<p><strong>${formulaHtml('x^2')}</strong></p>`);
+        const formula = f.formula();
+        f.select(formula.parentNode, 0);
+        const nativeRange = f.range.cloneRange();
+        if (usePositionAPI) f.document.caretPositionFromPoint = () => ({ offsetNode: nativeRange.startContainer, offset: 0 });
+        else f.document.caretRangeFromPoint = () => nativeRange;
+        const target = f.editor.querySelector('p');
+        f.pointer('mousedown', target, 150, 55);
+        f.pointer('click', target, 150, 55);
+        assert.ok(f.caretAt(formula.parentNode, 1));
+        assert.equal(f.manager.popover, null);
+    });
+}
+
+test('later text and another visual line keep their native click positions', async () => {
+    const f = await pointerFixture(`<p>${formulaHtml('x')} after<br>next line</p>`);
+    const paragraph = f.editor.querySelector('p');
+    const after = f.formula().nextSibling;
+    f.select(after, 3);
+    f.document.caretRangeFromPoint = () => f.range.cloneRange();
+    for (const [x, y] of [[95, 55], [74, 95]]) {
+        f.pointer('mousedown', paragraph, x, y);
+        const click = f.pointer('click', paragraph, x, y);
+        assert.equal(click.defaultPrevented, false);
+        assert.ok(f.caretAt(after, 3));
+    }
+});
+
+test('modified clicks, double clicks and drags beside a formula keep their selections', async () => {
+    const f = await pointerFixture(`<p>A ${formulaHtml('x')} after</p>`);
+    const paragraph = f.editor.querySelector('p');
+    const before = paragraph.firstChild;
+    const after = paragraph.lastChild;
+    for (const modifiers of [{ shiftKey: true }, { ctrlKey: true }, { metaKey: true }, { altKey: true }, { detail: 2 }, { button: 2 }]) {
+        f.select(before, 1, after, 3);
+        f.pointer('mousedown', paragraph, 74, 55, modifiers);
+        const click = f.pointer('click', paragraph, 74, 55, modifiers);
+        assert.equal(click.defaultPrevented, false);
+        assert.equal(f.range.collapsed, false);
+    }
+    f.pointer('mousedown', paragraph, 74, 55);
+    f.pointer('mousemove', paragraph, 100, 55);
+    f.pointer('mousemove', paragraph, 74, 55);
+    f.select(before, 1, after, 3);
+    assert.equal(f.pointer('click', paragraph, 74, 55).defaultPrevented, false);
+    assert.equal(f.range.collapsed, false);
+});
+
+test('a click between adjacent formulas places the caret between them, while their bodies still open TeX editing', async () => {
+    const f = await pointerFixture(`<p>${formulaHtml('a')}${formulaHtml('b')}</p>`);
+    const paragraph = f.editor.querySelector('p');
+    const second = paragraph.lastChild;
+    f.pointer('mousedown', second, 72, 55);
+    f.pointer('click', second, 72, 55);
+    assert.ok(f.caretAt(paragraph, 1));
+    assert.equal(f.manager.popover, null);
+    f.pointer('mousedown', f.formula(), 40, 55);
+    f.pointer('click', f.formula(), 40, 55);
+    assert.equal(f.manager.popover.hidden, false);
+    assert.equal(f.input().value, 'a');
+});
+
+test('edge clicks do not change a read-only document or reinterpret display math', async () => {
+    const f = await pointerFixture(`<p>${formulaHtml('x')} after</p>`);
+    f.editor.setAttribute('contenteditable', 'false');
+    f.select(f.formula().nextSibling, 2);
+    f.pointer('mousedown', f.formula().parentNode, 74, 55);
+    assert.equal(f.pointer('click', f.formula().parentNode, 74, 55).defaultPrevented, false);
+    assert.ok(f.caretAt(f.formula().nextSibling, 2));
+    const display = await pointerFixture(`<p>${formulaHtml('x', 'display')}</p>`);
+    display.pointer('mousedown', display.formula(), 68, 55);
+    display.pointer('click', display.formula(), 68, 55);
+    assert.equal(display.manager.popover.hidden, false);
 });
 
 test('formulas and "$$" blocks survive the clipboard sanitizer', async () => {
@@ -412,6 +688,40 @@ test('math blocks show the formula with a TeX and Preview toggle', async t => {
     assert.deepEqual([render.tex, render.displayMode], ['\\frac{a}{b}\n', true]);
     // Display state and the rendered formula are not document content.
     assert.equal(f.domUtils.getCleanedHTML(), html);
+});
+
+test('empty math blocks load with the TeX input visible without changing their source or focus', async t => {
+    for (const tex of ['', '\n', ' \t\n\u200B\u2060\uFEFF']) {
+        await t.test(JSON.stringify(tex), async t => {
+            const html = `<pre><code class="language-math" data-mdw-math-delimiter="$$">${tex}</code></pre>`;
+            const f = await codeBlockFixture(t, html);
+            assert.equal(f.pre.getAttribute('data-math-view'), 'code');
+            const buttons = Array.from(f.pre.querySelectorAll('.code-block-view-btn'));
+            assert.deepEqual(buttons.map(button => [button.textContent, button.getAttribute('aria-pressed')]),
+                [['TeX', 'true'], ['Preview', 'false']]);
+            assert.equal(f.range, null, 'loading must not steal the caret');
+            assert.equal(f.pre.querySelector('code').textContent, tex);
+            assert.equal(f.domUtils.getCleanedHTML(), html);
+
+            f.click(buttons[0]);
+            assert.ok(f.pre.querySelector('code').contains(f.range.startContainer));
+            assert.equal(f.range.collapsed, true);
+        });
+    }
+});
+
+test('math input stays open after typing and an explicit Preview choice survives control rebuilding', async t => {
+    const f = await codeBlockFixture(t, '<pre><code class="language-math">\n</code></pre>');
+    assert.equal(f.pre.getAttribute('data-math-view'), 'code');
+    f.pre.querySelector('code').textContent = 'x^2\n';
+    f.manager.highlightCodeBlocks();
+    assert.equal(f.pre.getAttribute('data-math-view'), 'code');
+
+    f.pre.querySelector('code').textContent = '\n';
+    f.click(f.pre.querySelector('.code-block-view-btn[data-math-view="preview"]'));
+    f.manager.highlightCodeBlocks();
+    assert.equal(f.pre.getAttribute('data-math-view'), 'preview');
+    assert.equal(f.pre.querySelector('.code-block-view-btn[data-math-view="preview"]').getAttribute('aria-pressed'), 'true');
 });
 
 test('opening a math block source shows the TeX with the caret at its end', async t => {

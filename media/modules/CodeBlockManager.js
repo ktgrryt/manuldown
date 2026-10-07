@@ -309,7 +309,12 @@ export class CodeBlockManager {
 
     // "code" shows the TeX with the formula below it; "preview" shows only the formula.
     _getMathView(pre) {
-        return pre.getAttribute('data-math-view') === 'code' ? 'code' : 'preview';
+        const view = pre.getAttribute('data-math-view');
+        if (view === 'code' || view === 'preview') return view;
+        // Empty formulas need a visible input when opened from Markdown.
+        // Once a view is chosen, keep it while typing or rebuilding controls.
+        const tex = this._getCodeBlockText(pre.querySelector('code')).replace(/[\u200B\u2060\uFEFF]/g, '');
+        return tex.trim() === '' ? 'code' : 'preview';
     }
 
     _setMathView(pre, view) {

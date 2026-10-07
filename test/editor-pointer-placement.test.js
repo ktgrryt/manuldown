@@ -118,6 +118,74 @@ test('empty-code click correction preserves placements in another row or block',
     assert.deepEqual(other.placements, []);
 });
 
+function populatedCodeClickFixture({ side, directHit = true, collapsed = true, readOnly = false }) {
+    const f = fixture(`<p>before <code${readOnly ? ' contenteditable="false"' : ''}>value</code> after</p>`);
+    const code = f.editor.querySelector('code');
+    const block = code.parentElement;
+    // At the left edge Chromium can report the preceding text's endpoint,
+    // even when the click is inside the code's padding or first character.
+    let range = { startContainer: code.previousSibling, startOffset: 7, collapsed };
+    f.window.getSelection = () => ({
+        rangeCount: 1, isCollapsed: collapsed, getRangeAt: () => range,
+        removeAllRanges() {}, addRange(next) { range = next; },
+    });
+    f.document.elementFromPoint = () => directHit ? code : block;
+    const createRange = f.document.createRange;
+    f.document.createRange = () => ({
+        ...createRange(),
+        getClientRects: () => [{ left: 26, right: 76, top: 96, bottom: 116, width: 50 }],
+    });
+    const placements = [];
+    const cursorManager = {
+        _placeCursorBeforeInlineCodeElement: () => { placements.push('before'); return true; },
+        _placeCursorInsideInlineCodeStart: () => { placements.push('inside'); return true; },
+    };
+    const place = new Function('window', 'document', 'editor', 'Node', 'domUtils', 'cursorManager',
+        'getCaretRangeFromPoint', 'getInlineCodeEdgeAtRange', 'getClosestBlockElement',
+        'moveCursorOutOfInlineCodeRight',
+        `${extract('isInlineCodeNode')}\n${extract('placeCaretAtInlineCodeAfterClick')}\nreturn placeCaretAtInlineCodeAfterClick;`
+    )(f.window, f.document, f.editor, f.window.Node, f.domUtils, cursorManager,
+        () => range, () => side ? { code, side } : null, () => block,
+        () => { placements.push('after'); return true; });
+    return { place, placements, code, get range() { return range; } };
+}
+
+test('clicking the left padding of existing code enters it for editing', () => {
+    const f = populatedCodeClickFixture({ side: 'start' });
+    assert.equal(f.place(22, 106), true);
+    assert.deepEqual(f.placements, ['inside']);
+});
+
+test('clicking the right padding of existing code places the caret at its editable text end', () => {
+    const f = populatedCodeClickFixture({ side: 'end' });
+    assert.equal(f.place(80, 106), true);
+    assert.deepEqual(f.placements, []);
+    assert.equal(f.range.startContainer, f.code.firstChild);
+    assert.equal(f.range.startOffset, 5);
+});
+
+for (const [side, x, expected] of [['start', 15, 'before'], ['end', 90, 'after']]) {
+    test(`clicking outside existing code still places the caret ${expected} it`, () => {
+        const f = populatedCodeClickFixture({ side, directHit: false });
+        assert.equal(f.place(x, 106), true);
+        assert.deepEqual(f.placements, [expected]);
+    });
+}
+
+for (const [name, options] of [
+    ['interior carets', { side: null }],
+    ['text selections', { side: 'start', collapsed: false }],
+    ['read-only code', { side: 'start', readOnly: true }],
+]) {
+    test(`code click correction preserves ${name}`, () => {
+        const f = populatedCodeClickFixture(options);
+        const original = f.range;
+        assert.equal(f.place(22, 106), false);
+        assert.equal(f.range, original);
+        assert.deepEqual(f.placements, []);
+    });
+}
+
 for (const [name, markup, selector] of [
     ['link', '<a href="https://example.test">link</a>', 'a'],
     ['image', '<img alt="image">', 'img'],

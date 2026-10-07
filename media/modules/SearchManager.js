@@ -420,11 +420,23 @@ export class SearchManager {
             this._performSearch();
         });
 
-        // Prevent keydown events from reaching the editor
+        // Keep search-bar keys local, except clipboard shortcuts handled by VS Code.
         this.searchBar.addEventListener('keydown', (e) => {
+            const key = e.key.toLowerCase();
+            const isClipboardShortcut = !e.altKey && (
+                ((e.metaKey || e.ctrlKey) && ['c', 'x', 'v'].includes(key)) ||
+                (e.key === 'Insert' && (e.shiftKey || e.ctrlKey))
+            );
+            if (isClipboardShortcut) {
+                // The webview host listens on window and dispatches clipboard
+                // commands back to the focused input. Stopping propagation here
+                // prevents those commands from running in desktop VS Code.
+                return;
+            }
+
             // Cmd+F / Ctrl+F while search is open → re-select input text
             const modKey = this._isMac ? e.metaKey : e.ctrlKey;
-            if (modKey && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'f') {
+            if (modKey && !e.altKey && !e.shiftKey && key === 'f') {
                 e.preventDefault();
                 e.stopPropagation();
                 this.searchInput.select();

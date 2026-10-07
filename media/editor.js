@@ -7685,12 +7685,37 @@ const {
         selection.addRange(newRange);
     }
 
+    // Native block merging can move the following line into the math preview,
+    // whose contents are excluded from Markdown. Keep that boundary explicit.
+    function handleBackspaceAfterMathBlock(selection, range) {
+        if (!selection || !range || !range.collapsed || !editor.contains(range.startContainer)) return false;
+        const block = getClosestBlockElement(range.startContainer);
+        if (!block || !/^(P|DIV|H[1-6])$/.test(block.tagName)) return false;
+        const pre = block.previousElementSibling;
+        const code = pre?.tagName === 'PRE' ? pre.querySelector('code.language-math') : null;
+        if (!code || !isAtBlockStartForRange(range, block)) return false;
+
+        const tex = cursorManager.getCodeBlockText(code).replace(/[\u200B\u2060\uFEFF]/g, '');
+        if (tex.trim() === '') {
+            stateManager.saveState();
+            pre.remove();
+            // Removing the preceding sibling leaves the caret and all inline
+            // formatting in the current line intact. No native input follows.
+            notifyChange();
+            stateManager.saveStateDebounced();
+        } else {
+            codeBlockManager._editMathSource(pre);
+        }
+        return true;
+    }
+
     // Backspace処理
     function handleBackspace() {
         const selection = window.getSelection();
         if (!selection || !selection.rangeCount) return false;
 
         const range = selection.getRangeAt(0);
+        if (handleBackspaceAfterMathBlock(selection, range)) return true;
         let container = range.commonAncestorContainer;
         let offset = range.startOffset;
 
@@ -12179,6 +12204,9 @@ const {
             return false;
         }
         const { code, side } = edge;
+        if (code.closest('[contenteditable="false"]')) {
+            return false;
+        }
         // Leave placements that other click handling moved to another block.
         const lineBlock = code.closest('td, th') || getClosestBlockElement(code);
         if (!lineBlock || !lineBlock.contains(currentRange.startContainer)) {
@@ -12198,6 +12226,25 @@ const {
                 return cursorManager._placeCursorAfterInlineCodeElement(code, selection);
             }
             return cursorManager._placeCursorInsideInlineCodeStart(code, selection);
+        }
+
+        // Code padding belongs to the editable box. Chromium may resolve a
+        // click there (or at the first character) to the adjacent plain text.
+        // Explicitly enter the code so returning to it allows editing again.
+        if (clickedCode === code) {
+            if (side === 'start') {
+                return cursorManager._placeCursorInsideInlineCodeStart(code, selection);
+            }
+            if (side === 'end') {
+                const textNode = domUtils.getLastTextNode(code);
+                if (!textNode) return false;
+                const range = document.createRange();
+                range.setStart(textNode, textNode.textContent.length);
+                range.collapse(true);
+                selection.removeAllRanges();
+                selection.addRange(range);
+                return true;
+            }
         }
 
         const contentsRange = document.createRange();
@@ -18564,6 +18611,7 @@ const {
             // Record the committed text before the composition changes the DOM,
             // so undo never lands on half-typed (uncommitted) IME text.
             stateManager.flushDebouncedState();
+            cursorManager.prepareInlineCodeComposition();
         }, true);
 
         editor.addEventListener('beforeinput', (e) => {
@@ -18623,6 +18671,15 @@ const {
 
             if (footnoteManager.handleBeforeInput(e)) {
                 return;
+            }
+
+            if (e.cancelable && e.inputType === 'deleteContentBackward') {
+                const selection = window.getSelection();
+                const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
+                if (handleBackspaceAfterMathBlock(selection, range)) {
+                    e.preventDefault();
+                    return;
+                }
             }
 
             if (e.inputType === 'insertParagraph' || e.inputType === 'insertLineBreak') {

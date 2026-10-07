@@ -128,6 +128,62 @@ test('loading and input cleanup preserve source zero-width characters in text an
     assert.equal(f.range.startOffset, 3);
 });
 
+test('IME re-editing at the code start uses a temporary anchor that is not saved', async (t) => {
+    const f = await fixture(t, '<p>before <code>value</code> after</p>', 0);
+    const { CursorManager } = await cursorManagerModule;
+    const manager = new CursorManager(f.editor, f.domUtils);
+    assert.equal(manager.prepareInlineCodeComposition(), true);
+    assert.equal(f.code.textContent, '\u200Bvalue');
+    assert.equal(f.range.startContainer, f.code.firstChild);
+    assert.equal(f.range.startOffset, 1);
+    assert.equal(f.domUtils.getCleanedHTML(), '<p>before <code>value</code> after</p>');
+    assert.equal(manager.prepareInlineCodeComposition(), false);
+
+    f.domUtils.recordCaretAnchorInput(f.range, 'insertCompositionText', '日本語');
+    f.code.firstChild.insertData(1, '日本語');
+    f.domUtils.commitCaretAnchorInput();
+    f.placeCaret(f.code.firstChild, 4);
+    assert.equal(f.strip(), true);
+    assert.equal(f.code.textContent, '日本語value');
+    assert.equal(f.range.startOffset, 3);
+});
+
+test('IME preparation preserves source zero-width characters at the code start', async (t) => {
+    const f = await fixture(t, '<p>before <code>\u200Bvalue</code></p>', 0);
+    const { CursorManager } = await cursorManagerModule;
+    const manager = new CursorManager(f.editor, f.domUtils);
+    assert.equal(manager.prepareInlineCodeComposition(), true);
+    assert.equal(f.code.textContent, '\u200B\u200Bvalue');
+    assert.equal(f.strip(), true);
+    assert.equal(f.code.textContent, '\u200Bvalue');
+});
+
+test('IME preparation leaves other caret positions and selections untouched', async (t) => {
+    const f = await fixture(t, '<p>before <code>value</code> after</p>', 2);
+    const { CursorManager } = await cursorManagerModule;
+    const manager = new CursorManager(f.editor, f.domUtils);
+    for (const [node, offset] of [[f.code.firstChild, 2], [f.code.previousSibling, 7]]) {
+        f.placeCaret(node, offset);
+        assert.equal(manager.prepareInlineCodeComposition(), false);
+        assert.equal(f.range.startContainer, node);
+        assert.equal(f.range.startOffset, offset);
+    }
+    f.placeCaret(f.code.firstChild, 0);
+    window.getSelection = () => ({ rangeCount: 1, isCollapsed: false, getRangeAt: () => f.range });
+    assert.equal(manager.prepareInlineCodeComposition(), false);
+    assert.equal(f.code.textContent, 'value');
+});
+
+for (const html of ['<pre><code>value</code></pre>', '<p><code contenteditable="false">value</code></p>']) {
+    test(`IME preparation leaves fenced and read-only code unchanged: ${html}`, async (t) => {
+        const f = await fixture(t, html, 0);
+        const { CursorManager } = await cursorManagerModule;
+        const manager = new CursorManager(f.editor, f.domUtils);
+        assert.equal(manager.prepareInlineCodeComposition(), false);
+        assert.equal(f.code.textContent, 'value');
+    });
+}
+
 async function editingFixture(t, html, offset = 0) {
     const f = await fixture(t, html, offset);
     const { CursorManager } = await cursorManagerModule;

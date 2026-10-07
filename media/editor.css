@@ -1875,6 +1875,10 @@ body.image-resizing * {
     display: none;
 }
 
+#editor pre[data-math-view="code"] > code {
+    min-height: 1.5em;
+}
+
 #editor pre[data-math-view="code"] > .math-preview {
     margin-top: 8px;
     padding-top: 8px;

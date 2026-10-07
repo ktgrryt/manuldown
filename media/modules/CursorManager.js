@@ -1720,6 +1720,36 @@ export class CursorManager {
         return true;
     }
 
+    prepareInlineCodeComposition(selection = window.getSelection()) {
+        if (!selection?.rangeCount || !selection.isCollapsed) return false;
+        const range = selection.getRangeAt(0);
+        if (!this.editor.contains(range.startContainer)) return false;
+        const code = this.domUtils.getParentElement(range.startContainer, 'CODE');
+        if (!code || code.closest('pre, [contenteditable="false"]')) return false;
+        const prefix = document.createRange();
+        prefix.selectNodeContents(code);
+        prefix.setEnd(range.startContainer, range.startOffset);
+        if (prefix.toString() !== '') return false;
+        const text = this.domUtils.getFirstTextNode(code);
+        if (!text) return false;
+
+        // Chromium can commit the first composition prematurely at the atomic
+        // left boundary when text precedes the code. A temporary text anchor
+        // keeps composition inside the code; normal post-input cleanup removes
+        // it. Add it only when composition starts so it cannot affect wrapping
+        // or the separate inside/outside positions used by arrow navigation.
+        if (this.domUtils.getCaretAnchorOffset(text) !== 0) {
+            text.insertData(0, INLINE_CODE_RIGHT_CARET_ANCHOR);
+            text.mdwCaretAnchor = {
+                character: INLINE_CODE_RIGHT_CARET_ANCHOR,
+                text: text.textContent,
+                offset: 0
+            };
+        }
+        this._placeCollapsedCaret(selection, text, 1);
+        return true;
+    }
+
     _isSelectionNearInlineCodeLeftBoundary(selection, code) {
         if (!selection || !selection.rangeCount || !selection.isCollapsed || !code) {
             return false;
@@ -4365,7 +4395,10 @@ export class CursorManager {
             const atCurrentLineStart = !!currentLine && currentX <= (currentLine.left + 2);
             if (atCurrentLineStart) {
                 const lineStartCaret = findLineStartCaretInBlock(currentBlock, targetLine);
-                if (lineStartCaret) {
+                // A tall formula can put the current space within the previous
+                // line's tolerance. Rediscovering this caret is not an upward step.
+                if (lineStartCaret && (lineStartCaret.node !== range.startContainer ||
+                    lineStartCaret.offset !== range.startOffset)) {
                     this._placeCollapsedCaret(selection, lineStartCaret.node, lineStartCaret.offset);
                     return true;
                 }
@@ -4395,6 +4428,10 @@ export class CursorManager {
                     return false;
                 }
                 if (!currentBlock.contains(probeRange.startContainer)) {
+                    return false;
+                }
+                if (probeRange.startContainer === range.startContainer &&
+                    probeRange.startOffset === range.startOffset) {
                     return false;
                 }
                 const probeRect = this._getVisualCaretRectForRange(probeRange);
@@ -5199,6 +5236,9 @@ export class CursorManager {
         }
 
         if (!moved && !currentListItem && selection.modify) {
+            const beforeScrollTop = this.editor.scrollTop;
+            const beforeEditorTop = this.editor.getBoundingClientRect().top;
+            const beforeContentTop = currentY - beforeEditorTop + beforeScrollTop;
             try {
                 selection.modify('move', 'backward', 'line');
             } catch (e) {
@@ -5213,15 +5253,24 @@ export class CursorManager {
                     afterRange.endOffset !== originOffset);
                 if (movedByModify && this.editor.contains(afterRange.startContainer)) {
                     const afterRect = this._getVisualCaretRectForRange(afterRange);
-                    const afterY = afterRect ? (afterRect.top || afterRect.y || 0) : null;
-                    const movedUpByModify = Number.isFinite(afterY) && afterY < (currentY - 2);
+                    const afterContentTop = afterRect
+                        ? (afterRect.top || afterRect.y || 0) - this.editor.getBoundingClientRect().top + this.editor.scrollTop
+                        : null;
+                    const distance = Number.isFinite(afterContentTop) ? beforeContentTop - afterContentTop : NaN;
+                    // Chromium can jump to the document start when moving up
+                    // beside display math. Validate one line in content coordinates:
+                    // a native scroll can disguise a long jump in viewport coordinates.
+                    const movedUpOneLine = distance > 2 && distance <= lineStep * 1.65;
                     const movedIntoExcludedElement =
                         this._isInNavigationExcludedElement(afterRange.startContainer);
-                    if (movedUpByModify && !movedIntoExcludedElement) {
+                    if (afterRange.collapsed && movedUpOneLine && !movedIntoExcludedElement) {
                         return;
                     }
-                    this._restoreOriginalCaret(selection, originContainer, originOffset);
                 }
+            }
+            this._restoreOriginalCaret(selection, originContainer, originOffset);
+            if (Math.abs(this.editor.scrollTop - beforeScrollTop) >= 1) {
+                this.editor.scrollTop = beforeScrollTop;
             }
         }
 
@@ -8950,12 +8999,81 @@ export class CursorManager {
         return true;
     }
 
+    /** Keep logical line movement outside the hidden TeX of inline formulas. */
+    _moveToMathLineBoundary(selection, atStart) {
+        const range = selection.getRangeAt(0);
+        const caret = range.cloneRange();
+        caret.collapse(atStart);
+        const element = caret.startContainer.nodeType === Node.ELEMENT_NODE
+            ? caret.startContainer : caret.startContainer.parentElement;
+        const block = element?.closest('p, div, li, h1, h2, h3, h4, h5, h6, td, th, blockquote, pre');
+        if (!block || block === this.editor || !this.editor.contains(block) || block.tagName === 'PRE' ||
+            !block.querySelector('span[data-mdw-math]')) return false;
+
+        const boundary = (node, before) => {
+            const result = document.createRange();
+            if (before) result.setStartBefore(node);
+            else result.setStartAfter(node);
+            result.collapse(true);
+            return result;
+        };
+        let start = document.createRange();
+        start.setStart(block, 0);
+        start.collapse(true);
+        let tokens = [];
+        const lines = [];
+        const visit = node => {
+            if (node.nodeType === Node.TEXT_NODE) {
+                if (this.domUtils.getTextWithoutCaretAnchors(node) !== '') tokens.push(node);
+                return;
+            }
+            if (node.nodeType !== Node.ELEMENT_NODE) return;
+            if (node.tagName === 'BR' || /^(UL|OL|TABLE|PRE|P|DIV|LI|IMG)$/.test(node.tagName)) {
+                lines.push({ start, end: boundary(node, true), tokens });
+                start = boundary(node, false);
+                tokens = [];
+            } else if (node.matches('span[data-mdw-math], code, [contenteditable="false"]')) {
+                // A formula is one position; its source and shadow rendering
+                // never participate in finding an editable line endpoint.
+                tokens.push(node);
+            } else {
+                Array.from(node.childNodes).forEach(visit);
+            }
+        };
+        Array.from(block.childNodes).forEach(visit);
+        const end = document.createRange();
+        end.setStart(block, block.childNodes.length);
+        end.collapse(true);
+        lines.push({ start, end, tokens });
+        const line = lines.find(candidate =>
+            caret.compareBoundaryPoints(Range.START_TO_START, candidate.start) >= 0 &&
+            caret.compareBoundaryPoints(Range.START_TO_START, candidate.end) <= 0);
+        if (!line) return false;
+
+        const target = (atStart ? line.start : line.end).cloneRange();
+        const token = atStart ? line.tokens[0] : line.tokens.at(-1);
+        if (token?.nodeType === Node.TEXT_NODE) {
+            const anchor = this.domUtils.getCaretAnchorOffset(token);
+            const offset = atStart ? (anchor === 0 ? 1 : 0)
+                : token.textContent.length - (anchor === token.textContent.length - 1 ? 1 : 0);
+            target.setStart(token, offset);
+        } else if (token) {
+            if (atStart) target.setStartBefore(token);
+            else target.setStartAfter(token);
+        }
+        target.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(target);
+        return true;
+    }
+
     /**
      * カーソルを行頭に移動
      */
     moveCursorToLineStart() {
         const selection = window.getSelection();
         if (!selection || !selection.rangeCount) return;
+        if (this._moveToMathLineBoundary(selection, true)) return;
 
         const range = selection.getRangeAt(0);
         const node = range.startContainer;
@@ -9152,6 +9270,7 @@ export class CursorManager {
     moveCursorToLineEnd() {
         const selection = window.getSelection();
         if (!selection || !selection.rangeCount) return;
+        if (this._moveToMathLineBoundary(selection, false)) return;
 
         const range = selection.getRangeAt(0);
         const node = range.startContainer;
