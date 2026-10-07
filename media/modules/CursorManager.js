@@ -35,6 +35,7 @@ export class CursorManager {
         this.moveAcrossFootnoteReference = options.moveAcrossFootnoteReference || null;
         this._forwardImageStep = null;
         this._inlineCodeLeftBoundaryState = null;
+        this._inlineMathVerticalCaret = null;
     }
 
     _placeCollapsedCaret(selection, node, offset) {
@@ -3262,11 +3263,47 @@ export class CursorManager {
         }
     }
 
+    _getInlineMathEdge(range) {
+        if (!range?.collapsed) return null;
+        const container = range.startContainer;
+        const element = container?.nodeType === Node.ELEMENT_NODE ? container : container?.parentElement;
+        if (!element || !this.editor.contains(element) || element.closest('pre, code')) return null;
+        const formula = element.closest('span[data-mdw-math="inline"]');
+        if (formula) return { formula, atStart: range.startOffset === 0 };
+        const isFormula = node => node?.nodeType === Node.ELEMENT_NODE &&
+            node.matches('span[data-mdw-math="inline"]');
+        if (container.nodeType === Node.ELEMENT_NODE) {
+            const next = container.childNodes[range.startOffset];
+            if (isFormula(next)) return { formula: next, atStart: true };
+            const previous = container.childNodes[range.startOffset - 1];
+            if (isFormula(previous)) return { formula: previous, atStart: false };
+        } else if (container.nodeType === Node.TEXT_NODE) {
+            if (range.startOffset === 0 && isFormula(container.previousSibling)) {
+                return { formula: container.previousSibling, atStart: false };
+            }
+            if (range.startOffset === container.textContent.length && isFormula(container.nextSibling)) {
+                return { formula: container.nextSibling, atStart: true };
+            }
+        }
+        return null;
+    }
+
     _getCaretRect(range) {
         if (!range) {
             return null;
         }
         const container = range.startContainer;
+        // Empty atomic spans have no native caret rect. Their parent paragraph's
+        // bounds describe the whole block, not the position beside the formula.
+        if (container?.nodeType === Node.ELEMENT_NODE || this._isInNavigationExcludedElement(container)) {
+            const edge = this._getInlineMathEdge(range);
+            const rect = edge?.formula.getBoundingClientRect();
+            if (rect?.height > 0) {
+                const x = edge.atStart ? rect.left : rect.right;
+                return { left: x, right: x, top: rect.top, bottom: rect.bottom,
+                    width: 0, height: rect.height, x, y: rect.top };
+            }
+        }
         if (container && container.nodeType === Node.TEXT_NODE) {
             const text = container.textContent || '';
             if (text.length > 0) {
@@ -4210,6 +4247,94 @@ export class CursorManager {
         }
     }
 
+    clearInlineMathVerticalState() {
+        this._inlineMathVerticalCaret = null;
+    }
+
+    /** Keep a formula on the next visual line from being skipped by native probes. */
+    _moveVerticallyAcrossInlineMath(selection, direction) {
+        if (!selection?.rangeCount || !document.caretRangeFromPoint) return false;
+        const range = selection.getRangeAt(0);
+        if (!range.collapsed || !this.editor.contains(range.startContainer)) return false;
+        const block = this._getBlockFromContainer(range.startContainer, range.startOffset);
+        if (!block || block.closest('pre, td, th')) return false;
+        const previous = this._inlineMathVerticalCaret;
+        const keepingColumn = previous?.node === range.startContainer && previous.offset === range.startOffset;
+        const originEdge = this._getInlineMathEdge(range);
+        const getAdjacentBlock = () => direction === 'up'
+            ? this._getPrevNavigableElementInDocument(block)
+            : this._getNextNavigableElementInDocument(block);
+        // Avoid extra layout reads for ordinary movement away from formulas.
+        if (!keepingColumn && !originEdge && !block.querySelector('span[data-mdw-math="inline"]') &&
+            !getAdjacentBlock()?.querySelector('span[data-mdw-math="inline"]')) return false;
+        const rect = this._getVisualCaretRectForRange(range);
+        if (!rect || !(rect.height > 0)) return false;
+        const x = keepingColumn ? previous.x : rect.left;
+        this.clearInlineMathVerticalState();
+        const lines = this._getVisualLinesForBlock(block);
+        if (!lines.length) return false;
+        let index = 0;
+        for (let i = 1; i < lines.length; i++) {
+            if (Math.abs(lines[i].top - rect.top) < Math.abs(lines[index].top - rect.top)) index = i;
+        }
+        index += direction === 'up' ? -1 : 1;
+        let targetBlock = block;
+        let targetLine = lines[index];
+        if (!targetLine) {
+            targetBlock = getAdjacentBlock();
+            if (targetBlock?.matches('ul, ol')) {
+                const items = targetBlock.querySelectorAll('li');
+                targetBlock = direction === 'up' ? items[items.length - 1] : items[0];
+            }
+            if (!targetBlock || targetBlock.closest('pre, td, th') || targetBlock.matches('hr, img, table')) return false;
+            const targetLines = this._getVisualLinesForBlock(targetBlock);
+            targetLine = direction === 'up' ? targetLines[targetLines.length - 1] : targetLines[0];
+        }
+        if (!targetLine) return false;
+        const formulas = Array.from(targetBlock.querySelectorAll('span[data-mdw-math="inline"]'))
+            .filter(formula => !formula.closest('pre, code') &&
+                this._isSameVisualLine(targetLine, formula.getBoundingClientRect()));
+        if (!formulas.length && !keepingColumn && !originEdge) return false;
+        const targetY = (targetLine.top + targetLine.bottom) / 2;
+        const probe = document.caretRangeFromPoint(x, targetY);
+        const probeRect = probe && targetBlock.contains(probe.startContainer) &&
+            !this._isInNavigationExcludedElement(probe.startContainer)
+            ? this._getVisualCaretRectForRange(probe) : null;
+        let caret;
+        if (probeRect?.height > 0 && this._isSameVisualLine(targetLine, probeRect) &&
+            !this._getInlineMathEdge(probe)) {
+            // Ordinary text on a math line keeps the existing navigation path.
+            if (!keepingColumn && !originEdge) return false;
+            caret = probe;
+        } else {
+            let edge;
+            let distance = Infinity;
+            for (const formula of formulas) {
+                const bounds = formula.getBoundingClientRect();
+                if (!(bounds.width > 0 && bounds.height > 0)) continue;
+                for (const atStart of [true, false]) {
+                    const candidateDistance = Math.abs(x - (atStart ? bounds.left : bounds.right));
+                    if (candidateDistance < distance) {
+                        distance = candidateDistance;
+                        edge = { formula, atStart };
+                    }
+                }
+            }
+            if (!edge) return false;
+            caret = document.createRange();
+            const sibling = edge.atStart ? edge.formula.previousSibling : edge.formula.nextSibling;
+            if (sibling?.nodeType === Node.TEXT_NODE && sibling.textContent.length > 0) {
+                caret.setStart(sibling, edge.atStart ? sibling.textContent.length : 0);
+            } else if (edge.atStart) caret.setStartBefore(edge.formula);
+            else caret.setStartAfter(edge.formula);
+            caret.collapse(true);
+        }
+        selection.removeAllRanges();
+        selection.addRange(caret);
+        this._inlineMathVerticalCaret = { node: caret.startContainer, offset: caret.startOffset, x };
+        return true;
+    }
+
     /**
      * カーソルを上に1行移動
      * @param {Function} notifyCallback - 変更を通知するコールバック
@@ -4218,6 +4343,7 @@ export class CursorManager {
         const selection = window.getSelection();
         if (!selection || !selection.rangeCount) return;
         this._clearForwardImageStep();
+        if (this._moveVerticallyAcrossInlineMath(selection, 'up')) return;
         if (this._normalizeSelectionForNavigation(selection, 'up')) return;
         if (this._moveVerticallyAcrossBlockImages(selection, 'up')) return;
         const range = selection.getRangeAt(0);
@@ -5479,6 +5605,7 @@ export class CursorManager {
         const selection = window.getSelection();
         if (!selection || !selection.rangeCount) return;
         this._clearForwardImageStep();
+        if (this._moveVerticallyAcrossInlineMath(selection, 'down')) return;
         if (this._moveVerticallyAcrossBlockImages(selection, 'down')) return;
         let range = selection.getRangeAt(0);
         let container = range.startContainer;
@@ -7430,12 +7557,13 @@ export class CursorManager {
      */
     moveCursorForward(notifyCallback) {
         const selection = window.getSelection();
-        if (!selection || !selection.rangeCount) return false;
+        if (!selection) return false;
         if (this.moveAcrossFootnoteReference?.(selection, 'forward')) {
             this.clearInlineCodeBoundaryState();
             this._clearForwardImageStep();
             return true;
         }
+        if (!selection.rangeCount) return false;
         if (this._collapseTextSelectionForNavigation(selection, 'forward')) return true;
         let range = selection.getRangeAt(0);
         let node = range.startContainer;
@@ -8285,12 +8413,13 @@ export class CursorManager {
      */
     moveCursorBackward(notifyCallback) {
         const selection = window.getSelection();
-        if (!selection || !selection.rangeCount) return false;
+        if (!selection) return false;
         if (this.moveAcrossFootnoteReference?.(selection, 'backward')) {
             this.clearInlineCodeBoundaryState();
             this._clearForwardImageStep();
             return true;
         }
+        if (!selection.rangeCount) return false;
         if (this._collapseTextSelectionForNavigation(selection, 'backward')) return true;
         if (this._consumeInlineCodeLeftBoundaryBackward(selection)) {
             return true;

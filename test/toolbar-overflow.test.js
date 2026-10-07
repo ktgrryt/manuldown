@@ -7,7 +7,7 @@ const domino = require('@mixmark-io/domino');
 const source = fs.readFileSync(path.join(__dirname, '..', 'media/modules/ToolbarManager.js'), 'utf8');
 const modulePromise = import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 
-async function fixture(t, initialWidth) {
+async function fixture(t, initialWidth, { withFootnote = false } = {}) {
     const window = domino.createWindow(`
         <div class="toolbar">
             <button class="toolbar-btn" data-command="bold" title="Bold (Ctrl+B)">B</button>
@@ -15,10 +15,11 @@ async function fixture(t, initialWidth) {
             <div class="toolbar-separator"></div>
             <button class="toolbar-btn" data-command="h1" title="Heading 1">H1</button>
             <button class="toolbar-btn" data-command="image" title="Insert Image">Image</button>
+            ${withFootnote ? '<button class="toolbar-btn" data-command="settings" title="Settings">Settings</button>' : ''}
             <button class="toolbar-btn toolbar-overflow-toggle" hidden>…</button>
             <div class="toolbar-overflow-menu" hidden></div>
         </div>
-        <div id="editor" contenteditable="true"><p>text</p></div>
+        <div id="editor" contenteditable="true"><p>text</p>${withFootnote ? '<div data-mdw-footnote-definition="a"><a data-mdw-footnote-backref="a" contenteditable="false">1 ↩</a><div class="mdw-footnote-content"><p>Note</p></div></div>' : ''}</div>
     `);
     const document = window.document;
     const editor = document.getElementById('editor');
@@ -85,12 +86,49 @@ async function fixture(t, initialWidth) {
     };
     return {
         manager, toolbar, editor, event, select,
+        focus: element => { activeElement = element; range = null; event('focusin', element); },
         resize: next => { width = next; manager.updateOverflowLayout(); },
         visible: () => manager.toolbarButtons.filter(b => !b.hidden).map(b => b.getAttribute('data-command')),
         overflow: () => Array.from(manager.overflowButtons).filter(([, b]) => !b.hidden).map(([command]) => command),
         get range() { return range; }, get focused() { return activeElement; },
     };
 }
+
+test('footnote numbers keep editing tools disabled in the overflow menu while Settings remains available', async (t) => {
+    const f = await fixture(t, 80, { withFootnote: true });
+    const original = f.editor.innerHTML;
+    const number = f.editor.querySelector('[data-mdw-footnote-backref]');
+    f.focus(number);
+    for (const command of ['bold', 'italic', 'h1', 'image']) {
+        assert.equal(f.manager.commandButtons.get(command).disabled, true, command);
+        assert.equal(f.manager.overflowButtons.get(command).disabled, true, command);
+    }
+    f.manager.openOverflowMenu(true);
+    assert.equal(f.focused, f.manager.overflowButtons.get('settings'));
+    f.manager.updateToolbarState();
+    assert.equal(f.manager.overflowButtons.get('bold').disabled, true, 'Menu focus must not re-enable editing');
+    let settingsOpened = 0;
+    f.manager.onOpenSettings = () => { settingsOpened++; };
+    const commands = [];
+    const executeCommand = f.manager.executeCommand.bind(f.manager);
+    f.manager.executeCommand = command => { commands.push(command); executeCommand(command); };
+    f.event('click', f.manager.commandButtons.get('bold'));
+    f.event('click', f.manager.overflowButtons.get('h1'));
+    assert.deepEqual(commands, []);
+    f.event('keydown', f.focused, 'Escape');
+    f.manager.updateToolbarState();
+    assert.equal(f.manager.commandButtons.get('bold').disabled, true, 'Focus on the menu toggle still has no editable caret');
+    f.manager.openOverflowMenu(true);
+    f.event('click', f.manager.overflowButtons.get('settings'));
+    assert.deepEqual(commands, ['settings']);
+    assert.equal(settingsOpened, 1);
+    assert.equal(f.manager.overflowMenu.hidden, true);
+    assert.equal(f.editor.innerHTML, original);
+    f.select(1);
+    f.manager.updateToolbarState();
+    assert.equal(f.manager.commandButtons.get('bold').disabled, false);
+    assert.equal(f.manager.overflowButtons.get('bold').disabled, false);
+});
 
 test('a narrow toolbar moves its trailing commands into the menu and hides a trailing separator', async (t) => {
     const f = await fixture(t, 150);

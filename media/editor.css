@@ -1361,7 +1361,7 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
 }
 
 #editor hr.selected {
-    background-color: var(--vscode-editor-selectionBackground);
+    /* Highlight the 1px stroke without filling the padded click target. */
     border-top-color: var(--vscode-focusBorder);
 }
 
@@ -2274,8 +2274,16 @@ body.image-resizing * {
 
 .mdw-footnote-backref {
     flex: 0 0 auto;
+    align-self: flex-start;
     min-width: 2em;
     user-select: none;
+}
+
+.mdw-footnote-ref a:focus,
+.mdw-footnote-backref:focus {
+    outline: 1px solid var(--vscode-focusBorder, #3794ff);
+    outline-offset: 2px;
+    border-radius: 2px;
 }
 
 .mdw-footnote-content {

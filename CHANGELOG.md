@@ -7,6 +7,9 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 ## [Unreleased]
 
 ### Added
+- Keyboard navigation for footnote references and list numbers: focus a number with arrows or Tab and press Enter to jump between the body and its note.
+- Delete a footnote and all its references with Backspace (or macOS Ctrl+H) on its focused list number, with Undo/Redo support.
+- Open ManulDown settings from the toolbar's **…** menu or the `/settings` slash command.
 - Math: write TeX as `$…$` and `$$…$$`, rendered with KaTeX. Type `$tex$` or `$$` + Enter, use `/math` or `/inline-math`, or the Math and Math Block toolbar items. Inline formulas are edited in a popover with a live result and TeX errors; math blocks are edited like code blocks with a TeX/Preview toggle, and ```` ```math ```` fences render the same way. KaTeX loads only for documents with a formula.
 - Unified inline link popover from the toolbar, `/link`, `Cmd+K`, or `Ctrl+K`.
 - Host-validated HTTP, HTTPS, email URL, and absolute or explicit relative workspace-path input in the same field.
@@ -18,6 +21,9 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 - Load Prism as one script, and load Mermaid only when a document has a Mermaid code block.
 
 ### Fixed
+- Keep footnote cursor navigation to one step when VS Code and the Webview both receive a macOS Ctrl shortcut, and avoid scrolling numbers that are already visible.
+- Move from a footnote text end to the next note number without looping through its delete control; keep the caret stable at the final note end.
+- Disable toolbar editing commands while a footnote number is focused, including overflow menu items, and restore their availability when returning to editable text.
 - Keep the selected link text intact when editor DOM normalization runs while a pasted path is being validated.
 - Preserve unchanged Markdown blocks and inline syntax when another part of a document is edited, including underscore spelling, footnote definition order, and boundary blank lines.
 - Keep literal punctuation and backslashes literal, escape image labels and titles correctly, and retain original zero-width characters in text and code.

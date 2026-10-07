@@ -382,6 +382,38 @@ test('arrow navigation can leave a selected formula on either side without editi
     assert.equal(f.changes, 0);
 });
 
+test('vertical arrows and Mac Ctrl+P/N share math navigation while modified keys keep native behavior', async () => {
+    const f = await fixture(`<p>a${formulaHtml('x')}b</p>`);
+    f.select(f.editor.querySelector('p').firstChild, 0);
+    const calls = [];
+    f.manager.moveVertically = (selection, direction) => {
+        assert.ok(selection.getRangeAt(0) === f.range);
+        calls.push(direction);
+        return true;
+    };
+    for (const [name, modifiers, isMac, direction] of [
+        ['ArrowUp', {}, false, 'up'], ['ArrowDown', {}, false, 'down'],
+        ['p', { ctrlKey: true }, true, 'up'], ['n', { ctrlKey: true }, true, 'down'],
+    ]) {
+        const event = key(name, modifiers);
+        assert.equal(f.manager.handleKeydown(event, isMac), true);
+        assert.equal(event.defaultPrevented, true);
+        assert.equal(calls.at(-1), direction);
+    }
+    const count = calls.length;
+    for (const [name, modifiers, isMac] of [
+        ['ArrowDown', { shiftKey: true }, true], ['ArrowUp', { altKey: true }, true],
+        ['ArrowUp', { metaKey: true }, true], ['ArrowDown', { ctrlKey: true }, true],
+        ['n', { ctrlKey: true }, false], ['p', { ctrlKey: true, shiftKey: true }, true],
+        ['ArrowUp', { isComposing: true }, true],
+    ]) {
+        assert.equal(f.manager.handleKeydown(key(name, modifiers), isMac), false);
+    }
+    assert.equal(calls.length, count);
+    f.manager.moveVertically = () => false;
+    assert.equal(f.manager.handleKeydown(key('ArrowDown')), false);
+});
+
 for (const html of [
     `<p>${formulaHtml('x')}</p>`,
     `<p>a<strong>${formulaHtml('x')}</strong>b</p>`,

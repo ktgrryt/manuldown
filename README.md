@@ -54,8 +54,13 @@ GitHub alert markers such as `[!NOTE]` are shown as read-only source and kept in
 - **Footnote**: Insert a reference at the caret (or after selected text) and focus its editable note at the end of the document
 
 Edit note text directly. Hover over a note to show × at its right edge, then click it to delete the note and all its references. Insertion, editing and deletion support Undo/Redo.
+With a note's list number focused, press `Backspace` (`Ctrl+H` on macOS) to delete the note and all its references, just like ×.
 Backspace or Delete on a reference removes that occurrence. Deleting the last reference also removes its note.
 Copying or moving annotated text preserves its notes. Notes can use reference-style links and images defined in the document. Nested footnote definitions are editable up to four levels; deeper definitions retain their original Markdown as read-only source.
+At the start of a note, press `Left` (`Ctrl+B` on macOS) to focus its number, or select a number with `Tab`. Press `Enter` to return to the reference, `Right` (`Ctrl+F` on macOS) to resume editing the note, or `Up` / `Down` to move between note numbers.
+At the end of a note, `Right` (`Ctrl+F` on macOS) moves to the next note number. `Left` from that number returns to the previous note's text end. At the end of the final note, the caret stays there.
+While a reference or note number is focused, toolbar editing commands are disabled and Settings remains available. Return to editable text to use formatting again.
+Body reference numbers can also be focused with `Left` / `Right` (`Ctrl+B` / `Ctrl+F` on macOS) or `Tab`. The focused number has an outline; press `Enter` to open its note, or another horizontal arrow to return to the surrounding text.
 - **Code**: Insert a code block
 - **Math** / **Math Block** (in the **…** menu): Insert an inline formula or a math block. With text selected, Math turns the selection into a formula.
 - **Image**: Choose an image file to copy into the document's image folder and insert at the original selection. Image and Link follow the other buttons in the left-aligned toolbar.
@@ -92,6 +97,7 @@ Type `/` in the editor to open the slash command menu. You can narrow results by
 | `/math` | Insert a math block (`$$…$$`) and focus its TeX |
 | `/inline-math` | Insert an inline formula (`$…$`) and open its editor |
 | `/checkbox` | Create a checklist item (task list) |
+| `/settings` | Open VSCode settings filtered to ManulDown |
 
 Custom slash commands:
 
@@ -104,7 +110,7 @@ For example, ~/.manuldown/meeting-minutes.md can be inserted with /meeting-minut
 Notes for custom command names:
 
 - Command IDs are normalized from file names (`spaces` -> `-`, leading `/` removed, lowercase).
-- Built-in command IDs (`link`, `toc`, `footnote`, `table`, `quote`, `code`, `math`, `inline-math`, `checkbox`) are reserved.
+- Built-in command IDs (`link`, `toc`, `footnote`, `table`, `quote`, `code`, `math`, `inline-math`, `checkbox`, `settings`) are reserved.
 - Duplicate normalized command IDs are ignored.
 
 Menu controls:
@@ -175,6 +181,8 @@ ManulDown supports standard macOS-style Emacs keybindings. These are disabled on
 ### Settings
 
 You can change the following options from VSCode settings (`Ctrl+,` / `Cmd+,`):
+
+Choose **Settings** from the toolbar's **…** menu or run `/settings` to open settings filtered to ManulDown.
 
 | Setting | Default | Description |
 | --- | --- | --- |

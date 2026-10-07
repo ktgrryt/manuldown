@@ -1639,6 +1639,7 @@ const {
         moveToCodeBlockGap: (pre, direction, selection) =>
             codeBlockGapManager.moveToGap(pre, direction, selection),
         moveAcrossFootnoteReference: (selection, direction) =>
+            footnoteManager.moveAcrossBackref(selection, direction) ||
             footnoteManager.moveAcrossReference(selection, direction) ||
             mathManager.moveAcrossFormula(selection, direction)
     });
@@ -1682,7 +1683,9 @@ const {
     const mathManager = new MathManager(editor, stateManager, {
         onChange: () => notifyChange(),
         scriptSrc: document.body?.dataset?.katexScriptSrc || '',
-        styleHref: document.body?.dataset?.katexStyleHref || ''
+        styleHref: document.body?.dataset?.katexStyleHref || '',
+        moveVertically: (selection, direction) =>
+            cursorManager._moveVerticallyAcrossInlineMath(selection, direction)
     });
     codeBlockManager.setMathRenderer(mathManager);
     const toolbarManager = new ToolbarManager(editor, stateManager, {
@@ -1696,8 +1699,13 @@ const {
         canInsertFootnote: () => footnoteManager.canInsert(),
         onInsertMath: () => mathManager.insert(),
         canInsertMath: () => mathManager.canInsert(),
-        onInsertMathBlock: () => insertMathBlock()
+        onInsertMathBlock: () => insertMathBlock(),
+        onOpenSettings: () => openManulDownSettings()
     });
+
+    function openManulDownSettings() {
+        vscode.postMessage({ type: 'openSettings' });
+    }
 
     function requestImageFile() {
         const requestId = beginImageInsertionRequest();
@@ -5917,7 +5925,16 @@ const {
         { id: 'code', source: 'builtin', description: 'Insert a code block', action: insertSlashCodeBlock },
         { id: 'math', source: 'builtin', description: 'Insert a math block ($$…$$)', action: insertMathBlock },
         { id: 'inline-math', source: 'builtin', description: 'Insert an inline formula ($…$)', action: () => mathManager.insert() },
-        { id: 'checkbox', source: 'builtin', description: 'Create a checklist item', action: insertSlashCheckbox }
+        { id: 'checkbox', source: 'builtin', description: 'Create a checklist item', action: insertSlashCheckbox },
+        {
+            id: 'settings',
+            source: 'builtin',
+            description: 'Open ManulDown settings',
+            action: () => {
+                notifyChangeImmediate();
+                openManulDownSettings();
+            }
+        }
     ];
     const builtInSlashCommandIdSet = new Set(builtInSlashCommands.map((cmd) => cmd.id.toLowerCase()));
     const listRestrictedSlashCommandIds = new Set(['table', 'quote', 'code', 'math', 'toc']);
@@ -16885,6 +16902,11 @@ const {
             return true;
         }
 
+        if (navDirection && footnoteManager.handleKeydown(e, isMac)) {
+            recordCtrlNavHandled(navDirection, fromCommand);
+            return true;
+        }
+
         // Ctrl+* navigation first shares the arrow path for deterministic caret stepping.
         // Ctrl+F has dedicated image-edge fallbacks below, so skip this generic path.
         if (ctrlKey && direction && direction !== 'right') {
@@ -17709,7 +17731,21 @@ const {
             return;
         }
 
+        const ctrlNavDirection = isMacHorizontalCtrlNav
+            ? key === 'b' ? 'left' : 'right'
+            : isMacVerticalCtrlNav ? key === 'p' ? 'up' : 'down' : null;
+        // VS Code may deliver its cursor command before the DOM keydown.
+        // Check here before footnote focus can consume a second navigation step.
+        if (ctrlNavDirection && shouldSuppressKeydownNav(ctrlNavDirection)) {
+            e.preventDefault();
+            e.stopPropagation();
+            return;
+        }
+
         if (footnoteManager.handleKeydown(e, isMac)) {
+            if (ctrlNavDirection) {
+                recordCtrlNavHandled(ctrlNavDirection, false);
+            }
             return;
         }
 
@@ -21862,6 +21898,10 @@ const {
                         (key === 'p' || key === 'n'))
                 );
 
+            if (!shouldRevealAfterVerticalNavigation && !['Control', 'Shift', 'Alt', 'Meta'].includes(e.key)) {
+                cursorManager.clearInlineMathVerticalState?.();
+            }
+
             if (shouldRevealAfterVerticalNavigation) {
                 const direction = e.key === 'ArrowUp' || key === 'p' ? 'up' : 'down';
                 handleVerticalNavigation(() => handleKeydown(e), direction);
@@ -21884,9 +21924,13 @@ const {
             }
         });
 
+        // Reset the preferred column before math's mousedown handler can stop propagation.
+        editor.addEventListener('pointerdown', () => cursorManager.clearInlineMathVerticalState?.(), true);
+
         // mousedownイベント - 箇条書きでのカーソル位置を修正（clickより先に実行）
         editor.addEventListener('mousedown', (e) => {
             if (isUpdating) return;
+            cursorManager.clearInlineMathVerticalState?.();
             if (cursorManager && typeof cursorManager.clearInlineCodeBoundaryState === 'function') {
                 cursorManager.clearInlineCodeBoundaryState();
             }

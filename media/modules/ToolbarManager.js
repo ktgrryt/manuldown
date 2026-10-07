@@ -19,9 +19,11 @@ export class ToolbarManager {
         this.onInsertMath = options.onInsertMath || null;
         this.canInsertMath = options.canInsertMath || (() => true);
         this.onInsertMathBlock = options.onInsertMathBlock || null;
+        this.onOpenSettings = options.onOpenSettings || null;
         this.commandButtons = new Map();
         this.overflowButtons = new Map();
         this.overflowSelection = null;
+        this.focusedFootnoteNumber = null;
         this.overflowLayoutFrame = null;
         this.activeStateCommands = new Map([
             ['bold', 'bold'],
@@ -83,11 +85,12 @@ export class ToolbarManager {
             });
             button.addEventListener('click', (e) => {
                 e.preventDefault();
+                if (button.disabled) return;
                 const command = button.getAttribute('data-command');
                 this.executeCommand(command);
                 // ダイアログを開くコマンドはダイアログ側でフォーカスを管理するため、ここではスキップ
                 if (command !== 'table' && command !== 'link' && command !== 'image' && command !== 'footnote' &&
-                    command !== 'math') {
+                    command !== 'math' && command !== 'settings') {
                     setTimeout(() => this.editor.focus(), 0);
                 }
             });
@@ -106,6 +109,10 @@ export class ToolbarManager {
         this.editor.addEventListener('mouseup', updateToolbarState);
         this.editor.addEventListener('input', updateToolbarState);
         this.editor.addEventListener('focus', updateToolbarState);
+        this.editor.addEventListener('focusin', (event) => {
+            this.focusedFootnoteNumber = this.getFootnoteNumber(event.target);
+            this.updateToolbarState();
+        });
         this.editor.addEventListener('blur', updateToolbarState);
 
         this.updateToolbarState();
@@ -147,7 +154,7 @@ export class ToolbarManager {
                 this.closeOverflowMenu({ restoreSelection: true });
                 this.executeCommand(command);
                 if (command !== 'table' && command !== 'link' && command !== 'image' && command !== 'footnote' &&
-                    command !== 'math') {
+                    command !== 'math' && command !== 'settings') {
                     setTimeout(() => this.editor.focus(), 0);
                 }
             });
@@ -333,6 +340,18 @@ export class ToolbarManager {
      * @param {string} command - 実行するコマンド
      */
     executeCommand(command) {
+        if (command === 'settings') {
+            if (this.onOpenSettings) this.onOpenSettings();
+            return;
+        }
+
+        // Check before focusing the editor: a number deliberately has no
+        // editable range, and focus could create an unrelated insertion point.
+        if (this.isSelectionOnFootnoteNumber()) {
+            this.updateToolbarState();
+            return;
+        }
+
         this.editor.focus();
 
         if (command === 'footnote') {
@@ -469,11 +488,12 @@ export class ToolbarManager {
     }
 
     updateCommandAvailability() {
+        const onFootnoteNumber = this.isSelectionOnFootnoteNumber();
         const inTableCellContext = this.isSelectionInTableCellContext();
         const inHeadingContext = this.isSelectionInHeadingContext();
         const inListContext = this.isSelectionInListContext();
         const inCodeBlockContext = this.isSelectionInCodeBlockContext();
-        const activeHeadingCommand = this.getActiveHeadingCommand();
+        const activeHeadingCommand = onFootnoteNumber ? null : this.getActiveHeadingCommand();
 
         this.commandButtons.forEach((button, command) => {
             const disabledByTable = this.tableCellRestrictedCommands.has(command) && inTableCellContext;
@@ -491,6 +511,7 @@ export class ToolbarManager {
             const disabledFootnote = command === 'footnote' && !this.canInsertFootnote();
             const disabledMath = command === 'math' && !this.canInsertMath();
             const isDisabled =
+                (onFootnoteNumber && command !== 'settings') ||
                 disabledByTable ||
                 disabledBoldInHeading ||
                 disabledByList ||
@@ -514,8 +535,33 @@ export class ToolbarManager {
         });
     }
 
+    getFootnoteNumber(node) {
+        const element = node?.nodeType === 1 ? node : node?.parentElement;
+        const number = element?.closest?.('sup[data-mdw-footnote-ref], [data-mdw-footnote-backref]');
+        return number && this.editor.contains(number) ? number : null;
+    }
+
+    isSelectionOnFootnoteNumber() {
+        const document = this.editor.ownerDocument;
+        if (!document) return false;
+        const number = this.getFootnoteNumber(document.activeElement);
+        if (number) {
+            this.focusedFootnoteNumber = number;
+            return true;
+        }
+        const selection = document.defaultView?.getSelection?.();
+        for (let i = 0; i < (selection?.rangeCount || 0); i++) {
+            const range = selection.getRangeAt(i);
+            if (this.getFootnoteNumber(range.startContainer) || this.getFootnoteNumber(range.endContainer)) return true;
+        }
+        // Keyboard focus can move into the toolbar or its overflow menu while
+        // the editing target is still the number, with no native selection.
+        return !selection?.rangeCount && !!this.focusedFootnoteNumber &&
+            this.editor.contains(this.focusedFootnoteNumber) && !!this.toolbar?.contains(document.activeElement);
+    }
+
     updateCommandActiveStates() {
-        const shouldReflectActiveState = this.isSelectionInsideEditor();
+        const shouldReflectActiveState = !this.isSelectionOnFootnoteNumber() && this.isSelectionInsideEditor();
         this.activeStateCommands.forEach((nativeCommand, command) => {
             const button = this.commandButtons.get(command);
             if (!button) return;
@@ -530,7 +576,7 @@ export class ToolbarManager {
     }
 
     updateCommandContextStates() {
-        const shouldReflectState = this.isSelectionInsideEditor();
+        const shouldReflectState = !this.isSelectionOnFootnoteNumber() && this.isSelectionInsideEditor();
         const states = shouldReflectState ? this.getContextCommandStates() : {};
 
         this.contextStateCommands.forEach((command) => {

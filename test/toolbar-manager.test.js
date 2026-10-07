@@ -95,7 +95,8 @@ test('the active heading button remains enabled and exposes its pressed state', 
 async function inlineCodeFixture(t, html) {
     const domWindow = domino.createWindow(`<div id="editor" contenteditable="true">${html}</div>`);
     const editor = domWindow.document.getElementById('editor');
-    editor.focus = () => {};
+    let activeElement = editor;
+    Object.defineProperty(domWindow.document, 'activeElement', { get: () => activeElement });
     const { ToolbarManager } = await toolbarManagerModulePromise;
     const savedStates = [];
     const manager = new ToolbarManager(editor, { saveState: () => savedStates.push(true) });
@@ -119,14 +120,81 @@ async function inlineCodeFixture(t, html) {
         }
     });
     const select = (node, startOffset, endOffset = startOffset) => {
+        activeElement = editor;
         range = {
             startContainer: node, endContainer: node,
             startOffset, endOffset, collapsed: startOffset === endOffset,
             intersectsNode: (candidate) => candidate === node || candidate.contains(node),
         };
     };
-    return { manager, editor, select, savedStates };
+    const focus = element => {
+        activeElement = element;
+        if (element !== editor) range = null;
+        const event = domWindow.document.createEvent('Event');
+        event.initEvent('focusin', true, false);
+        element.dispatchEvent(event);
+    };
+    Object.defineProperty(editor, 'focus', { value: () => focus(editor) });
+    return { manager, editor, select, focus, savedStates };
 }
+
+const editingCommands = ['bold', 'italic', 'strikethrough', 'inlinecode', 'h1', 'h2', 'h3', 'ul', 'ol',
+    'checkbox', 'quote', 'codeblock', 'table', 'image', 'link', 'footnote', 'math', 'mathblock'];
+
+test('footnote number focus disables editing commands and guards execution before editor focus', async (t) => {
+    const f = await inlineCodeFixture(t, '<p>Body<sup data-mdw-footnote-ref="a" contenteditable="false"><a>1</a></sup> after</p>' +
+        '<div data-mdw-footnote-definition="a"><a data-mdw-footnote-backref="a" contenteditable="false">1 ↩</a><div class="mdw-footnote-content"><p>Note</p></div></div>');
+    const document = f.editor.ownerDocument;
+    const toolbar = document.createElement('div');
+    toolbar.className = 'toolbar';
+    document.body.insertBefore(toolbar, f.editor);
+    for (const command of [...editingCommands, 'settings']) {
+        const button = document.createElement('button');
+        button.className = 'toolbar-btn';
+        button.setAttribute('data-command', command);
+        toolbar.appendChild(button);
+    }
+    f.manager.setup();
+    let settingsOpened = 0;
+    f.manager.onOpenSettings = () => { settingsOpened++; };
+    const original = f.editor.innerHTML;
+    for (const number of [f.editor.querySelector('sup a'), f.editor.querySelector('[data-mdw-footnote-backref]')]) {
+        f.focus(number);
+        for (const command of editingCommands) {
+            const button = f.manager.commandButtons.get(command);
+            assert.equal(button.disabled, true, command);
+            assert.equal(button.getAttribute('aria-disabled'), 'true', command);
+            assert.equal(button.classList.contains('is-disabled'), true, command);
+            f.manager.executeCommand(command);
+            assert.equal(document.activeElement, number, 'A rejected command must keep the number focused');
+        }
+        assert.equal(f.manager.commandButtons.get('settings').disabled, false);
+        f.manager.executeCommand('settings');
+        assert.equal(document.activeElement, number);
+        f.focus(f.manager.commandButtons.get('settings'));
+        f.manager.updateToolbarState();
+        assert.equal(f.manager.commandButtons.get('bold').disabled, true, 'Moving focus into the toolbar retains the note-number context');
+    }
+    assert.equal(settingsOpened, 2);
+    assert.equal(f.savedStates.length, 0);
+    assert.equal(f.editor.innerHTML, original);
+    f.select(f.editor.querySelector('.mdw-footnote-content p').firstChild, 0);
+    f.manager.updateToolbarState();
+    for (const command of editingCommands) assert.equal(f.manager.commandButtons.get(command).disabled, false, command);
+});
+
+test('native ranges inside a footnote number disable tools while note text formatting stays available', async (t) => {
+    const f = await inlineCodeFixture(t, '<div data-mdw-footnote-definition="a"><a data-mdw-footnote-backref="a" contenteditable="false">1 ↩</a><div class="mdw-footnote-content"><p>Note</p></div></div>');
+    const button = f.editor.ownerDocument.createElement('button');
+    f.manager.commandButtons.set('bold', button);
+    f.select(f.editor.querySelector('[data-mdw-footnote-backref]').firstChild, 0);
+    f.manager.updateCommandAvailability();
+    assert.equal(button.disabled, true);
+    f.select(f.editor.querySelector('.mdw-footnote-content p').firstChild, 0, 4);
+    f.manager.updateCommandAvailability();
+    assert.equal(button.disabled, false);
+    assert.equal(f.manager.canToggleInlineCode(), true);
+});
 
 test('inline code is active at a caret inside code but not outside it', async (t) => {
     const f = await inlineCodeFixture(t, '<p>before<code>value</code>after</p>');

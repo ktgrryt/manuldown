@@ -148,6 +148,7 @@ async function createFixture(editorHtml) {
         `<div id="editor">${editorHtml}</div><div id="toc-resizer"><p>outside</p></div>`
     );
     const editor = domWindow.document.getElementById('editor');
+    editor.scrollTo = ({ top }) => { editor.scrollTop = top; };
     domWindow.HTMLElement.prototype.getBoundingClientRect = () => (
         { left: 0, right: 0, top: 0, bottom: 0, width: 0, height: 0, x: 0, y: 0 }
     );
@@ -158,6 +159,13 @@ async function createFixture(editorHtml) {
     domWindow.getComputedStyle = () => ({ lineHeight: '20px', fontSize: '16px' });
     const selection = new TestSelection(null);
     domWindow.getSelection = () => selection;
+    let activeElement = editor;
+    Object.defineProperty(domWindow.document, 'activeElement', { get: () => activeElement });
+    for (const element of [editor, ...editor.querySelectorAll('[data-mdw-footnote-backref], sup[data-mdw-footnote-ref] a')]) {
+        Object.defineProperty(element, 'focus', {
+            value: () => { activeElement = element; }, configurable: true
+        });
+    }
 
     // Domino intentionally exposes a minimal NodeList. The production webview
     // provides NodeList#forEach, which isImageOnlyBlockElement uses.
@@ -193,6 +201,7 @@ async function createFixture(editorHtml) {
     const { FootnoteManager } = await footnoteManagerModulePromise;
     const footnoteManager = new FootnoteManager(editor, {});
     cursorManager.moveAcrossFootnoteReference = (selection, direction) =>
+        footnoteManager.moveAcrossBackref(selection, direction) ||
         footnoteManager.moveAcrossReference(selection, direction);
     cursorManager.moveToCodeBlockGap = (pre, direction, selection) =>
         codeBlockGapManager.moveToGap(pre, direction, selection);
@@ -205,6 +214,7 @@ async function createFixture(editorHtml) {
         footnoteManager,
         selection,
         placeCaret(container, offset) {
+            activeElement = editor;
             const range = new TestRange();
             range.setStart(container, offset);
             range.collapse(true);
@@ -502,6 +512,41 @@ function loadFootnoteEditing(fixture) {
 const editableNote = body => `<div data-mdw-footnote-definition="a"><a contenteditable="false" data-exclude-from-markdown="true">1 ↩</a><div class="mdw-footnote-content">${body}</div><a contenteditable="false" data-exclude-from-markdown="true">×</a></div>`;
 const inlineNoteReference = key => `<sup contenteditable="false" data-mdw-footnote-ref="${key}"><a>1</a></sup>`;
 
+test('horizontal note boundaries visit the next number and return to the previous text end', async () => {
+    const definition = (key, text) => `<div data-mdw-footnote-definition="${key}"><a data-mdw-footnote-backref="${key}" contenteditable="false" data-exclude-from-markdown="true">1 ↩</a><div class="mdw-footnote-content"><p>${text}</p></div><a data-mdw-footnote-delete="${key}" contenteditable="false" data-exclude-from-markdown="true">×</a></div>`;
+    const fixture = await createFixture('<p>Body</p>' + definition('a', 'First') + definition('b', 'Last') +
+        '<div data-exclude-from-markdown="true" contenteditable="false">Hidden autocomplete</div>');
+    try {
+        const [first, last] = Array.from(fixture.editor.querySelectorAll('.mdw-footnote-content p')).map(p => p.firstChild);
+        const number = fixture.editor.querySelector('[data-mdw-footnote-backref="b"]');
+        const original = fixture.editor.innerHTML;
+        const unexpectedEdit = () => assert.fail('horizontal navigation is not an edit');
+        const assertCaret = (container, offset) => {
+            const range = fixture.selection.getRangeAt(0);
+            assert.equal(range.startContainer, container);
+            assert.equal(range.startOffset, offset);
+        };
+        fixture.placeCaret(first, first.textContent.length);
+        assert.equal(fixture.cursorManager.moveCursorForward(unexpectedEdit), true);
+        assert.equal(fixture.footnoteManager.getFocusedBackref(), number);
+        assert.equal(fixture.selection.rangeCount, 0);
+        assert.equal(fixture.cursorManager.moveCursorBackward(unexpectedEdit), true);
+        assertCaret(first, first.textContent.length);
+        fixture.cursorManager.moveCursorForward(unexpectedEdit);
+        assert.equal(fixture.footnoteManager.getFocusedBackref(), number);
+        fixture.cursorManager.moveCursorForward(unexpectedEdit);
+        assertCaret(last, 0);
+        fixture.placeCaret(last, last.textContent.length);
+        for (let i = 0; i < 4; i++) {
+            assert.equal(fixture.cursorManager.moveCursorForward(unexpectedEdit), true);
+            assertCaret(last, last.textContent.length);
+        }
+        assert.equal(fixture.editor.innerHTML, original);
+    } finally {
+        fixture.restoreGlobals();
+    }
+});
+
 test('horizontal navigation crosses an inline footnote without skipping its neighboring text', async () => {
     const fixture = await createFixture(`<p>ab${inlineNoteReference('a')}cd</p>${editableNote('<p>Note</p>')}`);
     try {
@@ -510,14 +555,24 @@ test('horizontal navigation crosses an inline footnote without skipping its neig
         const after = reference.nextSibling;
         const original = fixture.domUtils.getCleanedHTML();
         fixture.placeCaret(before, 0);
-        for (const [node, offset] of [[before, 1], [before, 2], [after, 0], [after, 1], [after, 2]]) {
+        for (const [node, offset] of [[before, 1], [before, 2], [reference], [after, 0], [after, 1], [after, 2]]) {
             assert.equal(fixture.cursorManager.moveCursorForward(() => assert.fail('navigation is not an edit')), true);
+            if (node === reference) {
+                assert.equal(fixture.footnoteManager.getFocusedReference(), reference);
+                assert.equal(fixture.selection.rangeCount, 0);
+                continue;
+            }
             const range = fixture.selection.getRangeAt(0);
             assert.equal(range.startContainer, node);
             assert.equal(range.startOffset, offset);
         }
-        for (const [node, offset] of [[after, 1], [after, 0], [before, 2], [before, 1], [before, 0]]) {
+        for (const [node, offset] of [[after, 1], [after, 0], [reference], [before, 2], [before, 1], [before, 0]]) {
             assert.equal(fixture.cursorManager.moveCursorBackward(() => assert.fail('navigation is not an edit')), true);
+            if (node === reference) {
+                assert.equal(fixture.footnoteManager.getFocusedReference(), reference);
+                assert.equal(fixture.selection.rangeCount, 0);
+                continue;
+            }
             const range = fixture.selection.getRangeAt(0);
             assert.equal(range.startContainer, node);
             assert.equal(range.startOffset, offset);
@@ -564,8 +619,8 @@ test('horizontal reference navigation respects formatting and paragraph boundari
             const original = fixture.domUtils.getCleanedHTML();
             fixture.placeCaret(parent, index);
             assert.equal(fixture.cursorManager.moveCursorForward(), true);
-            assert.equal(fixture.selection.getRangeAt(0).startContainer, parent);
-            assert.equal(fixture.selection.getRangeAt(0).startOffset, index + 1);
+            assert.equal(fixture.footnoteManager.getFocusedReference(), reference);
+            assert.equal(fixture.selection.rangeCount, 0);
             assert.equal(fixture.cursorManager.moveCursorBackward(), true);
             assert.equal(fixture.selection.getRangeAt(0).startContainer, parent);
             assert.equal(fixture.selection.getRangeAt(0).startOffset, index);
@@ -597,8 +652,11 @@ test('crossing a reference next to inline code retains the code entry and exit p
                 fixture.placeCaret(code.firstChild, 1);
                 fixture.cursorManager.moveCursorForward();
                 fixture.cursorManager.moveCursorForward();
+                assert.equal(fixture.footnoteManager.getFocusedReference(), reference);
+                fixture.cursorManager.moveCursorForward();
                 assert.equal(fixture.selection.getRangeAt(0).startContainer, after);
                 assert.equal(fixture.selection.getRangeAt(0).startOffset, 0);
+                fixture.cursorManager.moveCursorBackward();
                 fixture.cursorManager.moveCursorBackward();
                 fixture.cursorManager.moveCursorBackward();
                 assert.equal(fixture.selection.getRangeAt(0).startContainer, code.firstChild);
@@ -606,11 +664,14 @@ test('crossing a reference next to inline code retains the code entry and exit p
             } else {
                 fixture.placeCaret(before, 1);
                 fixture.cursorManager.moveCursorForward();
+                assert.equal(fixture.footnoteManager.getFocusedReference(), reference);
+                fixture.cursorManager.moveCursorForward();
                 const edge = fixture.selection.getRangeAt(0);
                 assert.equal(edge.startContainer, reference.parentNode);
                 assert.equal(edge.startOffset, childIndex(reference) + 1);
                 fixture.cursorManager.moveCursorForward();
                 assert.equal(code.contains(fixture.selection.getRangeAt(0).startContainer), true);
+                fixture.cursorManager.moveCursorBackward();
                 fixture.cursorManager.moveCursorBackward();
                 fixture.cursorManager.moveCursorBackward();
                 assert.equal(fixture.selection.getRangeAt(0).startContainer, before);
@@ -1073,14 +1134,13 @@ test('horizontal keyboard entry shows the checkbox cursor before selectionchange
     }
 });
 
-test('the keydown listener repairs note-control carets before Chromium can lose them', async () => {
+test('the keydown listener focuses note numbers when navigation lands inside their text', async () => {
     for (const key of ['ArrowDown', 'ArrowRight']) {
         const fixture = await createFixture('<p>Body</p><div data-mdw-footnote-definition="a"><a data-mdw-footnote-backref="a" contenteditable="false">1 ↩</a><div class="mdw-footnote-content"><p><br></p></div></div>');
         try {
             fixture.editor.scrollTo = ({ top }) => { fixture.editor.scrollTop = top; };
             const navigation = loadCheckboxNavigation(fixture);
             const controlText = fixture.editor.querySelector('a').firstChild;
-            const paragraph = fixture.editor.querySelector('.mdw-footnote-content p');
             fixture.placeCaret(fixture.editor.firstChild.firstChild, 0);
             navigation.listen(e => {
                 // Reproduce generic navigation choosing the first text in the
@@ -1091,10 +1151,88 @@ test('the keydown listener repairs note-control carets before Chromium can lose 
             const event = new window.Event('keydown', { bubbles: true, cancelable: true });
             event.key = key;
             fixture.editor.dispatchEvent(event);
-            assert.equal(fixture.selection.getRangeAt(0).startContainer, paragraph);
-            assert.equal(fixture.selection.getRangeAt(0).startOffset, 0);
+            assert.equal(fixture.editor.ownerDocument.activeElement, fixture.editor.querySelector('a'));
+            assert.equal(fixture.selection.rangeCount, 0);
         } finally {
             fixture.restoreGlobals();
+        }
+    }
+});
+
+test('host Ctrl+B and Ctrl+F navigation enters and leaves footnote number focus without editing', async () => {
+    const fixture = await createFixture('<p>Body</p><div data-mdw-footnote-definition="a"><a data-mdw-footnote-backref="a" contenteditable="false">1 ↩</a><div class="mdw-footnote-content"><p>Note</p></div></div>');
+    try {
+        fixture.editor.scrollTo = ({ top }) => { fixture.editor.scrollTop = top; };
+        const navigation = loadCheckboxNavigation(fixture);
+        const original = fixture.editor.innerHTML;
+        const text = fixture.editor.querySelector('.mdw-footnote-content p').firstChild;
+        const backref = fixture.editor.querySelector('[data-mdw-footnote-backref]');
+        fixture.placeCaret(text, 0);
+        const event = key => ({ key, ctrlKey: true, __fromCommand: true, preventDefault() {}, stopPropagation() {} });
+        assert.equal(navigation.backward(event('b')), true);
+        assert.equal(fixture.editor.ownerDocument.activeElement, backref);
+        assert.equal(fixture.selection.rangeCount, 0);
+        assert.equal(navigation.backward(event('f')), true);
+        assert.equal(fixture.editor.ownerDocument.activeElement, fixture.editor);
+        assert.equal(fixture.selection.getRangeAt(0).startContainer, text);
+        assert.equal(fixture.selection.getRangeAt(0).startOffset, 0);
+        assert.deepEqual(navigation.recordedDirections, ['left', 'right']);
+        assert.equal(fixture.editor.innerHTML, original);
+    } finally {
+        fixture.restoreGlobals();
+    }
+});
+
+test('the full keydown handler deduplicates host-first and keydown-first footnote Ctrl navigation', async () => {
+    for (const scenario of ['body-reference', 'note-number']) {
+        for (const order of ['command-first', 'keydown-first']) {
+            const fixture = await createFixture(`<p>Before${inlineNoteReference('a')}After</p>` +
+                '<div data-mdw-footnote-definition="a"><a data-mdw-footnote-backref="a" contenteditable="false">1 ↩</a><div class="mdw-footnote-content"><p>Note a</p></div></div>' +
+                '<div data-mdw-footnote-definition="b"><a data-mdw-footnote-backref="b" contenteditable="false">2 ↩</a><div class="mdw-footnote-content"><p>Note b</p></div></div>' +
+                '<div data-mdw-footnote-definition="c"><a data-mdw-footnote-backref="c" contenteditable="false">3 ↩</a><div class="mdw-footnote-content"><p>Note c</p></div></div>');
+            try {
+                const names = ['handleKeydown', 'handleEmacsNavKeydown', 'recordCtrlNavHandled', 'shouldSuppressKeydownNav', 'shouldSuppressCommandNav'];
+                const navigation = new Function('footnoteManager', 'cursorManager', `
+                    const isMac = true, isComposing = false;
+                    const compositionUpdateGate = { composing: false };
+                    const shouldRouteHorizontalArrowAfterComposition = () => false;
+                    const isTextInputKeydown = () => false;
+                    const isImeInteractionKeydown = () => false;
+                    const handleTableStructureSelectKeydown = () => false;
+                    const handleUndoRedoKeydown = () => false;
+                    const ctrlNavSuppressWindowMs = 200;
+                    let lastCtrlNavDirection = null, lastCtrlNavCommandTs = 0, lastCtrlNavKeydownTs = 0;
+                    let lastCaretIntentSource = null;
+                    ${names.map(extractEditorFunction).join('\n')}
+                    return { handleKeydown, handleEmacsNavKeydown, shouldSuppressCommandNav };
+                `)(fixture.footnoteManager, fixture.cursorManager);
+                const isReference = scenario === 'body-reference';
+                const direction = isReference ? 'right' : 'down';
+                const key = isReference ? 'f' : 'n';
+                const reference = fixture.editor.querySelector('sup');
+                if (isReference) fixture.placeCaret(reference.previousSibling, 6);
+                else fixture.editor.querySelector('[data-mdw-footnote-backref="a"]').focus();
+                const event = () => ({ key, ctrlKey: true, preventDefault() { this.defaultPrevented = true; }, stopPropagation() {} });
+                const command = () => {
+                    if (!navigation.shouldSuppressCommandNav(direction)) {
+                        assert.equal(navigation.handleEmacsNavKeydown({ ...event(), __fromCommand: true }), true);
+                    }
+                };
+                const keydownEvent = event();
+                if (order === 'command-first') {
+                    command();
+                    navigation.handleKeydown(keydownEvent);
+                } else {
+                    navigation.handleKeydown(keydownEvent);
+                    command();
+                }
+                assert.equal(keydownEvent.defaultPrevented, true);
+                assert.equal(isReference ? fixture.footnoteManager.getFocusedReference() : fixture.footnoteManager.getFocusedBackref(),
+                    isReference ? reference : fixture.editor.querySelector('[data-mdw-footnote-backref="b"]'), `${scenario}, ${order}`);
+                assert.equal(fixture.selection.rangeCount, 0);
+            } finally {
+                fixture.restoreGlobals();
+            }
         }
     }
 });

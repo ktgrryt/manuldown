@@ -40,7 +40,7 @@ class ImageImportError extends Error {
 
 export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     private static readonly viewType = 'manulDown.editor';
-    private static readonly builtInSlashCommandIds = new Set(['table', 'quote', 'code', 'checkbox', 'link', 'toc', 'footnote', 'math', 'inline-math']);
+    private static readonly builtInSlashCommandIds = new Set(['table', 'quote', 'code', 'checkbox', 'link', 'toc', 'footnote', 'math', 'inline-math', 'settings']);
     private static readonly workspaceLinkRequestIdPattern = /^workspace-link-\d{1,16}-\d{1,10}$/;
     private static readonly workspaceLinkSuggestionRequestIdPattern =
         /^workspace-link-suggest-\d{1,16}-\d{1,10}$/;
@@ -1332,6 +1332,18 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                         break;
                     case 'requestCustomSlashCommands':
                         await this.postCustomSlashCommands(webviewPanel.webview);
+                        break;
+                    case 'openSettings':
+                        if (
+                            !editorDisposed &&
+                            this.webviewPanels.get(documentKey) === webviewPanel &&
+                            webviewPanel.active
+                        ) {
+                            await vscode.commands.executeCommand(
+                                'workbench.action.openSettings',
+                                '@ext:ktgrryt.manuldown'
+                            );
+                        }
                         break;
                     case 'requestPastedPathLink':
                         {
@@ -4520,6 +4532,10 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         </button>
         <button class="toolbar-btn" data-command="mathblock" data-overflow-only title="Insert Math Block ($$…$$)" aria-label="Insert Math Block" hidden>
             Math Block
+        </button>
+        <div class="toolbar-separator"></div>
+        <button class="toolbar-btn" data-command="settings" data-overflow-only title="Settings" hidden>
+            Settings
         </button>
         <button class="toolbar-btn toolbar-overflow-toggle" type="button" title="More tools" aria-label="More tools" aria-haspopup="menu" aria-expanded="false" aria-controls="toolbar-overflow-menu" hidden>
             &hellip;

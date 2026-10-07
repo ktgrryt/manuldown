@@ -58,12 +58,13 @@ function isZeroWidthText(value) {
 }
 
 export class MathManager {
-    constructor(editor, stateManager, { onChange = () => {}, scriptSrc = '', styleHref = '' } = {}) {
+    constructor(editor, stateManager, { onChange = () => {}, scriptSrc = '', styleHref = '', moveVertically = null } = {}) {
         this.editor = editor;
         this.stateManager = stateManager;
         this.onChange = onChange;
         this.scriptSrc = scriptSrc;
         this.styleHref = styleHref;
+        this.moveVertically = moveVertically;
         this.loadState = 'idle';
         this.observer = null;
         this.popover = null;
@@ -746,6 +747,16 @@ export class MathManager {
         const key = event.key?.toLowerCase();
         const selection = this.window.getSelection();
         const range = this.getRange();
+        const verticalDirection = !event.shiftKey && (
+            (!event.ctrlKey && event.key === 'ArrowUp') || (isMac && event.ctrlKey && key === 'p')
+        ) ? 'up' : !event.shiftKey && (
+            (!event.ctrlKey && event.key === 'ArrowDown') || (isMac && event.ctrlKey && key === 'n')
+        ) ? 'down' : null;
+        if (verticalDirection && this.moveVertically?.(selection, verticalDirection)) {
+            event.preventDefault();
+            event.stopPropagation();
+            return true;
+        }
         const direction = !event.shiftKey && (
             (!event.ctrlKey && event.key === 'ArrowLeft') || (isMac && event.ctrlKey && key === 'b')
         ) ? 'backward' : !event.shiftKey && (

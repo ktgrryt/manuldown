@@ -171,6 +171,13 @@ export class FootnoteManager {
             else if (control.hasAttribute('data-mdw-footnote-ref')) this.goToDefinition(control);
             else this.goToReference(control.getAttribute('data-mdw-footnote-backref'));
         }, true);
+        this.editor.addEventListener('focusin', event => {
+            const number = event.target.closest?.('[data-mdw-footnote-ref], [data-mdw-footnote-backref]');
+            if (!number) return;
+            // A focused number is a navigation control, not an editing position.
+            this.editor.ownerDocument.defaultView.getSelection()?.removeAllRanges();
+            this.revealCaretTarget(number, null, { alignToTop: false });
+        });
         this.refresh();
     }
 
@@ -199,6 +206,7 @@ export class FootnoteManager {
                 if (link.textContent !== number) link.textContent = number;
                 setAttribute(link, 'href', `#mdw-fn-${key}`);
                 setAttribute(link, 'title', defined.has(key) ? `Footnote ${label}` : `Missing footnote: ${label}`);
+                setAttribute(link, 'tabindex', '0');
             }
             reference.classList.toggle('mdw-footnote-missing', !defined.has(key));
         }
@@ -242,6 +250,7 @@ export class FootnoteManager {
             if (backref.textContent !== text) backref.textContent = text;
             setAttribute(backref, 'href', `#mdw-fnref-${key}-1`);
             setAttribute(backref, 'title', 'Back to reference');
+            setAttribute(backref, 'tabindex', '0');
             if (!definition.querySelector('[data-mdw-footnote-delete]')) {
                 const remove = this.editor.ownerDocument.createElement('a');
                 remove.className = 'mdw-footnote-delete';
@@ -360,7 +369,7 @@ export class FootnoteManager {
         let target = content;
         while (target.nodeType === 1) {
             const children = Array.from(target.childNodes).filter(child => {
-                if (child.nodeType === 1) return child.getAttribute('contenteditable') !== 'false' &&
+                if (child.nodeType === 1) return (!atStart || child.getAttribute('contenteditable') !== 'false') &&
                     child.getAttribute('data-exclude-from-markdown') !== 'true';
                 if (child.nodeType !== 3) return false;
                 if (!child.textContent) return false;
@@ -368,6 +377,11 @@ export class FootnoteManager {
                 return !/^(DIV|UL|OL|BLOCKQUOTE)$/.test(target.tagName) || !/^\s*$/.test(child.textContent);
             });
             const child = atStart ? children[0] : children[children.length - 1];
+            if (!atStart && child?.nodeType === 1 && child.getAttribute('contenteditable') === 'false') {
+                range.setStartAfter(child);
+                range.collapse(true);
+                return;
+            }
             if (!child || /^(BR|IMG|HR|INPUT)$/.test(child.tagName || '')) break;
             target = child;
         }
@@ -388,18 +402,160 @@ export class FootnoteManager {
     }
 
     moveAcrossReference(selection, direction) {
+        const focused = this.getFocusedReference();
+        if (focused) {
+            this.placeCaretBesideReference(focused, direction === 'backward');
+            return true;
+        }
         if (!selection?.rangeCount) return false;
         const range = selection.getRangeAt(0);
         if (!this.editor.contains(range.startContainer)) return false;
         const element = range.startContainer.nodeType === 1 ? range.startContainer : range.startContainer.parentElement;
+        const inside = element.closest('sup[data-mdw-footnote-ref]');
         const reference = range.collapsed
-            ? element.closest('sup[data-mdw-footnote-ref]') || this.getAdjacentReference(range, direction)
+            ? inside || this.getAdjacentReference(range, direction)
             : this.getSelectedReference(range);
         if (!reference) return false;
+        if (range.collapsed && !inside) {
+            this.focusNumber(reference);
+            return true;
+        }
+        this.placeCaretBesideReference(reference, direction === 'backward');
+        return true;
+    }
+
+    placeCaretBesideReference(reference, atStart) {
+        const selection = this.editor.ownerDocument.defaultView.getSelection();
         const caret = this.editor.ownerDocument.createRange();
-        this.setCaretAtReferenceEdge(caret, reference, direction === 'backward');
+        this.editor.focus({ preventScroll: true });
+        this.setCaretAtReferenceEdge(caret, reference, atStart);
         selection.removeAllRanges();
         selection.addRange(caret);
+    }
+
+    getFocusedReference() {
+        const reference = this.editor.ownerDocument.activeElement?.closest?.('sup[data-mdw-footnote-ref]');
+        return reference && this.editor.contains(reference) ? reference : null;
+    }
+
+    getFocusedBackref() {
+        const backref = this.editor.ownerDocument.activeElement?.closest?.('[data-mdw-footnote-backref]');
+        return backref && this.editor.contains(backref) ? backref : null;
+    }
+
+    focusNumber(number) {
+        this.editor.ownerDocument.defaultView.getSelection()?.removeAllRanges();
+        const target = number.matches('sup[data-mdw-footnote-ref]') ? number.querySelector('a') : number;
+        target.focus({ preventScroll: true });
+        this.revealCaretTarget(number, null, { alignToTop: false });
+    }
+
+    isAtContentStart(range, content) {
+        if (!range?.collapsed || !content.contains(range.startContainer)) return false;
+        const meaningful = node => (node.nodeType === 1 && node.getAttribute('data-exclude-from-markdown') !== 'true') || (node.nodeType === 3 &&
+            !(/^(DIV|UL|OL|BLOCKQUOTE)$/.test(node.parentElement.tagName)
+                ? /^[\s\u200B\u2060\uFEFF]*$/ : /^[\u200B\u2060\uFEFF]*$/).test(node.textContent));
+        let node = range.startContainer;
+        if (node.nodeType === 3) {
+            if (!/^[\u200B\u2060\uFEFF]*$/.test(node.textContent.slice(0, range.startOffset))) return false;
+        } else if (Array.from(node.childNodes).slice(0, range.startOffset).some(meaningful)) return false;
+        while (node !== content) {
+            for (let previous = node.previousSibling; previous; previous = previous.previousSibling) {
+                if (meaningful(previous)) return false;
+            }
+            node = node.parentNode;
+        }
+        return true;
+    }
+
+    isAtContentEnd(range, content) {
+        if (!range?.collapsed || !content.contains(range.startContainer)) return false;
+        const boundaryText = /^[\u200B\u2060\uFEFF]*$/;
+        const meaningful = node => {
+            if (node.nodeType === 1 && node.getAttribute('data-exclude-from-markdown') === 'true') return false;
+            if (node.nodeType === 3) {
+                const empty = /^(DIV|UL|OL|BLOCKQUOTE)$/.test(node.parentElement.tagName)
+                    ? /^[\s\u200B\u2060\uFEFF]*$/ : boundaryText;
+                return !empty.test(node.textContent);
+            }
+            // A sole BR is the editable placeholder of an empty block.
+            if (node.nodeType === 1 && node.tagName === 'BR' &&
+                Array.from(node.parentNode.childNodes).every(sibling => sibling === node ||
+                    (sibling.nodeType === 1 && sibling.getAttribute('data-exclude-from-markdown') === 'true') ||
+                    (sibling.nodeType === 3 && boundaryText.test(sibling.textContent)))) return false;
+            return node.nodeType === 1;
+        };
+        let node = range.startContainer;
+        if (node.nodeType === 3) {
+            if (!boundaryText.test(node.textContent.slice(range.startOffset))) return false;
+        } else if (Array.from(node.childNodes).slice(range.startOffset).some(meaningful)) return false;
+        while (node !== content) {
+            for (let next = node.nextSibling; next; next = next.nextSibling) {
+                if (meaningful(next)) return false;
+            }
+            node = node.parentNode;
+        }
+        return true;
+    }
+
+    moveAcrossBackref(selection, direction) {
+        const focused = this.getFocusedBackref();
+        if (focused) {
+            const definition = focused.closest('[data-mdw-footnote-definition]');
+            if (direction === 'forward') {
+                this.placeCaret(definition.querySelector('.mdw-footnote-content'), true);
+                return true;
+            }
+            const previous = definition.previousElementSibling;
+            const previousContent = previous?.matches('[data-mdw-footnote-definition]') &&
+                previous.querySelector('.mdw-footnote-content');
+            if (previousContent) {
+                this.editor.focus({ preventScroll: true });
+                const caret = this.editor.ownerDocument.createRange();
+                this.setCaretAtContentEdge(caret, previousContent, false);
+                selection.removeAllRanges();
+                selection.addRange(caret);
+                this.revealCaretTarget(previousContent, caret, { alignToTop: false });
+                return true;
+            }
+            // Resume ordinary backward navigation before this note.
+            this.editor.focus({ preventScroll: true });
+            const caret = this.editor.ownerDocument.createRange();
+            caret.setStartBefore(definition);
+            caret.collapse(true);
+            selection.removeAllRanges();
+            selection.addRange(caret);
+            return false;
+        }
+        if (!selection?.rangeCount) return false;
+        const range = selection.getRangeAt(0);
+        const element = range.startContainer.nodeType === 1 ? range.startContainer : range.startContainer.parentElement;
+        const content = element.closest('.mdw-footnote-content');
+        if (direction === 'forward') {
+            if (!content || !this.editor.contains(content) || !this.isAtContentEnd(range, content)) return false;
+            const definition = content.closest('[data-mdw-footnote-definition]');
+            let next = definition?.nextElementSibling;
+            while (next?.getAttribute('data-exclude-from-markdown') === 'true') next = next.nextElementSibling;
+            const number = next?.matches('[data-mdw-footnote-definition]') && next.querySelector('[data-mdw-footnote-backref]');
+            if (number) {
+                this.focusNumber(number);
+                return true;
+            }
+            if (!definition) return false;
+            if (!next && definition.parentElement === this.editor) return true;
+            // Skip this note's delete control before continuing into ordinary
+            // content (also when a nested note has no following sibling).
+            const caret = this.editor.ownerDocument.createRange();
+            caret.setStartAfter(definition);
+            caret.collapse(true);
+            selection.removeAllRanges();
+            selection.addRange(caret);
+            return false;
+        }
+        const backref = content?.previousElementSibling;
+        if (!backref?.hasAttribute('data-mdw-footnote-backref') || !this.editor.contains(backref) ||
+            !this.isAtContentStart(range, content)) return false;
+        this.focusNumber(backref);
         return true;
     }
 
@@ -410,19 +566,18 @@ export class FootnoteManager {
         const element = node.nodeType === 1 ? node : node.parentElement;
         const reference = element.closest('sup[data-mdw-footnote-ref]');
         if (reference) {
-            // Native caret probes can land inside the read-only number. Keep
-            // that position beside the reference instead of at the editor end.
-            const selection = this.editor.ownerDocument.defaultView.getSelection();
-            const corrected = this.editor.ownerDocument.createRange();
-            this.setCaretAtReferenceEdge(corrected, reference, range.startOffset === 0);
-            selection.removeAllRanges();
-            selection.addRange(corrected);
+            this.focusNumber(reference);
             return true;
         }
         const definition = element.closest('[data-mdw-footnote-definition]');
         if (!definition) return false;
         const content = definition.querySelector('.mdw-footnote-content');
         if (!content) return false;
+        const backref = element.closest('[data-mdw-footnote-backref]');
+        if (backref) {
+            this.focusNumber(backref);
+            return true;
+        }
         const control = element.closest('[contenteditable="false"], [data-exclude-from-markdown="true"]');
         const layoutBoundary = /^(DIV|UL|OL|BLOCKQUOTE)$/.test(element.tagName) &&
             (node.nodeType === 1 || /^\s*$/.test(node.textContent));
@@ -455,16 +610,26 @@ export class FootnoteManager {
         return true;
     }
 
-    revealCaretTarget(node, range = null) {
+    revealCaretTarget(node, range = null, { alignToTop = true } = {}) {
         if (!node.getBoundingClientRect || !this.editor.getBoundingClientRect || this.editor.clientHeight <= 0) return;
         const editorRect = this.editor.getBoundingClientRect();
         const caretRect = Array.from(range?.getClientRects?.() || []).find(rect => rect.height > 0);
         const targetRect = caretRect || node.getBoundingClientRect();
         const style = this.editor.ownerDocument.defaultView.getComputedStyle(this.editor);
         const topInset = Math.max(16, parseFloat(style.paddingTop) || 0);
+        let targetTop = this.editor.scrollTop + targetRect.top - editorRect.top - topInset;
+        if (!alignToTop) {
+            const bottomInset = Math.max(16, parseFloat(style.paddingBottom) || 0);
+            const visibleTop = editorRect.top + topInset;
+            const visibleBottom = editorRect.top + this.editor.clientHeight - bottomInset;
+            const targetBottom = targetRect.bottom ?? targetRect.top;
+            if (targetRect.top >= visibleTop && targetBottom <= visibleBottom) return;
+            if (targetRect.top >= visibleTop) {
+                targetTop = this.editor.scrollTop + targetBottom - visibleBottom;
+            }
+        }
         const maxScrollTop = Math.max(0, this.editor.scrollHeight - this.editor.clientHeight);
-        const top = Math.max(0, Math.min(maxScrollTop,
-            this.editor.scrollTop + targetRect.top - editorRect.top - topInset));
+        const top = Math.max(0, Math.min(maxScrollTop, targetTop));
         // Scroll the editor alone. Native scrollIntoView can move its ancestors,
         // and a smooth scroll can be interrupted by caret visibility updates.
         this.editor.scrollTo({ top, behavior: 'instant' });
@@ -604,20 +769,83 @@ export class FootnoteManager {
         if (event.defaultPrevented || event.isComposing || event.keyCode === 229 ||
             event.metaKey || event.altKey) return false;
         const key = event.key?.toLowerCase();
+        const focused = this.getFocusedBackref();
+        const focusedReference = this.getFocusedReference();
+        if (!event.ctrlKey && !event.shiftKey && event.key === 'Enter') {
+            const range = this.getRange();
+            const element = range?.collapsed && (range.startContainer.nodeType === 1
+                ? range.startContainer : range.startContainer.parentElement);
+            const reference = focusedReference || this.getSelectedReference(range) ||
+                (element && this.editor.contains(element) && element.closest('sup[data-mdw-footnote-ref]'));
+            if (focused || reference) {
+                event.preventDefault();
+                event.stopPropagation();
+                if (reference) this.goToDefinition(reference);
+                else this.goToReference(focused.getAttribute('data-mdw-footnote-backref'));
+                return true;
+            }
+        }
         const horizontalDirection = !event.shiftKey && (
             (!event.ctrlKey && event.key === 'ArrowLeft') || (isMac && event.ctrlKey && key === 'b')
         ) ? 'backward' : !event.shiftKey && (
             (!event.ctrlKey && event.key === 'ArrowRight') || (isMac && event.ctrlKey && key === 'f')
         ) ? 'forward' : null;
-        if (horizontalDirection && this.moveAcrossReference(this.editor.ownerDocument.defaultView.getSelection(), horizontalDirection)) {
+        const selection = this.editor.ownerDocument.defaultView.getSelection();
+        if (horizontalDirection && (this.moveAcrossBackref(selection, horizontalDirection) ||
+            this.moveAcrossReference(selection, horizontalDirection))) {
             event.preventDefault();
             event.stopPropagation();
             return true;
+        }
+        const verticalDirection = !event.shiftKey && (
+            (!event.ctrlKey && event.key === 'ArrowUp') || (isMac && event.ctrlKey && key === 'p')
+        ) ? 'backward' : !event.shiftKey && (
+            (!event.ctrlKey && event.key === 'ArrowDown') || (isMac && event.ctrlKey && key === 'n')
+        ) ? 'forward' : null;
+        if (focusedReference && verticalDirection) {
+            this.placeCaretBesideReference(focusedReference, verticalDirection === 'backward');
+            return false;
+        }
+        if (focusedReference && !event.ctrlKey && !event.shiftKey && event.key === 'Escape') {
+            this.placeCaretBesideReference(focusedReference, false);
+            event.preventDefault();
+            event.stopPropagation();
+            return true;
+        }
+        if (focused && !event.shiftKey) {
+            if (verticalDirection) {
+                const definition = focused.closest('[data-mdw-footnote-definition]');
+                const adjacent = verticalDirection === 'backward' ? definition.previousElementSibling : definition.nextElementSibling;
+                if (adjacent?.hasAttribute('data-mdw-footnote-definition')) {
+                    this.focusNumber(adjacent.querySelector('[data-mdw-footnote-backref]'));
+                } else if (verticalDirection === 'forward') {
+                    this.placeCaret(definition.querySelector('.mdw-footnote-content'), true);
+                } else {
+                    this.moveAcrossBackref(selection, 'backward');
+                    return false;
+                }
+                event.preventDefault();
+                event.stopPropagation();
+                return true;
+            }
+            if (!event.ctrlKey && event.key === 'Escape') {
+                this.placeCaret(focused.closest('[data-mdw-footnote-definition]').querySelector('.mdw-footnote-content'), true);
+                event.preventDefault();
+                event.stopPropagation();
+                return true;
+            }
         }
         const ctrlH = isMac && event.ctrlKey && !event.shiftKey && event.key?.toLowerCase() === 'h';
         if (event.ctrlKey && !ctrlH) return false;
         const direction = event.key === 'Backspace' || ctrlH ? 'backward' : event.key === 'Delete' ? 'forward' : null;
         if (!direction) return false;
+        if (focused && direction === 'backward' && !event.shiftKey) {
+            event.preventDefault();
+            event.stopPropagation();
+            this.remove(focused.getAttribute('data-mdw-footnote-backref'));
+            return true;
+        }
+        if (focusedReference) this.placeCaretBesideReference(focusedReference, direction === 'forward');
         if (this.preventFootnoteBoundaryDeletion(event, direction, true)) return true;
         this.captureReferencesBeforeDelete();
         if (!this.deleteReferenceAtCaret(direction)) return false;
@@ -628,6 +856,11 @@ export class FootnoteManager {
 
     handleBeforeInput(event) {
         if (event.defaultPrevented || event.isComposing) return false;
+        if ((this.getFocusedBackref() || this.getFocusedReference()) && event.cancelable !== false) {
+            event.preventDefault();
+            event.stopPropagation();
+            return true;
+        }
         const boundaryDirection = event.inputType?.endsWith('Backward') ? 'backward'
             : event.inputType?.endsWith('Forward') ? 'forward' : null;
         if (event.cancelable !== false && boundaryDirection && this.preventFootnoteBoundaryDeletion(event, boundaryDirection)) return true;
