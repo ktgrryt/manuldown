@@ -461,6 +461,7 @@ function loadCheckboxNavigation(fixture, nativeTopLine = true) {
         };
         const command = (direction, handleEmacsNavKeydown) => {
             const message = { type: 'cursorMove', direction };
+            const insertCommandMenu = { handleCursorMove: () => false };
             const shouldSuppressCommandNav = () => false;
             const moveSlashCommandSelection = () => false;
             const setTimeout = () => {};

@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as os from 'os';
 import * as path from 'path';
+import * as fs from 'fs/promises';
 import { MarkdownDocument } from './MarkdownDocument';
 import { WorkspaceLinkPicker } from './WorkspaceLinkPicker';
 import { getNonce } from '../utils/getNonce';
@@ -1653,18 +1654,13 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                         );
                         break;
                     case 'saveImageFromUri':
-                        // Save a dropped local image URI (e.g. Finder drag-and-drop)
+                        // URI strings from clipboard/drag data are untrusted.
                         await this.saveImageFromUri(
                             message.uri,
                             document,
                             webviewPanel.webview,
                             {
                                 altText: typeof message.altText === 'string' ? message.altText : undefined,
-                                source: message.source === 'drop' ||
-                                    message.source === 'paste' ||
-                                    message.source === 'internal'
-                                    ? message.source
-                                    : 'unknown',
                                 requestId: typeof message.requestId === 'string'
                                     ? message.requestId
                                     : undefined
@@ -3577,11 +3573,70 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         return /^[a-z0-9]{1,10}$/.test(subtype) ? subtype : 'img';
     }
 
+    private async assertImageSaveDirectory(directory: vscode.Uri, documentDirectory: vscode.Uri): Promise<void> {
+        if (!isUriLexicallyWithinDirectory(directory, documentDirectory)) {
+            throw new ImageImportError('The image save directory is invalid.');
+        }
+
+        // Inspect each child without following links. The document directory
+        // itself is the user-selected boundary and may have a canonical alias.
+        const relativePath = path.posix.relative(documentDirectory.path, directory.path);
+        let component = documentDirectory;
+        for (const segment of relativePath.split('/').filter(Boolean)) {
+            component = vscode.Uri.joinPath(component, segment);
+            if (component.scheme === 'file') {
+                const stat = await fs.lstat(component.fsPath);
+                if (stat.isSymbolicLink() || !stat.isDirectory()) {
+                    throw new ImageImportError('The image save directory must be a directory, not a symbolic link.');
+                }
+            } else {
+                const stat = await vscode.workspace.fs.stat(component);
+                if (stat.type !== vscode.FileType.Directory) {
+                    throw new ImageImportError('The image save directory must be a directory, not a symbolic link.');
+                }
+            }
+        }
+        if (!await isUriSecurelyWithinDirectory(directory, documentDirectory, (uri) => vscode.workspace.fs.stat(uri))) {
+            throw new ImageImportError('The image save directory is outside the Markdown document directory.');
+        }
+    }
+
+    private async ensureImageSaveDirectory(directory: vscode.Uri, documentDirectory: vscode.Uri): Promise<void> {
+        if (!isUriLexicallyWithinDirectory(directory, documentDirectory) || directory.path === documentDirectory.path) {
+            throw new ImageImportError('The image save directory is invalid.');
+        }
+        await this.assertImageSaveDirectory(directory.with({ path: path.posix.dirname(directory.path) }), documentDirectory);
+
+        if (directory.scheme === 'file') {
+            // mkdir without recursive creation cannot follow a dangling child
+            // symlink. lstat also rejects links that point inside the document.
+            try {
+                await fs.mkdir(directory.fsPath);
+            } catch (error) {
+                if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+                    throw error;
+                }
+            }
+        } else {
+            try {
+                await vscode.workspace.fs.stat(directory);
+            } catch (error) {
+                if ((error as vscode.FileSystemError).code !== 'FileNotFound') {
+                    throw error;
+                }
+                await vscode.workspace.fs.createDirectory(directory);
+            }
+        }
+
+        await this.assertImageSaveDirectory(directory, documentDirectory);
+    }
+
     private async reserveImageSaveTarget(
         directory: vscode.Uri,
         documentFileName: string,
-        extension: string
-    ): Promise<{ filename: string; imageUri: vscode.Uri; reservationKey: string }> {
+        extension: string,
+        documentDirectory: vscode.Uri
+    ): Promise<{ filename: string; imageUri: vscode.Uri; reservationKey: string; file?: fs.FileHandle }> {
         let sequence = 1;
 
         while (true) {
@@ -3595,13 +3650,39 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             if (this.pendingImageSavePaths.has(reservationKey)) {
                 continue;
             }
+            await this.assertImageSaveDirectory(directory, documentDirectory);
+
+            if (imageUri.scheme === 'file') {
+                // Exclusive creation refuses existing files and symlinks,
+                // including dangling ones, and reserves across editor instances.
+                let file: fs.FileHandle;
+                try {
+                    file = await fs.open(imageUri.fsPath, 'wx');
+                } catch (error) {
+                    if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+                        continue;
+                    }
+                    throw error;
+                }
+                this.pendingImageSavePaths.add(reservationKey);
+                return { filename, imageUri, reservationKey, file };
+            }
+
+            // Provider stat may report a dangling link as missing. A directory
+            // entry with this name is occupied regardless of its target.
+            const entries = await vscode.workspace.fs.readDirectory(directory);
+            if (entries.some(([name]) => name === filename)) {
+                continue;
+            }
 
             let exists = false;
             try {
                 await vscode.workspace.fs.stat(imageUri);
                 exists = true;
-            } catch {
-                // A missing candidate can be reserved below.
+            } catch (error) {
+                if ((error as vscode.FileSystemError).code !== 'FileNotFound') {
+                    throw error;
+                }
             }
             if (exists || this.pendingImageSavePaths.has(reservationKey)) {
                 continue;
@@ -3635,27 +3716,24 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         const imagesDir = vscode.Uri.joinPath(documentDir, 'images');
         const documentImagesDir = vscode.Uri.joinPath(imagesDir, documentFileName);
 
-        try {
-            await vscode.workspace.fs.stat(imagesDir);
-        } catch {
-            await vscode.workspace.fs.createDirectory(imagesDir);
-        }
-
-        try {
-            await vscode.workspace.fs.stat(documentImagesDir);
-        } catch {
-            await vscode.workspace.fs.createDirectory(documentImagesDir);
-        }
+        await this.ensureImageSaveDirectory(imagesDir, documentDir);
+        await this.ensureImageSaveDirectory(documentImagesDir, documentDir);
 
         const reservedTarget = await this.reserveImageSaveTarget(
             documentImagesDir,
             documentFileName,
-            extension
+            extension,
+            documentDir
         );
-        const { filename, imageUri, reservationKey } = reservedTarget;
+        const { filename, imageUri, reservationKey, file } = reservedTarget;
 
         try {
-            await vscode.workspace.fs.writeFile(imageUri, bytes);
+            if (file) {
+                await file.writeFile(bytes);
+            } else {
+                await this.assertImageSaveDirectory(documentImagesDir, documentDir);
+                await vscode.workspace.fs.writeFile(imageUri, bytes);
+            }
 
             const relativePath = `images/${documentFileName}/${filename}`;
             const altText = typeof options.altText === 'string' && options.altText !== ''
@@ -3676,6 +3754,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             }
         } finally {
             this.pendingImageSavePaths.delete(reservationKey);
+            await file?.close();
         }
     }
 
@@ -3990,7 +4069,6 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         webview: vscode.Webview,
         options: {
             altText?: string;
-            source?: 'paste' | 'drop' | 'internal' | 'unknown';
             requestId?: string;
         } = {}
     ): Promise<void> {
@@ -4020,48 +4098,20 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 return;
             }
 
-            const importSource = options.source ?? 'unknown';
-            const looksLikeAbsolutePath = path.win32.isAbsolute(raw) || path.posix.isAbsolute(raw);
-            const looksLikeExplicitScheme = /^[a-z][a-z0-9+.-]*:/i.test(raw);
             const allowRemoteImageImport = this.getBooleanSetting('security.allowRemoteImageImport', false);
 
-            if (
-                importSource === 'paste' &&
-                (looksLikeAbsolutePath || !looksLikeExplicitScheme || /^file:/i.test(raw))
-            ) {
-                throw new Error('Pasted local image URIs are blocked for security reasons.');
-            }
-
             const sourceUri = this.resolveImageSourceUri(raw, document);
-            if (
-                importSource === 'internal' &&
-                !isUriLexicallyWithinDirectory(sourceUri, this.getDocumentDirectoryUri(document))
-            ) {
-                throw new Error('Internal image URI is outside the Markdown document directory.');
+            if (sourceUri.scheme !== 'http' && sourceUri.scheme !== 'https') {
+                throw new ImageImportError('Local image URLs cannot be imported. Drop an image file or use Insert Image.');
             }
-            let bytes: Uint8Array;
-            let mimeType = this.getImageMimeTypeFromPath(sourceUri.path || sourceUri.fsPath || raw);
-
-            if (sourceUri.scheme === 'http' || sourceUri.scheme === 'https') {
-                if (!allowRemoteImageImport) {
-                    throw new Error('Remote image import is disabled.');
-                }
-                const remoteImage = await this.fetchRemoteImage(sourceUri);
-                bytes = remoteImage.bytes;
-                if (remoteImage.mimeType) {
-                    mimeType = remoteImage.mimeType;
-                }
-            } else if (sourceUri.scheme === 'file' || !sourceUri.scheme) {
-                const sourceStat = await vscode.workspace.fs.stat(sourceUri);
-                this.assertImportedImageSize(sourceStat.size);
-                bytes = await vscode.workspace.fs.readFile(sourceUri);
-                this.assertImportedImageSize(bytes.byteLength);
-            } else {
-                throw new Error(`Unsupported image URI scheme: ${sourceUri.scheme}`);
+            if (!allowRemoteImageImport) {
+                throw new Error('Remote image import is disabled.');
             }
+            const remoteImage = await this.fetchRemoteImage(sourceUri);
+            const mimeType = remoteImage.mimeType || this.getImageMimeTypeFromPath(sourceUri.path);
 
             await this.saveImageBytes(
-                bytes,
+                remoteImage.bytes,
                 mimeType,
                 document,
                 webview,
@@ -4518,9 +4568,6 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             Table
         </button>
         <div class="toolbar-separator"></div>
-        <button class="toolbar-btn" data-command="insert-menu" data-shortcut-mac="Control+/" data-shortcut-other="Alt+/" data-overflow-only title="Insert Command Menu" aria-label="Insert Command Menu" hidden>
-            Insert…
-        </button>
         <button class="toolbar-btn" data-command="link" data-shortcut-key="K" data-overflow-only title="Insert Link" hidden>
             Link
         </button>

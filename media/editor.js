@@ -1215,13 +1215,11 @@ const {
         });
     }
 
-    function isImportableImageUri(rawSrc, source = 'paste') {
+    function isImportableImageUri(rawSrc) {
         const src = String(rawSrc || '').trim();
         if (!src) return false;
         if (/^data:image\//i.test(src)) return true;
-        if (isWebviewResourceUrl(src)) return true;
-        if (source === 'drop' && /^file:\/\//i.test(src)) return true;
-        if (source === 'drop' && isLikelyAbsoluteFsPath(src)) return true;
+        if (isWebviewResourceUrl(src)) return false;
         if (settingsState.allowRemoteImageImport && /^https?:\/\//i.test(src)) return true;
         return false;
     }
@@ -1691,11 +1689,6 @@ const {
     codeBlockManager.setMathRenderer(mathManager);
     const toolbarManager = new ToolbarManager(editor, stateManager, {
         isMac,
-        onOpenInsertMenu: () => openInsertCommandMenu(),
-        canOpenInsertMenu: () => {
-            const selection = window.getSelection();
-            return canOpenInsertCommandMenu(selection?.rangeCount ? selection.getRangeAt(0) : null);
-        },
         onInsertTable: () => tableManager.openTableDialog(),
         onInsertQuote: () => insertToolbarQuote(),
         onInsertCodeBlock: () => insertToolbarCodeBlock(),
@@ -20442,7 +20435,7 @@ const {
             const images = Array.from(container.querySelectorAll('img')).filter((image) => {
                 const displaySrc = (image.getAttribute('src') || image.currentSrc || '').trim();
                 const originalSrc = (image.getAttribute('data-md-path') || displaySrc).trim();
-                return displaySrc !== '' && !displaySrc.startsWith('blob:') && isImportableImageUri(originalSrc, 'paste');
+                return displaySrc !== '' && !displaySrc.startsWith('blob:') && isImportableImageUri(originalSrc);
             });
             if (images.length !== 1) {
                 return null;
@@ -22445,7 +22438,7 @@ const {
             const imageUri = imageFile ? null : extractImageUriFromDataTransfer(e.dataTransfer);
             e.preventDefault();
             e.stopPropagation();
-            if (!imageFile && (!imageUri || !isImportableImageUri(imageUri, 'drop'))) return;
+            if (!imageFile && (!imageUri || !isImportableImageUri(imageUri))) return;
 
             editor.focus();
 

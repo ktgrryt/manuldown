@@ -174,10 +174,13 @@ function loadExtensionModules() {
                     }
                     const stat = vscodeMockState.stats.get(uri.path);
                     if (!stat) {
-                        throw new Error('File not found');
+                        throw Object.assign(new Error('File not found'), { code: 'FileNotFound' });
                     }
                     return stat;
                 },
+                readDirectory: async (uri) => [...vscodeMockState.stats]
+                    .filter(([entryPath]) => path.posix.dirname(entryPath) === uri.path)
+                    .map(([entryPath, stat]) => [path.posix.basename(entryPath), stat.type]),
                 createDirectory: async (uri) => {
                     vscodeMockState.stats.set(uri.path, { size: 0, type: 2 });
                 },
@@ -2388,7 +2391,7 @@ test('oversized data URL images are rejected before any file is created', async 
     }
 });
 
-test('a valid data URL image is saved and inserted normally', async () => {
+test('a valid data URL image is saved and inserted on a remote filesystem', async () => {
     const provider = new MarkdownEditorProvider({});
     const webviewMessages = [];
     const webview = {
@@ -2399,11 +2402,14 @@ test('a valid data URL image is saved and inserted normally', async () => {
         asWebviewUri: (uri) => ({ toString: () => `webview-resource:${uri.path}` }),
     };
     resetVscodeMockState();
+    vscodeMockState.stats.set('/workspace', { size: 0, type: 2 });
+    const document = createTextDocument('');
+    document.uri = createMockUri('/workspace/document.md', 'vscode-remote', 'test');
 
     const saved = await provider.saveImageFromDataUrl(
         `data:image/png;base64,${Buffer.from([1, 2, 3]).toString('base64')}`,
         'image/png',
-        createTextDocument(''),
+        document,
         webview,
         { altText: 'diagram', requestId: 'image-request-1' }
     );
@@ -2418,7 +2424,7 @@ test('a valid data URL image is saved and inserted normally', async () => {
     assert.equal(webviewMessages[1].type, 'requestSync');
 });
 
-test('concurrent image saves reserve distinct filenames', async () => {
+test('concurrent image saves reserve distinct filenames on a remote filesystem', async () => {
     const provider = new MarkdownEditorProvider({});
     const webviewMessages = [];
     const webview = {
@@ -2429,6 +2435,9 @@ test('concurrent image saves reserve distinct filenames', async () => {
         asWebviewUri: (uri) => ({ toString: () => `webview-resource:${uri.path}` }),
     };
     resetVscodeMockState();
+    vscodeMockState.stats.set('/workspace', { size: 0, type: 2 });
+    const document = createTextDocument('');
+    document.uri = createMockUri('/workspace/document.md', 'vscode-remote', 'test');
 
     const firstData = Buffer.from([1, 2, 3]);
     const secondData = Buffer.from([4, 5, 6]);
@@ -2436,14 +2445,14 @@ test('concurrent image saves reserve distinct filenames', async () => {
         provider.saveImageFromDataUrl(
             `data:image/png;base64,${firstData.toString('base64')}`,
             'image/png',
-            createTextDocument(''),
+            document,
             webview,
             { requestId: 'concurrent-image-1' }
         ),
         provider.saveImageFromDataUrl(
             `data:image/png;base64,${secondData.toString('base64')}`,
             'image/png',
-            createTextDocument(''),
+            document,
             webview,
             { requestId: 'concurrent-image-2' }
         ),
@@ -2468,7 +2477,7 @@ test('concurrent image saves reserve distinct filenames', async () => {
     assert.equal(new Set(insertMessages.map((message) => message.markdown)).size, 2);
 });
 
-test('oversized local images are rejected before their contents are read', async () => {
+test('local image URL imports are rejected before their contents are read', async () => {
     const provider = new MarkdownEditorProvider({});
     const originalLimit = MarkdownEditorProvider.maxImportedImageBytes;
     const originalConsoleError = console.error;
@@ -2488,7 +2497,7 @@ test('oversized local images are rejected before their contents are read', async
 
         assert.equal(vscodeMockState.reads.length, 0);
         assert.equal(vscodeMockState.writes.length, 0);
-        assert.match(vscodeMockState.errors.at(-1), /Image is too large/);
+        assert.match(vscodeMockState.errors.at(-1), /Local image URLs cannot be imported/);
     } finally {
         MarkdownEditorProvider.maxImportedImageBytes = originalLimit;
         console.error = originalConsoleError;

@@ -28,6 +28,8 @@ ManulDown is a VSCode extension that lets you edit Markdown files in a WYSIWYG e
 - **Toolbar**: Quick access buttons for common formatting.
 - **Undo/Redo**: Edit history support.
 
+Local image imports require an image file from the clipboard or drag-and-drop, or the **Image** file picker. Local file URLs in pasted or dropped HTML are blocked. Image save folders must be real directories; symbolic links are rejected.
+
 ## Usage
 
 1. Open a Markdown file (`.md`).
@@ -86,7 +88,7 @@ Formulas are saved as `$…$` and `$$` blocks. Unchanged formulas keep their ori
 
 Type `/` at the start of a line or after whitespace in the editor to open the slash command menu. You can narrow results by typing a prefix such as `/ta`.
 
-To insert a footnote or another command directly after text, focus the document and press `Control+/` on macOS (`Alt+/` on Windows/Linux), or choose **More tools → Command Menu** in the toolbar. Type a prefix such as `fo` in the search field, choose a command with the arrow keys or Tab, and press Enter to insert it. Search text stays out of the document. Escape cancels and restores the original cursor position. The shortcut is disabled while the accessibility view is shown.
+To insert a footnote or another command directly after text, focus the document and press `Control+/` on macOS (`Alt+/` on Windows/Linux). Type a prefix such as `fo` in the search field, choose a command with the arrow keys or Tab, and press Enter to insert it. Search text stays out of the document. Escape cancels and restores the original cursor position. The shortcut is disabled while the accessibility view is shown.
 
 | Command | Action |
 | --- | --- |
