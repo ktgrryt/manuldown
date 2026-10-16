@@ -7,6 +7,7 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 ## [Unreleased]
 
 ### Added
+- Copy selected content as Markdown from the editor's right-click menu.
 - Keyboard navigation for footnote references and list numbers: focus a number with arrows or Tab and press Enter to jump between the body and its note.
 - Delete a footnote and all its references with Backspace (or macOS Ctrl+H) on its focused list number, with Undo/Redo support.
 - Open ManulDown settings from the toolbar's **…** menu or the `/settings` slash command.

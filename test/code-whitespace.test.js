@@ -19,6 +19,8 @@ const vscodeMockState = {
     didSaveDocumentListeners: [],
     executedCommands: [],
     externalOpens: [],
+    clipboardWrites: [],
+    clipboardError: null,
     quickPickCalls: [],
     inputBoxCalls: [],
     quickPickResponses: [],
@@ -43,6 +45,8 @@ function resetVscodeMockState() {
     vscodeMockState.didSaveDocumentListeners.length = 0;
     vscodeMockState.executedCommands.length = 0;
     vscodeMockState.externalOpens.length = 0;
+    vscodeMockState.clipboardWrites.length = 0;
+    vscodeMockState.clipboardError = null;
     vscodeMockState.quickPickCalls.length = 0;
     vscodeMockState.inputBoxCalls.length = 0;
     vscodeMockState.quickPickResponses.length = 0;
@@ -228,6 +232,12 @@ function loadExtensionModules() {
             },
         },
         env: {
+            clipboard: {
+                writeText: async text => {
+                    if (vscodeMockState.clipboardError) throw vscodeMockState.clipboardError;
+                    vscodeMockState.clipboardWrites.push(text);
+                },
+            },
             openExternal: async (uri) => {
                 vscodeMockState.externalOpens.push(uri);
                 return true;
@@ -396,6 +406,31 @@ async function createEditorSyncHarness(initialText = 'before') {
     await provider.resolveCustomTextEditor(document, webview.panel, {});
     return { provider, document, webview };
 }
+
+test('copying Markdown through the host writes text without changing the document', async () => {
+    const { provider, document, webview } = await createEditorSyncHarness('Original document\n');
+    delete provider.htmlToMarkdown;
+    await webview.sendMessage({ type: 'copyMarkdown', html: '<p><strong>selected</strong> <a href="./note.md">link</a></p>' });
+    assert.deepEqual(vscodeMockState.clipboardWrites, ['**selected** [link](./note.md)']);
+    assert.equal(document.getText(), 'Original document\n');
+    assert.deepEqual(document.savedTexts, []);
+    assert.deepEqual(vscodeMockState.writes, []);
+    for (const html of [null, 42, '']) await webview.sendMessage({ type: 'copyMarkdown', html });
+    assert.equal(vscodeMockState.clipboardWrites.length, 1);
+    webview.dispose();
+});
+
+test('Markdown clipboard failures report an error without modifying the document', async () => {
+    const { provider, document, webview } = await createEditorSyncHarness('Original document\n');
+    delete provider.htmlToMarkdown;
+    vscodeMockState.clipboardError = new Error('Clipboard unavailable');
+    await webview.sendMessage({ type: 'copyMarkdown', html: '<p>selected</p>' });
+    assert.deepEqual(vscodeMockState.errors, ['Could not copy the selection as Markdown.']);
+    assert.deepEqual(vscodeMockState.clipboardWrites, []);
+    assert.equal(document.getText(), 'Original document\n');
+    assert.deepEqual(document.savedTexts, []);
+    webview.dispose();
+});
 
 async function waitFor(condition, message) {
     for (let attempt = 0; attempt < 50; attempt++) {

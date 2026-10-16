@@ -75,6 +75,8 @@ Pasting an absolute local path directly over selected text also creates a relati
 
 Place the caret inside a link and press `Cmd+Enter` on macOS or `Ctrl+Enter` on Windows/Linux to open its URL, workspace file, or heading in the current document. `Cmd+Click` / `Ctrl+Click` also opens links.
 
+Select content, right-click, and choose **Copy as Markdown** to copy the selection as Markdown text, including headings, formatting, links, lists, tables, code, math, and referenced footnotes. Normal copy keeps its existing behavior.
+
 ### Math
 
 Formulas use TeX syntax and are rendered with [KaTeX](https://katex.org/supported.html). KaTeX is loaded only for documents that contain a formula.

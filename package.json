@@ -3,7 +3,7 @@
   "displayName": "ManulDown",
   "description": "WYSIWYG editor for Markdown files in VSCode",
   "icon": "images/icon.png",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "publisher": "ktgrryt",
   "license": "MIT",
   "repository": {
@@ -89,6 +89,12 @@
         "category": "ManulDown"
       },
       {
+        "command": "manulDown.copyAsMarkdown",
+        "title": "Copy as Markdown",
+        "category": "ManulDown",
+        "enablement": "activeCustomEditorId == 'manulDown.editor'"
+      },
+      {
         "command": "manulDown.undo",
         "title": "Undo in ManulDown Editor",
         "category": "ManulDown"
@@ -135,6 +141,19 @@
       }
     ],
     "menus": {
+      "webview/context": [
+        {
+          "command": "manulDown.copyAsMarkdown",
+          "when": "webviewId == 'manulDown.editor' && webviewSection == 'editor' && manulDownHasMarkdownSelection",
+          "group": "clipboard@10"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "manulDown.copyAsMarkdown",
+          "when": "activeCustomEditorId == 'manulDown.editor'"
+        }
+      ],
       "editor/title": [
         {
           "command": "manulDown.openEditor",

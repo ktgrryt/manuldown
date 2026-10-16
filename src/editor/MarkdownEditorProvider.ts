@@ -1757,6 +1757,17 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                             }
                         }
                         break;
+                    case 'copyMarkdown':
+                        if (typeof message.html === 'string' && message.html) {
+                            try {
+                                const markdown = this.htmlToClipboardMarkdown(message.html, document);
+                                await vscode.env.clipboard.writeText(markdown);
+                            } catch (error) {
+                                console.error('[clipboard] Failed to copy Markdown:', error);
+                                void vscode.window.showErrorMessage('Could not copy the selection as Markdown.');
+                            }
+                        }
+                        break;
                     case 'writeClipboard':
                         {
                             const requestId = typeof message.requestId === 'string' ? message.requestId : '';
@@ -3056,7 +3067,20 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         };
     }
 
-    private htmlToMarkdown(html: string, document: vscode.TextDocument, footnoteContext: { depth: number; trustedBodySource?: string } = { depth: 0 }): string {
+    private htmlToClipboardMarkdown(html: string, document: vscode.TextDocument): string {
+        const root = createWindow('<div id="clipboard"></div>').document.getElementById('clipboard');
+        root.innerHTML = html;
+        // Reference links/images must work outside this document without their
+        // original reference definitions. Serialize them as inline links instead.
+        root.querySelectorAll('[data-mdw-opaque-kind="reference-link"], [data-mdw-opaque-kind="reference-image"]').forEach((node: any) => {
+            node.removeAttribute('data-mdw-opaque-kind');
+            node.removeAttribute('data-mdw-opaque-source');
+        });
+        root.querySelectorAll('[data-mdw-footnote-source]').forEach((node: any) => node.removeAttribute('data-mdw-footnote-source'));
+        return this.htmlToMarkdown(root.innerHTML, document, { depth: 0, preserveSource: false }).replace(/\r?\n$/, '');
+    }
+
+    private htmlToMarkdown(html: string, document: vscode.TextDocument, footnoteContext: { depth: number; trustedBodySource?: string; preserveSource?: boolean } = { depth: 0 }): string {
         // Use Turndown for reliable HTML to Markdown conversion
         const placeholderNamespace = this.createPlaceholderNamespace(html, 'CONVERSION');
         const emptyLineMarker = `${placeholderNamespace}EMPTYLINE`;
@@ -3103,7 +3127,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             html = this.convertWebviewUrisToRelativePaths(html, document);
             html = this.restoreDocumentSpelledLinkTargets(html, documentText);
             let preservedSource = { html, restore: (value: string) => value };
-            if (footnoteContext.depth === 0) {
+            if (footnoteContext.depth === 0 && footnoteContext.preserveSource !== false) {
                 const sourceText = documentText.replace(/\r\n?/g, '\n');
                 const originalDocument = new MarkdownDocument(document);
                 if (!this.sourceCache || this.sourceCache.text !== sourceText) {
@@ -4595,7 +4619,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     </div>
     <div class="editor-container" data-editor-content inert aria-hidden="true" aria-busy="true">
         <div id="editor-sync-warning" role="alert" hidden></div>
-        <div id="editor" contenteditable="true" spellcheck="false"></div>
+        <div id="editor" contenteditable="true" spellcheck="false" data-vscode-context='{"webviewSection":"editor"}'></div>
         <div id="editor-scrollbar-indicator" aria-hidden="true">
             <div id="editor-scrollbar-thumb"></div>
         </div>

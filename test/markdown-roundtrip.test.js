@@ -81,6 +81,40 @@ function visibleText(html) {
     return html.replace(/<[^>]*>/g, '');
 }
 
+test('Markdown clipboard output includes formatting, structure, code and math without a document-ending newline', () => {
+    const provider = new MarkdownEditorProvider({});
+    const html = '<h2>Heading</h2><p><strong>bold</strong> <em>italic</em> <a href="./note.md">link</a> <code>code</code></p><ul><li>item<ul><li>nested</li></ul></li></ul><pre><code class="language-js">let a = 1;\n</code></pre><p><span data-mdw-math="inline">x^2</span></p><table><thead><tr><th>H</th></tr></thead><tbody><tr><td>V</td></tr></tbody></table>';
+    const markdown = provider.htmlToClipboardMarkdown(html, createTextDocument(''));
+    assert.match(markdown, /^## Heading\n/);
+    assert.match(markdown, /\*\*bold\*\* \*italic\* \[link\]\(\.\/note\.md\) `code`/);
+    assert.match(markdown, /[*-] item\n  [*-] nested/);
+    assert.match(markdown, /```js\nlet a = 1;\n```/);
+    assert.match(markdown, /\$x\^2\$/);
+    assert.match(markdown, /\| H \|\n\| --- \|\n\| V \|/);
+    assert.equal(markdown.endsWith('\n'), false);
+});
+
+test('Markdown clipboard links and images are self-contained even when the document uses references', () => {
+    const source = '[link][ref] and ![image][img]\n\n[ref]: ./note.md "Title"\n[img]: ./image.png\n';
+    const document = createTextDocument(source);
+    const html = new MarkdownDocument(document).toHtml();
+    const provider = new MarkdownEditorProvider({});
+    const markdown = provider.htmlToClipboardMarkdown(html.replace(/<pre\b[\s\S]*?<\/pre>/g, ''), document);
+    assert.match(markdown, /\[link\]\(\.\/note\.md "Title"\)/);
+    assert.match(markdown, /!\[image\]\(\.\/image\.png\)/);
+    assert.doesNotMatch(markdown, /\[ref\]|\[img\]|MDW/);
+});
+
+test('Markdown clipboard footnotes keep their body and inline reference links', () => {
+    const source = 'body[^a]\n\n[^a]: see [link][ref]\n\n[ref]: ./note.md\n';
+    const document = createTextDocument(source);
+    const html = new MarkdownDocument(document).toHtml().replace(/<pre\b[\s\S]*?<\/pre>/g, '');
+    const markdown = new MarkdownEditorProvider({}).htmlToClipboardMarkdown(html, document);
+    assert.match(markdown, /body\[\^a\]/);
+    assert.match(markdown, /\[\^a\]: see \[link\]\(\.\/note\.md\)/);
+    assert.doesNotMatch(markdown, /\[ref\]|MDW/);
+});
+
 async function withEditableDocument(source, callback) {
     const fs = require('node:fs');
     const domino = require('@mixmark-io/domino');

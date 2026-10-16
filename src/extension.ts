@@ -151,6 +151,18 @@ export function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(openLinkAtCursorCommand);
 
+    const copyAsMarkdownCommand = vscode.commands.registerCommand(
+        'manulDown.copyAsMarkdown',
+        (menuContext?: { webviewSection?: string }) => {
+            provider.postMessageToActiveEditor({
+                type: 'copyAsMarkdown',
+                fromContextMenu: menuContext?.webviewSection === 'editor',
+            });
+        }
+    );
+
+    context.subscriptions.push(copyAsMarkdownCommand);
+
     const historyCommands = [
         { id: 'manulDown.undo', direction: 'undo' },
         { id: 'manulDown.redo', direction: 'redo' },

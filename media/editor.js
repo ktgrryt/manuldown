@@ -10,6 +10,7 @@ import { ToolbarManager } from './modules/ToolbarManager.js';
 import { TableManager } from './modules/TableManager.js';
 import { SearchManager } from './modules/SearchManager.js';
 import { FootnoteManager } from './modules/FootnoteManager.js';
+import { createMarkdownClipboardHtml } from './modules/MarkdownClipboard.js';
 import { InsertCommandMenu, isInsertMenuShortcut } from './modules/InsertCommandMenu.js';
 import { MathManager } from './modules/MathManager.js';
 import { CompositionUpdateGate } from './modules/CompositionUpdateGate.js';
@@ -99,6 +100,7 @@ const {
     let shouldApplyInlineLinkResponse = () => true;
     let receiveWorkspaceLinkSuggestions = () => false;
     let trustedClipboardPayload = null;
+    let markdownCopyContextHtml = '';
     let handleHostMessage = () => {};
     const compositionUpdateGate = new CompositionUpdateGate();
     const pendingHistoryCommandsAfterComposition = [];
@@ -21857,21 +21859,28 @@ const {
             }
         });
 
-        // 画像上で右クリックしたらその画像を選択（Copy/Cutを使いやすくする）
+        // Snapshot the selection before the native context menu takes focus.
         editor.addEventListener('contextmenu', (e) => {
-            if (isUpdating) return;
+            markdownCopyContextHtml = '';
             const image = e.target && e.target.closest ? e.target.closest('img') : null;
-            if (!image || !editor.contains(image)) return;
-
-            const selection = window.getSelection();
-            if (!selection) return;
-            const range = document.createRange();
-            range.selectNode(image);
-            selection.removeAllRanges();
-            selection.addRange(range);
-
-            hideLinkPopover(true);
-            showImageResizeOverlay(image);
+            if (!isUpdating && !editorLoadFailed && !e.target.closest('input, textarea, select, button, [data-exclude-from-markdown="true"]')) {
+                const selection = window.getSelection();
+                if (image && editor.contains(image) && selection) {
+                    const range = document.createRange();
+                    range.selectNode(image);
+                    selection.removeAllRanges();
+                    selection.addRange(range);
+                    hideLinkPopover(true);
+                    showImageResizeOverlay(image);
+                }
+                if (selection?.rangeCount) {
+                    markdownCopyContextHtml = createMarkdownClipboardHtml(editor, selection.getRangeAt(0), footnoteManager);
+                }
+            }
+            editor.dataset.vscodeContext = JSON.stringify({
+                webviewSection: 'editor',
+                manulDownHasMarkdownSelection: !!markdownCopyContextHtml
+            });
         });
 
         // 複数行選択のコピー時は改行を正規化したtext/plainを優先して設定
@@ -24504,6 +24513,19 @@ const {
                 break;
             case 'openLinkAtCursor':
                 requestOpenLinkAtCursor();
+                break;
+            case 'copyAsMarkdown':
+                {
+                    if (isUpdating || editorLoadFailed) break;
+                    const selection = window.getSelection();
+                    const html = message.fromContextMenu
+                        ? markdownCopyContextHtml
+                        : (selection?.rangeCount
+                            ? createMarkdownClipboardHtml(editor, selection.getRangeAt(0), footnoteManager)
+                            : '');
+                    markdownCopyContextHtml = '';
+                    if (html) vscode.postMessage({ type: 'copyMarkdown', html });
+                }
                 break;
             case 'workspaceLinkSuggestions':
                 receiveWorkspaceLinkSuggestions(message);
