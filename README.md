@@ -75,7 +75,7 @@ Pasting an absolute local path directly over selected text also creates a relati
 
 Place the caret inside a link and press `Cmd+Enter` on macOS or `Ctrl+Enter` on Windows/Linux to open its URL, workspace file, or heading in the current document. `Cmd+Click` / `Ctrl+Click` also opens links.
 
-Select content, right-click, and choose **Copy as Markdown** to copy the selection as Markdown text, including headings, formatting, links, lists, tables, code, math, and referenced footnotes. Normal copy keeps its existing behavior.
+Select content, right-click, and choose **Copy as Markdown**, or press `Cmd+Shift+C` on macOS / `Ctrl+Shift+C` on Windows/Linux while the editor body has focus. This copies the selection as Markdown text, including headings, formatting, links, lists, tables, code, math, and referenced footnotes. The shortcut does nothing without a selection. Normal copy keeps its existing behavior.
 
 ### Math
 

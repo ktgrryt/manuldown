@@ -67,6 +67,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     private pendingImageSavePaths = new Set<string>();
     private imagePickerOpen = false;
     private lastActivePanel: vscode.WebviewPanel | null = null;
+    private markdownCopyFocusedPanel: vscode.WebviewPanel | null = null;
     private customSlashCommandCache: { loadedAt: number; items: CustomSlashCommandTemplate[] } | null = null;
     private tocPanelWidthPx = MarkdownEditorProvider.defaultTocPanelWidthPx;
     private currentEmptyListItemMarker: string | null = null;
@@ -984,8 +985,10 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         webviewPanel.onDidChangeViewState((event) => {
             if (event.webviewPanel.active) {
                 this.lastActivePanel = webviewPanel;
+                void webviewPanel.webview.postMessage({ type: 'requestMarkdownCopyFocus' });
                 return;
             }
+            this.updateMarkdownCopyFocus(webviewPanel, false);
             const activeRequest = activeWorkspaceLinkRequest;
             if (activeRequest) {
                 // Keep the slot occupied until the cancelled operation unwinds.
@@ -1243,6 +1246,11 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         webviewPanel.webview.onDidReceiveMessage(
             async (message) => {
                 switch (message.type) {
+                    case 'markdownCopyFocus':
+                        if (!editorDisposed) {
+                            this.updateMarkdownCopyFocus(webviewPanel, message.focused === true);
+                        }
+                        break;
                     case 'syncSnapshot':
                         if (typeof message.requestId === 'string') {
                             settleSyncSnapshotRequest(
@@ -2081,6 +2089,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         // Cleanup
         webviewPanel.onDidDispose(() => {
             editorDisposed = true;
+            this.updateMarkdownCopyFocus(webviewPanel, false);
             activePastedPathLinkRequestId = null;
             if (activeWorkspaceLinkRequest) {
                 activeWorkspaceLinkRequest.cancellation.cancel();
@@ -2109,6 +2118,19 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 this.lastActivePanel = null;
             }
         });
+    }
+
+    private updateMarkdownCopyFocus(panel: vscode.WebviewPanel, focused: boolean): void {
+        if (focused && panel.active) {
+            this.markdownCopyFocusedPanel = panel;
+        } else if (this.markdownCopyFocusedPanel === panel) {
+            this.markdownCopyFocusedPanel = null;
+        }
+        void vscode.commands.executeCommand(
+            'setContext',
+            'manulDown.editorTextFocus',
+            this.markdownCopyFocusedPanel?.active === true
+        );
     }
 
     public postMessageToActiveEditor(message: any, options?: { reveal?: boolean }): boolean {

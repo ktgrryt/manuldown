@@ -420,6 +420,44 @@ test('copying Markdown through the host writes text without changing the documen
     webview.dispose();
 });
 
+test('Markdown copy keybindings follow body focus and are cleared when the panel deactivates or closes', async () => {
+    const { webview } = await createEditorSyncHarness();
+    const focusContext = () => vscodeMockState.executedCommands.filter(args => args[0] === 'setContext' && args[1] === 'manulDown.editorTextFocus').at(-1)?.[2];
+    await webview.sendMessage({ type: 'markdownCopyFocus', focused: true });
+    assert.equal(focusContext(), true);
+    await webview.sendMessage({ type: 'markdownCopyFocus', focused: false });
+    assert.equal(focusContext(), false);
+    await webview.sendMessage({ type: 'markdownCopyFocus', focused: true });
+    webview.setActive(false);
+    assert.equal(focusContext(), false);
+    await webview.sendMessage({ type: 'markdownCopyFocus', focused: true });
+    assert.equal(focusContext(), false, 'inactive webviews cannot enable the shortcut');
+    webview.setActive(true);
+    assert.deepEqual(webview.postedMessages.at(-1), { type: 'requestMarkdownCopyFocus' });
+    await webview.sendMessage({ type: 'markdownCopyFocus', focused: true });
+    assert.equal(focusContext(), true);
+    webview.dispose();
+    assert.equal(focusContext(), false);
+    await webview.sendMessage({ type: 'markdownCopyFocus', focused: true });
+    assert.equal(focusContext(), false, 'late messages from a disposed panel are ignored');
+});
+
+test('focus messages from another ManulDown pane cannot clear the active pane focus', async () => {
+    const { provider, webview } = await createEditorSyncHarness();
+    const other = createWebviewPanelHarness();
+    other.panel.active = false;
+    const otherDocument = createMutableTextDocument('other');
+    otherDocument.uri = createMockUri('/workspace/other.md');
+    await provider.resolveCustomTextEditor(otherDocument, other.panel, {});
+    await webview.sendMessage({ type: 'markdownCopyFocus', focused: true });
+    await other.sendMessage({ type: 'markdownCopyFocus', focused: false });
+    assert.deepEqual(vscodeMockState.executedCommands.at(-1), ['setContext', 'manulDown.editorTextFocus', true]);
+    await other.sendMessage({ type: 'markdownCopyFocus', focused: true });
+    assert.deepEqual(vscodeMockState.executedCommands.at(-1), ['setContext', 'manulDown.editorTextFocus', true]);
+    other.dispose();
+    webview.dispose();
+});
+
 test('Markdown clipboard failures report an error without modifying the document', async () => {
     const { provider, document, webview } = await createEditorSyncHarness('Original document\n');
     delete provider.htmlToMarkdown;

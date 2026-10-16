@@ -11,6 +11,56 @@ const clipboardModule = import(moduleUrl(moduleSource('MarkdownClipboard.js')
 const footnoteModule = import(moduleUrl(moduleSource('FootnoteManager.js')));
 const editorSource = fs.readFileSync(path.join(__dirname, '..', 'media', 'editor.js'), 'utf8');
 
+function extractEditorFunction(name) {
+    const start = editorSource.indexOf(`    function ${name}(`);
+    const end = editorSource.indexOf('\n    }\n', start);
+    assert.ok(start >= 0 && end > start, `${name} exists`);
+    return editorSource.slice(start, end + 6);
+}
+
+function shortcutFixture({ editor, document, window, copy }, isMac = true) {
+    let activeElement = editor;
+    let windowFocused = true;
+    let selection = null;
+    const messages = [];
+    Object.defineProperty(document, 'activeElement', { get: () => activeElement });
+    document.hasFocus = () => windowFocused;
+    window.getSelection = () => selection;
+    const caseStart = editorSource.indexOf("            case 'copyAsMarkdown':");
+    const caseEnd = editorSource.indexOf("            case 'workspaceLinkSuggestions':", caseStart);
+    const functions = ['isMarkdownCopyEditorFocused', 'syncMarkdownCopyFocus', 'handleMarkdownCopyShortcutKeydown']
+        .map(extractEditorFunction).join('\n');
+    const helpers = new Function('editor', 'document', 'window', 'vscode', 'createMarkdownClipboardHtml', `
+        const isMac = ${isMac};
+        let isComposing = false;
+        const compositionUpdateGate = { composing: false, finalizing: false };
+        const isUpdating = false;
+        const editorLoadFailed = false;
+        const footnoteManager = null;
+        let markdownCopyEditorFocused = null;
+        let markdownCopyContextHtml = '';
+        ${functions}
+        return {
+            isMarkdownCopyEditorFocused, syncMarkdownCopyFocus, handleMarkdownCopyShortcutKeydown,
+            receive(message) { switch(message.type) { ${editorSource.slice(caseStart, caseEnd)} } },
+            setComposing(value) { isComposing = value; }
+        };
+    `)(editor, document, window, { postMessage: message => messages.push(message) }, (_editor, range) => copy(range));
+    return {
+        ...helpers, messages,
+        focus(element, focused = true) { activeElement = element; windowFocused = focused; },
+        select(range) { selection = range ? { rangeCount: 1, getRangeAt: () => range } : null; },
+        key(properties) {
+            let prevented = false;
+            const handled = helpers.handleMarkdownCopyShortcutKeydown({
+                ...properties, preventDefault() { prevented = true; },
+                stopPropagation() { assert.fail('the key must reach the VS Code dispatcher'); }
+            });
+            return { handled, prevented };
+        }
+    };
+}
+
 // Domino has no DOM Range implementation. These fixtures use text selections or
 // whole child-node selections; browser QA also exercises native spanning ranges.
 class FixtureRange {
@@ -190,4 +240,80 @@ test('the native context menu is scoped to selected ManulDown content', () => {
     assert.match(entry.when, /webviewId == 'manulDown.editor'/);
     assert.match(entry.when, /webviewSection == 'editor'/);
     assert.match(entry.when, /manulDownHasMarkdownSelection/);
+});
+
+test('Markdown copy focus excludes search fields, controls, other panels and an unfocused window', async () => {
+    await withFixture('<p>text</p><input><textarea></textarea><button>Copy</button><span contenteditable="false">formula</span>', f => {
+        const shortcut = shortcutFixture(f);
+        assert.equal(shortcut.isMarkdownCopyEditorFocused(), true);
+        shortcut.syncMarkdownCopyFocus();
+        shortcut.syncMarkdownCopyFocus();
+        assert.deepEqual(shortcut.messages, [{ type: 'markdownCopyFocus', focused: true }]);
+        for (const target of [...f.editor.querySelectorAll('input, textarea, button, span'), f.document.getElementById('outside')]) {
+            shortcut.focus(target);
+            assert.equal(shortcut.isMarkdownCopyEditorFocused(), false);
+            assert.deepEqual(shortcut.key({ key: 'C', metaKey: true, shiftKey: true }), { handled: false, prevented: false });
+        }
+        shortcut.focus(f.editor, false);
+        assert.equal(shortcut.isMarkdownCopyEditorFocused(), false);
+        shortcut.syncMarkdownCopyFocus();
+        assert.deepEqual(shortcut.messages.at(-1), { type: 'markdownCopyFocus', focused: false });
+        shortcut.receive({ type: 'requestMarkdownCopyFocus' });
+        assert.equal(shortcut.messages.length, 3, 'panel reactivation can force a fresh focus report');
+    });
+});
+
+for (const isMac of [true, false]) {
+    test(`${isMac ? 'Cmd' : 'Ctrl'}+Shift+C copies Markdown exactly once through the contributed command`, async () => {
+        await withFixture('<p><strong>selected</strong></p>', f => {
+            const shortcut = shortcutFixture(f, isMac);
+            shortcut.select(f.range(f.editor.querySelector('strong').firstChild));
+            const modifier = isMac ? { metaKey: true } : { ctrlKey: true };
+            assert.deepEqual(shortcut.key({ key: 'C', shiftKey: true, ...modifier }), { handled: true, prevented: true });
+            assert.deepEqual(shortcut.messages, [], 'DOM handling only suppresses native behavior');
+
+            const binding = require('../package.json').contributes.keybindings.find(item => item.command === 'manulDown.copyAsMarkdown');
+            assert.equal(binding.key, 'ctrl+shift+c');
+            assert.equal(binding.mac, 'cmd+shift+c');
+            assert.equal(binding.when, "activeCustomEditorId == 'manulDown.editor' && manulDown.editorTextFocus");
+            const extensionSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'extension.ts'), 'utf8');
+            const start = extensionSource.indexOf('    const copyAsMarkdownCommand =');
+            const end = extensionSource.indexOf('    context.subscriptions.push(copyAsMarkdownCommand);', start);
+            const source = require('typescript').transpileModule(extensionSource.slice(start, end), {}).outputText;
+            let executeCommand;
+            new Function('vscode', 'provider', source)({
+                commands: { registerCommand(id, callback) { assert.equal(id, binding.command); executeCommand = callback; } }
+            }, { postMessageToActiveEditor: message => shortcut.receive(message) });
+            executeCommand(binding.args);
+            assert.deepEqual(shortcut.messages, [{ type: 'copyMarkdown', html: '<p><strong>selected</strong></p>' }]);
+
+            for (const properties of [
+                { key: 'c', ...modifier },
+                { key: 'c', shiftKey: true, ...(isMac ? { ctrlKey: true } : { metaKey: true }) },
+                { key: 'c', shiftKey: true, altKey: true, ...modifier },
+                { key: 'c', shiftKey: true, metaKey: true, ctrlKey: true },
+                { key: 'x', shiftKey: true, ...modifier }
+            ]) assert.deepEqual(shortcut.key(properties), { handled: false, prevented: false });
+        });
+    });
+}
+
+test('shortcut commands do nothing without a selection, during composition or after focus leaves the body', async () => {
+    await withFixture('<p>text</p><input>', f => {
+        const shortcut = shortcutFixture(f);
+        const command = { type: 'copyAsMarkdown', fromShortcut: true };
+        assert.deepEqual(shortcut.key({ key: 'C', metaKey: true, shiftKey: true }), { handled: true, prevented: true });
+        shortcut.receive(command);
+        shortcut.select(f.range(f.editor.firstChild.firstChild, 1, 1));
+        shortcut.receive(command);
+        shortcut.select(f.range(f.editor.firstChild.firstChild));
+        shortcut.focus(f.editor.querySelector('input'));
+        shortcut.receive(command);
+        shortcut.focus(f.editor, false);
+        shortcut.receive(command);
+        shortcut.focus(f.editor);
+        shortcut.setComposing(true);
+        shortcut.receive(command);
+        assert.deepEqual(shortcut.messages, []);
+    });
 });

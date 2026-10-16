@@ -153,10 +153,11 @@ export function activate(context: vscode.ExtensionContext) {
 
     const copyAsMarkdownCommand = vscode.commands.registerCommand(
         'manulDown.copyAsMarkdown',
-        (menuContext?: { webviewSection?: string }) => {
+        (menuContext?: { webviewSection?: string; fromShortcut?: boolean }) => {
             provider.postMessageToActiveEditor({
                 type: 'copyAsMarkdown',
                 fromContextMenu: menuContext?.webviewSection === 'editor',
+                fromShortcut: menuContext?.fromShortcut === true,
             });
         }
     );

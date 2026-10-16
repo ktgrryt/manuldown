@@ -101,6 +101,7 @@ const {
     let receiveWorkspaceLinkSuggestions = () => false;
     let trustedClipboardPayload = null;
     let markdownCopyContextHtml = '';
+    let markdownCopyEditorFocused = null;
     let handleHostMessage = () => {};
     const compositionUpdateGate = new CompositionUpdateGate();
     const pendingHistoryCommandsAfterComposition = [];
@@ -8808,6 +8809,28 @@ const {
             return false;
         }
         // VS Code executes the command once; suppress native Enter handling.
+        e.preventDefault();
+        return true;
+    }
+
+    function isMarkdownCopyEditorFocused() {
+        const activeElement = document.activeElement;
+        return document.hasFocus() && !!activeElement && editor.contains(activeElement) &&
+            !activeElement.closest('input, textarea, select, button, [contenteditable="false"], [data-exclude-from-markdown="true"]');
+    }
+
+    function syncMarkdownCopyFocus(focused = isMarkdownCopyEditorFocused(), force = false) {
+        if (!force && markdownCopyEditorFocused === focused) return;
+        markdownCopyEditorFocused = focused;
+        vscode.postMessage({ type: 'markdownCopyFocus', focused });
+    }
+
+    function handleMarkdownCopyShortcutKeydown(e) {
+        const primaryModifier = isMac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
+        if (!primaryModifier || !e.shiftKey || e.altKey || String(e.key || '').toLowerCase() !== 'c' ||
+            !isMarkdownCopyEditorFocused()) return false;
+        // VS Code executes the contributed command once. Keep forwarding the
+        // event to its dispatcher, including when no text is selected.
         e.preventDefault();
         return true;
     }
@@ -18232,6 +18255,12 @@ const {
     function setupEditor() {
         setupImageRemovalSyncObserver();
 
+        document.addEventListener('focusin', () => syncMarkdownCopyFocus(), true);
+        document.addEventListener('focusout', () => syncMarkdownCopyFocus(false), true);
+        window.addEventListener('focus', () => syncMarkdownCopyFocus());
+        window.addEventListener('blur', () => syncMarkdownCopyFocus(false));
+        syncMarkdownCopyFocus();
+        document.addEventListener('keydown', handleMarkdownCopyShortcutKeydown, true);
         document.addEventListener('keydown', handleInsertMenuShortcutKeydown, true);
 
         // VS Code owns the Cmd/Ctrl+Z keybinding while ManulDown owns the actual
@@ -24517,6 +24546,8 @@ const {
             case 'copyAsMarkdown':
                 {
                     if (isUpdating || editorLoadFailed) break;
+                    if (message.fromShortcut && (!isMarkdownCopyEditorFocused() || isComposing ||
+                        compositionUpdateGate.composing || compositionUpdateGate.finalizing)) break;
                     const selection = window.getSelection();
                     const html = message.fromContextMenu
                         ? markdownCopyContextHtml
@@ -24526,6 +24557,9 @@ const {
                     markdownCopyContextHtml = '';
                     if (html) vscode.postMessage({ type: 'copyMarkdown', html });
                 }
+                break;
+            case 'requestMarkdownCopyFocus':
+                syncMarkdownCopyFocus(isMarkdownCopyEditorFocused(), true);
                 break;
             case 'workspaceLinkSuggestions':
                 receiveWorkspaceLinkSuggestions(message);

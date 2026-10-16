@@ -205,6 +205,15 @@
         "when": "activeCustomEditorId == 'manulDown.editor'"
       },
       {
+        "command": "manulDown.copyAsMarkdown",
+        "key": "ctrl+shift+c",
+        "mac": "cmd+shift+c",
+        "when": "activeCustomEditorId == 'manulDown.editor' && manulDown.editorTextFocus",
+        "args": {
+          "fromShortcut": true
+        }
+      },
+      {
         "command": "manulDown.undo",
         "key": "ctrl+z",
         "mac": "cmd+z",
