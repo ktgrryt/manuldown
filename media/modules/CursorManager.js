@@ -235,9 +235,8 @@ export class CursorManager {
             }
             current = current.parentElement;
         }
-        if (parent === this.editor) {
-            return true;
-        }
+        // Initial typing can create a text node directly under the editor.
+        // Its content still counts when resolving navigation and document ends.
         const rawText = node.textContent || '';
         const hasPlaceholderSignal =
             /&ZeroWidthSpace;/i.test(rawText) ||
@@ -3181,7 +3180,9 @@ export class CursorManager {
                 anchor = anchor.parentElement;
             }
             if (!anchor || anchor === this.editor) {
-                anchor = lastText.parentElement || this.editor;
+                // Root text can be followed by an empty line or an atomic block.
+                // Search from that text so these trailing stops still count.
+                anchor = lastText;
             }
 
             let trailing = anchor && anchor !== this.editor

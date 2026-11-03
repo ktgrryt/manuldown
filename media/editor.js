@@ -1434,10 +1434,16 @@ const {
         scheduleEditorOverflowStateUpdate();
     }
 
+    function updateEditorPlaceholderState() {
+        if (!editor) return;
+        // The IME owns its text nodes and selection until compositionend.
+        // Updating only the class keeps the placeholder out of that text.
+        editor.classList.toggle('is-empty', !isComposing && isEditorEffectivelyEmpty());
+    }
+
     function updateEditorOverflowState() {
         if (!editor) return;
-        const hasRenderableContent = !isEditorEffectivelyEmpty();
-        editor.classList.toggle('is-empty', !hasRenderableContent);
+        updateEditorPlaceholderState();
 
         const metrics = getEditorScrollbarMetrics();
         const hasOverflow = !!metrics;
@@ -11374,6 +11380,12 @@ const {
         return text.trim() === '';
     }
 
+    function isEditorRootTextRange(range) {
+        const node = range && range.startContainer;
+        return !!(node && node.nodeType === Node.TEXT_NODE &&
+            node.parentElement === editor && !isEditorLevelWhitespaceTextNode(node));
+    }
+
     function createCollapsedRangeAtElementBoundary(element, boundary = 'start') {
         if (!element || element.nodeType !== Node.ELEMENT_NODE) {
             return null;
@@ -12060,6 +12072,9 @@ const {
         }
 
         const isEditorGapClick = clickedElement === editor;
+        if (isEditorGapClick && isEditorRootTextRange(pointRange)) {
+            return null;
+        }
         if (!isEditorGapClick &&
             (domUtils.getParentElement(clickedElement, 'TD') || domUtils.getParentElement(clickedElement, 'TH'))) {
             return null;
@@ -12741,6 +12756,13 @@ const {
             pointRangeContainer === editor ||
             isEditorLevelWhitespaceTextNode(pointRangeContainer) ||
             (clickedIsBlockElement && !pointRangeIsInsideClickedBlock);
+
+        // Typing into a new document can create text directly under #editor.
+        // Its clicks target #editor too, but the native text offset is valid.
+        // Snapping to an element boundary would skip this first line entirely.
+        if (editorGapClick && isEditorRootTextRange(pointRange)) {
+            return null;
+        }
 
         if (!unstablePoint && !editorGapClick) {
             return null;
@@ -18644,6 +18666,7 @@ const {
             }
             compositionUpdateGate.begin();
             isComposing = true;
+            updateEditorPlaceholderState();
             lastCompositionEndTs = 0;
             tableManager.handleEdgeCompositionStart();
             hideSlashCommandMenu();
@@ -18651,6 +18674,7 @@ const {
 
         editor.addEventListener('compositionend', (e) => {
             isComposing = false;
+            updateEditorPlaceholderState();
             lastCompositionEndTs = Date.now();
             const tableEdgeCompositionBlocked = tableManager.handleEdgeCompositionEnd();
             const finalizationToken = compositionUpdateGate.end({
@@ -18978,6 +19002,7 @@ const {
 
         editor.addEventListener('input', (e) => {
             if (!isUpdating) {
+                updateEditorPlaceholderState();
                 domUtils.commitCaretAnchorInput();
                 if (tableManager._compositionBlockedEdge) {
                     tableManager._compositionBlockedEdge.textContent = '\u00A0';

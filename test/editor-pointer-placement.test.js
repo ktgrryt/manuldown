@@ -43,6 +43,77 @@ function fixture(html) {
     return { window, document, editor, domUtils };
 }
 
+function rootTextClickFixture(text = '日本語を入力') {
+    const f = fixture(`${text}<div>次の行</div>`);
+    const block = f.editor.lastChild;
+    block.getBoundingClientRect = () => ({ top: 40, bottom: 60, height: 20 });
+    f.domUtils.isBlockElement = element => ['DIV', 'P'].includes(element.tagName);
+    const helpers = new Function('document', 'editor', 'Node', 'domUtils',
+        `${[
+            'isEditorLevelWhitespaceTextNode', 'isEditorRootTextRange',
+            'createCollapsedRangeAtElementBoundary', 'getNearestBlockBoundaryRangeByY',
+            'getStableGapClickRange', 'getClosestBlockElement',
+            'getNearestTopLevelElementFromIndex', 'isSupportedBlockForLooseSideClick',
+            'getVerticalDistanceScoreForBlock', 'pickCloserSupportedBlockByY',
+            'getNearestSupportedBlockForLooseSideByY', 'resolveBlockForLooseSideTextClick',
+        ].map(extract).join('\n')}
+        return {
+            place: getStableGapClickRange,
+            resolveLooseSide: resolveBlockForLooseSideTextClick,
+        };`
+    )(f.document, f.editor, f.window.Node, f.domUtils);
+    return { ...f, block, ...helpers };
+}
+
+for (const offset of [0, 2, 6]) {
+    test(`clicking committed Japanese root text preserves the native caret at offset ${offset}`, () => {
+        // Typing into a new empty editor leaves text directly under #editor.
+        // Enter can add a DIV below it, which must not capture first-line clicks.
+        const f = rootTextClickFixture();
+        const range = { startContainer: f.editor.firstChild, startOffset: offset, collapsed: true };
+        assert.ok(f.place(100, 20, f.editor, range) === null,
+            'A valid hit on the first line must not snap to the block below');
+    });
+
+    test(`loose-side correction preserves committed Japanese root text at offset ${offset}`, () => {
+        const f = rootTextClickFixture();
+        const range = { startContainer: f.editor.firstChild, startOffset: offset, collapsed: true };
+        assert.ok(f.resolveLooseSide(20, f.editor, range) === null,
+            'Side-click correction must not target the following block for a native root-text hit');
+    });
+}
+
+test('a gap click with an editor-level caret still snaps to the nearest editable block', () => {
+    const f = rootTextClickFixture();
+    const range = { startContainer: f.editor, startOffset: 1, collapsed: true };
+    const placed = f.place(100, 20, f.editor, range);
+    assert.equal(placed.startContainer, f.block.firstChild);
+    assert.equal(placed.startOffset, 0);
+    assert.equal(placed.collapsed, true);
+    assert.ok(f.resolveLooseSide(20, f.editor, range) === f.block);
+});
+
+test('a gap click on ignorable root text still snaps to the nearest editable block', () => {
+    const f = rootTextClickFixture('\n\u200B ');
+    const range = { startContainer: f.editor.firstChild, startOffset: 1, collapsed: true };
+    const placed = f.place(100, 20, f.editor, range);
+    assert.equal(placed.startContainer, f.block.firstChild);
+    assert.equal(placed.startOffset, 0);
+    assert.equal(placed.collapsed, true);
+    assert.ok(f.resolveLooseSide(20, f.editor, range) === f.block);
+});
+
+test('loose-side correction still resolves clicks in an existing paragraph', () => {
+    const f = rootTextClickFixture();
+    const range = { startContainer: f.block.firstChild, startOffset: 1, collapsed: true };
+    assert.ok(f.resolveLooseSide(50, f.block, range) === f.block);
+});
+
+test('loose-side correction still resolves editor gaps without a native caret range', () => {
+    const f = rootTextClickFixture();
+    assert.ok(f.resolveLooseSide(20, f.editor, null) === f.block);
+});
+
 for (const boundary of ['start', 'end']) {
     test(`a gap click at a code block's ${boundary} uses editable code instead of toolbar text`, () => {
         const f = fixture('<pre><div data-exclude-from-markdown="true" contenteditable="false"><span>plaintext</span><button>Copy</button></div><code>first\nlast</code></pre>');
