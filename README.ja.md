@@ -164,6 +164,8 @@ ManulDownは、MarkdownファイルをWYSIWYGエディタで編集できるVSCod
 
 #### 表の操作
 
+セルの範囲・行・列を選択した状態でツールバーを使うと、選択セル全体に太字・斜体・取り消し線・インラインコードを適用できます。全体に同じ書式が付いている場合は、同じボタンをもう一度押すと解除します。
+
 | 操作 | Mac | Windows / Linux |
 | --- | --- | --- |
 | 行／列を挿入 | `Cmd+Ctrl+Shift+Up/Down/Left/Right` | `Ctrl+Shift+Alt+Up/Down/Left/Right` |

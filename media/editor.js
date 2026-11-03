@@ -1699,6 +1699,8 @@ const {
     codeBlockManager.setMathRenderer(mathManager);
     const toolbarManager = new ToolbarManager(editor, stateManager, {
         isMac,
+        onFormatSelectedCells: (command) => tableManager.formatSelectedCells(command),
+        getSelectedCellFormatState: (command) => tableManager.getSelectedCellFormatState(command),
         onInsertTable: () => tableManager.openTableDialog(),
         onInsertQuote: () => insertToolbarQuote(),
         onInsertCodeBlock: () => insertToolbarCodeBlock(),

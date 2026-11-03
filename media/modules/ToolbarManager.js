@@ -21,6 +21,8 @@ export class ToolbarManager {
         this.canInsertMath = options.canInsertMath || (() => true);
         this.onInsertMathBlock = options.onInsertMathBlock || null;
         this.onOpenSettings = options.onOpenSettings || null;
+        this.onFormatSelectedCells = options.onFormatSelectedCells || null;
+        this.getSelectedCellFormatState = options.getSelectedCellFormatState || (() => null);
         this.commandButtons = new Map();
         this.overflowButtons = new Map();
         this.overflowSelection = null;
@@ -110,6 +112,7 @@ export class ToolbarManager {
         const updateAvailability = () => {
             this.updateCommandAvailability();
             this.updateCommandContextStates();
+            this.updateCommandActiveStates();
             this.updateOverflowMenuState();
         };
         const updateToolbarState = () => this.updateToolbarState();
@@ -361,6 +364,13 @@ export class ToolbarManager {
             return;
         }
 
+        // Cell and row/column selections are independent of the native text
+        // range. Format that selection before focus can create a new caret.
+        if (this.onFormatSelectedCells?.(command)) {
+            this.updateToolbarState();
+            return;
+        }
+
         this.editor.focus();
 
         if (command === 'footnote') {
@@ -575,10 +585,11 @@ export class ToolbarManager {
             const button = this.commandButtons.get(command);
             if (!button) return;
 
+            const cellState = this.getSelectedCellFormatState(command);
             const isActive =
                 !button.disabled &&
                 shouldReflectActiveState &&
-                this.isNativeCommandActive(nativeCommand);
+                (cellState !== null ? cellState : this.isNativeCommandActive(nativeCommand));
             button.classList.toggle('is-active', isActive);
             button.setAttribute('aria-pressed', isActive ? 'true' : 'false');
         });
@@ -685,6 +696,7 @@ export class ToolbarManager {
     }
 
     canToggleInlineCode() {
+        if (this.getSelectedCellFormatState('inlinecode') !== null) return true;
         const selection = window.getSelection();
         if (!selection || selection.rangeCount !== 1) return false;
         const range = selection.getRangeAt(0);
@@ -707,6 +719,8 @@ export class ToolbarManager {
     }
 
     isInlineCodeActive() {
+        const cellState = this.getSelectedCellFormatState('inlinecode');
+        if (cellState !== null) return cellState;
         const selection = window.getSelection();
         if (!selection || selection.rangeCount !== 1) return false;
         const range = selection.getRangeAt(0);
@@ -1363,6 +1377,7 @@ export class ToolbarManager {
     }
 
     isSelectionInsideEditor() {
+        if (this.getSelectedCellFormatState('bold') !== null) return true;
         const selection = window.getSelection();
         if (!selection || selection.rangeCount === 0) {
             return false;

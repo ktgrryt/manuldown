@@ -162,6 +162,8 @@ Image resize flow: place the caret on the left or right edge of an image, press 
 
 #### Table Operations
 
+Select a range of cells, a row, or a column, then use the toolbar to apply bold, italic, strikethrough, or inline code to all selected cells. Clicking the same format again removes it when the entire selection already has that format.
+
 | Action | Mac | Windows / Linux |
 | --- | --- | --- |
 | Insert row/column | `Cmd+Ctrl+Shift+Up/Down/Left/Right` | `Ctrl+Shift+Alt+Up/Down/Left/Right` |

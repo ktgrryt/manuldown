@@ -25,6 +25,31 @@ async function createToolbarManager() {
     return { manager, savedStates };
 }
 
+for (const command of ['bold', 'italic', 'strikethrough', 'inlinecode']) {
+    test(`${command} delegates the selected cell range before creating a native caret`, async () => {
+        const { ToolbarManager } = await toolbarManagerModulePromise;
+        const calls = [];
+        const manager = new ToolbarManager(
+            { focus: () => assert.fail('Cell formatting must not move the caret first') },
+            { saveState: () => assert.fail('Cell formatting owns its single undo step') },
+            { onFormatSelectedCells: selectedCommand => { calls.push(selectedCommand); return true; } }
+        );
+        manager.toggleInlineCode = () => assert.fail('Do not format an unrelated native range');
+        manager.updateToolbarState = () => calls.push('update toolbar');
+        manager.executeCommand(command);
+        assert.deepEqual(calls, [command, 'update toolbar']);
+    });
+}
+
+test('inline code uses the normal text command when there is no cell range', async () => {
+    const { manager } = await createToolbarManager();
+    const calls = [];
+    manager.onFormatSelectedCells = command => { calls.push(['cells', command]); return false; };
+    manager.toggleInlineCode = () => calls.push('native text');
+    manager.executeCommand('inlinecode');
+    assert.deepEqual(calls, [['cells', 'inlinecode'], 'native text']);
+});
+
 test('clicking the active heading level toggles it back to a paragraph', async () => {
     const { manager, savedStates } = await createToolbarManager();
     const formattedBlocks = [];
@@ -140,6 +165,33 @@ async function inlineCodeFixture(t, html) {
 
 const editingCommands = ['bold', 'italic', 'strikethrough', 'inlinecode', 'h1', 'h2', 'h3', 'ul', 'ol',
     'checkbox', 'quote', 'codeblock', 'table', 'image', 'link', 'footnote', 'math', 'mathblock'];
+
+test('cell-range toolbar states reflect all selected cells without a native text range', async t => {
+    const f = await inlineCodeFixture(t, '<table><tr><td class="md-table-cell-selected">Cell</td></tr></table>');
+    let states = { bold: true, italic: false, strikethrough: true, inlinecode: true };
+    f.manager.getSelectedCellFormatState = command => states[command] ?? null;
+    f.manager.isNativeCommandActive = () => true; // Must not override a mixed/off cell state.
+    for (const command of ['bold', 'italic', 'strikethrough', 'inlinecode', 'h1']) {
+        f.manager.commandButtons.set(command, f.editor.ownerDocument.createElement('button'));
+    }
+
+    f.manager.updateToolbarState();
+    for (const [command, active] of Object.entries(states)) {
+        const button = f.manager.commandButtons.get(command);
+        assert.equal(button.disabled, false, command);
+        assert.equal(button.getAttribute('aria-pressed'), String(active), command);
+    }
+    assert.equal(f.manager.commandButtons.get('h1').disabled, true, 'Block commands remain restricted in tables');
+
+    states = { bold: false, italic: false, strikethrough: false, inlinecode: false };
+    f.manager.updateToolbarState();
+    for (const command of Object.keys(states)) {
+        const button = f.manager.commandButtons.get(command);
+        assert.equal(button.getAttribute('aria-pressed'), 'false', command);
+        assert.equal(button.classList.contains('is-active'), false, command);
+    }
+    assert.equal(f.manager.canToggleInlineCode(), true);
+});
 
 test('footnote number focus disables editing commands and guards execution before editor focus', async (t) => {
     const f = await inlineCodeFixture(t, '<p>Body<sup data-mdw-footnote-ref="a" contenteditable="false"><a>1</a></sup> after</p>' +

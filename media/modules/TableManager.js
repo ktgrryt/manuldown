@@ -6,6 +6,12 @@
 
 // Must match the outside-right caret anchor used by CursorManager / editor.js.
 const INLINE_CODE_RIGHT_CARET_ANCHOR = '\u200B';
+const CELL_INLINE_FORMATS = new Map([
+    ['bold', { tag: 'strong', tags: new Set(['STRONG', 'B']) }],
+    ['italic', { tag: 'em', tags: new Set(['EM', 'I']) }],
+    ['strikethrough', { tag: 'del', tags: new Set(['DEL', 'S', 'STRIKE']) }],
+    ['inlinecode', { tag: 'code', tags: new Set(['CODE']) }]
+]);
 
 export class TableManager {
     constructor(editor, domUtils, stateManager, options = {}) {
@@ -1469,6 +1475,163 @@ export class TableManager {
 
     hasActiveTableSelection() {
         return this.hasCellSelection() || this.hasStructureSelection();
+    }
+
+    _getSelectedFormattingCells() {
+        // The visible highlights are authoritative; selectedCells may still
+        // reference an earlier selection or detached table after an update.
+        let cells = this._getDomSelectedCells();
+        if (!cells.length) {
+            const selection = this._normalizeStructureSelection();
+            if (selection && this.editor.contains(selection.table)) {
+                cells = this._collectStructureCells(selection.table, selection.type, selection.index);
+            }
+        }
+        return [...new Set(cells)].filter(cell =>
+            /^(TD|TH)$/.test(cell.tagName) && this.editor.contains(cell) &&
+            this.editor.contains(cell.closest('table')));
+    }
+
+    _isCellFormattingExcludedElement(element) {
+        return !!element?.matches?.(
+            'pre, [contenteditable="false"], [data-exclude-from-markdown="true"], [aria-hidden="true"], ' +
+            '[data-mdw-opaque-source], .mdw-opaque-source, [data-mdw-math], ' +
+            '[data-mdw-footnote-ref], [data-mdw-footnote-backref]'
+        );
+    }
+
+    _getCellFormattingTextNodes(cell) {
+        for (let ancestor = cell; ancestor && ancestor !== this.editor; ancestor = ancestor.parentElement) {
+            if (this._isCellFormattingExcludedElement(ancestor)) return [];
+        }
+        const nodes = [];
+        const visit = node => {
+            if (node.nodeType === Node.TEXT_NODE) {
+                // Caret controls and empty-cell placeholders are not content.
+                const text = node.textContent || '';
+                if (text.replace(/[\u200B\u2060\uFEFF\u00A0\s]/g, '') !== '') nodes.push(node);
+            } else if (node.nodeType === Node.ELEMENT_NODE && !this._isCellFormattingExcludedElement(node)) {
+                Array.from(node.childNodes).forEach(visit);
+            }
+        };
+        Array.from(cell.childNodes).forEach(visit);
+        return nodes;
+    }
+
+    _getCellFormatAncestors(node, cell, format) {
+        const ancestors = [];
+        for (let element = node.parentElement; element && element !== cell; element = element.parentElement) {
+            if (format.tags.has(element.tagName)) ancestors.push(element);
+        }
+        return ancestors;
+    }
+
+    _mergeAdjacentCellFormats(parent) {
+        if (this._isCellFormattingExcludedElement(parent)) return;
+        for (const child of Array.from(parent.children)) this._mergeAdjacentCellFormats(child);
+        let mark = parent.firstChild;
+        while (mark) {
+            const format = !this._isCellFormattingExcludedElement(mark) &&
+                Array.from(CELL_INLINE_FORMATS.values()).find(item => item.tags.has(mark.tagName));
+            if (!format) {
+                mark = mark.nextSibling;
+                continue;
+            }
+            let next = mark.nextSibling;
+            while (next?.nodeType === Node.TEXT_NODE && next.textContent === '') {
+                const empty = next;
+                next = next.nextSibling;
+                empty.remove();
+            }
+            if (next && format.tags.has(next.tagName) && !this._isCellFormattingExcludedElement(next)) {
+                // Prefer an existing mark's metadata over an unadorned wrapper.
+                if (!mark.attributes.length && next.attributes.length) {
+                    while (mark.lastChild) next.insertBefore(mark.lastChild, next.firstChild);
+                    mark.remove();
+                    mark = next;
+                } else {
+                    while (next.firstChild) mark.appendChild(next.firstChild);
+                    next.remove();
+                }
+            } else {
+                mark = mark.nextSibling;
+            }
+        }
+    }
+
+    getSelectedCellFormatState(command) {
+        const format = CELL_INLINE_FORMATS.get(command);
+        if (!format) return null;
+        const cells = this._getSelectedFormattingCells();
+        if (!cells.length) return null;
+        const nodes = cells.flatMap(cell => this._getCellFormattingTextNodes(cell).map(node => ({ node, cell })));
+        return nodes.length > 0 && nodes.every(({ node, cell }) =>
+            this._getCellFormatAncestors(node, cell, format).length > 0);
+    }
+
+    formatSelectedCells(command) {
+        const format = CELL_INLINE_FORMATS.get(command);
+        if (!format) return false;
+        const cells = this._getSelectedFormattingCells();
+        if (!cells.length) return false;
+        const nodes = cells.flatMap(cell => this._getCellFormattingTextNodes(cell).map(node => ({ node, cell })));
+        // Consume an empty-cell command without creating invisible formatting
+        // wrappers or a redundant undo checkpoint.
+        if (!nodes.length) return true;
+        const remove = nodes.every(({ node, cell }) =>
+            this._getCellFormatAncestors(node, cell, format).length > 0);
+
+        this.stateManager.saveState();
+        if (remove) {
+            const marks = new Set(nodes.flatMap(({ node, cell }) => this._getCellFormatAncestors(node, cell, format)));
+            // Preserve inherited formatting on atomic, non-editable content
+            // while removing it from the selected cells' editable text.
+            const protectExcluded = node => {
+                if (node.nodeType !== Node.ELEMENT_NODE) return;
+                if (this._isCellFormattingExcludedElement(node)) {
+                    if (node.hasAttribute('data-inline-code-left-caret-anchor')) {
+                        if (command === 'inlinecode' && marks.has(node.parentElement)) node.remove();
+                        return;
+                    }
+                    if (node.getAttribute('data-exclude-from-markdown') === 'true') return;
+                    let parent = node.parentElement;
+                    while (parent && !marks.has(parent)) parent = parent.parentElement;
+                    if (parent) {
+                        const retainedMark = document.createElement(format.tag);
+                        node.replaceWith(retainedMark);
+                        retainedMark.appendChild(node);
+                    }
+                    return;
+                }
+                Array.from(node.childNodes).forEach(protectExcluded);
+            };
+            cells.forEach(cell => Array.from(cell.childNodes).forEach(protectExcluded));
+            marks.forEach(mark => {
+                while (mark.firstChild) mark.parentNode.insertBefore(mark.firstChild, mark);
+                mark.remove();
+            });
+        } else {
+            nodes.forEach(({ node, cell }) => {
+                if (this._getCellFormatAncestors(node, cell, format).length) return;
+                let target = node;
+                // Code and escaped characters serialize their text literally.
+                // Put the mark outside those nodes so it survives Markdown save.
+                for (let parent = node.parentElement; parent && parent !== cell; parent = parent.parentElement) {
+                    if (parent.hasAttribute('data-mdw-escaped-character') ||
+                        (command !== 'inlinecode' && parent.tagName === 'CODE')) target = parent;
+                }
+                const mark = document.createElement(format.tag);
+                target.replaceWith(mark);
+                mark.appendChild(target);
+            });
+        }
+        // Adjacent delimiters such as **one****two** would become literal
+        // Markdown characters. Merge equal inline marks before serialization.
+        cells.forEach(cell => this._mergeAdjacentCellFormats(cell));
+        this.domUtils.ensureInlineCodeSpaces?.();
+        if (this.notifyChange) this.notifyChange();
+        this.stateManager.commitStateAfterChange?.();
+        return true;
     }
 
     clearCellSelection() {
