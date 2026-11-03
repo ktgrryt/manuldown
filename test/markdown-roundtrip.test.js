@@ -270,6 +270,108 @@ test('new literal punctuation remains literal instead of becoming Markdown struc
     }
 });
 
+for (const [tag, renderedTag] of [['strong', 'strong'], ['b', 'strong'], ['em', 'em'], ['i', 'em']]) {
+    test(`${tag} uses readable punctuation boundaries without changing visible text on reload`, () => {
+        const provider = new MarkdownEditorProvider({});
+        for (const [before, selected, after] of [
+            ['前', '「文字」', '後'], ['前', '「文字', '後'], ['前', '文字」', '後'],
+            ['前', '【必須】', '後'], ['前', '『文字』', '後'], ['a', '(text)', 'b'],
+            ['前', '[文字]', '後'], ['前', '`文字`', '後'], ['前', '「', '後'],
+            ['😀', '「文字」', '😺'], ['', '「文字」', ''], ['前 ', '「文字」', ' 後'],
+            ['、', '「文字」', '。'], ['前', 'plain', '後'], ['前', '😀文字', '後']
+        ]) {
+            const escape = text => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            const html = `<p>${escape(before)}<${tag}>${escape(selected)}</${tag}>${escape(after)}</p>`;
+            const source = `${before}${selected}${after}\n`;
+            const markdown = provider.htmlToMarkdown(html, createTextDocument(source));
+            const rendered = require('@mixmark-io/domino').createWindow(
+                new MarkdownDocument(createTextDocument(markdown)).toHtml()
+            ).document;
+            assert.equal(rendered.querySelector('p').textContent, before + selected + after, markdown);
+            const punctuation = /[\p{P}$+<=>`^|~]/u;
+            const ordinary = text => !!text && !/\s/u.test(text) && !punctuation.test(text);
+            const unsafe = (punctuation.test(Array.from(selected)[0]) && ordinary(Array.from(before).at(-1))) ||
+                (punctuation.test(Array.from(selected).at(-1)) && ordinary(Array.from(after)[0]));
+            const expected = unsafe
+                ? selected.replace(/^[\s\p{P}$+<=>`^|~]+|[\s\p{P}$+<=>`^|~]+$/gu, '') : selected;
+            const formatted = selected.startsWith('`') && unsafe ? '' : expected;
+            assert.equal(rendered.querySelector(renderedTag)?.textContent || '', formatted, markdown);
+            assert.doesNotMatch(markdown, /MDW|&#\d+;|<(?:strong|b|em|i)\b/);
+
+            const reloaded = provider.htmlToMarkdown(rendered.body.innerHTML, createTextDocument(markdown));
+            assert.equal(reloaded, markdown, 'Reload must keep the readable boundary spelling');
+        }
+    });
+}
+
+test('punctuation emphasis keeps nested formatting, links and adjacent code after reload', () => {
+    const cases = [
+        ['<p>外<strong>前<em>「文字」</em>後</strong>文</p>', '外前「文字」後文', 'strong em', '文字'],
+        ['<p>前<strong><em>「文字」</em></strong>後</p>', '前「文字」後', 'strong', '文字'],
+        ['<p>X<em>a</em><strong>「b」</strong>Y</p>', 'Xa「b」Y', 'strong', 'b'],
+        ['<p>前<strong><a href="./note.md">「文字」</a></strong>後</p>', '前「文字」後', 'a', '「文字」'],
+        ['<p><code>前</code><strong>「文字」</strong><code>後</code></p>', '前「文字」後', 'strong', '「文字」']
+    ];
+    for (const [html, text, selector, selected] of cases) {
+        const markdown = new MarkdownEditorProvider({}).htmlToMarkdown(html, createTextDocument(''));
+        const root = require('@mixmark-io/domino').createWindow(new MarkdownDocument(createTextDocument(markdown)).toHtml()).document;
+        assert.equal(root.querySelector('p').textContent, text, markdown);
+        assert.equal(root.querySelector(selector)?.textContent, selected, markdown);
+        if (html.includes('<code>')) {
+            assert.deepEqual(Array.from(root.querySelectorAll('code')).map(code => code.textContent), ['前', '後']);
+        }
+        if (html.includes('<a ')) assert.equal(root.querySelector('a').getAttribute('href'), './note.md');
+        if (html.includes('<em>a</em>')) assert.equal(root.querySelector('em')?.textContent, 'a');
+        if (html.includes('<strong><em>')) assert.equal(root.querySelector('em')?.textContent, '文字');
+        assert.doesNotMatch(markdown, /&#\d+;/);
+    }
+});
+
+test('punctuation bold survives editing in lists and table cells and copying as Markdown', () => {
+    const provider = new MarkdownEditorProvider({});
+    const fragments = [
+        '<ul><li>前<strong>「文字」</strong>後</li></ul>',
+        '<table><thead><tr><th>Header</th></tr></thead><tbody><tr><td>前<strong>「文字」</strong>後</td></tr></tbody></table>'
+    ];
+    for (const html of fragments) {
+        const markdown = provider.htmlToMarkdown(html, createTextDocument(''));
+        const rendered = require('@mixmark-io/domino').createWindow(new MarkdownDocument(createTextDocument(markdown)).toHtml()).document;
+        const element = rendered.querySelector(html.startsWith('<ul>') ? 'li' : 'td');
+        assert.equal(element.textContent, '前「文字」後', markdown);
+        assert.equal(element.querySelector('strong')?.textContent, '文字', markdown);
+        const edited = provider.htmlToMarkdown(rendered.body.innerHTML + '<p>追記</p>', createTextDocument(markdown));
+        const reloaded = require('@mixmark-io/domino').createWindow(convert(edited).html).document;
+        assert.equal(reloaded.querySelector('strong')?.textContent, '文字', edited);
+    }
+    const clipboard = provider.htmlToClipboardMarkdown('<p>前<strong>「文字」</strong>後</p>', createTextDocument(''));
+    assert.equal(require('@mixmark-io/domino').createWindow(convert(clipboard).html).document.querySelector('strong')?.textContent, '文字');
+});
+
+test('fixing new punctuation emphasis leaves code and preserved literal Markdown untouched', () => {
+    const source = '前「文字」後\n\n`前**「literal」**後`\n\n```text\n前**「literal」**後\n```\n';
+    const document = createTextDocument(source);
+    const root = require('@mixmark-io/domino').createWindow(new MarkdownDocument(document).toHtml()).document;
+    root.querySelector('p').innerHTML = '前<strong>「文字」</strong>後';
+    const output = new MarkdownEditorProvider({}).htmlToMarkdown(root.body.innerHTML, document);
+    assert.ok(output.includes('`前**「literal」**後`'));
+    assert.ok(output.includes('```text\n前**「literal」**後\n```'));
+    const rendered = require('@mixmark-io/domino').createWindow(convert(output).html).document;
+    assert.equal(rendered.querySelector('strong')?.textContent, '文字');
+    assert.deepEqual(Array.from(rendered.querySelectorAll('code')).map(code => code.textContent),
+        ['前**「literal」**後', '前**「literal」**後\n']);
+});
+
+test('bracket bold saves readable Japanese without encoding neighbors or deleting literal stars', () => {
+    const provider = new MarkdownEditorProvider({});
+    assert.equal(provider.htmlToMarkdown('<p>これは<strong>「テスト」</strong>です</p>', createTextDocument('')),
+        'これは「**テスト**」です\n');
+    const markdown = provider.htmlToMarkdown('<p>これは<strong>**「テスト」**</strong>です</p>', createTextDocument(''));
+    assert.doesNotMatch(markdown, /&#\d+;/);
+    const root = require('@mixmark-io/domino').createWindow(convert(markdown).html).document;
+    assert.equal(root.querySelector('p').textContent, 'これは**「テスト」**です');
+    assert.equal(root.querySelector('strong')?.textContent, 'テスト');
+});
+
 test('new images escape alt brackets, backslashes and quoted titles', () => {
     const html = '<p><img src="./x.png" alt="a]b\\c[d" title="a &quot;quote&quot;"></p>';
     const output = new MarkdownEditorProvider({}).htmlToMarkdown(html, createTextDocument(''));

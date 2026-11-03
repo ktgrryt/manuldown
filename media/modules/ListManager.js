@@ -5,9 +5,14 @@
  */
 
 export class ListManager {
-    constructor(editor, domUtils) {
+    constructor(editor, domUtils, options = {}) {
         this.editor = editor;
         this.domUtils = domUtils;
+        // The editor flushes pending placements before native input starts, so
+        // a list restore must share that queue rather than move an IME caret.
+        this.deferCaretPlacement = typeof options.deferCaretPlacement === 'function'
+            ? options.deferCaretPlacement
+            : (place) => requestAnimationFrame(place);
     }
 
     _isListElement(element) {
@@ -125,7 +130,7 @@ export class ListManager {
     }
 
     _restoreCursorInMovedListItem(listItem, cursorNode, cursorOffset, fallbackOffset = 0) {
-        requestAnimationFrame(() => {
+        this.deferCaretPlacement(() => {
             this.editor.focus();
 
             const selection = window.getSelection();
@@ -385,7 +390,7 @@ export class ListManager {
                 }
                 
                 // カーソル位置とフォーカスを復元
-                requestAnimationFrame(() => {
+                this.deferCaretPlacement(() => {
                     this.editor.focus();
                     
                     const selection = window.getSelection();
@@ -572,7 +577,7 @@ export class ListManager {
             
             // カーソル位置とフォーカスを復元
             // DOMが更新されるまで待つためにrequestAnimationFrameを使用
-            requestAnimationFrame(() => {
+            this.deferCaretPlacement(() => {
                 // エディタにフォーカスを確保
                 this.editor.focus();
                 

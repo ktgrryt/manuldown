@@ -24,6 +24,7 @@ export class StateManager {
         this.isRestoringState = false;
         this.saveStateTimeout = null;
         this.historyRestoreTimeout = null;
+        this.pendingHistoryRestore = null;
         this.pendingSaveSelection = null;
         this.pendingChangeSelection = null;
     }
@@ -385,17 +386,37 @@ export class StateManager {
                 if (this.historyRestoreTimeout) {
                     clearTimeout(this.historyRestoreTimeout);
                 }
-                this.historyRestoreTimeout = setTimeout(() => {
-                    this.historyRestoreTimeout = null;
+                const pendingRestore = () => {
                     restoreFocusAndSelection();
                     if (afterSelectionRestoreCallback) {
                         // Reveal only after the final focus/selection pass. Calling it
                         // for both passes lets two layout phases fight over scrollTop.
                         afterSelectionRestoreCallback(preservedScrollTop);
                     }
+                };
+                this.pendingHistoryRestore = pendingRestore;
+                this.historyRestoreTimeout = setTimeout(() => {
+                    if (this.pendingHistoryRestore === pendingRestore) {
+                        this.flushPendingHistoryRestore();
+                    }
                 }, 0);
             }
         }
+    }
+
+    /** Finish the last history caret restore before a new native edit starts. */
+    flushPendingHistoryRestore() {
+        const pendingRestore = this.pendingHistoryRestore;
+        if (!pendingRestore) return false;
+        this.pendingHistoryRestore = null;
+        if (this.historyRestoreTimeout) {
+            clearTimeout(this.historyRestoreTimeout);
+            this.historyRestoreTimeout = null;
+        }
+        // Changing selection after compositionstart commits the first IME
+        // character, so editor input entry points run this final pass first.
+        pendingRestore();
+        return true;
     }
 
     mapHistorySelectionToCurrentDom(primarySelection, fallbackSelection) {
@@ -423,6 +444,7 @@ export class StateManager {
             clearTimeout(this.historyRestoreTimeout);
             this.historyRestoreTimeout = null;
         }
+        this.pendingHistoryRestore = null;
         const pendingSelection = this.takePendingSaveSelection();
         const liveSelection = this.saveSelection();
         const latestState = this.undoStack[this.undoStack.length - 1];
@@ -641,6 +663,7 @@ export class StateManager {
             clearTimeout(this.historyRestoreTimeout);
             this.historyRestoreTimeout = null;
         }
+        this.pendingHistoryRestore = null;
         this.pendingSaveSelection = null;
         this.pendingChangeSelection = null;
         this.undoStack = [];

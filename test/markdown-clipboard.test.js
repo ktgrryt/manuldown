@@ -39,11 +39,13 @@ function shortcutFixture({ editor, document, window, copy }, isMac = true) {
         const footnoteManager = null;
         let markdownCopyEditorFocused = null;
         let markdownCopyContextHtml = '';
+        let clipboardCopySequence = 0;
         ${functions}
         return {
             isMarkdownCopyEditorFocused, syncMarkdownCopyFocus, handleMarkdownCopyShortcutKeydown,
             receive(message) { switch(message.type) { ${editorSource.slice(caseStart, caseEnd)} } },
-            setComposing(value) { isComposing = value; }
+            setComposing(value) { isComposing = value; },
+            getCopySequence() { return clipboardCopySequence; }
         };
     `)(editor, document, window, { postMessage: message => messages.push(message) }, (_editor, range) => copy(range));
     return {
@@ -195,6 +197,7 @@ test('the context command copies its snapshot even after the native menu clears 
         const isUpdating = false;
         const editorLoadFailed = false;
         let markdownCopyContextHtml = '<p><strong>snapshot</strong></p>';
+        let clipboardCopySequence = 0;
         switch (message.type) { ${editorSource.slice(start, end)} }
         return markdownCopyContextHtml;
     `);
@@ -286,6 +289,7 @@ for (const isMac of [true, false]) {
             }, { postMessageToActiveEditor: message => shortcut.receive(message) });
             executeCommand(binding.args);
             assert.deepEqual(shortcut.messages, [{ type: 'copyMarkdown', html: '<p><strong>selected</strong></p>' }]);
+            assert.equal(shortcut.getCopySequence(), 1, 'Markdown copy cancels an older pending image copy');
 
             for (const properties of [
                 { key: 'c', ...modifier },

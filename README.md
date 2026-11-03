@@ -75,7 +75,9 @@ Pasting an absolute local path directly over selected text also creates a relati
 
 Place the caret inside a link and press `Cmd+Enter` on macOS or `Ctrl+Enter` on Windows/Linux to open its URL, workspace file, or heading in the current document. `Cmd+Click` / `Ctrl+Click` also opens links.
 
-Select content, right-click, and choose **Copy as Markdown**, or press `Cmd+Shift+C` on macOS / `Ctrl+Shift+C` on Windows/Linux while the editor body has focus. This copies the selection as Markdown text, including headings, formatting, links, lists, tables, code, math, and referenced footnotes. The shortcut does nothing without a selection. Normal copy keeps its existing behavior.
+Select content, right-click, and choose **Copy as Markdown**, or press `Cmd+Shift+C` on macOS / `Ctrl+Shift+C` on Windows/Linux while the editor body has focus. This copies the selection as Markdown text, including headings, formatting, links, lists, tables, code, math, images, and referenced footnotes. The shortcut does nothing without a selection.
+
+Normal copy (`Cmd+C` / `Ctrl+C`, or **Copy** in the context menu) copies a selected image as PNG. A selection containing text and/or multiple images copies rich HTML with embedded images in their original order; the destination app must support pasting HTML with images. Plain-text destinations receive the text and image descriptions. Image-only destinations do not receive multiple separate attachments. Images use their original pixel dimensions; animated images copy as a still PNG. Blocked or unavailable images, remote servers that disallow cross-origin access, and clipboard permission failures fall back to text and image references with a warning. Cut retains its existing behavior.
 
 ### Math
 

@@ -1720,6 +1720,54 @@ export class CursorManager {
         return true;
     }
 
+    prepareBlockBoundaryComposition(selection = window.getSelection()) {
+        if (!selection?.rangeCount || !selection.isCollapsed) return false;
+        const range = selection.getRangeAt(0);
+        const isTextBlock = (node) => node?.nodeType === Node.ELEMENT_NODE &&
+            /^(?:P|DIV|H[1-6])$/.test(node.tagName) &&
+            node.getAttribute('contenteditable') !== 'false';
+        let target = range.startContainer;
+        let offset = range.startOffset;
+        if (target === this.editor) {
+            const children = Array.from(this.editor.childNodes);
+            const isEditorUi = (node) => node?.nodeType === Node.ELEMENT_NODE &&
+                node.getAttribute('data-exclude-from-markdown') === 'true';
+            let before = offset - 1;
+            let after = offset;
+            while (before >= 0 && isEditorUi(children[before])) before--;
+            while (after < children.length && isEditorUi(children[after])) after++;
+
+            const previous = children[before];
+            target = previous || children[after];
+            if (target?.nodeType === Node.TEXT_NODE) {
+                offset = previous ? target.textContent.length : 0;
+            } else if (isTextBlock(target)) {
+                offset = previous ? target.childNodes.length : 0;
+            } else {
+                // Code blocks, tables and other atomic content have their own
+                // gap caret handling. Keep an outside caret outside those blocks.
+                return false;
+            }
+        } else if (!isTextBlock(target) || !this.editor.contains(target) ||
+            offset !== target.childNodes.length || target.lastChild?.nodeName !== 'BR') {
+            return false;
+        }
+
+        // The last BR is the browser's empty-line placeholder. Composing after
+        // it also abandons the first character; composing before it keeps the
+        // same empty line, including paragraphs containing several soft breaks.
+        if (isTextBlock(target) && offset === target.childNodes.length &&
+            target.lastChild?.nodeName === 'BR') {
+            offset--;
+        }
+
+        // Chromium can abandon the first IME character at a root/block edge,
+        // even though the same caret inside the paragraph composes normally.
+        // Resolve the equivalent position before the browser inserts that text.
+        this._placeCollapsedCaret(selection, target, offset);
+        return true;
+    }
+
     prepareInlineCodeComposition(selection = window.getSelection()) {
         if (!selection?.rangeCount || !selection.isCollapsed) return false;
         const range = selection.getRangeAt(0);

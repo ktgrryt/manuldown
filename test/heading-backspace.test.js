@@ -81,7 +81,7 @@ async function createFixture(html, onNativeDelete = () => {}) {
         'getFirstDirectTextNode', 'handleBackspaceAfterMathBlock', 'getClosestBlockElement',
         'isAtBlockStartForRange'
     ];
-    const backspace = new Function('window', 'editor', 'domUtils', 'notifyChange', 'requestAnimationFrame',
+    const backspace = new Function('window', 'editor', 'domUtils', 'notifyChange', 'deferCaretPlacement',
         'cursorManager', 'codeBlockManager', 'stateManager',
         `${names.map(extractFunction).join('\n')}\nreturn handleBackspace;`
     )(window, editor, new DOMUtils(editor), () => changes++, () => {},

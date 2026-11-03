@@ -12,6 +12,7 @@ import {
 } from '../utils/workspaceLinks';
 import { MAX_EDITABLE_FOOTNOTE_DEPTH, decodeFootnoteLabel, parseFootnoteDefinition, serializeFootnoteDefinition } from './Footnotes';
 import { MarkdownSourceBlock, preserveMarkdownSource } from './MarkdownSource';
+import { EmphasisBoundarySerializer } from './Emphasis';
 import TurndownService from 'turndown';
 const { createWindow } = require('@mixmark-io/domino');
 const { gfm } = require('turndown-plugin-gfm');
@@ -74,6 +75,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     private currentMathBlockFenceInfo: string | null = null;
     // Text of the document being converted by htmlToMarkdown (see escapeHtmlLikeText).
     private currentConversionDocumentText: string | null = null;
+    private currentEmphasisSerializer: EmphasisBoundarySerializer | null = null;
     private sourceCache: { text: string; html: string; blocks?: MarkdownSourceBlock[] } | undefined;
     private readonly workspaceLinkPicker = new WorkspaceLinkPicker();
     public explicitlyRequested = false;
@@ -204,6 +206,21 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         });
 
         const provider = this;
+        for (const [name, tags, delimiter] of [
+            ['strong', ['strong', 'b'], '**'],
+            ['emphasis', ['em', 'i'], '*'],
+        ] as const) {
+            this.turndownService.addRule(name, {
+                filter: [...tags],
+                replacement: (content: string) => {
+                    if (!content.trim()) {
+                        return '';
+                    }
+                    return provider.currentEmphasisSerializer?.wrap(content, delimiter) ??
+                        delimiter + content + delimiter;
+                }
+            });
+        }
         this.turndownService.addRule('escapedCharacter', {
             filter: (node: any) => node.nodeName === 'SPAN' &&
                 node.hasAttribute('data-mdw-escaped-character') && /^[`*_{}\[\]()#+.!|>~-]$/.test(node.textContent),
@@ -1776,6 +1793,11 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                             }
                         }
                         break;
+                    case 'imageCopyFailed':
+                        void vscode.window.showWarningMessage(
+                            'Could not copy image data. Text and image references were copied instead. Remote images must allow cross-origin access.'
+                        );
+                        break;
                     case 'writeClipboard':
                         {
                             const requestId = typeof message.requestId === 'string' ? message.requestId : '';
@@ -3114,12 +3136,15 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         const previousEmptyListItemMarker = this.currentEmptyListItemMarker;
         const previousMathBlockFenceInfo = this.currentMathBlockFenceInfo;
         const previousConversionDocumentText = this.currentConversionDocumentText;
+        const previousEmphasisSerializer = this.currentEmphasisSerializer;
+        const emphasisSerializer = new EmphasisBoundarySerializer(`${placeholderNamespace}EMPHASIS`);
         // The conversion is synchronous, so the document cannot change while it
         // runs. Read its text once; getText() joins every line on each call.
         const documentText = document.getText();
         this.currentEmptyListItemMarker = emptyListItemMarker;
         this.currentMathBlockFenceInfo = mathBlockFenceInfo;
         this.currentConversionDocumentText = documentText;
+        this.currentEmphasisSerializer = emphasisSerializer;
         try {
             const unorderedListMarker = this.getPreferredUnorderedListMarker(documentText);
             const escapedUnorderedListMarker = this.escapeRegExp(unorderedListMarker);
@@ -3545,10 +3570,10 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     mathBlockFenceInfo
                 ))
             ));
-            const restoredMarkdown = restoredContent.replace(
+            const restoredMarkdown = emphasisSerializer.restore(restoredContent.replace(
                 new RegExp(`${this.escapeRegExp(zeroWidthNamespace)}(200b|2060|feff)END`, 'g'),
                 (_match, characterCode) => String.fromCharCode(parseInt(characterCode, 16))
-            );
+            ));
             this.assertNoLeakedPlaceholderMarkers(restoredMarkdown, documentText);
             return restoredMarkdown;
         } catch (error) {
@@ -3558,6 +3583,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             this.currentEmptyListItemMarker = previousEmptyListItemMarker;
             this.currentMathBlockFenceInfo = previousMathBlockFenceInfo;
             this.currentConversionDocumentText = previousConversionDocumentText;
+            this.currentEmphasisSerializer = previousEmphasisSerializer;
         }
     }
 

@@ -11,6 +11,7 @@ import { TableManager } from './modules/TableManager.js';
 import { SearchManager } from './modules/SearchManager.js';
 import { FootnoteManager } from './modules/FootnoteManager.js';
 import { createMarkdownClipboardHtml } from './modules/MarkdownClipboard.js';
+import { createImageClipboardSnapshot, writeImageClipboard } from './modules/ImageClipboard.js';
 import { InsertCommandMenu, isInsertMenuShortcut } from './modules/InsertCommandMenu.js';
 import { MathManager } from './modules/MathManager.js';
 import { CompositionUpdateGate } from './modules/CompositionUpdateGate.js';
@@ -100,6 +101,7 @@ const {
     let shouldApplyInlineLinkResponse = () => true;
     let receiveWorkspaceLinkSuggestions = () => false;
     let trustedClipboardPayload = null;
+    let clipboardCopySequence = 0;
     let markdownCopyContextHtml = '';
     let markdownCopyEditorFocused = null;
     let handleHostMessage = () => {};
@@ -1651,7 +1653,7 @@ const {
             footnoteManager.moveAcrossReference(selection, direction) ||
             mathManager.moveAcrossFormula(selection, direction)
     });
-    const listManager = new ListManager(editor, domUtils);
+    const listManager = new ListManager(editor, domUtils, { deferCaretPlacement });
     const markdownConverter = new MarkdownConverter(editor, domUtils, {
         applyImageSourcePolicy
     });
@@ -2279,7 +2281,7 @@ const {
         }
 
         placeSelectionAtEmptyParagraphStart(paragraph, selection);
-        requestAnimationFrame(() => {
+        deferCaretPlacement(() => {
             placeSelectionAtEmptyParagraphStart(paragraph, window.getSelection());
             focusEditorAndRevealCaret();
             updateListItemClasses();
@@ -3192,6 +3194,14 @@ const {
 
     function getTrustedClipboardPayload(html, plainText) {
         const candidate = trustedClipboardPayload;
+        // Chromium's native paste may add html/head/body wrappers inside our
+        // markers, even though Clipboard.write() received a fragment. Compare
+        // an inert, parsed fragment to the already serialized local snapshot so
+        // these wrappers do not discard image provenance. All actual content
+        // and attributes must still match exactly.
+        const template = document.createElement('template');
+        template.innerHTML = html;
+        html = template.innerHTML;
         if (
             !candidate ||
             Date.now() - candidate.createdAt > TRUSTED_CLIPBOARD_PAYLOAD_MAX_AGE_MS ||
@@ -5118,7 +5128,7 @@ const {
         tableManager._insertNodeAsBlock(range, wrapper);
         tableManager.wrapTables();
 
-        requestAnimationFrame(() => {
+        deferCaretPlacement(() => {
             const firstCell = wrapper.querySelector('td, th');
             if (firstCell) {
                 tableManager._setCursorToCellStart(firstCell);
@@ -5180,7 +5190,7 @@ const {
 
         tableManager._insertNodeAsBlock(range, blockquote);
 
-        requestAnimationFrame(() => {
+        deferCaretPlacement(() => {
             const sel = window.getSelection();
             if (!sel) return;
             placeCollapsedCaret(sel, p, 0);
@@ -5214,7 +5224,7 @@ const {
             block.parentNode.insertBefore(blockquote, block);
             blockquote.appendChild(block);
 
-            requestAnimationFrame(() => {
+            deferCaretPlacement(() => {
                 const sel = window.getSelection();
                 if (!sel) return;
                 const newRange = document.createRange();
@@ -5252,7 +5262,7 @@ const {
                 }
                 blockquote.appendChild(paragraph);
 
-                requestAnimationFrame(() => {
+                deferCaretPlacement(() => {
                     const sel = window.getSelection();
                     if (!sel) return;
                     const newRange = document.createRange();
@@ -5382,7 +5392,7 @@ const {
         appendFragmentToBlockquote(blockquote, fragment);
         tableManager._insertNodeAsBlock(quoteRange, blockquote);
 
-        requestAnimationFrame(() => {
+        deferCaretPlacement(() => {
             const sel = window.getSelection();
             if (!sel) return;
             const newRange = document.createRange();
@@ -5479,7 +5489,7 @@ const {
         const pre = createMathBlock();
         tableManager._insertNodeAsBlock(range, pre);
 
-        requestAnimationFrame(() => {
+        deferCaretPlacement(() => {
             const sel = window.getSelection();
             if (!sel) return;
             placeCaretAtCodeBlockStart(pre.querySelector('code'), sel);
@@ -5505,7 +5515,7 @@ const {
 
         tableManager._insertNodeAsBlock(range, pre);
 
-        requestAnimationFrame(() => {
+        deferCaretPlacement(() => {
             const label = pre.querySelector('.code-block-language');
             if (label && startEditingCodeBlockLanguageLabel(label)) {
                 notifyChange();
@@ -5664,7 +5674,7 @@ const {
                             : (getFirstDirectTextNodeAfterCheckbox(currentBlock) || getFirstDirectTextNode(currentBlock));
                         const offset = range.startOffset;
                         listManager.outdentListItem(currentBlock, textNode, offset);
-                        requestAnimationFrame(() => {
+                        deferCaretPlacement(() => {
                             updateListItemClasses();
                             correctCheckboxCursorPosition();
                         });
@@ -5716,7 +5726,7 @@ const {
                             parentList.replaceWith(p);
                         }
 
-                        requestAnimationFrame(() => {
+                        deferCaretPlacement(() => {
                             const sel = window.getSelection();
                             if (!sel) return;
                             if (typeof restoredParagraphOffset === 'number') {
@@ -5790,7 +5800,7 @@ const {
                         ensureCheckboxLeadingSpace(currentBlock);
                     }
 
-                    requestAnimationFrame(() => {
+                    deferCaretPlacement(() => {
                         const sel = window.getSelection();
                         if (!sel) return;
                         if (
@@ -5801,9 +5811,9 @@ const {
                             updateListItemClasses();
                             notifyChange();
                             pendingSlashCheckboxCaretListItem = currentBlock;
-                            setTimeout(() => {
+                            deferCaretPlacement(() => {
                                 correctCheckboxCursorPosition();
-                            }, 0);
+                            });
                             return;
                         }
 
@@ -5835,9 +5845,9 @@ const {
                         updateListItemClasses();
                         notifyChange();
                         pendingSlashCheckboxCaretListItem = currentBlock;
-                        setTimeout(() => {
+                        deferCaretPlacement(() => {
                             correctCheckboxCursorPosition();
-                        }, 0);
+                        });
                     });
                 }
                 if (hadOnlyPlaceholderBreaks) {
@@ -5912,7 +5922,7 @@ const {
             }
         }
 
-        requestAnimationFrame(() => {
+        deferCaretPlacement(() => {
             const sel = window.getSelection();
             if (!sel) return;
             const newRange = document.createRange();
@@ -5943,9 +5953,9 @@ const {
             updateListItemClasses();
             notifyChange();
             pendingSlashCheckboxCaretListItem = li;
-            setTimeout(() => {
+            deferCaretPlacement(() => {
                 correctCheckboxCursorPosition();
-            }, 0);
+            });
         });
         if (hadOnlyPlaceholderBreaks) {
             cleanupPlaceholderArtifactsInCell(tableCellBoundary);
@@ -6477,6 +6487,7 @@ const {
     // チェックボックス行に入った場合のカーソル位置補正
     // チェックボックスが先頭にある場合のみ適用
     function correctCheckboxCursorPosition() {
+        if (isComposing || compositionUpdateGate.composing) return;
         const sel = window.getSelection();
         if (!sel || !sel.rangeCount || !sel.isCollapsed) return;
         const range = sel.getRangeAt(0);
@@ -7127,26 +7138,38 @@ const {
     // composition started there is committed when the deferred placement moves
     // the caret, so typing "moji" gave "mおじ". The next key, input or
     // composition runs the placement first instead.
-    let pendingCaretPlacement = null;
+    const pendingCaretPlacements = new Set();
+    let flushingCaretPlacements = false;
 
     function deferCaretPlacement(place) {
         const pending = { place, frame: 0 };
         pending.frame = requestAnimationFrame(() => {
-            if (pendingCaretPlacement === pending) {
-                pendingCaretPlacement = null;
-            }
+            // A flushed callback may already have been dequeued by the browser.
+            if (!pendingCaretPlacements.delete(pending)) return;
             place();
         });
-        pendingCaretPlacement = pending;
+        pendingCaretPlacements.add(pending);
     }
 
     function flushPendingCaretPlacement() {
-        const pending = pendingCaretPlacement;
-        if (!pending) return false;
-        pendingCaretPlacement = null;
-        cancelAnimationFrame(pending.frame);
-        pending.place();
-        return true;
+        if (flushingCaretPlacements) return false;
+        flushingCaretPlacements = true;
+        let flushed = false;
+        try {
+            flushed = stateManager.flushPendingHistoryRestore();
+            // Each edit can enqueue structural cleanup as well as a caret move.
+            // Complete all of them in order before the browser owns an IME range.
+            while (pendingCaretPlacements.size > 0) {
+                const pending = pendingCaretPlacements.values().next().value;
+                pendingCaretPlacements.delete(pending);
+                cancelAnimationFrame(pending.frame);
+                pending.place();
+                flushed = true;
+            }
+        } finally {
+            flushingCaretPlacements = false;
+        }
+        return flushed;
     }
 
     function getCodeBlockCursorOffset(codeBlock, range) {
@@ -8457,9 +8480,9 @@ const {
                         cursorManager.setCodeBlockCursorOffset(codeBlock, selection, targetOffset);
 
                         if (codeBlock.className.match(/language-\w+/)) {
-                            setTimeout(() => {
+                            deferCaretPlacement(() => {
                                 codeBlockManager.highlightSingleCodeBlock(codeBlock);
-                            }, 0);
+                            });
                         }
 
                         notifyChange();
@@ -8556,7 +8579,7 @@ const {
         document.execCommand('delete', false, null);
 
         // Backspace後に空のリストアイテムをクリーンアップ
-        requestAnimationFrame(() => {
+        deferCaretPlacement(() => {
             const selection = window.getSelection();
             const currentRange = selection && selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
             let cursorContainer = currentRange ? currentRange.startContainer : null;
@@ -9084,10 +9107,10 @@ const {
         cursorManager.setCodeBlockCursorOffset(codeBlock, selection, targetOffset);
 
         if (codeBlock.className.match(/language-\w+/)) {
-            setTimeout(() => {
+            deferCaretPlacement(() => {
                 codeBlockManager.highlightSingleCodeBlock(codeBlock);
                 cursorManager.setCodeBlockCursorOffset(codeBlock, selection, targetOffset);
-            }, 0);
+            });
         }
 
         notifyChangeImmediate();
@@ -9760,14 +9783,14 @@ const {
             // Ensure editor maintains focus after Tab operation.
             // When a range was selected, restore the list-block selection.
             if (selectionRestoreTargets && selectionRestoreTargets.length > 0) {
-                requestAnimationFrame(() => {
+                deferCaretPlacement(() => {
                     editor.focus();
                     restoreRangeSelectionAroundListItems(selectionRestoreTargets);
                 });
             } else {
-                setTimeout(() => {
+                deferCaretPlacement(() => {
                     editor.focus();
-                }, 0);
+                });
             }
 
             notifyChange();
@@ -10040,7 +10063,7 @@ const {
                         // noop
                     }
                 }
-                requestAnimationFrame(() => {
+                deferCaretPlacement(() => {
                     try {
                         const didRestore = restoreListStructureAfterDelete(listStructureRestore);
                         const didPrune = pruneEmptyListItemsAfterRangeDelete(selectedListItems);
@@ -13512,7 +13535,7 @@ const {
 
         const scheduleEnsureExitFromPre = (pre) => {
             if (!pre) return;
-            setTimeout(() => {
+            deferCaretPlacement(() => {
                 const sel = window.getSelection();
                 if (!sel || !sel.rangeCount) return;
                 const r = sel.getRangeAt(0);
@@ -13520,7 +13543,7 @@ const {
                 if (stillInPre) {
                     exitEmptyCodeBlockDownFromPre(pre, sel, true, true);
                 }
-            }, 0);
+            });
         };
 
         let preBlock = domUtils.getParentElement(range.startContainer, 'PRE');
@@ -14187,7 +14210,7 @@ const {
                 e.preventDefault();
                 navigateFromHR(selectedHR, e.key === 'ArrowDown' ? 'down' : 'right');
                 // チェックボックス行に移動した場合、カーソル位置を補正
-                setTimeout(() => correctCheckboxCursorPosition(), 0);
+                deferCaretPlacement(correctCheckboxCursorPosition);
                 return true;
             }
         }
@@ -14359,7 +14382,7 @@ const {
                     if (moveDownFromEmptyCheckboxListItemOneStep(range, selection)) {
                         e.preventDefault();
                         e.stopPropagation();
-                        setTimeout(() => correctCheckboxCursorPosition(), 0);
+                        deferCaretPlacement(correctCheckboxCursorPosition);
                         return true;
                     }
                 }
@@ -14532,7 +14555,7 @@ const {
                     if (result && result.handled) {
                         e.preventDefault();
                         if (result.exited) {
-                            setTimeout(() => correctCheckboxCursorPosition(), 0);
+                            deferCaretPlacement(correctCheckboxCursorPosition);
                         }
                         return true;
                     }
@@ -14566,7 +14589,7 @@ const {
                             if (shouldExit) {
                                 e.preventDefault();
                                 if (exitEmptyCodeBlockDownFromPre(preBlock, selection, true, true)) {
-                                    setTimeout(() => correctCheckboxCursorPosition(), 0);
+                                    deferCaretPlacement(correctCheckboxCursorPosition);
                                     return true;
                                 }
                             }
@@ -14593,7 +14616,7 @@ const {
                             if (!inCode) {
                                 e.preventDefault();
                                 if (exitEmptyCodeBlockDownFromPre(preBlock, selection, true, true)) {
-                                    setTimeout(() => correctCheckboxCursorPosition(), 0);
+                                    deferCaretPlacement(correctCheckboxCursorPosition);
                                     return true;
                                 }
                             }
@@ -14613,7 +14636,7 @@ const {
                         if (lineInfo && !lineInfo.hasLineBelow) {
                             e.preventDefault();
                             if (exitEmptyCodeBlockDownFromPre(preBlock, selection, true, true)) {
-                                setTimeout(() => correctCheckboxCursorPosition(), 0);
+                                deferCaretPlacement(correctCheckboxCursorPosition);
                                 return true;
                             }
                         }
@@ -14638,7 +14661,7 @@ const {
                             } else {
                                 e.preventDefault();
                                 if (exitEmptyCodeBlockDownFromPre(preBlock, selection, true, true)) {
-                                    setTimeout(() => correctCheckboxCursorPosition(), 0);
+                                    deferCaretPlacement(correctCheckboxCursorPosition);
                                     return true;
                                 }
                             }
@@ -14654,7 +14677,7 @@ const {
                         const range = selection.getRangeAt(0);
                         if (exitCodeBlockDownIfAtEnd(range)) {
                             e.preventDefault();
-                            setTimeout(() => correctCheckboxCursorPosition(), 0);
+                            deferCaretPlacement(correctCheckboxCursorPosition);
                             return true;
                         }
                     }
@@ -14705,7 +14728,7 @@ const {
                                     e.preventDefault();
                                     if (exitEmptyCodeBlockDownFromPre(preBlock, selection, true, true)) {
                                         // チェックボックス行に入った場合、カーソル位置を補正
-                                        setTimeout(() => correctCheckboxCursorPosition(), 0);
+                                        deferCaretPlacement(correctCheckboxCursorPosition);
                                         return true;
                                     }
                                 }
@@ -14784,7 +14807,7 @@ const {
                 if (moveCursorDownFromInlineCodeOutsideLeftBoundary(rangeAfter, selectionAfter)) {
                     normalizeVerticalEntryAtInlineCode(beforeRange);
                     syncImageCaretEdgeIndicatorsNow(selectionAfter);
-                    setTimeout(() => correctCheckboxCursorPosition(), 0);
+                    deferCaretPlacement(correctCheckboxCursorPosition);
                     return true;
                 }
                 let preBlock = domUtils.getParentElement(rangeAfter.startContainer, 'PRE');
@@ -14810,7 +14833,7 @@ const {
                         if (shouldExit) {
                             if (exitEmptyCodeBlockDownFromPre(preBlock, selectionAfter, true, true)) {
                                 // チェックボックス行に入った場合、カーソル位置を補正
-                                setTimeout(() => correctCheckboxCursorPosition(), 0);
+                                deferCaretPlacement(correctCheckboxCursorPosition);
                                 syncImageCaretEdgeIndicatorsNow(selectionAfter);
                                 return true;
                             }
@@ -14830,7 +14853,7 @@ const {
                             const codeBlock = afterPreBlock.querySelector('code');
                             if (codeBlock) {
                                 if (exitEmptyCodeBlockDownFromPre(afterPreBlock, selectionAfter, true, true)) {
-                                    setTimeout(() => correctCheckboxCursorPosition(), 0);
+                                    deferCaretPlacement(correctCheckboxCursorPosition);
                                     syncImageCaretEdgeIndicatorsNow(selectionAfter);
                                     return true;
                                 }
@@ -14840,7 +14863,7 @@ const {
                 }
             }
             // チェックボックス行に入った場合、カーソル位置を補正
-            setTimeout(() => correctCheckboxCursorPosition(), 0);
+            deferCaretPlacement(correctCheckboxCursorPosition);
             syncImageCaretEdgeIndicatorsNow(selectionAfter);
             return true;
         }
@@ -15022,7 +15045,7 @@ const {
                         e.preventDefault();
                         e.stopPropagation();
                         notifyChange();
-                        setTimeout(() => correctCheckboxCursorPosition(), 0);
+                        deferCaretPlacement(correctCheckboxCursorPosition);
                         return true;
                     }
                 }
@@ -15089,10 +15112,10 @@ const {
                 return true;
             }
             // ブラウザのデフォルト動作後にチェックボックスのカーソル位置を補正
-            setTimeout(() => {
+            deferCaretPlacement(() => {
                 correctCheckboxCursorPosition();
                 syncImageCaretEdgeIndicatorsNow();
-            }, 0);
+            });
             return false;
         }
         return false;
@@ -16881,9 +16904,9 @@ const {
                 killCodeBlock.textContent = '\n';
                 cursorManager.setCodeBlockCursorOffset(killCodeBlock, selection, 0);
                 if (killCodeBlock.className.match(/language-\w+/)) {
-                    setTimeout(() => {
+                    deferCaretPlacement(() => {
                         codeBlockManager.highlightSingleCodeBlock(killCodeBlock);
-                    }, 0);
+                    });
                 }
                 domUtils.ensureInlineCodeSpaces();
                 domUtils.cleanupGhostStyles();
@@ -17254,7 +17277,7 @@ const {
                 e.preventDefault();
                 navigateFromHR(selectedHRDown, 'down');
                 // チェックボックス行に移動した場合、カーソル位置を補正
-                setTimeout(() => correctCheckboxCursorPosition(), 0);
+                deferCaretPlacement(correctCheckboxCursorPosition);
                 recordCtrlNavHandled('down', fromCommand);
                 return true;
             }
@@ -17348,7 +17371,7 @@ const {
                 }
             }
             // チェックボックス行に入った場合、カーソル位置を補正
-            setTimeout(() => correctCheckboxCursorPosition(), 0);
+            deferCaretPlacement(correctCheckboxCursorPosition);
             syncImageCaretEdgeIndicatorsNow(afterSelection);
             recordCtrlNavHandled('down', fromCommand);
             return true;
@@ -17550,7 +17573,7 @@ const {
                         e.preventDefault();
                         e.stopPropagation();
                         notifyChange();
-                        setTimeout(() => correctCheckboxCursorPosition(), 0);
+                        deferCaretPlacement(correctCheckboxCursorPosition);
                         return true;
                     }
                 }
@@ -17614,7 +17637,7 @@ const {
             syncImageCaretEdgeIndicatorsNow();
             // チェックボックス行に入った場合、カーソル位置を補正
             // setTimeout to ensure cursor is positioned after moveCursorForward completes
-            setTimeout(() => correctCheckboxCursorPosition(), 0);
+            deferCaretPlacement(correctCheckboxCursorPosition);
             return true;
         }
 
@@ -17938,7 +17961,7 @@ const {
             pendingCtrlKDeleteSync = true;
             // Native Ctrl+K deletion can bypass custom handlers in some WebView paths.
             // If no notification occurs in this turn, force a sync once.
-            setTimeout(() => {
+            deferCaretPlacement(() => {
                 if (!pendingCtrlKDeleteSync || isUpdating) return;
                 const currentSelection = window.getSelection();
                 if (!currentSelection || !currentSelection.rangeCount) {
@@ -17952,7 +17975,7 @@ const {
                 }
                 pendingCtrlKDeleteSync = false;
                 notifyChangeImmediate();
-            }, 0);
+            });
         } else if (!e.isComposing) {
             pendingCtrlKDeleteSync = false;
         }
@@ -18013,7 +18036,7 @@ const {
                 e.preventDefault();
                 e.stopPropagation();
                 if (startEditingCodeBlockLanguageLabel(selectedLabel)) {
-                    setTimeout(() => {
+                    deferCaretPlacement(() => {
                         if (!selectedLabel.classList.contains('editing')) return;
                         selectedLabel.textContent = '';
                         const sel = window.getSelection();
@@ -18025,7 +18048,7 @@ const {
                             sel.addRange(r);
                         }
                         selectedLabel.dispatchEvent(new Event('input', { bubbles: true }));
-                    }, 0);
+                    });
                 }
                 return;
             }
@@ -18794,6 +18817,7 @@ const {
             // Compositions without a keydown (e.g. dictation) still have to
             // start where the previous edit put the caret.
             flushPendingCaretPlacement();
+            cursorManager.prepareBlockBoundaryComposition();
             typingUndoGroup.break();
             // Record the committed text before the composition changes the DOM,
             // so undo never lands on half-typed (uncommitted) IME text.
@@ -21931,14 +21955,14 @@ const {
                         e.preventDefault();
                         return;
                     }
-                    setTimeout(() => {
+                    deferCaretPlacement(() => {
                         normalizeCheckboxListItems();
                         domUtils.ensureInlineCodeSpaces();
                         domUtils.cleanupGhostStyles();
                         tableManager.wrapTables();
                         applyImageRenderSizes();
                         notifyChange();
-                    }, 0);
+                    });
                 }
             }
         });
@@ -21968,6 +21992,10 @@ const {
         });
 
         // 複数行選択のコピー時は改行を正規化したtext/plainを優先して設定
+        // A later copy/cut (including one in an input) cancels pending image
+        // conversion, so it cannot overwrite the user's newer clipboard.
+        document.addEventListener('copy', () => { clipboardCopySequence++; }, true);
+        document.addEventListener('cut', () => { clipboardCopySequence++; }, true);
         const handleEditorCopy = (e) => {
             if (isUpdating || e.defaultPrevented) return;
             const selection = window.getSelection();
@@ -21979,11 +22007,48 @@ const {
             if (!payload) return;
 
             const fallbackText = normalizeClipboardPlainText(selection.toString());
-            const plainText = normalizeClipboardPlainText(payload.text || '') || fallbackText;
-            if (!selectionContainsImage(selection) && !clipboardPayloadHasStructure(selection, payload, plainText)) return;
+            let plainText = normalizeClipboardPlainText(payload.text || '') || fallbackText;
+            const hasImages = selectionContainsImage(selection);
+            if (!hasImages && !clipboardPayloadHasStructure(selection, payload, plainText)) return;
+
+            let imageSnapshot = null;
+            if (hasImages) {
+                payload.html = createMarkdownClipboardHtml(editor, anchorRange, footnoteManager) || payload.html;
+                imageSnapshot = createImageClipboardSnapshot(payload.html, {
+                    document,
+                    imageAltText: image => parseImageAltSizeSpec(image.getAttribute('alt') || '').altText,
+                    serializePlainText: container => normalizeClipboardPlainText(fragmentToClipboardPlainText(container))
+                });
+                if (imageSnapshot) plainText = imageSnapshot.text;
+            }
 
             e.preventDefault();
+            // Leave a synchronous HTML/text fallback if PNG conversion or the
+            // Webview clipboard permission fails. Cut keeps its existing path.
             writeClipboardPayload(e.clipboardData, payload, fallbackText, plainText);
+            if (imageSnapshot) {
+                const sequence = clipboardCopySequence;
+                const isCurrent = () => sequence === clipboardCopySequence;
+                void writeImageClipboard(imageSnapshot, {
+                    clipboard: navigator.clipboard,
+                    ClipboardItem: window.ClipboardItem,
+                    Blob: window.Blob,
+                    markHtml: html => `${INTERNAL_EDITOR_HTML_MARKER_START}${html}${INTERNAL_EDITOR_HTML_MARKER_END}`,
+                    isCurrent
+                }).then(result => {
+                    if (!isCurrent()) return;
+                    trustedClipboardPayload = {
+                        html: result.html,
+                        plainText,
+                        images: imageSnapshot.originalImages,
+                        createdAt: Date.now()
+                    };
+                }).catch(error => {
+                    if (!isCurrent()) return;
+                    console.error('[clipboard] Failed to copy image data:', error);
+                    vscode.postMessage({ type: 'imageCopyFailed' });
+                });
+            }
         };
         // Lists, several lines or blocks need the editor's own clipboard format
         // so that pasting them keeps their structure and formatting.
@@ -24254,7 +24319,7 @@ const {
 
             // チェックボックス付近のカーソル補正
             // チェックボックスが先頭にある場合のみ適用
-            if (isUpdating || isCorrectingCheckboxCursor) return;
+            if (isUpdating || isComposing || compositionUpdateGate.composing || isCorrectingCheckboxCursor) return;
             if (!sel || !sel.rangeCount || !sel.isCollapsed) return;
             const range = sel.getRangeAt(0);
             const container = range.startContainer;
@@ -24615,7 +24680,10 @@ const {
                             ? createMarkdownClipboardHtml(editor, selection.getRangeAt(0), footnoteManager)
                             : '');
                     markdownCopyContextHtml = '';
-                    if (html) vscode.postMessage({ type: 'copyMarkdown', html });
+                    if (html) {
+                        clipboardCopySequence++;
+                        vscode.postMessage({ type: 'copyMarkdown', html });
+                    }
                 }
                 break;
             case 'requestMarkdownCopyFocus':
@@ -24909,7 +24977,7 @@ const {
                     }
                     if (!shouldSuppressCommandNav('up')) {
                         handleVerticalNavigation(() => handleEmacsNavKeydown(createCommandNavEvent('up')), 'up');
-                        setTimeout(() => correctCheckboxCursorPosition(), 0);
+                        deferCaretPlacement(correctCheckboxCursorPosition);
                     }
                 }
                 if (message.direction === 'right') {
@@ -24928,7 +24996,7 @@ const {
                     }
                     if (!shouldSuppressCommandNav('down')) {
                         handleVerticalNavigation(() => handleEmacsNavKeydown(createCommandNavEvent('down')), 'down');
-                        setTimeout(() => correctCheckboxCursorPosition(), 0);
+                        deferCaretPlacement(correctCheckboxCursorPosition);
                     }
                 }
                 if (searchCloseSelection) {

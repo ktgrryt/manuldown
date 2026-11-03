@@ -452,6 +452,11 @@ export class ToolbarManager {
             return;
         }
 
+        if ((command === 'bold' || command === 'italic') && !this.normalizeEmphasisSelection(command)) {
+            this.updateToolbarState();
+            return;
+        }
+
         // コマンド実行前に状態を保存
         this.stateManager.saveState();
 
@@ -693,6 +698,73 @@ export class ToolbarManager {
             const end = node === range.endContainer ? range.endOffset : node.length;
             return node.data.slice(start, end).replace(/[\u200B\u2060\uFEFF]/g, '').length > 0;
         });
+    }
+
+    normalizeEmphasisSelection(command) {
+        // Removing an existing format must still cover the full selection.
+        if (this.isNativeCommandActive(command)) return true;
+        const selection = window.getSelection();
+        if (!selection?.rangeCount) return true;
+        const range = selection.getRangeAt(0);
+        if (range.collapsed || !this.editor.contains(range.startContainer) ||
+            !this.editor.contains(range.endContainer)) return true;
+
+        const portions = this._getSelectedTextNodes(range).map(node => ({
+            node,
+            start: node === range.startContainer ? range.startOffset : 0,
+            end: node === range.endContainer ? range.endOffset : node.length
+        }));
+        const text = portions.map(({ node, start, end }) => node.data.slice(start, end)).join('');
+        if (!text) return false;
+        const blockFor = node => this._getElementFromNode(node)?.closest(
+            'p, div, li, td, th, h1, h2, h3, h4, h5, h6, blockquote, pre'
+        ) || this.editor;
+        const beforeRange = range.cloneRange();
+        beforeRange.selectNodeContents(blockFor(range.startContainer));
+        beforeRange.setEnd(range.startContainer, range.startOffset);
+        const afterRange = range.cloneRange();
+        afterRange.selectNodeContents(blockFor(range.endContainer));
+        afterRange.setStart(range.endContainer, range.endOffset);
+        const before = Array.from(beforeRange.toString()).at(-1) || '';
+        const after = Array.from(afterRange.toString())[0] || '';
+        const characters = Array.from(text);
+        const punctuation = /[\p{P}$+<=>`^|~]/u;
+        const ordinary = character => !!character && !/\s/u.test(character) && !punctuation.test(character);
+        const invalidStart = punctuation.test(characters[0]) && ordinary(before);
+        const invalidEnd = punctuation.test(characters.at(-1)) && ordinary(after);
+        if (!invalidStart && !invalidEnd) return true;
+
+        // Keep boundary punctuation outside the format rather than encoding
+        // neighboring prose or inserting invisible Markdown separators.
+        let start = 0;
+        let end = text.length;
+        let firstCharacter = 0;
+        let lastCharacter = characters.length;
+        while (firstCharacter < lastCharacter && /[\s\p{P}$+<=>`^|~]/u.test(characters[firstCharacter])) {
+            start += characters[firstCharacter++].length;
+        }
+        while (lastCharacter > firstCharacter && /[\s\p{P}$+<=>`^|~]/u.test(characters[lastCharacter - 1])) {
+            end -= characters[--lastCharacter].length;
+        }
+        if (start >= end) return false;
+        const locate = (offset, atEnd) => {
+            for (const portion of portions) {
+                const length = portion.end - portion.start;
+                if (offset < length || (atEnd && offset === length)) {
+                    return { node: portion.node, offset: portion.start + offset };
+                }
+                offset -= length;
+            }
+            return null;
+        };
+        const first = locate(start, false);
+        const last = locate(end, true);
+        if (!first || !last) return false;
+        range.setStart(first.node, first.offset);
+        range.setEnd(last.node, last.offset);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        return true;
     }
 
     canToggleInlineCode() {

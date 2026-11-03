@@ -465,7 +465,8 @@ function loadCheckboxNavigation(fixture, nativeTopLine = true) {
             const insertCommandMenu = { handleCursorMove: () => false };
             const shouldSuppressCommandNav = () => false;
             const moveSlashCommandSelection = () => false;
-            const setTimeout = () => {};
+            const deferCaretPlacement = () => {};
+            const correctCheckboxCursorPosition = () => {};
             switch (message.type) {
                 ${editorSource.slice(commandStart, commandEnd)}
             }

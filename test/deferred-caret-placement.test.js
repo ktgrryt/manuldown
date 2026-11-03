@@ -21,17 +21,17 @@ function createDeferredCaretPlacement() {
         return nextFrame++;
     };
     const cancelAnimationFrame = (id) => frames.delete(id);
-    const source = sliceEditorSource('let pendingCaretPlacement = null;', 'function getCodeBlockCursorOffset(');
+    const source = sliceEditorSource('const pendingCaretPlacements = new Set();', 'function getCodeBlockCursorOffset(');
     const helpers = new Function(
-        'requestAnimationFrame', 'cancelAnimationFrame',
+        'requestAnimationFrame', 'cancelAnimationFrame', 'stateManager',
         `${source}\nreturn { deferCaretPlacement, flushPendingCaretPlacement };`
-    )(requestAnimationFrame, cancelAnimationFrame);
-    const runFrame = () => {
+    )(requestAnimationFrame, cancelAnimationFrame, { flushPendingHistoryRestore: () => false });
+    const takeFrame = () => {
         const callbacks = [...frames.values()];
         frames.clear();
-        callbacks.forEach((callback) => callback());
+        return () => callbacks.forEach((callback) => callback());
     };
-    return { ...helpers, runFrame };
+    return { ...helpers, runFrame: () => takeFrame()(), takeFrame };
 }
 
 test('a deferred caret placement runs on the next frame', () => {
@@ -59,6 +59,51 @@ test('a key before the frame places the caret first, and only once', () => {
     assert.deepEqual(placements, ['new item']);
 });
 
+test('all pending edits complete before IME starts, without a later caret move', () => {
+    const { deferCaretPlacement, flushPendingCaretPlacement, runFrame } = createDeferredCaretPlacement();
+    const placements = [];
+    let caret = 'old item';
+    deferCaretPlacement(() => { placements.push('cleanup'); caret = 'new item'; });
+    deferCaretPlacement(() => { placements.push('restore'); caret = 'new item end'; });
+
+    assert.equal(flushPendingCaretPlacement(), true);
+    assert.deepEqual(placements, ['cleanup', 'restore']);
+    assert.equal(caret, 'new item end');
+    caret = 'IME uncommitted t';
+
+    runFrame();
+    assert.equal(caret, 'IME uncommitted t');
+    assert.deepEqual(placements, ['cleanup', 'restore']);
+    assert.equal(flushPendingCaretPlacement(), false);
+});
+
+test('a frame already dequeued before IME cannot replay a flushed caret move', () => {
+    const { deferCaretPlacement, flushPendingCaretPlacement, takeFrame } = createDeferredCaretPlacement();
+    let caret = 'old item';
+    deferCaretPlacement(() => { caret = 'new item'; });
+    const dequeuedFrame = takeFrame();
+
+    flushPendingCaretPlacement();
+    assert.equal(caret, 'new item');
+    caret = 'IME uncommitted t';
+    dequeuedFrame();
+    assert.equal(caret, 'IME uncommitted t');
+});
+
+test('a cleanup that queues another placement finishes before input too', () => {
+    const { deferCaretPlacement, flushPendingCaretPlacement, runFrame } = createDeferredCaretPlacement();
+    const placements = [];
+    deferCaretPlacement(() => {
+        placements.push('cleanup');
+        deferCaretPlacement(() => placements.push('caret'));
+    });
+
+    flushPendingCaretPlacement();
+    assert.deepEqual(placements, ['cleanup', 'caret']);
+    runFrame();
+    assert.deepEqual(placements, ['cleanup', 'caret']);
+});
+
 test('key, input and composition events flush a deferred caret placement', () => {
     assert.match(
         editorSource,
@@ -78,4 +123,18 @@ test('list Enter never moves the caret on a bare animation frame', () => {
     const source = sliceEditorSource('function handleListItemEnterKeydown(e, context)', 'function handleTabKeydown(');
     assert.doesNotMatch(source, /requestAnimationFrame\(/);
     assert.match(source, /deferCaretPlacement\(/);
+});
+
+test('checkbox caret correction leaves the browser IME selection untouched', () => {
+    const source = sliceEditorSource('function correctCheckboxCursorPosition()', '// Update list item classes based on content');
+    for (const [composing, gateComposing] of [[true, false], [false, true], [false, false]]) {
+        let selectionReads = 0;
+        const correct = new Function('isComposing', 'compositionUpdateGate', 'window',
+            `${source}\nreturn correctCheckboxCursorPosition;`
+        )(composing, { composing: gateComposing }, {
+            getSelection: () => { selectionReads++; return null; }
+        });
+        correct();
+        assert.equal(selectionReads, composing || gateComposing ? 0 : 1);
+    }
 });

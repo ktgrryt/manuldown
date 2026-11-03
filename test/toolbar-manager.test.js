@@ -166,6 +166,97 @@ async function inlineCodeFixture(t, html) {
 const editingCommands = ['bold', 'italic', 'strikethrough', 'inlinecode', 'h1', 'h2', 'h3', 'ul', 'ol',
     'checkbox', 'quote', 'codeblock', 'table', 'image', 'link', 'footnote', 'math', 'mathblock'];
 
+async function formattingSelectionFixture(t, html, active = false) {
+    const f = await inlineCodeFixture(t, html);
+    const editor = f.editor;
+    const offsetAt = (node, offset) => {
+        let total = node.nodeType === 3 ? offset : Array.from(node.childNodes).slice(0, offset)
+            .reduce((sum, child) => sum + child.textContent.length, 0);
+        while (node && node !== editor) {
+            for (let previous = node.previousSibling; previous; previous = previous.previousSibling) {
+                total += previous.textContent.length;
+            }
+            node = node.parentNode;
+        }
+        return total;
+    };
+    class TextRange {
+        get commonAncestorContainer() { return editor; }
+        get collapsed() { return this.startContainer === this.endContainer && this.startOffset === this.endOffset; }
+        setStart(node, offset) { this.startContainer = node; this.startOffset = offset; }
+        setEnd(node, offset) { this.endContainer = node; this.endOffset = offset; }
+        selectNodeContents(node) { this.setStart(node, 0); this.setEnd(node, node.childNodes.length); }
+        cloneRange() { return Object.assign(new TextRange(), this); }
+        toString() { return editor.textContent.slice(offsetAt(this.startContainer, this.startOffset), offsetAt(this.endContainer, this.endOffset)); }
+        intersectsNode(node) {
+            return offsetAt(node, node.nodeType === 3 ? node.length : node.childNodes.length) > offsetAt(this.startContainer, this.startOffset) &&
+                offsetAt(node, 0) < offsetAt(this.endContainer, this.endOffset);
+        }
+    }
+    let range = null;
+    window.getSelection = () => ({
+        get rangeCount() { return range ? 1 : 0; },
+        getRangeAt: () => range,
+        removeAllRanges: () => { range = null; },
+        addRange: next => { range = next; }
+    });
+    f.manager.isNativeCommandActive = () => active;
+    f.manager.updateToolbarState = () => {};
+    const commands = [];
+    editor.ownerDocument.execCommand = command => commands.push({ command, text: range.toString() });
+    return {
+        ...f, commands,
+        select(startNode, start, endNode = startNode, end = startNode.length) {
+            range = new TextRange();
+            range.setStart(startNode, start);
+            range.setEnd(endNode, end);
+        }
+    };
+}
+
+for (const command of ['bold', 'italic']) {
+    test(`${command} keeps unsafe bracket edges outside the live formatted selection`, async t => {
+        const f = await formattingSelectionFixture(t, '<p>これは「テスト」です</p>');
+        const text = f.editor.querySelector('p').firstChild;
+        f.select(text, 3, text, 8);
+        f.manager.executeCommand(command);
+        assert.deepEqual(f.commands, [{ command, text: 'テスト' }]);
+        assert.equal(f.savedStates.length, 1);
+    });
+}
+
+test('formatting skips an unsafe punctuation-only selection without creating history', async t => {
+    const f = await formattingSelectionFixture(t, '<p>前「」後</p>');
+    const text = f.editor.querySelector('p').firstChild;
+    f.select(text, 1, text, 3);
+    f.manager.executeCommand('bold');
+    assert.deepEqual(f.commands, []);
+    assert.equal(f.savedStates.length, 0);
+});
+
+test('valid standalone brackets and removing an existing format keep the original range', async t => {
+    const f = await formattingSelectionFixture(t, '<p>previous</p><p>「テスト」</p><p>after</p>');
+    const text = f.editor.querySelectorAll('p')[1].firstChild;
+    f.select(text, 0);
+    f.manager.executeCommand('bold');
+    assert.deepEqual(f.commands, [{ command: 'bold', text: '「テスト」' }]);
+    f.manager.isNativeCommandActive = () => true;
+    f.editor.querySelectorAll('p')[1].innerHTML = '前「テスト」後';
+    const full = f.editor.querySelectorAll('p')[1].firstChild;
+    f.select(full, 1, full, 6);
+    f.manager.executeCommand('bold');
+    assert.equal(f.commands.at(-1).text, '「テスト」');
+});
+
+test('bracket trimming maps a selection across inline elements to the inner text', async t => {
+    const f = await formattingSelectionFixture(t, '<p>これは<span>「</span><em>テスト</em><span>」</span>です</p>');
+    const brackets = f.editor.querySelectorAll('span');
+    f.select(brackets[0].firstChild, 0, brackets[1].firstChild, 1);
+    f.manager.executeCommand('bold');
+    assert.deepEqual(f.commands, [{ command: 'bold', text: 'テスト' }]);
+    assert.equal(f.editor.querySelector('em').textContent, 'テスト');
+});
+
 test('cell-range toolbar states reflect all selected cells without a native text range', async t => {
     const f = await inlineCodeFixture(t, '<table><tr><td class="md-table-cell-selected">Cell</td></tr></table>');
     let states = { bold: true, italic: false, strikethrough: true, inlinecode: true };

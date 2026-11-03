@@ -387,6 +387,96 @@ test('StateManager reapplies and reveals the change location after normalization
     ]);
 });
 
+for (const direction of ['Undo', 'Redo']) {
+    test(`StateManager flushes the final ${direction.toLowerCase()} caret restore before IME input`, async () => {
+        const { editor, manager } = await createStateManager();
+        const initialSelection = { id: 'initial' };
+        const changeSelection = { id: 'changed-text' };
+        const compositionSelection = { id: 'native-ime-caret' };
+        let activeSelection = initialSelection;
+        let revealCount = 0;
+        manager.saveSelection = () => activeSelection;
+        manager.restoreSelection = (savedSelection) => {
+            activeSelection = savedSelection;
+            return !!savedSelection;
+        };
+
+        editor.innerHTML = 'A';
+        manager.seedState();
+        activeSelection = changeSelection;
+        manager.saveState();
+        editor.innerHTML = 'B';
+        manager.commitStateAfterChange();
+        assert.equal(manager.flushPendingHistoryRestore(), false);
+        if (direction === 'Redo') {
+            assert.equal(manager.performUndo(), true);
+            assert.equal(manager.flushPendingHistoryRestore(), true);
+        }
+
+        editor.scrollTop = 1400;
+        const revealChange = (preservedScrollTop) => {
+            revealCount++;
+            assert.equal(activeSelection, changeSelection);
+            assert.equal(preservedScrollTop, 1400);
+            assert.equal(editor.scrollTop, 1400);
+            editor.scrollTop = 720;
+        };
+        assert.equal(manager[`perform${direction}`](null, revealChange), true);
+        assert.equal(revealCount, 0);
+        assert.equal(manager.flushPendingHistoryRestore(), true);
+        assert.equal(manager.historyRestoreTimeout, null);
+        assert.equal(editor.scrollTop, 720);
+        assert.equal(revealCount, 1);
+        assert.equal(manager.flushPendingHistoryRestore(), false);
+
+        // Native composition owns the caret after the entry point flushes.
+        activeSelection = compositionSelection;
+        editor.scrollTop = 900;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        assert.equal(activeSelection, compositionSelection);
+        assert.equal(editor.scrollTop, 900);
+        assert.equal(revealCount, 1);
+    });
+}
+
+test('StateManager only flushes the latest of consecutive history restores', async () => {
+    const { editor, manager } = await createStateManager();
+    const selectionA = { id: 'edit-a' };
+    const selectionB = { id: 'edit-b' };
+    const compositionSelection = { id: 'native-ime-caret' };
+    let activeSelection = selectionA;
+    const revealed = [];
+    manager.saveSelection = () => activeSelection;
+    manager.restoreSelection = (savedSelection) => {
+        activeSelection = savedSelection;
+        return !!savedSelection;
+    };
+
+    editor.innerHTML = 'A';
+    manager.seedState();
+    manager.saveState();
+    editor.innerHTML = 'B';
+    manager.commitStateAfterChange();
+    activeSelection = selectionB;
+    manager.saveState();
+    editor.innerHTML = 'C';
+    manager.commitStateAfterChange();
+
+    assert.equal(manager.performUndo(null, () => revealed.push('undo-c')), true);
+    assert.equal(manager.performUndo(null, () => revealed.push('undo-b')), true);
+    assert.equal(manager.performRedo(null, () => revealed.push('redo-b')), true);
+    assert.equal(manager.flushPendingHistoryRestore(), true);
+    assert.equal(editor.innerHTML, 'B');
+    assert.equal(activeSelection, selectionA);
+    assert.deepEqual(revealed, ['redo-b']);
+
+    activeSelection = compositionSelection;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(activeSelection, compositionSelection);
+    assert.deepEqual(revealed, ['redo-b']);
+    assert.equal(manager.flushPendingHistoryRestore(), false);
+});
+
 test('StateManager keeps the input-time anchor while a debounced save is pending', async () => {
     const { editor, manager } = await createStateManager({
         maxHistorySize: 10,
@@ -995,6 +1085,7 @@ test('StateManager clearHistory releases stacks and byte accounting', async () =
     assert.deepEqual(manager.redoStack, []);
     assert.equal(manager.undoHistoryBytes, 0);
     assert.equal(manager.redoHistoryBytes, 0);
+    assert.equal(manager.flushPendingHistoryRestore(), false);
 });
 
 test('StateManager records committed text when an IME composition starts', async () => {
