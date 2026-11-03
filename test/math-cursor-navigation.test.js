@@ -308,6 +308,7 @@ test('pressing Control again between Ctrl+N steps preserves the column while poi
     assert.ok(start >= 0 && end > start);
     new Function('editor', 'cursorManager', 'window', 'handleKeydown', `
         const isMac = true, isComposing = false;
+        const searchCloseSelection = null;
         const compositionUpdateGate = { composing: false };
         const isImeInteractionKeydown = () => false;
         const handleVerticalNavigation = navigate => navigate();

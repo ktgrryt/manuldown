@@ -432,6 +432,7 @@ function loadCheckboxNavigation(fixture, nativeTopLine = true) {
     assert.notEqual(commandEnd, -1);
     return new Function('editor', 'domUtils', 'cursorManager', 'footnoteManager', 'codeBlockGapManager', 'nativeTopLine', `
         const isMac = true;
+        const searchCloseSelection = null;
         let lastCaretIntentSource = 'pointer';
         const lastPointerCaretIntentTs = Date.now();
         const pointerAdjustWindowMs = 450;

@@ -331,3 +331,171 @@ test('search stops collecting matches at the limit and highlights without spread
     assert.equal(added.length, 10);
     assert.match(manager.matchCountLabel.textContent, /\/10\+$/);
 });
+
+async function createCloseFixture(t, {
+    savedSelection = createRange('saved'), invalidRange = false, onDidClose = true,
+    scrollTop = 1800, paddingBefore = 40, paddingAfter = 40,
+    nativeAnchoringDelta = 0, focusChangesScroll = true
+} = {}) {
+    const { SearchManager } = await searchManagerModulePromise;
+    const calls = [];
+    let restoredRange = null;
+    let paddingTop = paddingBefore;
+    const expectedScrollTop = Math.max(0, scrollTop + paddingAfter - paddingBefore);
+    const originalWindow = global.window;
+    const navigatorDescriptor = Object.getOwnPropertyDescriptor(global, 'navigator');
+    global.window = {
+        getComputedStyle: () => ({ paddingTop: `${paddingTop}px` }),
+        getSelection: () => ({
+            removeAllRanges() { calls.push('clear selection'); restoredRange = null; },
+            addRange(range) {
+                calls.push('restore selection');
+                if (invalidRange) throw new Error('Detached selection');
+                restoredRange = range;
+            },
+        }),
+    };
+    Object.defineProperty(global, 'navigator', { configurable: true, value: { platform: 'MacIntel' } });
+    t.after(() => {
+        if (originalWindow === undefined) delete global.window;
+        else global.window = originalWindow;
+        if (navigatorDescriptor) Object.defineProperty(global, 'navigator', navigatorDescriptor);
+        else delete global.navigator;
+    });
+
+    class CloseSearchManager extends SearchManager {
+        _createSearchBar() {}
+        _observeEditorMutations() {}
+    }
+    const editor = {
+        scrollTop,
+        scrollLeft: 35,
+        focus(options) {
+            calls.push(['focus', options]);
+            // Native focus/selection restoration may move the viewport even
+            // when focus options were supplied. Close must restore it afterward.
+            if (focusChangesScroll) {
+                this.scrollTop = 0;
+                this.scrollLeft = 0;
+            }
+        },
+    };
+    const options = onDidClose ? {
+        onDidClose: (...args) => {
+            calls.push(['did close', args]);
+            assert.equal(manager.searchBar.style.display, 'none');
+            assert.equal(editor.scrollTop, expectedScrollTop);
+            assert.equal(editor.scrollLeft, 35);
+            assert.ok(calls.some(call => Array.isArray(call) && call[0] === 'focus'));
+        },
+    } : {};
+    const manager = new CloseSearchManager(editor, options);
+    manager.isOpen = true;
+    manager.searchBar = { style: { display: 'flex' } };
+    manager.savedSelection = savedSelection;
+    manager.matches = [createRange('match')];
+    manager.matchOffsets = [300];
+    manager.currentMatchIndex = 0;
+    manager._setReservedSpace = value => {
+        calls.push(['reserved space', value]);
+        if (value === 0) {
+            paddingTop = paddingAfter;
+            editor.scrollTop += nativeAnchoringDelta;
+        }
+    };
+    manager._clearHighlights = () => calls.push('clear highlights');
+    manager._updateMatchCountLabel = () => {};
+    return {
+        manager, editor, calls,
+        get restoredRange() { return restoredRange; },
+        // A fixed paragraph's viewport position follows layout padding and scroll.
+        get contentTop() { return 2000 + paddingTop - editor.scrollTop; }
+    };
+}
+
+test('closing search preserves the manually scrolled viewport while restoring the saved caret', async t => {
+    const f = await createCloseFixture(t);
+    const savedSelection = f.manager.savedSelection;
+    f.manager.close();
+    assert.deepEqual(f.calls.at(-1), ['did close', []]);
+    assert.deepEqual(f.calls.find(call => Array.isArray(call) && call[0] === 'focus'),
+        ['focus', { preventScroll: true }]);
+    assert.equal(f.editor.scrollTop, 1800);
+    assert.equal(f.editor.scrollLeft, 35);
+    assert.ok(f.restoredRange === savedSelection);
+    assert.equal(f.manager.savedSelection, null);
+    assert.equal(f.manager.isOpen, false);
+    assert.equal(f.manager.searchBar.style.display, 'none');
+    assert.deepEqual(f.manager.matches, []);
+    assert.deepEqual(f.manager.matchOffsets, []);
+    assert.equal(f.manager.currentMatchIndex, -1);
+});
+
+test('closing search without a saved selection or close callback still preserves scroll', async t => {
+    const f = await createCloseFixture(t, { savedSelection: null, onDidClose: false });
+    f.manager.close();
+    assert.equal(f.editor.scrollTop, 1800);
+    assert.equal(f.editor.scrollLeft, 35);
+    assert.equal(f.calls.includes('clear selection'), false);
+    assert.deepEqual(f.calls.find(call => Array.isArray(call) && call[0] === 'focus'),
+        ['focus', { preventScroll: true }]);
+});
+
+test('closing search with an invalid saved range still restores focus without scrolling', async t => {
+    const f = await createCloseFixture(t, { invalidRange: true });
+    assert.doesNotThrow(() => f.manager.close());
+    assert.equal(f.editor.scrollTop, 1800);
+    assert.equal(f.editor.scrollLeft, 35);
+    assert.equal(f.manager.savedSelection, null);
+    assert.ok(f.calls.includes('restore selection'));
+    assert.deepEqual(f.calls.find(call => Array.isArray(call) && call[0] === 'focus'),
+        ['focus', { preventScroll: true }]);
+});
+
+test('closing search cancels pending query and refresh timers', async t => {
+    const f = await createCloseFixture(t);
+    const fired = [];
+    const queryTimer = setTimeout(() => fired.push('query'), 10);
+    const refreshTimer = setTimeout(() => fired.push('refresh'), 10);
+    t.after(() => { clearTimeout(queryTimer); clearTimeout(refreshTimer); });
+    f.manager._inputDebounceTimer = queryTimer;
+    f.manager._refreshDebounceTimer = refreshTimer;
+    f.manager.close();
+    assert.equal(f.manager._inputDebounceTimer, null);
+    assert.equal(f.manager._refreshDebounceTimer, null);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.deepEqual(fired, []);
+});
+
+for (const [layout, paddingBefore, paddingAfter] of [
+    ['normal search bar', 78, 40],
+    ['hidden toolbar', 78, 20],
+    ['narrow search bar with fractional layout', 133.5, 40]
+]) {
+    test(`closing a ${layout} keeps the same paragraph at the same viewport position`, async t => {
+        const f = await createCloseFixture(t, { paddingBefore, paddingAfter });
+        const contentTop = f.contentTop;
+        f.manager.close();
+        assert.equal(f.contentTop, contentTop);
+        assert.equal(f.editor.scrollTop, 1800 + paddingAfter - paddingBefore);
+        assert.equal(f.editor.scrollLeft, 35);
+    });
+}
+
+test('closing search does not apply the padding correction twice after native scroll anchoring', async t => {
+    const f = await createCloseFixture(t, {
+        paddingBefore: 90, paddingAfter: 40,
+        nativeAnchoringDelta: -50, focusChangesScroll: false
+    });
+    const contentTop = f.contentTop;
+    f.manager.close();
+    assert.equal(f.editor.scrollTop, 1750);
+    assert.equal(f.contentTop, contentTop);
+});
+
+test('closing search clamps padding correction at the document top', async t => {
+    const f = await createCloseFixture(t, { scrollTop: 15, paddingBefore: 100, paddingAfter: 40 });
+    f.manager.close();
+    // Preserving the paragraph would require negative scrollTop at this edge.
+    assert.equal(f.editor.scrollTop, 0);
+});

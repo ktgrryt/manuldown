@@ -1677,6 +1677,7 @@ const {
             cursorManager.placeCursorAtLeadingImageLine(block, selection)
     });
     const searchManager = new SearchManager(editor, {
+        onDidClose: preserveViewportAfterSearchClose,
         onWillReplace: (range) => {
             stateManager.beginChangeAtSelection(stateManager.saveRange(range));
         },
@@ -3348,6 +3349,7 @@ const {
     let caretScrollRaf = null;
     let caretScrollForcePending = false;
     let caretScrollRestoreTopPending = null;
+    let searchCloseSelection = null;
     let historyCaretViewportOffsetPending = null;
     const caretScrollMargin = 8;
 
@@ -3488,6 +3490,20 @@ const {
         }
     }
 
+    function preserveViewportAfterSearchClose() {
+        const selection = window.getSelection();
+        const range = selection && selection.rangeCount ? selection.getRangeAt(0) : null;
+        // Store fixed endpoints: a live Range would follow later typing and
+        // accidentally suppress scrolling for the user's next edit as well.
+        searchCloseSelection = range ? {
+            startContainer: range.startContainer, startOffset: range.startOffset,
+            endContainer: range.endContainer, endOffset: range.endOffset
+        } : null;
+        caretScrollForcePending = false;
+        caretScrollRestoreTopPending = null;
+        historyCaretViewportOffsetPending = null;
+    }
+
     function ensureCaretVisible(force = false) {
         if (isUpdating) return;
         // Mouse click placement should not trigger additional auto-scroll corrections.
@@ -3500,6 +3516,18 @@ const {
         if (!selection || !selection.rangeCount) return;
         const range = selection.getRangeAt(0);
         if (!editor.contains(range.startContainer)) return;
+
+        // Search close can emit selectionchange after an earlier animation
+        // frame has already run. Keep that restored caret from pulling the
+        // viewport back until the selection moves or navigation reveals it.
+        if (!force && searchCloseSelection &&
+            range.startContainer === searchCloseSelection.startContainer &&
+            range.startOffset === searchCloseSelection.startOffset &&
+            range.endContainer === searchCloseSelection.endContainer &&
+            range.endOffset === searchCloseSelection.endOffset) {
+            return;
+        }
+        searchCloseSelection = null;
 
         // Vertical navigation can select an atomic editor element instead of creating
         // a collapsed caret. Treat recognized keyboard-only node selections as caret
@@ -22019,6 +22047,11 @@ const {
         // キーボードイベント
         editor.addEventListener('keydown', (e) => {
             const key = typeof e.key === 'string' ? e.key.toLowerCase() : '';
+            const shouldRevealAfterSearchClose = !!searchCloseSelection && !isImeInteractionKeydown(e) && (
+                ['ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown'].includes(e.key) ||
+                (isMac && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey &&
+                    ['a', 'b', 'e', 'f'].includes(key))
+            );
             const shouldRevealAfterVerticalNavigation =
                 !isImeInteractionKeydown(e) && (
                     ((e.key === 'ArrowUp' || e.key === 'ArrowDown') &&
@@ -22048,7 +22081,7 @@ const {
 
             // Run after every vertical-key branch, including early returns for HR,
             // list items, empty blocks, checkboxes, and code-block controls.
-            if (shouldRevealAfterVerticalNavigation) {
+            if (shouldRevealAfterVerticalNavigation || shouldRevealAfterSearchClose) {
                 revealCaretAfterKeyboardNavigation();
             }
         });
@@ -24895,6 +24928,9 @@ const {
                         handleVerticalNavigation(() => handleEmacsNavKeydown(createCommandNavEvent('down')), 'down');
                         setTimeout(() => correctCheckboxCursorPosition(), 0);
                     }
+                }
+                if (searchCloseSelection) {
+                    revealCaretAfterKeyboardNavigation();
                 }
                 syncCheckboxCaretIndicatorNow();
                 break;

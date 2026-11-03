@@ -166,6 +166,107 @@ test('history reveal uses native caret geometry and coalesces restoration passes
     assert.ok(anchorIndex >= 0 && revealIndex > anchorIndex);
 });
 
+function extractEditorFunction(name) {
+    const start = editorSource.indexOf(`    function ${name}(`);
+    const end = editorSource.indexOf('\n    }', start);
+    assert.ok(start >= 0 && end > start, `${name} exists`);
+    return editorSource.slice(start, end + '\n    }'.length);
+}
+
+async function searchCloseCaretFixture() {
+    const { calculateCaretAnchorScrollTop, calculateCaretRevealScrollTop } = await caretScrollModulePromise;
+    const text = { nodeType: 3 };
+    const range = {
+        startContainer: text, endContainer: text,
+        startOffset: 0, endOffset: 0, collapsed: true
+    };
+    const editor = {
+        scrollTop: 800, scrollHeight: 3000, clientHeight: 400,
+        contains: node => node === text,
+        getBoundingClientRect: () => ({ top: 0, bottom: 400, height: 400 })
+    };
+    const frames = [];
+    let keydownHandler;
+    editor.addEventListener = (type, handler) => {
+        assert.equal(type, 'keydown');
+        keydownHandler = handler;
+    };
+    const dependencies = {
+        editor,
+        window: { getSelection: () => ({ rangeCount: 1, isCollapsed: true, getRangeAt: () => range }) },
+        requestAnimationFrame: callback => frames.push(callback),
+        calculateCaretAnchorScrollTop, calculateCaretRevealScrollTop,
+        measureCaretRangeRect: () => ({ top: 50 - editor.scrollTop, bottom: 70 - editor.scrollTop }),
+        ensureCodeBlockCaretVisible() {},
+        isHRSelected: () => null,
+        getSelectedCodeBlockLanguageLabel: () => null,
+        getSelectedImageNodeFromRange: () => null,
+        isImeInteractionKeydown: () => false,
+        handleKeydown() {}, // A forward key at document end leaves the range unchanged.
+        handleVerticalNavigation: navigate => navigate(),
+        cursorManager: {},
+        footnoteManager: { normalizeCaret() {} },
+        mathManager: { normalizeCaret() {} },
+        codeBlockGapManager: { reconcile() {} },
+        syncCheckboxCaretIndicatorNow() {}
+    };
+    const functions = ['preserveViewportAfterSearchClose', 'ensureCaretVisible',
+        'scheduleEnsureCaretVisible', 'revealCaretAfterKeyboardNavigation'];
+    const keydownStart = editorSource.indexOf('// キーボードイベント\n');
+    const keydownEnd = editorSource.indexOf('// Reset the preferred column', keydownStart);
+    assert.ok(keydownStart >= 0 && keydownEnd > keydownStart);
+    const helpers = new Function(...Object.keys(dependencies), `
+        let isUpdating = false, lastCaretIntentSource = 'keyboard', lastPointerCaretIntentTs = 0;
+        let caretScrollRaf = null, caretScrollForcePending = false, caretScrollRestoreTopPending = null;
+        let historyCaretViewportOffsetPending = null, searchCloseSelection = null;
+        const isMac = true, isComposing = false, compositionUpdateGate = { composing: false };
+        const caretScrollMargin = 8;
+        ${functions.map(extractEditorFunction).join('\n')}
+        ${editorSource.slice(keydownStart, keydownEnd)}
+        return { ${functions.join(', ')} };
+    `)(...Object.values(dependencies));
+    return {
+        ...helpers, editor, range,
+        key(event) { keydownHandler(event); },
+        runFrame() {
+            const callbacks = frames.splice(0);
+            callbacks.forEach(callback => callback());
+        }
+    };
+}
+
+test('closing search keeps the viewport through delayed selectionchange frames', async () => {
+    const f = await searchCloseCaretFixture();
+    f.scheduleEnsureCaretVisible(true, 0);
+    f.preserveViewportAfterSearchClose();
+    f.runFrame();
+    assert.equal(f.editor.scrollTop, 800, 'pending keyboard reveal must not override search close');
+
+    // Chromium can deliver the restored selectionchange after the first frame.
+    for (let frame = 0; frame < 2; frame++) {
+        f.scheduleEnsureCaretVisible();
+        f.runFrame();
+        assert.equal(f.editor.scrollTop, 800);
+    }
+});
+
+test('a new caret position resumes automatic reveal after closing search', async () => {
+    const f = await searchCloseCaretFixture();
+    f.preserveViewportAfterSearchClose();
+    f.range.startOffset = f.range.endOffset = 1;
+    f.scheduleEnsureCaretVisible();
+    f.runFrame();
+    assert.equal(f.editor.scrollTop, 42);
+});
+
+test('Control+F at document end reveals even the same caret after search close', async () => {
+    const f = await searchCloseCaretFixture();
+    f.preserveViewportAfterSearchClose();
+    f.key({ key: 'f', ctrlKey: true, metaKey: false, altKey: false, shiftKey: false });
+    f.runFrame();
+    assert.equal(f.editor.scrollTop, 42);
+});
+
 test('native editor mutations checkpoint their pre-input state', () => {
     const beforeInputStart = editorSource.indexOf("editor.addEventListener('beforeinput'");
     const inputStart = editorSource.indexOf("editor.addEventListener('input'", beforeInputStart);

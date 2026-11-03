@@ -9,6 +9,7 @@ export class SearchManager {
      * @param {Object} options
      * @param {(range: Range) => void} options.onWillReplace - Called before replacing editor text
      * @param {(range: Range) => void} options.onDidReplace - Called after replacing editor text
+     * @param {() => void} options.onDidClose - Called after restoring editor focus and viewport
      */
     constructor(editor, options = {}) {
         this.editor = editor;
@@ -17,6 +18,9 @@ export class SearchManager {
             : null;
         this.onDidReplace = typeof options.onDidReplace === 'function'
             ? options.onDidReplace
+            : null;
+        this.onDidClose = typeof options.onDidClose === 'function'
+            ? options.onDidClose
             : null;
 
         // State
@@ -116,6 +120,8 @@ export class SearchManager {
     }
 
     close() {
+        const { scrollTop, scrollLeft } = this.editor;
+        const paddingTop = parseFloat(window.getComputedStyle(this.editor).paddingTop) || 0;
         this.isOpen = false;
         this.searchBar.style.display = 'none';
         this._setReservedSpace(0);
@@ -149,7 +155,16 @@ export class SearchManager {
             this.savedSelection = null;
         }
 
-        this.editor.focus();
+        // Closing search restores editing focus without returning the viewport
+        // to the caret that was saved before the user scrolled through results.
+        this.editor.focus({ preventScroll: true });
+        const nextPaddingTop = parseFloat(window.getComputedStyle(this.editor).paddingTop) || 0;
+        // Closing removes the space reserved above the document for search.
+        // Keep the same text on screen, even if native scroll anchoring already
+        // adjusted scrollTop while the padding changed.
+        this.editor.scrollTop = Math.max(0, scrollTop + nextPaddingTop - paddingTop);
+        this.editor.scrollLeft = scrollLeft;
+        this.onDidClose?.();
     }
 
     goToNext() {
