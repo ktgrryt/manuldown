@@ -140,6 +140,255 @@ for (const boundary of ['start', 'end']) {
     });
 }
 
+function codeBlockClickFixture(t, {
+    selectedLabel = false, precedingText = false, followingHtml = '', mermaid = true,
+    precedingHtml = precedingText ? '<p>above</p>' : '',
+} = {}) {
+    const f = fixture(`${precedingHtml}<pre${mermaid ? ' data-mermaid-view="diagram"' : ''}><div class="code-block-toolbar" data-exclude-from-markdown="true" contenteditable="false"><span class="code-block-language">${mermaid ? 'mermaid' : 'javascript'}</span><button>Copy</button></div><code>${mermaid ? 'graph TD\nA--&gt;B' : 'const answer = 42;'}</code>${mermaid ? '<div class="mermaid-preview" data-exclude-from-markdown="true" contenteditable="false"><svg><text>A</text></svg></div>' : ''}</pre>${followingHtml}`);
+    const pre = f.editor.querySelector('pre');
+    const label = pre.querySelector('.code-block-language');
+    const nodeListPrototype = Object.getPrototypeOf(f.editor.querySelectorAll('pre'));
+    const previousForEach = nodeListPrototype.forEach;
+    nodeListPrototype.forEach = Array.prototype.forEach;
+    t.after(() => {
+        if (previousForEach === undefined) delete nodeListPrototype.forEach;
+        else nodeListPrototype.forEach = previousForEach;
+    });
+    const createRange = f.document.createRange;
+    f.document.createRange = () => Object.assign(createRange(), {
+        cloneRange() { return Object.assign(f.document.createRange(), this); },
+    });
+    let range = selectedLabel ? { startContainer: label.firstChild, collapsed: false } : null;
+    const selection = {
+        get rangeCount() { return range ? 1 : 0; },
+        get isCollapsed() { return !range || range.collapsed; },
+        getRangeAt: () => range,
+        removeAllRanges() { range = null; },
+        addRange(next) { range = next; },
+    };
+    f.window.getSelection = () => selection;
+    f.editor.focus = () => {};
+    pre.getBoundingClientRect = () => ({ top: 50, bottom: 250, height: 200 });
+    for (const block of Array.from(f.editor.children)) {
+        if (block !== pre) block.getBoundingClientRect = () => block === pre.previousElementSibling
+            ? { top: 10, bottom: 30, height: 20 }
+            : { top: 280, bottom: 300, height: 20 };
+    }
+    const loadClass = name => {
+        const moduleSource = fs.readFileSync(path.join(__dirname, '..', 'media', 'modules', `${name}.js`), 'utf8');
+        return new Function('document', 'Node', 'NodeFilter',
+            `${moduleSource.replace(`export class ${name}`, `class ${name}`)}\nreturn ${name};`
+        )(f.document, f.window.Node, f.window.NodeFilter);
+    };
+    const gapManager = new (loadClass('CodeBlockGapManager'))(f.editor);
+    const domUtils = new (loadClass('DOMUtils'))(f.editor);
+    let hit = f.editor;
+    f.document.elementFromPoint = () => hit;
+    let sideCorrections = 0;
+    const dependencies = {
+        editor: f.editor, document: f.document, window: f.window, Node: f.window.Node,
+        domUtils, codeBlockGapManager: gapManager,
+        cursorManager: {
+            clearInlineCodeBoundaryState() {},
+            getCodeBlockText: code => code.textContent,
+            placeCursorAtLeadingImageLine: () => false,
+        },
+        tableManager: { handleMouseDown: () => false },
+        getImageCaretRangeFromHorizontalClick: () => null,
+        getCaretRangeFromPoint: () => range,
+        getLooseLeftSideTextClickRange: () => {
+            sideCorrections++;
+            if (!precedingText) return null;
+            const sideRange = f.document.createRange();
+            sideRange.setStart(f.editor.firstChild.firstChild, 0);
+            sideRange.collapse(true);
+            return sideRange;
+        },
+        getLooseRightSideTextClickRange: () => null,
+        getStableGapClickRange: () => null,
+        getNextNavigableNodeAfter: node => gapManager.adjacentNode(node, 'down'),
+        getPreferredFirstTextNodeForElement: node => domUtils.getFirstTextNode(node),
+        placeCaretInEmptyParagraph: () => false,
+        focusEditorWithoutScroll() {}, syncImageCaretEdgeIndicatorsNow() {},
+    };
+    const start = source.indexOf("        editor.addEventListener('mousedown', (e) => {", source.indexOf('// mousedownイベント'));
+    const end = source.indexOf("        document.addEventListener('mousemove',", start);
+    assert.ok(start >= 0 && end > start);
+    new Function(...Object.keys(dependencies), `
+        let isUpdating = false;
+        let pendingListMouseAdjustment, pendingInlineCodeSideClick, pendingMouseDriftCorrection;
+        let manualPointerSelection, lastPointerCaretIntentTs, lastCaretIntentSource, caretScrollForcePending;
+        ${extract('isEditorLevelWhitespaceTextNode')}
+        ${extract('isEditorRootTextRange')}
+        ${extract('getCodeBlockForAboveGapClick')}
+        ${extract('getCodeBlockForBelowGapClick')}
+        ${extract('exitEmptyCodeBlockDownFromPre')}
+        ${extract('beginManualPointerSelection')}
+        ${source.slice(start, end)}
+    `)(...Object.values(dependencies));
+    return {
+        ...f, pre, selection, gapManager, domUtils,
+        get sideCorrections() { return sideCorrections; },
+        click({ y = 270, target = f.editor, shiftKey = false, button = 0 } = {}) {
+            hit = target;
+            const event = f.document.createEvent('Event');
+            event.initEvent('mousedown', true, true);
+            Object.assign(event, { clientX: 100, clientY: y, button, shiftKey, detail: 1 });
+            target.dispatchEvent(event);
+            return event;
+        },
+    };
+}
+
+for (const selectedLabel of [false, true]) {
+    test(`clicking below a lone Mermaid preview opens a temporary input line with ${selectedLabel ? 'its label selected' : 'no selection'}`, t => {
+        const f = codeBlockClickFixture(t, { selectedLabel });
+        const original = f.domUtils.getCleanedHTML();
+        assert.equal(f.click().defaultPrevented, true);
+        const gap = f.editor.querySelector('[data-mdw-code-gap="true"]');
+        assert.ok(gap);
+        assert.equal(gap.previousElementSibling, f.pre);
+        assert.ok(gap.contains(f.selection.getRangeAt(0).startContainer));
+        assert.equal(f.selection.isCollapsed, true);
+        assert.equal(f.domUtils.getCleanedHTML(), original, 'an untouched line is not saved');
+
+        f.gapManager.reconcile(null);
+        assert.equal(gap.parentNode, null, 'leaving without input removes the line');
+        f.click();
+        const typedGap = f.editor.querySelector('[data-mdw-code-gap="true"]');
+        typedGap.firstChild.textContent += '日本語';
+        f.gapManager.reconcile(f.selection);
+        assert.equal(typedGap.hasAttribute('data-mdw-code-gap'), false);
+        assert.ok(f.domUtils.getCleanedHTML().includes('<p>日本語</p>'));
+    });
+}
+
+test('clicks below a diagram take priority over snapping to earlier text', t => {
+    const f = codeBlockClickFixture(t, { precedingText: true });
+    f.click();
+    assert.ok(f.editor.querySelector('[data-mdw-code-gap="true"]'));
+    assert.equal(f.sideCorrections, 0);
+});
+
+test('the bottom padding of the Mermaid block also opens a temporary input line', t => {
+    const f = codeBlockClickFixture(t, { selectedLabel: true });
+    assert.equal(f.click({ target: f.pre, y: 246 }).defaultPrevented, true);
+    assert.ok(f.editor.querySelector('[data-mdw-code-gap="true"]'));
+});
+
+test('clicking below a diagram reuses its temporary input line', t => {
+    const f = codeBlockClickFixture(t);
+    f.click();
+    const gap = f.editor.querySelector('[data-mdw-code-gap="true"]');
+    gap.getBoundingClientRect = () => ({ top: 280, bottom: 300, height: 20 });
+    f.click();
+    assert.equal(f.editor.querySelectorAll('[data-mdw-code-gap="true"]').length, 1);
+    assert.ok(gap.contains(f.selection.getRangeAt(0).startContainer));
+});
+
+test('clicking below a diagram uses an existing paragraph without inserting another line', t => {
+    const f = codeBlockClickFixture(t, { selectedLabel: true, followingHtml: '<p><br></p>' });
+    const paragraph = f.editor.lastChild;
+    f.click();
+    assert.equal(f.editor.querySelectorAll('p').length, 1);
+    assert.ok(!f.editor.querySelector('[data-mdw-code-gap]'));
+    assert.ok(paragraph.contains(f.selection.getRangeAt(0).startContainer));
+});
+
+test('a native hit on text after a diagram preserves its caret position', t => {
+    const f = codeBlockClickFixture(t, { followingHtml: '日本語を入力' });
+    const range = f.document.createRange();
+    range.setStart(f.editor.lastChild, 2);
+    range.collapse(true);
+    f.selection.addRange(range);
+    assert.equal(f.click().defaultPrevented, false);
+    assert.ok(!f.editor.querySelector('[data-mdw-code-gap]'));
+    assert.equal(f.selection.getRangeAt(0), range);
+    assert.equal(range.startOffset, 2);
+});
+
+test('diagram content, controls, Shift-click and secondary clicks do not create input lines', t => {
+    for (const options of [
+        { target: '.mermaid-preview text', y: 246 },
+        { target: '.code-block-toolbar button', y: 246 },
+        { target: 'pre', y: 150 },
+        { shiftKey: true },
+        { button: 2 },
+    ]) {
+        const f = codeBlockClickFixture(t, { selectedLabel: true });
+        f.click({ ...options, target: options.target ? f.editor.querySelector(options.target) : f.editor });
+        assert.ok(!f.editor.querySelector('[data-mdw-code-gap]'));
+    }
+});
+
+for (const mermaid of [false, true]) {
+    for (const selectedLabel of [false, true]) {
+        test(`clicking above a leading ${mermaid ? 'Mermaid preview' : 'code block'} opens a temporary line with ${selectedLabel ? 'its label selected' : 'no selection'}`, t => {
+            const f = codeBlockClickFixture(t, { mermaid, selectedLabel });
+            const original = f.domUtils.getCleanedHTML();
+            assert.equal(f.click({ y: 35 }).defaultPrevented, true);
+            const gap = f.editor.querySelector('[data-mdw-code-gap="true"]');
+            assert.ok(gap);
+            assert.equal(gap.parentElement, f.editor);
+            assert.equal(gap.nextElementSibling, f.pre);
+            assert.ok(gap.contains(f.selection.getRangeAt(0).startContainer));
+            assert.equal(f.selection.isCollapsed, true);
+            assert.equal(f.domUtils.getCleanedHTML(), original, 'an untouched line is not saved');
+
+            f.gapManager.reconcile(null);
+            assert.equal(gap.parentNode, null, 'leaving without typing removes the line');
+            f.click({ y: 35 });
+            const typedGap = f.editor.querySelector('[data-mdw-code-gap="true"]');
+            typedGap.firstChild.textContent += '日本語';
+            f.gapManager.reconcile(f.selection);
+            assert.equal(typedGap.hasAttribute('data-mdw-code-gap'), false);
+            assert.ok(f.domUtils.getCleanedHTML().startsWith('<p>日本語</p>'));
+        });
+    }
+}
+
+test('repeated clicks above a leading code block reuse its temporary line', t => {
+    const f = codeBlockClickFixture(t, { mermaid: false });
+    f.click({ y: 35 });
+    const gap = f.editor.querySelector('[data-mdw-code-gap="true"]');
+    assert.ok(gap);
+    gap.getBoundingClientRect = () => ({ top: 10, bottom: 30, height: 20 });
+    f.click({ y: 35 });
+    assert.equal(f.editor.querySelectorAll('[data-mdw-code-gap="true"]').length, 1);
+    assert.ok(gap.contains(f.selection.getRangeAt(0).startContainer));
+});
+
+test('editor controls and whitespace before a leading code block do not prevent opening a line above it', t => {
+    const f = codeBlockClickFixture(t, {
+        mermaid: false, precedingHtml: '\n<div data-exclude-from-markdown="true">UI</div>\n',
+    });
+    f.click({ y: 35 });
+    const gap = f.editor.querySelector('[data-mdw-code-gap="true"]');
+    assert.ok(gap);
+    assert.equal(gap.nextElementSibling, f.pre);
+});
+
+test('clicks above a code block with preceding document content do not create a new line', t => {
+    for (const precedingHtml of ['<p>above</p>', '<p><br></p>', '日本語']) {
+        const f = codeBlockClickFixture(t, { mermaid: false, precedingHtml });
+        f.click({ y: 35 });
+        assert.ok(!f.editor.querySelector('[data-mdw-code-gap]'));
+    }
+});
+
+test('top-of-document clicks preserve code controls, code text, Shift-click and secondary-click behavior', t => {
+    for (const options of [
+        { target: '.code-block-toolbar button', y: 55 },
+        { target: 'code', y: 100 },
+        { shiftKey: true },
+        { button: 2 },
+    ]) {
+        const f = codeBlockClickFixture(t, { mermaid: false, selectedLabel: true });
+        f.click({ y: 35, ...options, target: options.target ? f.editor.querySelector(options.target) : f.editor });
+        assert.ok(!f.editor.querySelector('[data-mdw-code-gap]'));
+    }
+});
+
 function emptyCodeClickFixture({ nativeOutside = false, directHit = true, otherBlock = false } = {}) {
     const f = fixture('<p><code data-is-new="true"><span contenteditable="false"></span>\u200B</code><br></p><p>below</p>');
     const code = f.editor.querySelector('code');

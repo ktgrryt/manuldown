@@ -23,6 +23,7 @@ ManulDown is a VSCode extension that lets you edit Markdown files in a WYSIWYG e
 - **Links**: Insert HTTP, HTTPS, and email links, or safely encoded links to files in the current workspace folder.
 - **Footnotes**: Render and edit `[^label]` references and `[^label]: note` definitions. Numbers and notes follow reference order; click a number to edit its note and click ↩ to return to the text.
 - **Math**: Write TeX formulas as `$…$` (inline) or `$$…$$` (block), rendered with KaTeX. See [Math](#math).
+- **Mermaid diagrams**: Switch between **Code/Preview**, copy the source with the copy icon, or choose **PNG/SVG** from the download icon. Open a diagram across the editor with the **expand icon (diagonal arrows)** at the right end of its toolbar. Scroll to zoom, or drag or use arrow keys to pan. The bottom-center controls offer **Fit to view** and **100%** for actual size. Press `Esc` or the × at the top right to close.
 - **Table of contents**: Auto-generated from headings.
 - **Two-way sync**: Changes in the editor are reflected in the Markdown file immediately.
 - **Toolbar**: Quick access buttons for common formatting.

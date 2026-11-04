@@ -5,6 +5,7 @@ import { StateManager } from './modules/StateManager.js';
 import { ListManager } from './modules/ListManager.js';
 import { MarkdownConverter } from './modules/MarkdownConverter.js';
 import { CodeBlockManager } from './modules/CodeBlockManager.js';
+import { MermaidViewer } from './modules/MermaidViewer.js';
 import { TableOfContentsManager } from './modules/TableOfContentsManager.js';
 import { ToolbarManager } from './modules/ToolbarManager.js';
 import { TableManager } from './modules/TableManager.js';
@@ -1663,6 +1664,7 @@ const {
         vscode,
         settingsState.editorThemeMode
     );
+    new MermaidViewer(editor);
     const tocManager = new TableOfContentsManager(editor, tocContainer, tocContent, tocEmpty, {
         enabled: settingsState.tocEnabled,
         scrollDuration: TOC_SCROLL_DURATION_MS
@@ -11574,6 +11576,25 @@ const {
         return distToPrev <= distToNext
             ? createCollapsedRangeAtElementBoundary(previousBlock, 'end')
             : createCollapsedRangeAtElementBoundary(nextBlock, 'start');
+    }
+
+    function getCodeBlockForAboveGapClick(y) {
+        if (!Number.isFinite(y)) return null;
+        const pre = Array.from(editor.children || []).find(child =>
+            child.tagName === 'PRE' && child.querySelector('code') && !codeBlockGapManager.isEditorUi(child));
+        if (!pre || y >= pre.getBoundingClientRect().top) return null;
+
+        // Only the document's leading code block needs an input line above it.
+        // An untouched gap from a previous click can be reused at that boundary.
+        const previous = codeBlockGapManager.adjacentNode(pre, 'up');
+        if (!previous) return pre;
+        if (previous.nodeType === Node.ELEMENT_NODE &&
+            previous.getAttribute('data-mdw-code-gap') === 'true' &&
+            codeBlockGapManager.isEmpty(previous) &&
+            !codeBlockGapManager.adjacentNode(previous, 'up')) {
+            return pre;
+        }
+        return null;
     }
 
     function getCodeBlockForBelowGapClick(y) {
@@ -22224,6 +22245,30 @@ const {
             const pointRange = getCaretRangeFromPoint(x, y);
             const isEditorGapClick = clickedElement === editor;
 
+            // Open boundary input lines above the leading code block or below
+            // a code/preview block, even when its language label is selected.
+            // Handle bottom PRE padding before snapping whitespace clicks to text.
+            if (!e.shiftKey && !isEditorRootTextRange(pointRange) &&
+                (isEditorGapClick || clickedElement.tagName === 'PRE')) {
+                const codeBlockAboveClick = isEditorGapClick ? getCodeBlockForAboveGapClick(y) : null;
+                const codeBlock = codeBlockAboveClick || getCodeBlockForBelowGapClick(y);
+                const direction = codeBlockAboveClick ? 'up' : 'down';
+                if (codeBlock && (isEditorGapClick || clickedElement === codeBlock)) {
+                    const selection = window.getSelection();
+                    if (!selection) return;
+                    focusEditorWithoutScroll();
+                    if (codeBlockGapManager.moveToGap(codeBlock, direction, selection, true) ||
+                        (direction === 'down' && exitEmptyCodeBlockDownFromPre(codeBlock, selection, true, true))) {
+                        e.preventDefault();
+                        if (selection.rangeCount > 0) {
+                            beginManualPointerSelection(e, selection.getRangeAt(0));
+                        }
+                        syncImageCaretEdgeIndicatorsNow(selection);
+                        return;
+                    }
+                }
+            }
+
             if (!e.shiftKey && isEditorGapClick) {
                 const looseLeftSideRange = getLooseLeftSideTextClickRange(x, y, clickedElement, pointRange);
                 if (looseLeftSideRange) {
@@ -22247,21 +22292,6 @@ const {
                     selection.addRange(looseRightSideRange);
                     beginManualPointerSelection(e, looseRightSideRange);
                     return;
-                }
-
-                const codeBlockBelowClick = getCodeBlockForBelowGapClick(y);
-                if (codeBlockBelowClick) {
-                    e.preventDefault();
-                    focusEditorWithoutScroll();
-                    const selection = window.getSelection();
-                    if (!selection) return;
-                    if (exitEmptyCodeBlockDownFromPre(codeBlockBelowClick, selection, true, true)) {
-                        if (selection.rangeCount > 0) {
-                            beginManualPointerSelection(e, selection.getRangeAt(0).cloneRange());
-                        }
-                        syncImageCaretEdgeIndicatorsNow(selection);
-                        return;
-                    }
                 }
             }
 

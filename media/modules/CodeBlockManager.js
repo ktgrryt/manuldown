@@ -4,6 +4,21 @@
  * コードブロックのシンタックスハイライト、言語選択、コピー機能を提供
  */
 
+const MERMAID_TOOLBAR_ICONS = {
+    code: '<path d="m8 8-4 4 4 4m8-8 4 4-4 4m-3-11-2 14"/>',
+    preview: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/>',
+    copy: '<rect x="4" y="7" width="13" height="14" rx="3"/><path d="M8 7V5a3 3 0 0 1 3-3h6a3 3 0 0 1 3 3v9a3 3 0 0 1-3 3"/>',
+    download: '<path d="M12 3v12m-5-5 5 5 5-5M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/>',
+    expand: '<path d="M15 3h6v6m0-6-7 7M9 21H3v-6m0 6 7-7"/>',
+    success: '<path d="m5 12 4 4L19 6"/>',
+    error: '<path d="m6 6 12 12M18 6 6 18"/>',
+    busy: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>'
+};
+
+function mermaidToolbarIcon(name) {
+    return `<svg class="mermaid-toolbar-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${MERMAID_TOOLBAR_ICONS[name]}</svg>`;
+}
+
 export class CodeBlockManager {
     constructor(editor, cursorManager = null, vscodeApi = null, themeMode = 'vscode') {
         this.editor = editor;
@@ -39,6 +54,8 @@ export class CodeBlockManager {
         this.mermaidIdCounter = 0;
         this.mermaidThemeKey = null;
         this.mermaidLoadState = 'idle';
+        this.mermaidExportMenu = null;
+        this.mermaidControlIdCounter = 0;
         this.mathRenderer = null;
         this.mathRenderHandles = new WeakMap();
         this.editorThemeMode = this._normalizeThemeMode(themeMode);
@@ -54,9 +71,19 @@ export class CodeBlockManager {
         if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
             window.addEventListener('message', this._handleWindowMessage);
             window.addEventListener('focus', this._reconcilePendingCopyButtons);
+            window.addEventListener('blur', () => this._closeMermaidExportMenu());
+            window.addEventListener('resize', () => this._closeMermaidExportMenu());
         }
         if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
             document.addEventListener('visibilitychange', this._reconcilePendingCopyButtons);
+            const dismissExportMenu = (event) => {
+                if (this.mermaidExportMenu && !this.mermaidExportMenu.container.contains(event.target)) {
+                    this._closeMermaidExportMenu();
+                }
+            };
+            document.addEventListener('mousedown', dismissExportMenu, true);
+            document.addEventListener('focusin', dismissExportMenu);
+            document.addEventListener('scroll', () => this._closeMermaidExportMenu(), true);
         }
         this._observeCodeBlockControlMutations();
         this._initMermaid();
@@ -669,13 +696,25 @@ export class CodeBlockManager {
         link.remove();
     }
 
+    _setCopyButtonLabel(button, label) {
+        if (!button.classList.contains('mermaid-icon-btn')) {
+            button.textContent = label;
+            return;
+        }
+        const icon = label === 'Copied!' ? 'success' : label === 'Failed' ? 'error' : label === 'Copying...' ? 'busy' : 'copy';
+        const description = label === 'Copy' ? 'Copy Mermaid source' : label === 'Failed' ? 'Copy failed' : label;
+        button.innerHTML = mermaidToolbarIcon(icon);
+        button.setAttribute('aria-label', description);
+        button.title = description;
+    }
+
     _resetCopyButtonState(button) {
         if (!button) {
             return;
         }
-        button.textContent = 'Copy';
-        button.dataset.copyState = 'idle';
-        delete button.dataset.copyResetAt;
+        this._setCopyButtonLabel(button, 'Copy');
+        button.setAttribute('data-copy-state', 'idle');
+        button.removeAttribute('data-copy-reset-at');
     }
 
     _stopCopyButtonStateReconciler() {
@@ -706,7 +745,7 @@ export class CodeBlockManager {
         const now = Date.now();
         let hasPending = false;
         this.editor.querySelectorAll('.code-block-copy-btn[data-copy-reset-at]').forEach((button) => {
-            const resetAt = Number(button.dataset.copyResetAt || 0);
+            const resetAt = Number(button.getAttribute('data-copy-reset-at') || 0);
             if (!Number.isFinite(resetAt) || resetAt <= now) {
                 this._resetCopyButtonState(button);
                 return;
@@ -755,7 +794,10 @@ export class CodeBlockManager {
         }
         if (this._isMermaidLanguage(language)) {
             if (toolbar.querySelectorAll('.code-block-export-btn').length < 2 ||
-                toolbar.querySelectorAll('.code-block-view-btn').length !== 2) {
+                !toolbar.querySelector('.code-block-download-btn') ||
+                !toolbar.querySelector('.code-block-export-menu') ||
+                toolbar.querySelectorAll('.code-block-view-btn').length !== 2 ||
+                !toolbar.querySelector('.code-block-expand-btn')) {
                 return false;
             }
         }
@@ -841,6 +883,9 @@ export class CodeBlockManager {
         }
 
         this.codeBlockControlObserver = new MutationObserver((mutations) => {
+            if (this.mermaidExportMenu && !this.editor.contains(this.mermaidExportMenu.container)) {
+                this._closeMermaidExportMenu();
+            }
             if (this.isReconcilingCodeBlockControls) {
                 return;
             }
@@ -1104,6 +1149,32 @@ export class CodeBlockManager {
         img.src = svgDataUrl;
     }
 
+    _closeMermaidExportMenu(focusToggle = false) {
+        const active = this.mermaidExportMenu;
+        if (!active) return;
+        this.mermaidExportMenu = null;
+        active.menu.hidden = true;
+        active.toggle.setAttribute('aria-expanded', 'false');
+        if (focusToggle && this.editor.contains(active.toggle)) active.toggle.focus({ preventScroll: true });
+    }
+
+    _openMermaidExportMenu(pre, container, toggle, menu, focusLast = false) {
+        this._closeMermaidExportMenu();
+        this.mermaidExportMenu = { pre, container, toggle, menu };
+        menu.hidden = false;
+        menu.classList.remove('opens-up');
+        toggle.setAttribute('aria-expanded', 'true');
+        if (typeof menu.getBoundingClientRect === 'function') {
+            const bounds = menu.getBoundingClientRect();
+            const anchor = toggle.getBoundingClientRect();
+            if (bounds.bottom > window.innerHeight - 8 && anchor.top > bounds.height + 8) {
+                menu.classList.add('opens-up');
+            }
+        }
+        const items = menu.querySelectorAll('[role="menuitem"]');
+        items[focusLast ? items.length - 1 : 0]?.focus({ preventScroll: true });
+    }
+
     /**
      * すべてのコードブロックをハイライト
      */
@@ -1307,6 +1378,7 @@ export class CodeBlockManager {
     addCodeBlockControls(pre, language) {
         const isMermaid = this._isMermaidLanguage(language);
         const isMath = this._isMathLanguage(language);
+        if (this.mermaidExportMenu?.pre === pre) this._closeMermaidExportMenu();
 
         // 既存のコントロールを削除
         const existingToolbar = pre.querySelector('.code-block-toolbar');
@@ -1328,7 +1400,7 @@ export class CodeBlockManager {
 
         // ツールバーを作成
         const toolbar = document.createElement('div');
-        toolbar.className = 'code-block-toolbar';
+        toolbar.className = isMermaid ? 'code-block-toolbar mermaid-toolbar' : 'code-block-toolbar';
         toolbar.contentEditable = 'false';
         toolbar.setAttribute('data-exclude-from-markdown', 'true');
         
@@ -1682,7 +1754,7 @@ export class CodeBlockManager {
 
         if (isMermaid) {
             const viewToggle = document.createElement('div');
-            viewToggle.className = 'code-block-view-toggle';
+            viewToggle.className = 'code-block-view-toggle mermaid-view-toggle';
             viewToggle.setAttribute('role', 'group');
             viewToggle.setAttribute('aria-label', 'Mermaid display');
             ['code', 'diagram'].forEach((view) => {
@@ -1690,8 +1762,12 @@ export class CodeBlockManager {
                 button.type = 'button';
                 button.className = 'code-block-view-btn';
                 button.setAttribute('data-mermaid-view', view);
-                button.textContent = view === 'code' ? 'Code' : 'Diagram';
-                button.title = `Show Mermaid ${view}`;
+                const label = view === 'code' ? 'Code' : 'Preview';
+                button.innerHTML = mermaidToolbarIcon(view === 'code' ? 'code' : 'preview');
+                const text = document.createElement('span');
+                text.textContent = label;
+                button.appendChild(text);
+                button.title = `Show Mermaid ${label.toLowerCase()}`;
                 button.addEventListener('mousedown', (e) => {
                     e.preventDefault();
                     e.stopPropagation();
@@ -1715,6 +1791,10 @@ export class CodeBlockManager {
                 viewToggle.appendChild(button);
             });
             actionGroup.appendChild(viewToggle);
+            const divider = document.createElement('span');
+            divider.className = 'mermaid-toolbar-divider';
+            divider.setAttribute('aria-hidden', 'true');
+            actionGroup.appendChild(divider);
         }
 
         if (isMath) {
@@ -1760,29 +1840,30 @@ export class CodeBlockManager {
 
         // コピーボタンを追加
         const copyBtn = document.createElement('button');
-        copyBtn.className = 'code-block-copy-btn';
-        copyBtn.textContent = 'Copy';
+        copyBtn.type = 'button';
+        copyBtn.className = isMermaid ? 'code-block-copy-btn mermaid-icon-btn' : 'code-block-copy-btn';
         copyBtn.title = 'Copy code to clipboard';
+        this._setCopyButtonLabel(copyBtn, 'Copy');
         let copyButtonResetTimer = null;
         const resetCopyButtonState = () => {
             this._resetCopyButtonState(copyBtn);
         };
         const setCopyButtonLabel = (label, resetDelayMs = 0) => {
-            copyBtn.textContent = label;
-            copyBtn.dataset.copyState = resetDelayMs > 0
+            this._setCopyButtonLabel(copyBtn, label);
+            copyBtn.setAttribute('data-copy-state', resetDelayMs > 0
                 ? (label === 'Copied!' ? 'success' : label === 'Failed' ? 'error' : 'idle')
-                : (label === 'Copying...' ? 'busy' : 'idle');
+                : (label === 'Copying...' ? 'busy' : 'idle'));
             if (copyButtonResetTimer) {
                 clearTimeout(copyButtonResetTimer);
                 copyButtonResetTimer = null;
             }
-            delete copyBtn.dataset.copyResetAt;
+            copyBtn.removeAttribute('data-copy-reset-at');
             if (resetDelayMs > 0) {
                 const resetAt = Date.now() + resetDelayMs;
-                copyBtn.dataset.copyResetAt = String(resetAt);
+                copyBtn.setAttribute('data-copy-reset-at', String(resetAt));
                 this._ensureCopyButtonStateReconciler();
                 copyButtonResetTimer = setTimeout(() => {
-                    const currentResetAt = Number(copyBtn.dataset.copyResetAt || 0);
+                    const currentResetAt = Number(copyBtn.getAttribute('data-copy-reset-at') || 0);
                     if (currentResetAt === resetAt) {
                         resetCopyButtonState();
                     }
@@ -1814,27 +1895,94 @@ export class CodeBlockManager {
         actionGroup.appendChild(copyBtn);
 
         if (isMermaid) {
-            const exportSvgBtn = document.createElement('button');
-            exportSvgBtn.className = 'code-block-export-btn';
-            exportSvgBtn.textContent = 'SVG';
-            exportSvgBtn.title = 'Save Mermaid diagram as SVG';
-            exportSvgBtn.addEventListener('click', (e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                this._exportMermaidSvg(pre, 'mermaid-diagram.svg');
-            });
-            actionGroup.appendChild(exportSvgBtn);
+            const download = document.createElement('div');
+            download.className = 'code-block-download';
+            const downloadBtn = document.createElement('button');
+            downloadBtn.type = 'button';
+            downloadBtn.className = 'code-block-download-btn mermaid-icon-btn';
+            downloadBtn.innerHTML = mermaidToolbarIcon('download');
+            downloadBtn.title = 'Download diagram';
+            downloadBtn.setAttribute('aria-label', 'Download diagram');
+            downloadBtn.setAttribute('aria-haspopup', 'menu');
+            downloadBtn.setAttribute('aria-expanded', 'false');
 
-            const exportPngBtn = document.createElement('button');
-            exportPngBtn.className = 'code-block-export-btn';
-            exportPngBtn.textContent = 'PNG';
-            exportPngBtn.title = 'Save Mermaid diagram as PNG';
-            exportPngBtn.addEventListener('click', (e) => {
+            const menu = document.createElement('div');
+            menu.className = 'code-block-export-menu';
+            menu.id = `mermaid-download-${++this.mermaidControlIdCounter}`;
+            menu.setAttribute('role', 'menu');
+            menu.setAttribute('aria-label', 'Download diagram as');
+            menu.hidden = true;
+            downloadBtn.setAttribute('aria-controls', menu.id);
+            ['png', 'svg'].forEach(format => {
+                const item = document.createElement('button');
+                item.type = 'button';
+                item.className = 'code-block-export-btn';
+                item.setAttribute('role', 'menuitem');
+                item.setAttribute('data-format', format);
+                item.tabIndex = -1;
+                const label = document.createElement('span');
+                label.textContent = format.toUpperCase();
+                const description = document.createElement('span');
+                description.className = 'code-block-export-description';
+                description.textContent = format === 'png' ? 'Image' : 'Vector';
+                item.appendChild(label);
+                item.appendChild(description);
+                item.title = `Save Mermaid diagram as ${format.toUpperCase()}`;
+                item.addEventListener('mousedown', event => event.preventDefault());
+                item.addEventListener('click', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    this._closeMermaidExportMenu(true);
+                    if (format === 'png') this._exportMermaidPng(pre, 'mermaid-diagram.png');
+                    else this._exportMermaidSvg(pre, 'mermaid-diagram.svg');
+                });
+                menu.appendChild(item);
+            });
+            downloadBtn.addEventListener('mousedown', event => {
+                event.preventDefault();
+                event.stopPropagation();
+            });
+            downloadBtn.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                if (this.mermaidExportMenu?.toggle === downloadBtn) this._closeMermaidExportMenu(true);
+                else this._openMermaidExportMenu(pre, download, downloadBtn, menu);
+            });
+            download.addEventListener('keydown', event => {
+                if (event.key === 'Escape' && this.mermaidExportMenu?.toggle === downloadBtn) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    this._closeMermaidExportMenu(true);
+                } else if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    if (menu.hidden) {
+                        this._openMermaidExportMenu(pre, download, downloadBtn, menu, event.key === 'ArrowUp' || event.key === 'End');
+                        return;
+                    }
+                    const items = Array.from(menu.querySelectorAll('[role="menuitem"]'));
+                    const index = items.indexOf(document.activeElement);
+                    const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 :
+                        (index + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+                    items[next].focus({ preventScroll: true });
+                }
+            });
+            download.appendChild(downloadBtn);
+            download.appendChild(menu);
+            actionGroup.appendChild(download);
+
+            const expandBtn = document.createElement('button');
+            expandBtn.type = 'button';
+            expandBtn.className = 'code-block-expand-btn mermaid-icon-btn';
+            expandBtn.innerHTML = mermaidToolbarIcon('expand');
+            expandBtn.title = 'Expand diagram (zoom and pan)';
+            expandBtn.setAttribute('aria-label', 'Expand diagram');
+            expandBtn.setAttribute('aria-haspopup', 'dialog');
+            expandBtn.addEventListener('mousedown', (e) => {
                 e.preventDefault();
                 e.stopPropagation();
-                this._exportMermaidPng(pre, 'mermaid-diagram.png');
             });
-            actionGroup.appendChild(exportPngBtn);
+            actionGroup.appendChild(expandBtn);
         }
 
         toolbar.appendChild(actionGroup);
@@ -1877,9 +2025,12 @@ export class CodeBlockManager {
             this._setMathView(pre, 'code');
         }
         
-        // 古い言語クラスを削除
-        const oldClasses = Array.from(code.classList).filter(cls => cls.startsWith('language-'));
-        oldClasses.forEach(cls => code.classList.remove(cls));
+        // Prism annotates PRE as well as CODE. Clear both so switching to
+        // plaintext or Mermaid cannot retain the previous syntax theme.
+        [pre, code].forEach(element => {
+            const oldClasses = Array.from(element.classList).filter(cls => cls.startsWith('language-'));
+            oldClasses.forEach(cls => element.classList.remove(cls));
+        });
         
         // 新しい言語クラスを追加
         if (newLang && newLang !== 'plaintext') {

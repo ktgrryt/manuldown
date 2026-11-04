@@ -7,6 +7,7 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 ## [Unreleased]
 
 ### Added
+- Mermaid diagrams have a Code/Preview switch and copy, download, and expand icons. Download offers PNG or SVG. The expanded preview supports wheel zoom, drag and keyboard panning, fit-to-view, and actual-size controls.
 - Copy selected content as Markdown from the editor's right-click menu or with `Cmd+Shift+C` on macOS / `Ctrl+Shift+C` on Windows/Linux while the editor body has focus.
 - Keyboard navigation for footnote references and list numbers: focus a number with arrows or Tab and press Enter to jump between the body and its note.
 - Delete a footnote and all its references with Backspace (or macOS Ctrl+H) on its focused list number, with Undo/Redo support.
@@ -22,6 +23,9 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 - Load Prism as one script, and load Mermaid only when a document has a Mermaid code block.
 
 ### Fixed
+- Clicking above a code block at the start of a document opens a temporary input line, including for Mermaid previews.
+- Clicking below a Mermaid preview opens a temporary input line, including when its language label is selected; untouched lines are not saved.
+- Keep code-block language labels in the same font, size, and line height after language changes, and remove stale Prism language classes when switching to plaintext or Mermaid.
 - Keep footnote cursor navigation to one step when VS Code and the Webview both receive a macOS Ctrl shortcut, and avoid scrolling numbers that are already visible.
 - Move from a footnote text end to the next note number without looping through its delete control; keep the caret stable at the final note end.
 - Disable toolbar editing commands while a footnote number is focused, including overflow menu items, and restore their availability when returning to editable text.

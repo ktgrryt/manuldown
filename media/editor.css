@@ -943,6 +943,11 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
     display: flex;
     justify-content: space-between;
     align-items: center;
+    /* Prism may add a language class to PRE after a language change. Keep
+       control typography independent of that parent's syntax theme. */
+    font-family: var(--vscode-editor-font-family, Consolas, Monaco, 'Andale Mono', 'Ubuntu Mono', monospace);
+    font-size: 11px;
+    line-height: 1.5;
     padding: 4px 8px;
     background-color: rgba(128, 128, 128, 0.1);
     border-bottom: 1px solid var(--vscode-editorGroup-border);
@@ -958,9 +963,17 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
 
 .code-block-view-toggle {
     display: flex;
-    border: 1px solid var(--vscode-editorGroup-border);
-    border-radius: 3px;
+    flex-shrink: 0;
+    align-items: stretch;
+    gap: 0;
+    border: 1px solid var(--vscode-input-border, var(--vscode-editorGroup-border));
+    border-radius: 4px;
+    background-color: var(--vscode-editor-background);
     overflow: hidden;
+}
+
+.code-block-view-btn + .code-block-view-btn {
+    border-left: 1px solid var(--vscode-input-border, var(--vscode-editorGroup-border));
 }
 
 .code-block-view-btn {
@@ -979,18 +992,20 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
 }
 
 .code-block-view-btn[aria-pressed="true"] {
-    background-color: var(--vscode-button-secondaryBackground, var(--vscode-list-hoverBackground));
-    color: var(--vscode-button-secondaryForeground, var(--vscode-editor-foreground));
+    background-color: var(--vscode-inputOption-activeBackground, var(--vscode-list-activeSelectionBackground));
+    color: var(--vscode-inputOption-activeForeground, var(--vscode-editor-foreground));
+    font-weight: 600;
 }
 
-.code-block-view-btn:focus-visible {
+.code-block-view-btn:focus-visible,
+.code-block-export-btn:focus-visible {
     outline: 1px solid var(--vscode-focusBorder);
     outline-offset: -1px;
 }
 
 /* Language label */
 .code-block-language {
-    font-size: 11px;
+    font: inherit;
     color: var(--vscode-descriptionForeground);
     font-weight: 500;
     text-transform: none;
@@ -1027,6 +1042,7 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
     background: transparent;
     color: inherit;
     font: inherit;
+    letter-spacing: inherit;
 }
 
 .code-block-language.nav-selected {
@@ -1079,7 +1095,8 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
     );
 }
 
-.code-block-export-btn {
+.code-block-export-btn,
+.code-block-expand-btn {
     padding: 2px 8px;
     font-size: 11px;
     background-color: var(--vscode-button-secondaryBackground);
@@ -1091,13 +1108,194 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
     font-weight: 500;
 }
 
-.code-block-export-btn:hover {
+.code-block-export-btn:hover,
+.code-block-expand-btn:hover {
     background-color: var(--vscode-button-secondaryHoverBackground);
 }
 
-.code-block-export-btn:active {
+.code-block-export-btn:active,
+.code-block-expand-btn:active {
     background-color: var(--vscode-button-background);
     color: var(--vscode-button-foreground);
+}
+
+.code-block-expand-btn {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 22px;
+    padding: 0;
+    background: transparent;
+}
+
+.code-block-expand-btn svg {
+    pointer-events: none;
+}
+
+/* Mermaid uses a compact segmented switch and icon actions. Keep its header
+   in normal flow so wrapped controls never cover the source or diagram. */
+#editor pre[data-mermaid-view] {
+    padding-top: 12px;
+}
+
+.mermaid-toolbar {
+    position: relative;
+    inset: auto;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: -12px -12px 12px;
+}
+
+.mermaid-toolbar .code-block-actions {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 6px;
+    margin-left: auto;
+}
+
+.mermaid-toolbar > .language-suggestions {
+    top: calc(100% + 4px);
+    left: 8px;
+}
+
+.mermaid-view-toggle {
+    gap: 2px;
+    padding: 2px;
+    border: 0;
+    border-radius: 4px;
+    background: var(--vscode-button-secondaryBackground, var(--vscode-list-hoverBackground));
+}
+
+.mermaid-view-toggle > .code-block-view-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    min-height: 18px;
+    padding: 1px 6px;
+    border: 0;
+    border-radius: 2px;
+    font-family: var(--vscode-font-family, sans-serif);
+    font-size: 11px;
+    line-height: 16px;
+}
+
+.mermaid-view-toggle > .code-block-view-btn[aria-pressed="true"] {
+    background: color-mix(in srgb, var(--vscode-focusBorder, #3676e8) 24%, var(--vscode-editor-background));
+    color: var(--vscode-editor-foreground);
+    font-weight: 600;
+}
+
+.mermaid-toolbar-divider {
+    flex-shrink: 0;
+    width: 1px;
+    height: 16px;
+    margin: 0 2px;
+    background: color-mix(in srgb, var(--vscode-editor-foreground) 18%, transparent);
+}
+
+.mermaid-toolbar .mermaid-icon-btn {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 22px;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 2px;
+    background: transparent;
+    color: var(--vscode-descriptionForeground, var(--vscode-editor-foreground));
+    cursor: pointer;
+}
+
+.mermaid-toolbar .mermaid-icon-btn:hover,
+.mermaid-toolbar .mermaid-icon-btn[aria-expanded="true"] {
+    background: var(--vscode-list-hoverBackground);
+    color: var(--vscode-editor-foreground);
+}
+
+.mermaid-toolbar .mermaid-icon-btn[data-copy-state="success"] {
+    color: var(--vscode-terminal-ansiGreen, #27844a);
+}
+
+.mermaid-toolbar .mermaid-icon-btn[data-copy-state="error"] {
+    color: var(--vscode-errorForeground);
+}
+
+.mermaid-toolbar-icon {
+    display: block;
+    flex-shrink: 0;
+    width: 14px;
+    height: 14px;
+    pointer-events: none;
+}
+
+.mermaid-icon-btn:focus-visible,
+.code-block-export-menu .code-block-export-btn:focus-visible {
+    outline: 2px solid var(--vscode-focusBorder);
+    outline-offset: -2px;
+}
+
+.code-block-download {
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+
+.code-block-export-menu {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 1002;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 168px;
+    padding: 4px;
+    border: 1px solid var(--vscode-dropdown-border, var(--vscode-editorGroup-border));
+    border-radius: 8px;
+    background: var(--vscode-dropdown-background, var(--vscode-editor-background));
+    color: var(--vscode-editor-foreground);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.22);
+    white-space: normal;
+}
+
+.code-block-export-menu[hidden] {
+    display: none;
+}
+
+.code-block-export-menu.opens-up {
+    top: auto;
+    bottom: calc(100% + 6px);
+}
+
+.code-block-export-menu .code-block-export-btn {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 24px;
+    padding: 8px 10px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: inherit;
+    font-family: var(--vscode-font-family, sans-serif);
+    font-size: 13px;
+    text-align: left;
+}
+
+.code-block-export-menu .code-block-export-btn:hover,
+.code-block-export-menu .code-block-export-btn:focus-visible {
+    background: var(--vscode-list-hoverBackground);
+}
+
+.code-block-export-description {
+    color: var(--vscode-descriptionForeground);
+    font-size: 11px;
+    font-weight: 400;
 }
 
 /* Language suggestions dropdown */
@@ -1224,6 +1422,228 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
     color: var(--vscode-errorForeground);
     font-size: 12px;
     white-space: pre-wrap;
+}
+
+.code-block-expand-btn:focus-visible {
+    outline: 2px solid var(--vscode-focusBorder);
+    outline-offset: -2px;
+}
+
+/* Native modal dialogs keep editor controls inert and contain keyboard focus. */
+.mermaid-viewer {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    max-width: none;
+    max-height: none;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: var(--vscode-editor-background);
+    color: var(--vscode-editor-foreground);
+    font-family: var(--vscode-font-family, sans-serif);
+    font-size: 13px;
+    line-height: 1.5;
+    user-select: none;
+}
+
+.mermaid-viewer[open] {
+    display: flex;
+    flex-direction: column;
+}
+
+.mermaid-viewer-toolbar {
+    display: flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 8px 12px 8px 20px;
+    border-bottom: 1px solid var(--vscode-editorGroup-border);
+    background: var(--vscode-editorGroupHeader-tabsBackground, var(--vscode-editor-background));
+}
+
+.mermaid-viewer-title {
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.mermaid-viewer-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    width: fit-content;
+    max-width: 100%;
+    margin: 0 auto;
+    padding: 6px;
+    border: 1px solid transparent;
+    border-radius: 3px;
+    background: transparent;
+}
+
+.mermaid-viewer button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    min-width: 44px;
+    min-height: 44px;
+    padding: 4px 12px;
+    border: 1px solid transparent;
+    border-radius: 3px;
+    background: var(--vscode-button-secondaryBackground, var(--vscode-list-hoverBackground));
+    color: var(--vscode-button-secondaryForeground, var(--vscode-editor-foreground));
+    font: inherit;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+}
+
+.mermaid-viewer button:hover {
+    background: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground));
+    border-color: var(--vscode-editorGroup-border);
+}
+
+.mermaid-viewer button:active {
+    border-color: var(--vscode-focusBorder);
+}
+
+.mermaid-viewer button:focus-visible,
+.mermaid-viewer-viewport:focus-visible {
+    outline: 1px solid var(--vscode-focusBorder);
+    outline-offset: -1px;
+}
+
+.mermaid-viewer button svg {
+    flex-shrink: 0;
+    pointer-events: none;
+}
+
+.mermaid-viewer .mermaid-viewer-close {
+    min-width: 36px;
+    min-height: 36px;
+    padding: 0;
+    border-color: transparent;
+    background: transparent;
+    color: var(--vscode-editor-foreground);
+}
+
+.mermaid-viewer .mermaid-viewer-close:hover {
+    background: var(--vscode-list-hoverBackground);
+}
+
+.mermaid-viewer button:disabled {
+    opacity: 0.45;
+    cursor: default;
+}
+
+.mermaid-viewer-scale {
+    min-width: 68px;
+    padding: 0 4px;
+    color: var(--vscode-input-foreground, var(--vscode-editor-foreground));
+    font-size: 14px;
+    font-weight: 600;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+}
+
+.mermaid-viewer-zoom {
+    display: flex;
+    flex-shrink: 0;
+    align-items: center;
+    border: 1px solid var(--vscode-input-border, var(--vscode-editorGroup-border));
+    border-radius: 3px;
+    background: var(--vscode-input-background, var(--vscode-editor-background));
+    overflow: hidden;
+}
+
+.mermaid-viewer-zoom button {
+    min-width: 42px;
+    min-height: 42px;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    color: var(--vscode-editor-foreground);
+}
+
+.mermaid-viewer-zoom button:hover {
+    background: var(--vscode-list-hoverBackground);
+}
+
+.mermaid-viewer .mermaid-viewer-actual {
+    flex-direction: column;
+    gap: 0;
+    min-width: 76px;
+    line-height: 1.25;
+}
+
+.mermaid-viewer-button-caption {
+    color: var(--vscode-descriptionForeground);
+    font-size: 11px;
+    font-weight: 400;
+}
+
+.mermaid-viewer-viewport {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+    touch-action: none;
+    cursor: grab;
+    background: var(--md-mermaid-preview-background);
+}
+
+.mermaid-viewer-viewport.is-dragging {
+    cursor: grabbing;
+}
+
+.mermaid-viewer-stage {
+    position: absolute;
+    top: 0;
+    left: 0;
+    transform-origin: 0 0;
+    pointer-events: none;
+}
+
+.mermaid-viewer-stage > svg {
+    display: block;
+    overflow: visible;
+    font-family: var(--vscode-font-family);
+    font-size: 13px;
+}
+
+.mermaid-viewer-stage foreignObject {
+    overflow: visible;
+}
+
+.mermaid-viewer-stage .label {
+    line-height: 1.2;
+    padding: 2px 6px 3px;
+    box-sizing: border-box;
+}
+
+.mermaid-viewer-status {
+    margin: 24px;
+    white-space: pre-wrap;
+    user-select: text;
+}
+
+.mermaid-viewer-footer {
+    flex-shrink: 0;
+    padding: 16px 12px 10px;
+    border-top: 1px solid var(--vscode-editorGroup-border);
+    background: var(--vscode-editorGroupHeader-tabsBackground, var(--vscode-editor-background));
+}
+
+.mermaid-viewer-hint {
+    margin: 10px 0 0;
+    color: var(--vscode-descriptionForeground);
+    font-size: 11px;
+    text-align: center;
 }
 
 /* Mermaid diagram styling is handled by Mermaid theme variables. */
