@@ -1220,6 +1220,22 @@ export class MarkdownDocument {
         return new MarkdownDocument(bodyDocument, undefined, { depth: depth + 1, links: this.referenceLinks }).toHtml();
     }
 
+    private stripBlockquotePrefix(line: string, limit = Number.POSITIVE_INFINITY): {
+        content: string; offset: number; depth: number;
+    } {
+        let offset = 0;
+        let depth = 0;
+        while (depth < limit) {
+            const prefix = line.slice(offset).match(/^ {0,3}>[ \t]?/);
+            if (!prefix) {
+                break;
+            }
+            offset += prefix[0].length;
+            depth++;
+        }
+        return { content: line.slice(offset), offset, depth };
+    }
+
     /**
      * Marked expands tabs to spaces, so tab-indented code (Makefiles, Go)
      * would be rewritten with spaces on save. Hide content tabs inside fenced
@@ -1239,26 +1255,13 @@ export class MarkdownDocument {
         let fenceLength = 0;
         let fenceQuoteDepth = 0;
         let protectedAny = false;
-        const stripQuotePrefix = (line: string, limit = Number.POSITIVE_INFINITY) => {
-            let offset = 0;
-            let depth = 0;
-            while (depth < limit) {
-                const prefix = line.slice(offset).match(/^ {0,3}>[ \t]?/);
-                if (!prefix) {
-                    break;
-                }
-                offset += prefix[0].length;
-                depth++;
-            }
-            return { content: line.slice(offset), offset, depth };
-        };
         const output = segments.map((segment) => {
             const line = this.stripTrailingCarriageReturn(segment.replace(/\n$/, ''));
-            let quoted = stripQuotePrefix(line, fenceMarker === null ? undefined : fenceQuoteDepth);
+            let quoted = this.stripBlockquotePrefix(line, fenceMarker === null ? undefined : fenceQuoteDepth);
             if (fenceMarker !== null && quoted.depth < fenceQuoteDepth) {
                 // An unterminated quoted fence stops when its quote ends.
                 fenceMarker = null;
-                quoted = stripQuotePrefix(line);
+                quoted = this.stripBlockquotePrefix(line);
             }
             if (fenceMarker === null) {
                 const openingFence = this.parseFenceOpeningLine(quoted.content);
@@ -1476,6 +1479,7 @@ export class MarkdownDocument {
         let inFence = false;
         let fenceMarker: '`' | '~' | null = null;
         let fenceLength = 0;
+        let fenceQuoteDepth = 0;
         const getSegmentLineInfo = (segment: string): { line: string; lineEnding: string } => {
             const lineEnding = segment.endsWith('\r\n')
                 ? '\r\n'
@@ -1498,10 +1502,19 @@ export class MarkdownDocument {
         for (let i = 0; i < segments.length; i++) {
             const segment = segments[i];
             const { line } = getSegmentLineInfo(segment);
+            let quoted = this.stripBlockquotePrefix(line, inFence ? fenceQuoteDepth : undefined);
+            if (inFence && quoted.depth < fenceQuoteDepth) {
+                // A quoted fence ends with its containing quote, even without
+                // an explicit closing fence. Resume normal empty-line handling.
+                inFence = false;
+                fenceMarker = null;
+                fenceLength = 0;
+                quoted = this.stripBlockquotePrefix(line);
+            }
 
             if (inFence) {
                 output.push(segment);
-                if (fenceMarker && this.isFenceClosingLine(line, fenceMarker, fenceLength)) {
+                if (fenceMarker && this.isFenceClosingLine(quoted.content, fenceMarker, fenceLength)) {
                     inFence = false;
                     fenceMarker = null;
                     fenceLength = 0;
@@ -1509,12 +1522,13 @@ export class MarkdownDocument {
                 continue;
             }
 
-            const openingFence = this.parseFenceOpeningLine(line);
+            const openingFence = this.parseFenceOpeningLine(quoted.content);
             if (openingFence) {
                 output.push(segment);
                 inFence = true;
                 fenceMarker = openingFence.marker;
                 fenceLength = openingFence.length;
+                fenceQuoteDepth = quoted.depth;
                 continue;
             }
 

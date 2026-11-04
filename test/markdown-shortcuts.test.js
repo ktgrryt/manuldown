@@ -336,6 +336,39 @@ test('link and image shortcuts wait for balanced parentheses in their destinatio
     }
 });
 
+test('angle destinations after spaces or tabs wait for the final closing parenthesis', async () => {
+    const before = 'Hello\u00a0world ';
+    const after = '\u00a0after\u00a0text';
+    const first = editor => editor.querySelector('p').firstChild;
+    for (const [marker, tag, attribute] of [['', 'a', 'href'], ['!', 'img', 'src']]) {
+        for (const whitespace of [' ', '\t', '  \t']) {
+            for (const destination of ['https://example.test/a)b', 'https://example.test/a(b']) {
+                const syntax = `${marker}[x](${whitespace}<${destination}>)`;
+                for (let length = 1; length <= syntax.length; length++) {
+                    const typed = syntax.slice(0, length);
+                    const html = `<p>${before}${typed.replace(/</g, '&lt;').replace(/>/g, '&gt;')}${after}</p>`;
+                    const result = await convertAt(html, first, before.length + typed.length, typed.slice(-1));
+                    const paragraph = result.editor.querySelector('p');
+                    if (length < syntax.length) {
+                        assert.equal(result.converted, false, typed);
+                        assert.equal(result.notified, 0, typed);
+                        assert.equal(paragraph.textContent, before + typed + after);
+                        assert.ok(!paragraph.querySelector('a,img'), typed);
+                    } else {
+                        assert.equal(result.converted, true, syntax);
+                        assert.equal(result.notified, 1, syntax);
+                        assert.equal(paragraph.querySelector(tag).getAttribute(attribute), destination);
+                        assert.equal(paragraph.firstChild.textContent, before);
+                        assert.equal(paragraph.lastChild.textContent, after);
+                        assert.equal(result.range.startContainer, paragraph.lastChild);
+                        assert.equal(result.range.startOffset, 0);
+                    }
+                }
+            }
+        }
+    }
+});
+
 test('delimiters around spaces are not emphasis', async () => {
     const result = await convertAt('<p>5 * 3 *</p>', (editor) => editor.querySelector('p').firstChild, undefined, '*');
     assert.equal(result.converted, false);

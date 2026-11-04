@@ -931,12 +931,47 @@ test('editing quoted fenced code preserves recipe tabs and quote indentation', a
     }
 });
 
+test('quoted code fences keep blank lines when loaded, edited and saved', async () => {
+    for (const prefix of ['> ', '> > ', '>\t']) {
+        for (const fence of ['```', '~~~']) {
+            for (const blankPrefix of [prefix.trimEnd(), prefix]) {
+                const source = `${prefix}${fence}make\n${prefix}target:\n${blankPrefix}\n${prefix}\tcommand\n${prefix}${fence}\n`;
+                await withEditableDocument(source, (editor, domUtils) => {
+                    const code = editor.querySelector('pre code');
+                    assert.equal(code.textContent, 'target:\n\n\tcommand\n', source);
+                    const provider = new MarkdownEditorProvider({});
+                    assert.equal(provider.htmlToMarkdown(domUtils.getCleanedHTML(), createTextDocument(source)), source);
+                    code.textContent = code.textContent.replace('command', 'new-command');
+                    const output = provider.htmlToMarkdown(domUtils.getCleanedHTML(), createTextDocument(source));
+                    const rendered = require('@mixmark-io/domino').createWindow(new MarkdownDocument(createTextDocument(output)).toHtml());
+                    assert.equal(rendered.document.querySelector('pre code').textContent, 'target:\n\n\tnew-command\n');
+                    assert.doesNotMatch(output, /MDW_/);
+                    assert.equal(convert(output).markdown, output);
+                });
+            }
+        }
+    }
+});
+
 test('top-level code keeps quote-looking content and tabs after a quoted fence closes', () => {
-    const source = '> ```make\n> \tcommand\n> ```\n\n```text\n> \tcontent\n```\n';
+    const source = '> ```make\n> \tcommand\n> ```\n\n```text\n> \tcontent\n>\n> ```make\n>\n```\n';
     const { html, markdown } = convert(source);
     const root = require('@mixmark-io/domino').createWindow(html).document;
-    assert.deepEqual(Array.from(root.querySelectorAll('pre code'), code => code.textContent), ['\tcommand\n', '> \tcontent\n']);
+    assert.deepEqual(Array.from(root.querySelectorAll('pre code'), code => code.textContent), ['\tcommand\n', '> \tcontent\n>\n> ```make\n>\n']);
     assert.equal(markdown, source);
+});
+
+test('an unclosed quoted fence stops protecting blank lines when its quote ends', async () => {
+    const source = '> ```make\n> target:\n>\n> \tcommand\n\nOutside\n\n> \n> Next\n';
+    await withEditableDocument(source, (editor, domUtils) => {
+        const code = editor.querySelector('pre code');
+        assert.equal(code.textContent, 'target:\n\n\tcommand\n');
+        code.textContent = code.textContent.replace('command', 'new-command');
+        const output = new MarkdownEditorProvider({}).htmlToMarkdown(domUtils.getCleanedHTML(), createTextDocument(source));
+        assert.match(output, /\nOutside\n\n> \n> Next\n$/);
+        assert.doesNotMatch(output, /MDW_/);
+        assert.equal(convert(output).markdown, output);
+    });
 });
 
 test('table cells that hold only an image keep the image', () => {

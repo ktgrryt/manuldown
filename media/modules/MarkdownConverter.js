@@ -298,10 +298,16 @@ export class MarkdownConverter {
         while ((match = opening.exec(text))) {
             if (!!match[1] !== image || this.isEscapedAt(text, match.index)) continue;
             const targetStart = opening.lastIndex;
+            let destinationStart = targetStart;
+            // Whitespace may separate "(" from an angle-delimited destination.
+            // Its parentheses are literal URL characters until ">" is typed.
+            while (text[destinationStart] === ' ' || text[destinationStart] === '\t') {
+                destinationStart++;
+            }
             let depth = 1;
-            let angle = text[targetStart] === '<';
+            let angle = text[destinationStart] === '<';
             let quote = null;
-            for (let index = targetStart; index < text.length; index++) {
+            for (let index = destinationStart; index < text.length; index++) {
                 const character = text[index];
                 if (character === '\n') break;
                 if (character === '\\') {
