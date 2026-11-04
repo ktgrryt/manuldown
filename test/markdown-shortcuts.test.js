@@ -39,6 +39,10 @@ class CaretRange {
     collapse() {
         this.collapsed = true;
     }
+
+    setStartAfter(node) {
+        this.setStart(node.parentNode, Array.from(node.parentNode.childNodes).indexOf(node) + 1);
+    }
 }
 
 // Build an editor from HTML, put the caret at `offset` in the text node that
@@ -82,7 +86,7 @@ async function convertAt(html, findTextNode, offset, insertedText) {
         const converted = converter.convertMarkdownSyntax(() => {
             notified++;
         }, { insertedText });
-        return { converted, notified, editor, html: editor.innerHTML };
+        return { converted, notified, editor, html: editor.innerHTML, range: activeRange };
     } finally {
         Object.assign(global, previous);
     }
@@ -226,6 +230,40 @@ test('typing a list marker at the start of an item keeps its other content', asy
     assert.equal(bullet.html, '<ul><li>text<strong>b</strong></li></ul>');
 });
 
+test('typing a list marker at an image left edge keeps the image in the new item', async () => {
+    const imageHtml = '<img src="display.png" data-md-path="images/original.png" alt="diagram|240x120">';
+    for (const [marker, tag, task] of [['- ', 'ul', false], ['* ', 'ul', false], ['-\u00a0', 'ul', false],
+        ['1. ', 'ol', false], ['- [ ] ', 'ul', true], ['- [x] ', 'ul', true]]) {
+        let originalImage;
+        const result = await convertAt(`<p>before</p><p>${marker}${imageHtml}</p><p>after</p>`, editor => {
+            originalImage = editor.querySelector('img');
+            return editor.querySelectorAll('p')[1].firstChild;
+        }, marker.length, marker.slice(-1));
+        assert.equal(result.converted, true, marker);
+        assert.equal(result.notified, 1);
+        const list = result.editor.children[1];
+        const item = list.firstElementChild;
+        assert.equal(list.tagName, tag.toUpperCase());
+        assert.ok(originalImage.parentElement === item, result.html);
+        assert.equal(originalImage.outerHTML, imageHtml);
+        assert.equal(result.editor.children.length, 3);
+        assert.equal(result.editor.firstElementChild.textContent, 'before');
+        assert.equal(result.editor.lastElementChild.textContent, 'after');
+        assert.equal(item.querySelectorAll('input[type="checkbox"]').length, task ? 1 : 0);
+        assert.ok(item.contains(result.range.startContainer));
+        assert.equal(result.range.startOffset, 0);
+        assert.ok(result.range.startContainer.nextSibling === originalImage);
+    }
+});
+
+test('a list shortcut takes the image and its link without moving surrounding lines', async () => {
+    const linkedImage = '<a href="https://example.test"><img src="image.png" alt="diagram"></a>';
+    const result = await convertAt(`<p>before<br>- ${linkedImage} caption<br>after</p>`,
+        editor => editor.querySelector('p').childNodes[2], 2, ' ');
+    assert.equal(result.converted, true);
+    assert.equal(result.html, `<p>before</p><ul><li>${linkedImage} caption</li></ul><p>after</p>`);
+});
+
 test('bold and italic conversion completes and keeps the preceding text', async () => {
     const bold = await convertAt('<p>a  **bold**</p>', (editor) => editor.querySelector('p').firstChild, undefined, '*');
     assert.equal(bold.converted, true);
@@ -235,6 +273,67 @@ test('bold and italic conversion completes and keeps the preceding text', async 
     const italic = await convertAt('<p>an *em*</p>', (editor) => editor.querySelector('p').firstChild, undefined, '*');
     assert.equal(italic.converted, true);
     assert.equal(italic.html, '<p>an <em>em</em> </p>');
+});
+
+test('inline shortcuts preserve NBSP in surrounding text and formatted labels', async () => {
+    const prefix = 'Hello\u00a0world ';
+    const suffix = '\u00a0after\u00a0text';
+    for (const [syntax, tag, body] of [
+        ['[a\u00a0b](https://example.test)', 'a', 'a\u00a0b'],
+        ['![a\u00a0b](image.png)', 'img', 'a\u00a0b'],
+        ['`a\u00a0b`', 'code', 'a b'],
+    ]) {
+        const result = await convertAt(`<p>${prefix}${syntax}${suffix}</p>`,
+            editor => editor.querySelector('p').firstChild, prefix.length + syntax.length, syntax.slice(-1));
+        assert.equal(result.converted, true);
+        const paragraph = result.editor.querySelector('p');
+        assert.equal(paragraph.firstChild.textContent, prefix);
+        assert.equal(paragraph.lastChild.textContent, suffix);
+        const formatted = paragraph.querySelector(tag);
+        assert.equal(tag === 'img' ? formatted.getAttribute('alt') : formatted.textContent, body);
+    }
+    const autoLink = await convertAt(`<p>${prefix}https://example.test\u00a0${suffix}</p>`,
+        editor => editor.querySelector('p').firstChild, prefix.length + 'https://example.test\u00a0'.length, '\u00a0');
+    assert.equal(autoLink.converted, true);
+    assert.equal(autoLink.editor.querySelector('p').firstChild.textContent, prefix);
+    assert.equal(autoLink.editor.querySelector('p').lastChild.textContent, suffix);
+});
+
+test('block shortcuts preserve NBSP in content and accept it after the marker', async () => {
+    for (const [marker, tag] of [['#', 'h1'], ['-', 'li'], ['1.', 'li'], ['>', 'blockquote p']]) {
+        const result = await convertAt(`<p>${marker}\u00a0Hello\u00a0world</p>`,
+            editor => editor.querySelector('p').firstChild, marker.length + 1, '\u00a0');
+        assert.equal(result.converted, true);
+        assert.equal(result.editor.querySelector(tag).textContent, 'Hello\u00a0world');
+    }
+});
+
+test('link and image shortcuts wait for balanced parentheses in their destination', async () => {
+    const first = editor => editor.querySelector('p').firstChild;
+    for (const [prefix, tag, attribute] of [['', 'a', 'href'], ['!', 'img', 'src']]) {
+        for (const destination of [
+            'https://en.wikipedia.org/wiki/Function_(mathematics)',
+            'https://example.test/a(b(c))',
+        ]) {
+            const incomplete = `${prefix}[x](${destination}`;
+            const pending = await convertAt(`<p>${incomplete}</p>`, first, undefined, ')');
+            assert.equal(pending.converted, false, incomplete);
+            assert.equal(pending.editor.querySelector('p').textContent, incomplete);
+            const complete = await convertAt(`<p>${incomplete})</p>`, first, undefined, ')');
+            assert.equal(complete.converted, true);
+            assert.equal(complete.editor.querySelector(tag).getAttribute(attribute), destination);
+        }
+        for (const [target, expected] of [
+            ['https://example.test/a\\(b\\)', 'https://example.test/a(b)'],
+            ['<https://example.test/a(b)>', 'https://example.test/a(b)'],
+            ['https://example.test/a(b) "Title (detail)"', 'https://example.test/a(b)'],
+        ]) {
+            const result = await convertAt(`<p>${prefix}[x](${target.replace(/</g, '&lt;').replace(/>/g, '&gt;')})</p>`,
+                first, undefined, ')');
+            assert.equal(result.converted, true, target);
+            assert.equal(result.editor.querySelector(tag).getAttribute(attribute), expected);
+        }
+    }
 });
 
 test('delimiters around spaces are not emphasis', async () => {

@@ -707,7 +707,22 @@ export class MarkdownDocument {
             const listMatch = lineWithoutEnding.match(/^((?:\s*>[ \t]?)*)([ \t]*)([*+-]|\d+[.)])([ \t]+|$)((?:\[[ xX]\][ \t]+)?)/);
             if (!listMatch) {
                 if (trimmed !== '' && !/^<p\b[^>]*\bdata-mdw-blankline=/i.test(trimmed)) {
-                    activeListStacks.clear();
+                    // An image or another indented block continues its list
+                    // item. Forgetting that parent made a following child list
+                    // reopen inside a separate, empty indent wrapper.
+                    const continuation = lineWithoutEnding.match(/^((?:[ \t]*>[ \t]?)*)([ \t]*)/)!;
+                    const stackKey = continuation[1];
+                    const stack = activeListStacks.get(stackKey) ?? [];
+                    const continuationIndent = this.getVisualIndentWidth(continuation[2]);
+                    let parentIndex = stack.length - 1;
+                    while (parentIndex >= 0 && continuationIndent < stack[parentIndex].sourceContentColumn) {
+                        parentIndex--;
+                    }
+                    if (parentIndex < 0) {
+                        activeListStacks.clear();
+                    } else {
+                        activeListStacks.set(stackKey, stack.slice(0, parentIndex + 1));
+                    }
                 }
                 output.push(segment);
                 continue;
@@ -1207,9 +1222,9 @@ export class MarkdownDocument {
 
     /**
      * Marked expands tabs to spaces, so tab-indented code (Makefiles, Go)
-     * would be rewritten with spaces on save. Hide the tabs inside top-level
-     * fenced code blocks behind a marker while Marked parses, then put them
-     * back. (Fences nested in lists or quotes are left to Marked.)
+     * would be rewritten with spaces on save. Hide content tabs inside fenced
+     * code blocks, including blockquotes, while leaving container indentation
+     * intact for Marked, then restore the tabs in the rendered code.
      */
     private protectFencedCodeTabs(markdown: string): {
         markdown: string;
@@ -1222,27 +1237,49 @@ export class MarkdownDocument {
         const tabMarker = this.createPlaceholderMarker(markdown, 'CODE_TAB');
         let fenceMarker: '`' | '~' | null = null;
         let fenceLength = 0;
+        let fenceQuoteDepth = 0;
         let protectedAny = false;
+        const stripQuotePrefix = (line: string, limit = Number.POSITIVE_INFINITY) => {
+            let offset = 0;
+            let depth = 0;
+            while (depth < limit) {
+                const prefix = line.slice(offset).match(/^ {0,3}>[ \t]?/);
+                if (!prefix) {
+                    break;
+                }
+                offset += prefix[0].length;
+                depth++;
+            }
+            return { content: line.slice(offset), offset, depth };
+        };
         const output = segments.map((segment) => {
             const line = this.stripTrailingCarriageReturn(segment.replace(/\n$/, ''));
+            let quoted = stripQuotePrefix(line, fenceMarker === null ? undefined : fenceQuoteDepth);
+            if (fenceMarker !== null && quoted.depth < fenceQuoteDepth) {
+                // An unterminated quoted fence stops when its quote ends.
+                fenceMarker = null;
+                quoted = stripQuotePrefix(line);
+            }
             if (fenceMarker === null) {
-                const openingFence = this.parseFenceOpeningLine(line);
+                const openingFence = this.parseFenceOpeningLine(quoted.content);
                 if (openingFence) {
                     fenceMarker = openingFence.marker;
                     fenceLength = openingFence.length;
+                    fenceQuoteDepth = quoted.depth;
                 }
                 return segment;
             }
-            if (this.isFenceClosingLine(line, fenceMarker, fenceLength)) {
+            if (this.isFenceClosingLine(quoted.content, fenceMarker, fenceLength)) {
                 fenceMarker = null;
                 fenceLength = 0;
                 return segment;
             }
-            if (!segment.includes('\t')) {
+            const contentSegment = segment.slice(quoted.offset);
+            if (!contentSegment.includes('\t')) {
                 return segment;
             }
             protectedAny = true;
-            return segment.replace(/\t/g, tabMarker);
+            return segment.slice(0, quoted.offset) + contentSegment.replace(/\t/g, tabMarker);
         });
         if (!protectedAny) {
             return { markdown, restore: (html) => html };
@@ -1721,6 +1758,8 @@ export class MarkdownDocument {
         }
 
         const documentDir = path.dirname(this.document.uri.fsPath);
+        const { createWindow } = require('@mixmark-io/domino');
+        const attributeContainer = createWindow('<div></div>').document.querySelector('div');
         // data-md-path is an internal trust marker added below. Raw Markdown HTML
         // must not be able to provide its own value and influence later imports
         // or Markdown serialization.
@@ -1736,7 +1775,11 @@ export class MarkdownDocument {
             if (!sourceMatch) {
                 return cleanedImageTag;
             }
-            const [, before, src, after] = sourceMatch;
+            const [, before, , after] = sourceMatch;
+            // The renderer has HTML-escaped this attribute. Read its DOM value
+            // before resolving the filename or escaping it into data-md-path.
+            attributeContainer.innerHTML = cleanedImageTag;
+            const src = attributeContainer.querySelector('img').getAttribute('src');
             // Decode URL-encoded src (marked encodes non-ASCII characters like Japanese)
             let decodedSrc = src;
             try {
@@ -1756,7 +1799,9 @@ export class MarkdownDocument {
             try {
                 // Convert to webview URI
                 const webviewUri = this.webview!.asWebviewUri(vscode.Uri.file(absolutePath));
-                const markdownPath = decodedSrc
+                // Keep URL escapes in the Markdown destination; only the file
+                // lookup above uses a decoded filesystem path.
+                const markdownPath = src
                     .replace(/&/g, '&amp;')
                     .replace(/"/g, '&quot;')
                     .replace(/</g, '&lt;')

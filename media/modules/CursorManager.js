@@ -1386,6 +1386,27 @@ export class CursorManager {
         return null;
     }
 
+    // A nested list has lines of its own; its first/last image is not the
+    // first/last content of the parent item's line.
+    _getListItemEdgeImage(listItem, edge) {
+        if (!listItem || listItem.tagName !== 'LI') {
+            return null;
+        }
+        const children = Array.from(listItem.childNodes || []);
+        if (edge === 'end') children.reverse();
+        for (const child of children) {
+            if (child.nodeType === Node.ELEMENT_NODE && ['UL', 'OL'].includes(child.tagName)) {
+                continue;
+            }
+            const node = edge === 'end'
+                ? this._getLastMeaningfulNode(child)
+                : this._getFirstMeaningfulNode(child);
+            if (!node) continue;
+            return node.nodeType === Node.ELEMENT_NODE && node.tagName === 'IMG' ? node : null;
+        }
+        return null;
+    }
+
     _getImageAheadFromCollapsedRange(range) {
         if (!range || !range.collapsed) {
             return null;
@@ -2789,6 +2810,17 @@ export class CursorManager {
         return true;
     }
 
+    _placeCursorInFirstListItem(list, selection) {
+        if (!list || !['UL', 'OL'].includes(list.tagName)) {
+            return false;
+        }
+        const firstItem = this._getListItemFromContainer(list, 0, 'down');
+        if (!firstItem || !list.contains(firstItem)) {
+            return false;
+        }
+        return this._placeCursorInListItemAtX(firstItem, firstItem.getBoundingClientRect().left, 'down', selection);
+    }
+
     /**
      * ブロックの最終表示行の行頭にカーソルを配置
      * 行頭から↑で上のブロックへ出るときの移動先。リストは最後の項目、表は最終行のセルに置く。
@@ -2854,6 +2886,14 @@ export class CursorManager {
         }
         if (this._placeCursorAfterTrailingInlineCode(listItem, selection)) {
             return true;
+        }
+        const trailingImage = this._getListItemEdgeImage(listItem, 'end');
+        if (trailingImage) {
+            const imageRange = document.createRange();
+            if (this._collapseRangeAfterNode(imageRange, trailingImage)) {
+                this._applyBackwardRange(selection, imageRange);
+                return true;
+            }
         }
         const textNode = this._getLastDirectTextNode(listItem) || this._getFirstDirectTextNode(listItem);
         if (textNode) {
@@ -3046,7 +3086,12 @@ export class CursorManager {
     }
 
     _isBlockImage(image) {
-        return window.getComputedStyle(image).display === 'block';
+        const display = window.getComputedStyle(image).display;
+        if (display === 'block') return true;
+        // Inline-block keeps an image-only list's marker on the image line.
+        // The image still owns that line for navigation.
+        return display === 'inline-block' &&
+            !!image.closest('li')?.classList.contains('image-only-list-item');
     }
 
     /**
@@ -3059,12 +3104,18 @@ export class CursorManager {
      */
     _placeCursorAtEnteredImageLine(block, direction, selection) {
         const originRange = selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
-        if (!block || (originRange && block.contains(originRange.startContainer))) {
+        if (!block) {
             return false;
         }
-        const image = direction === 'up'
-            ? this._getTrailingImageInBlock(block)
-            : this._getLeadingImageInBlock(block);
+        if (originRange && block.contains(originRange.startContainer)) {
+            const originItem = this.domUtils.getParentElement(originRange.startContainer, 'LI');
+            if (block.tagName !== 'LI' || originItem === block) return false;
+        }
+        const image = block.tagName === 'LI'
+            ? this._getListItemEdgeImage(block, direction === 'up' ? 'end' : 'start')
+            : direction === 'up'
+                ? this._getTrailingImageInBlock(block)
+                : this._getLeadingImageInBlock(block);
         const imageRange = document.createRange();
         if (!image || !this._isBlockImage(image) || !this._collapseRangeBeforeNode(imageRange, image)) {
             return false;
@@ -6181,13 +6232,15 @@ export class CursorManager {
             return false;
         };
 
-        // 画像全体選択で↓ → 画像右エッジ（画像直後）
+        // A whole-image selection represents the image's line. Collapse it
+        // internally, then finish the same downward step on the following line.
         const selectedImageForDown = this._getSelectedImageNode(range);
         if (selectedImageForDown) {
             const imageRightRange = document.createRange();
             if (this._collapseRangeAfterNode(imageRightRange, selectedImageForDown)) {
                 selection.removeAllRanges();
                 selection.addRange(imageRightRange);
+                this.moveCursorDown(notifyCallback);
                 return;
             }
         }
@@ -6199,7 +6252,9 @@ export class CursorManager {
             if (imageBehind && this._isCollapsedRangeAtNodeBoundary(range, imageBehind, 'after')) {
                 const imageBlock = this._getBlockFromContainer(imageBehind);
                 const trailingImage = imageBlock
-                    ? this._getTrailingImageInBlock(imageBlock)
+                    ? (imageBlock.tagName === 'LI'
+                        ? this._getListItemEdgeImage(imageBlock, 'end')
+                        : this._getTrailingImageInBlock(imageBlock))
                     : (imageBehind.parentElement === this.editor ? imageBehind : null);
                 if (trailingImage === imageBehind) {
                     // Handle Markdown hard-break form like "<img><br>" first.
@@ -6208,8 +6263,11 @@ export class CursorManager {
                     if (moveToNextLineWithinImageBlock(imageBehind, imageBlock)) {
                         return;
                     }
-                    const boundaryNode = imageBlock || imageBehind;
+                    const boundaryNode = this._getImageCaretAnchorNode(imageBehind) || imageBehind;
                     const nextAfterImage = this._getNextNavigableElementInDocument(boundaryNode);
+                    if (this._placeCursorInFirstListItem(nextAfterImage, selection)) {
+                        return;
+                    }
                     if (nextAfterImage && moveToBlockStart(nextAfterImage)) {
                         return;
                     }
@@ -6230,7 +6288,9 @@ export class CursorManager {
                     ? this._getLeadingImageInBlock(imageBlock)
                     : (imageAhead.parentElement === this.editor ? imageAhead : null);
                 const trailingImage = imageBlock
-                    ? this._getTrailingImageInBlock(imageBlock)
+                    ? (imageBlock.tagName === 'LI'
+                        ? this._getListItemEdgeImage(imageBlock, 'end')
+                        : this._getTrailingImageInBlock(imageBlock))
                     : (imageAhead.parentElement === this.editor ? imageAhead : null);
                 const isAtImageLeftEdge = this._isCollapsedRangeAtNodeBoundary(range, imageAhead, 'before');
 
@@ -6240,8 +6300,11 @@ export class CursorManager {
                     if (moveToNextLineWithinImageBlock(imageAhead, imageBlock)) {
                         return;
                     }
-                    const boundaryNode = imageBlock || imageAhead;
+                    const boundaryNode = this._getImageCaretAnchorNode(imageAhead) || imageAhead;
                     const nextAfterImage = this._getNextNavigableElementInDocument(boundaryNode);
+                    if (this._placeCursorInFirstListItem(nextAfterImage, selection)) {
+                        return;
+                    }
                     if (nextAfterImage && moveToBlockStart(nextAfterImage)) {
                         return;
                     }
@@ -7840,12 +7903,17 @@ export class CursorManager {
             if (imageBehind && this._isCollapsedRangeAtNodeBoundary(range, imageBehind, 'after')) {
                 const imageBlock = getCurrentBlockForNode(imageBehind);
                 const trailingImage = imageBlock
-                    ? this._getTrailingImageInBlock(imageBlock)
+                    ? (imageBlock.tagName === 'LI'
+                        ? this._getListItemEdgeImage(imageBlock, 'end')
+                        : this._getTrailingImageInBlock(imageBlock))
                     : (imageBehind.parentElement === this.editor ? imageBehind : null);
                 if (trailingImage === imageBehind) {
-                    const boundaryNode = imageBlock || imageBehind;
+                    const boundaryNode = this._getImageCaretAnchorNode(imageBehind) || imageBehind;
                     const nextElementAfterImage = this._getNextNavigableElementInDocument(boundaryNode);
                     if (nextElementAfterImage) {
+                        if (this._placeCursorInFirstListItem(nextElementAfterImage, selection)) {
+                            return true;
+                        }
                         if (moveToBlockStart(nextElementAfterImage)) {
                             return true;
                         }
@@ -7922,6 +7990,14 @@ export class CursorManager {
             if (isAtListEnd) {
                 const nextListItem = this._getAdjacentListItem(currentListItem, 'next');
                 if (nextListItem) {
+                    const leadingImage = this._getListItemEdgeImage(nextListItem, 'start');
+                    if (leadingImage) {
+                        const imageRange = document.createRange();
+                        if (this._collapseRangeBeforeNode(imageRange, leadingImage)) {
+                            applyRange(imageRange);
+                            return true;
+                        }
+                    }
                     let targetNode = this._getFirstDirectTextNode(nextListItem) ||
                         this._getLastDirectTextNode(nextListItem);
                     if (!targetNode) {
@@ -8739,6 +8815,9 @@ export class CursorManager {
                         if (parentLi === prevListItem) {
                             const currentText = (currentListItem.textContent || '').replace(/[\u200B\u2060\uFEFF\u00A0]/g, '').trim();
                             if (currentText === '') {
+                                if (this._getListItemEdgeImage(prevListItem, 'end')) {
+                                    return this._placeCursorAtListItemLogicalEnd(prevListItem, selection);
+                                }
                                 if (this._placeCursorAfterTrailingInlineCode(prevListItem, selection)) {
                                     return true;
                                 }

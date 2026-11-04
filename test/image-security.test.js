@@ -149,6 +149,32 @@ test('data URL images still save and insert normally on the local filesystem', a
     assert.equal(f.provider.pendingImageSavePaths.size, 0);
 });
 
+test('inserted images keep portable paths for document names with Markdown delimiters', async t => {
+    const domino = require('@mixmark-io/domino');
+    const editorSource = syncFs.readFileSync(path.join(__dirname, '..', 'media', 'editor.js'), 'utf8');
+    const start = editorSource.indexOf("const markdown = typeof message.markdown === 'string'");
+    const end = editorSource.indexOf('applyImageRenderSizeFromAlt(img);', start);
+    const createImage = new Function('message', 'document', 'applyImageSourcePolicy',
+        `${editorSource.slice(start, end)}\nreturn img;`);
+
+    for (const name of ['my notes', 'a(b)', 'a#b%20', '日本語']) {
+        const f = await fixture(t);
+        const document = { uri: fileUri(path.join(f.workspace, `${name}.md`)), getText: () => '' };
+        await f.provider.saveImageBytes(imageBytes, 'image/png', document, f.webview, { altText: 'a]b' });
+        const message = f.messages[0];
+        const expected = `images/${name}/${name}.png`.split('/').map(segment =>
+            encodeURIComponent(segment).replace(/[!'()*]/g, c => `%${c.charCodeAt(0).toString(16).toUpperCase()}`)
+        ).join('/');
+        assert.equal(message.markdownPath, expected);
+        assert.deepEqual(await fs.readFile(path.join(f.workspace, 'images', name, `${name}.png`)), imageBytes);
+        const window = domino.createWindow('<p></p>');
+        const img = createImage(message, window.document, (image, src) => image.setAttribute('src', src));
+        window.document.querySelector('p').appendChild(img);
+        assert.equal(img.getAttribute('data-md-path'), expected);
+        assert.equal(f.provider.htmlToMarkdown(window.document.body.innerHTML, document), message.markdown + '\n');
+    }
+});
+
 test('the image picker can still import an explicitly selected outside file', async t => {
     const f = await fixture(t);
     const selected = path.join(f.outside, 'selected.png');

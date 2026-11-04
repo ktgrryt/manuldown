@@ -216,6 +216,62 @@ test('an unsafe cross-block match does not hide an overlapping match in the next
     assert.deepEqual(manager.matchOffsets, [1]);
 });
 
+test('Unicode case folding maps search and replacement back to original character positions', async () => {
+    const previousDocument = global.document;
+    const previousNode = global.Node;
+    try {
+        for (const [text, query, expectedMatch, expectedResult, caseSensitive = false] of [
+            ['İcat dog', 'cat', 'cat', 'İX dog'],
+            ['İcat İcat', 'cat', 'cat', 'İX İX'],
+            ['İ dog', 'İ', 'İ', 'X dog'],
+            ['İ dog', 'i', 'İ', 'X dog'],
+            ['𐐀İCAT dog', 'cat', 'CAT', '𐐀İX dog'],
+            ['ΟΣ İcat dog', 'ος', 'ΟΣ', 'X İcat dog'],
+            ['İcat dog', 'cat', 'cat', 'İX dog', true],
+        ]) {
+            const window = domino.createWindow(`<p>${text}</p>`);
+            const document = window.document;
+            const paragraph = document.querySelector('p');
+            document.createRange = () => ({
+                setStart(node, offset) { this.startContainer = node; this.startOffset = offset; },
+                setEnd(node, offset) { this.endContainer = node; this.endOffset = offset; },
+                setStartAfter() {}, collapse() {},
+                toString() { return this.startContainer.data.slice(this.startOffset, this.endOffset); },
+                cloneContents() {
+                    const fragment = document.createDocumentFragment();
+                    fragment.appendChild(document.createTextNode(this.toString()));
+                    return fragment;
+                },
+                deleteContents() { this.startContainer.deleteData(this.startOffset, this.endOffset - this.startOffset); },
+                insertNode(node) {
+                    const tail = this.startContainer.splitText(this.startOffset);
+                    tail.parentNode.insertBefore(node, tail);
+                },
+            });
+            global.document = document;
+            global.Node = window.Node;
+            const manager = await createManager();
+            manager.editor = paragraph;
+            manager.query = query;
+            manager.caseSensitive = caseSensitive;
+            manager.currentMatchIndex = -1;
+            manager._getSearchableTextNodes = () => [paragraph.firstChild];
+            manager._clearHighlights = manager._applyHighlights = manager._updateCurrentMatchHighlight = () => {};
+            manager._updateMatchCountLabel = () => {};
+            manager._performSearch({ scrollToCurrentMatch: false });
+            assert.ok(manager.matches.length > 0);
+            for (const range of manager.matches.slice().reverse()) {
+                assert.equal(range.toString(), expectedMatch);
+                assert.ok(manager._replaceRange(range, 'X'));
+            }
+            assert.equal(paragraph.textContent, expectedResult);
+        }
+    } finally {
+        global.document = previousDocument;
+        global.Node = previousNode;
+    }
+});
+
 test('IME confirmation keydowns are not treated as find or replace actions', async () => {
     const manager = await createManager();
     const input = {};

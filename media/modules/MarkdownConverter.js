@@ -138,6 +138,21 @@ export class MarkdownConverter {
         }
     }
 
+    /** Keep inline content after a typed list marker in the new list item. */
+    moveLineContentAfter(textNode, target) {
+        let node = textNode.nextSibling;
+        while (node) {
+            if (node.nodeType === Node.ELEMENT_NODE &&
+                (node.tagName === 'BR' || this.domUtils.isBlockElement(node) ||
+                    ['UL', 'OL', 'TABLE', 'HR'].includes(node.tagName))) {
+                break;
+            }
+            const next = node.nextSibling;
+            target.appendChild(node);
+            node = next;
+        }
+    }
+
     /**
      * A marker typed at the start of an existing list item only removes the
      * marker (and adds a checkbox for "[ ]"): the item keeps its other inline
@@ -162,31 +177,6 @@ export class MarkdownConverter {
             }
         }
         return replacement;
-    }
-
-    /**
-     * Offset in rawText of the character at normalizedOffset, where the
-     * normalized text drops browser no-break spaces. User zero-width characters
-     * remain content; editor-owned controls were removed before conversion.
-     */
-    toRawOffset(rawText, normalizedOffset) {
-        let kept = 0;
-        for (let i = 0; i < rawText.length; i++) {
-            if (rawText[i] === '\u00A0') continue;
-            if (kept === normalizedOffset) return i;
-            kept++;
-        }
-        return rawText.length;
-    }
-
-    /**
-     * The raw text between two normalized offsets. No-break spaces are user
-     * text (Chromium inserts them for consecutive spaces) and must survive.
-     */
-    rawSlice(rawText, normalizedStart, normalizedEnd) {
-        const start = this.toRawOffset(rawText, normalizedStart);
-        const end = normalizedEnd === undefined ? rawText.length : this.toRawOffset(rawText, normalizedEnd);
-        return rawText.slice(start, end);
     }
 
     splitParagraphAndInsertBlock(textNode, blockElement) {
@@ -298,6 +288,45 @@ export class MarkdownConverter {
         }
 
         return backslashCount % 2 === 1;
+    }
+
+    /** Match a link ending at the caret, after its outer parentheses close. */
+    matchMarkdownLinkAtCursor(text, image = false) {
+        if (!text.endsWith(')')) return null;
+        const opening = /(!?)\[((?:\\[^\n]|[^\]\\\n])*)\]\(/g;
+        let match;
+        while ((match = opening.exec(text))) {
+            if (!!match[1] !== image || this.isEscapedAt(text, match.index)) continue;
+            const targetStart = opening.lastIndex;
+            let depth = 1;
+            let angle = text[targetStart] === '<';
+            let quote = null;
+            for (let index = targetStart; index < text.length; index++) {
+                const character = text[index];
+                if (character === '\n') break;
+                if (character === '\\') {
+                    index++;
+                    continue;
+                }
+                if (angle) {
+                    if (character === '>') angle = false;
+                } else if (quote) {
+                    if (character === quote) quote = null;
+                } else if ((character === '"' || character === "'") && /\s/.test(text[index - 1] || '')) {
+                    quote = character;
+                } else if (character === '(') {
+                    depth++;
+                } else if (character === ')' && --depth === 0) {
+                    if (index === text.length - 1) {
+                        const result = [text.slice(match.index), match[2], text.slice(targetStart, index)];
+                        result.index = match.index;
+                        return result;
+                    }
+                    break;
+                }
+            }
+        }
+        return null;
     }
 
     /**
@@ -445,8 +474,9 @@ export class MarkdownConverter {
         if (this.applySingleCharacterEscapeAtCursor(textNode, cursorOffset, selection, notifyCallback)) {
             return true;
         }
-        const normalizedText = rawText.replace(/\u00A0/g, '');
-        const normalizedCursorOffset = rawText.slice(0, cursorOffset).replace(/\u00A0/g, '').length;
+        // NBSP is user whitespace (also inserted by Chromium for consecutive
+        // spaces). Match and slice the original text so both content and caret
+        // offsets survive a shortcut. JavaScript's \s already recognizes NBSP.
         const isInTableCell = !!(
             this.domUtils.getParentElement(textNode, 'TD') ||
             this.domUtils.getParentElement(textNode, 'TH')
@@ -483,7 +513,7 @@ export class MarkdownConverter {
         };
 
         // 見出し構文をチェック（行頭）
-        const headingMatch = normalizedText.match(/^\s*(#{1,6})\s+(.+)$/);
+        const headingMatch = rawText.match(/^\s*(#{1,6})\s+(.+)$/);
         if (!isInTableCell && !isInListItem && headingMatch && blockMarkerTyped(/^\s*#{1,6}\s+$/)) {
             const level = headingMatch[1].length;
             const content = headingMatch[2];
@@ -498,7 +528,7 @@ export class MarkdownConverter {
             const newRange = document.createRange();
             const textContent = heading.firstChild;
             if (textContent) {
-                const newOffset = Math.min(content.length, normalizedCursorOffset - headingMatch[1].length - 1);
+                const newOffset = Math.min(content.length, cursorOffset - headingMatch[1].length - 1);
                 newRange.setStart(textContent, Math.max(0, newOffset));
                 newRange.collapse(true);
                 selection.removeAllRanges();
@@ -512,18 +542,18 @@ export class MarkdownConverter {
         // 太字構文をチェック **text**
         // As in CommonMark, the text inside the delimiters must not start or
         // end with whitespace ("5 * 3 *" stays text).
-        const boldMatch = normalizedText.match(/\*\*([^*\s](?:[^*]*[^*\s])?)\*\*$/);
-        if (boldMatch && normalizedCursorOffset === normalizedText.length) {
-            const boldStart = normalizedText.length - boldMatch[0].length;
-            const boldClosingStart = normalizedText.length - 2;
+        const boldMatch = rawText.match(/\*\*([^*\s](?:[^*]*[^*\s])?)\*\*$/);
+        if (boldMatch && cursorOffset === rawText.length) {
+            const boldStart = rawText.length - boldMatch[0].length;
+            const boldClosingStart = rawText.length - 2;
             const boldIsEscaped =
-                this.isEscapedAt(normalizedText, boldStart) ||
-                this.isEscapedAt(normalizedText, boldClosingStart);
+                this.isEscapedAt(rawText, boldStart) ||
+                this.isEscapedAt(rawText, boldClosingStart);
             if (boldIsEscaped) {
                 // 明示的にエスケープされた "**" は装飾へ変換しない
             } else {
-                const beforeText = this.rawSlice(rawText, 0, boldStart);
-                const boldText = this.rawSlice(rawText, boldStart + 2, boldClosingStart);
+                const beforeText = rawText.slice(0, boldStart);
+                const boldText = rawText.slice(boldStart + 2, boldClosingStart);
 
                 const fragment = document.createDocumentFragment();
 
@@ -555,18 +585,18 @@ export class MarkdownConverter {
         }
 
         // イタリック構文をチェック *text*
-        const italicMatch = normalizedText.match(/(?<!\*)\*([^*\s](?:[^*]*[^*\s])?)\*(?!\*)$/);
-        if (italicMatch && normalizedCursorOffset === normalizedText.length) {
-            const italicStart = normalizedText.length - italicMatch[0].length;
-            const italicClosingStart = normalizedText.length - 1;
+        const italicMatch = rawText.match(/(?<!\*)\*([^*\s](?:[^*]*[^*\s])?)\*(?!\*)$/);
+        if (italicMatch && cursorOffset === rawText.length) {
+            const italicStart = rawText.length - italicMatch[0].length;
+            const italicClosingStart = rawText.length - 1;
             const italicIsEscaped =
-                this.isEscapedAt(normalizedText, italicStart) ||
-                this.isEscapedAt(normalizedText, italicClosingStart);
+                this.isEscapedAt(rawText, italicStart) ||
+                this.isEscapedAt(rawText, italicClosingStart);
             if (italicIsEscaped) {
                 // 明示的にエスケープされた "*" は装飾へ変換しない
             } else {
-                const beforeText = this.rawSlice(rawText, 0, italicStart);
-                const italicText = this.rawSlice(rawText, italicStart + 1, italicClosingStart);
+                const beforeText = rawText.slice(0, italicStart);
+                const italicText = rawText.slice(italicStart + 1, italicClosingStart);
 
                 const fragment = document.createDocumentFragment();
 
@@ -598,7 +628,7 @@ export class MarkdownConverter {
         }
 
         // 取り消し線構文をチェック ~~text~~（カーソル直前の範囲で判定）
-        const beforeCursorText = normalizedText.slice(0, normalizedCursorOffset);
+        const beforeCursorText = rawText.slice(0, cursorOffset);
         const strikeMatch = beforeCursorText.match(/~~([^~]+)~~(\s*)$/);
         if (strikeMatch) {
             const matchedText = strikeMatch[0];
@@ -611,9 +641,9 @@ export class MarkdownConverter {
             if (strikeIsEscaped) {
                 // 明示的にエスケープされた "~~" は装飾へ変換しない
             } else {
-                const strikeText = this.rawSlice(rawText, strikeStart + 2, strikeClosingStart);
-                const beforeText = this.rawSlice(rawText, 0, strikeStart);
-                const afterText = this.rawSlice(rawText, normalizedCursorOffset);
+                const strikeText = rawText.slice(strikeStart + 2, strikeClosingStart);
+                const beforeText = rawText.slice(0, strikeStart);
+                const afterText = rawText.slice(cursorOffset);
 
                 const fragment = document.createDocumentFragment();
 
@@ -655,11 +685,11 @@ export class MarkdownConverter {
         if (codeMatch && !parentIsCode) {
             const matchedText = codeMatch[0];
             const codeStart = beforeCursorText.length - matchedText.length;
-            const beforeText = this.rawSlice(rawText, 0, codeStart);
+            const beforeText = rawText.slice(0, codeStart);
             // Code keeps its spaces as ordinary spaces, not no-break spaces.
-            const codeText = this.rawSlice(rawText, codeStart + 1, beforeCursorText.length - 1)
+            const codeText = rawText.slice(codeStart + 1, beforeCursorText.length - 1)
                 .replace(/ /g, ' ');
-            const afterText = this.rawSlice(rawText, normalizedCursorOffset);
+            const afterText = rawText.slice(cursorOffset);
 
             const parent = textNode.parentElement;
             const fragment = document.createDocumentFragment();
@@ -701,10 +731,10 @@ export class MarkdownConverter {
             : null;
         if (mathMatch) {
             const mathStart = beforeCursorText.length - mathMatch[0].length + mathMatch[1].length;
-            const beforeText = this.rawSlice(rawText, 0, mathStart);
-            const tex = this.rawSlice(rawText, mathStart + 1, beforeCursorText.length - 1)
+            const beforeText = rawText.slice(0, mathStart);
+            const tex = rawText.slice(mathStart + 1, beforeCursorText.length - 1)
                 .replace(/ /g, ' ');
-            const afterText = this.rawSlice(rawText, normalizedCursorOffset);
+            const afterText = rawText.slice(cursorOffset);
 
             const fragment = document.createDocumentFragment();
             if (beforeText) {
@@ -735,7 +765,7 @@ export class MarkdownConverter {
         }
 
         // 水平線構文をチェック --- (3つ以上のハイフンのみ)
-        const hrMatch = normalizedText.match(/^-{3,}$/);
+        const hrMatch = rawText.match(/^-{3,}$/);
         // An <hr> cannot live inside a list item or heading; there "---" stays text.
         if (!isInTableCell && !isInListItem && !isInHeading && hrMatch && blockMarkerTyped(/^-{3,}$/)) {
             const hr = document.createElement('hr');
@@ -762,7 +792,7 @@ export class MarkdownConverter {
         }
 
         // 順序なしリスト構文をチェック - item / - [ ] task
-        const ulMatch = normalizedText.match(/^\s*[-*]\s+(.*)$/);
+        const ulMatch = rawText.match(/^\s*[-*]\s+(.*)$/);
         if (
             !isInTableCell &&
             !isInHeading &&
@@ -834,6 +864,7 @@ export class MarkdownConverter {
                     }
                 } else {
                     ul = document.createElement('ul');
+                    this.moveLineContentAfter(textNode, li);
                     this.replaceLineWithBlock(textNode, ul);
                     ul.appendChild(li);
                 }
@@ -852,7 +883,7 @@ export class MarkdownConverter {
             const newRange = document.createRange();
             if (textContentNode) {
                 const markerLength = ulMatch[0].length - listText.length;
-                const newOffset = Math.min(listText.length, Math.max(0, normalizedCursorOffset - markerLength));
+                const newOffset = Math.min(listText.length, Math.max(0, cursorOffset - markerLength));
                 newRange.setStart(textContentNode, isTaskItem && listText.length === 0 ? 0 : newOffset);
                 newRange.collapse(true);
                 selection.removeAllRanges();
@@ -864,7 +895,7 @@ export class MarkdownConverter {
         }
 
         // 順序付きリスト構文をチェック 1. item
-        const olMatch = normalizedText.match(/^\s*\d+\.\s+(.*)$/);
+        const olMatch = rawText.match(/^\s*\d+\.\s+(.*)$/);
         if (
             !isInTableCell &&
             !isInHeading &&
@@ -916,6 +947,7 @@ export class MarkdownConverter {
                     }
                 } else {
                     ol = document.createElement('ol');
+                    this.moveLineContentAfter(textNode, li);
                     this.replaceLineWithBlock(textNode, ol);
                     ol.appendChild(li);
                 }
@@ -934,7 +966,7 @@ export class MarkdownConverter {
             const newRange = document.createRange();
             if (textContentNode) {
                 const markerLength = olMatch[0].length - content.length;
-                const newOffset = Math.min(content.length, Math.max(0, normalizedCursorOffset - markerLength));
+                const newOffset = Math.min(content.length, Math.max(0, cursorOffset - markerLength));
                 newRange.setStart(textContentNode, newOffset);
                 newRange.collapse(true);
                 selection.removeAllRanges();
@@ -946,7 +978,7 @@ export class MarkdownConverter {
         }
 
         // 引用構文をチェック > text（テキストが必要）
-        const blockquoteMatch = normalizedText.match(/^\s*>\s+(.+)$/);
+        const blockquoteMatch = rawText.match(/^\s*>\s+(.+)$/);
         if (!isInTableCell && !isInListItem && blockquoteMatch && blockMarkerTyped(/^\s*>\s+$/)) {
             const content = blockquoteMatch[1];
 
@@ -962,7 +994,7 @@ export class MarkdownConverter {
             const newRange = document.createRange();
             if (textContentNode) {
                 const markerLength = blockquoteMatch[0].length - content.length;
-                const newOffset = Math.min(content.length, Math.max(0, normalizedCursorOffset - markerLength));
+                const newOffset = Math.min(content.length, Math.max(0, cursorOffset - markerLength));
                 newRange.setStart(textContentNode, newOffset);
                 newRange.collapse(true);
                 selection.removeAllRanges();
@@ -974,10 +1006,10 @@ export class MarkdownConverter {
         }
 
         // URL自動リンク化をチェック（URLの後にスペースで確定）
-        const textBeforeCursor = normalizedText.slice(0, normalizedCursorOffset);
+        const textBeforeCursor = rawText.slice(0, cursorOffset);
 
         // Markdown画像構文をチェック ![alt](src)
-        const markdownImageMatch = textBeforeCursor.match(/!\[([^\]\n]*)\]\(([^)\n]+)\)$/);
+        const markdownImageMatch = this.matchMarkdownLinkAtCursor(textBeforeCursor, true);
         if (markdownImageMatch) {
             const matchIndex = markdownImageMatch.index ?? -1;
             const isEscapedImageSyntax = this.isEscapedAt(textBeforeCursor, matchIndex);
@@ -997,8 +1029,8 @@ export class MarkdownConverter {
                     .trim();
 
                 if (src !== '') {
-                    const beforeImage = normalizedText.slice(0, matchIndex);
-                    const afterCursorText = normalizedText.slice(normalizedCursorOffset);
+                    const beforeImage = rawText.slice(0, matchIndex);
+                    const afterCursorText = rawText.slice(cursorOffset);
 
                     // コード内にいる場合はスキップ
                     const parentIsCode = textNode.parentNode && textNode.parentNode.tagName === 'CODE';
@@ -1046,7 +1078,7 @@ export class MarkdownConverter {
         }
 
         // Markdownリンク構文をチェック [text](url)
-        const markdownLinkMatch = textBeforeCursor.match(/\[([^\]\n]+)\]\(([^)\n]+)\)$/);
+        const markdownLinkMatch = this.matchMarkdownLinkAtCursor(textBeforeCursor);
         if (markdownLinkMatch) {
             const matchIndex = markdownLinkMatch.index ?? -1;
             const isImageSyntax = matchIndex > 0 && textBeforeCursor[matchIndex - 1] === '!';
@@ -1067,8 +1099,8 @@ export class MarkdownConverter {
                     .trim();
 
                 if (label !== '' && href !== '') {
-                    const beforeLink = normalizedText.slice(0, matchIndex);
-                    const afterCursorText = normalizedText.slice(normalizedCursorOffset);
+                    const beforeLink = rawText.slice(0, matchIndex);
+                    const afterCursorText = rawText.slice(cursorOffset);
 
                     // 既にリンク内またはコード内にいる場合はスキップ
                     const parentLink = textNode.parentElement && textNode.parentElement.closest
@@ -1117,8 +1149,8 @@ export class MarkdownConverter {
         if (urlAutoLinkMatch) {
             const url = urlAutoLinkMatch[1];
             const matchIndex = urlAutoLinkMatch.index;
-            const beforeUrl = normalizedText.slice(0, matchIndex);
-            const afterCursorText = normalizedText.slice(normalizedCursorOffset);
+            const beforeUrl = rawText.slice(0, matchIndex);
+            const afterCursorText = rawText.slice(cursorOffset);
 
             // 既にリンク内またはコード内にいる場合はスキップ
             const parentLink = textNode.parentElement && textNode.parentElement.closest
@@ -1138,7 +1170,7 @@ export class MarkdownConverter {
                 fragment.appendChild(link);
 
                 // スペースを追加
-                const spacerNode = document.createTextNode(' ');
+                const spacerNode = document.createTextNode(rawText.slice(cursorOffset - 1, cursorOffset));
                 fragment.appendChild(spacerNode);
 
                 if (afterCursorText) {

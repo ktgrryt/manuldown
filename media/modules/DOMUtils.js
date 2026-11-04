@@ -575,6 +575,7 @@ export class DOMUtils {
         removeTransientClass('input[type="checkbox"].cursor-on', 'cursor-on');
         removeTransientClass('img.image-caret-left-edge', 'image-caret-left-edge');
         removeTransientClass('img.image-caret-right-edge', 'image-caret-right-edge');
+        removeTransientClass('li.image-only-list-item', 'image-only-list-item');
         removeTransientClass('table.md-table', 'md-table');
 
         if (historyComparable) {
@@ -741,9 +742,11 @@ export class DOMUtils {
         const allListItems = this.editor.querySelectorAll('li');
         for (let li of allListItems) {
             // カーソルが現在位置しているリストアイテムはスキップ
-            if (li === currentListItem) continue;
+            if (li === currentListItem || li.contains(currentContainer)) continue;
             if (li.getAttribute('data-preserve-empty') === 'true') continue;
-            if (li.querySelector(':scope > input[type="checkbox"]')) continue;
+            // Non-text content and child lists are not empty browser artifacts.
+            // In particular, typing in the next item must not delete an image.
+            if (li.querySelector('img, input, hr, table, pre, ul, ol, [data-mdw-math], [data-mdw-opaque-source]')) continue;
 
             // リストアイテムが空かチェック（空白、<br>、または<span><br></span>のみ）
             const textContent = li.textContent.trim();

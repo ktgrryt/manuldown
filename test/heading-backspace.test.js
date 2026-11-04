@@ -7,6 +7,8 @@ const domino = require('@mixmark-io/domino');
 const editorSource = fs.readFileSync(path.join(__dirname, '..', 'media', 'editor.js'), 'utf8');
 const domUtilsSource = fs.readFileSync(path.join(__dirname, '..', 'media', 'modules', 'DOMUtils.js'), 'utf8');
 const domUtilsPromise = import(`data:text/javascript;base64,${Buffer.from(domUtilsSource).toString('base64')}`);
+const listManagerSource = fs.readFileSync(path.join(__dirname, '..', 'media', 'modules', 'ListManager.js'), 'utf8');
+const listManagerPromise = import(`data:text/javascript;base64,${Buffer.from(listManagerSource).toString('base64')}`);
 
 function extractFunction(name) {
     const start = editorSource.indexOf(`    function ${name}(`);
@@ -52,10 +54,11 @@ async function createFixture(html, onNativeDelete = () => {}) {
     const document = window.document;
     const editor = document.getElementById('editor');
     const { DOMUtils } = await domUtilsPromise;
-    const previous = { document: global.document, Node: global.Node, NodeFilter: global.NodeFilter };
+    const previous = { document: global.document, Node: global.Node, NodeFilter: global.NodeFilter, window: global.window };
     global.document = document;
     global.Node = window.Node;
     global.NodeFilter = { SHOW_TEXT: 4, FILTER_ACCEPT: 1, FILTER_REJECT: 2 };
+    global.window = window;
     document.createRange = () => new TestRange();
     let range;
     const selection = {
@@ -69,6 +72,10 @@ async function createFixture(html, onNativeDelete = () => {}) {
     let changes = 0;
     const history = [];
     const editedMathBlocks = [];
+    const caretPlacements = [];
+    const { ListManager } = await listManagerPromise;
+    const domUtils = new DOMUtils(editor);
+    const listManager = new ListManager(editor, domUtils, { deferCaretPlacement: callback => caretPlacements.push(callback) });
     document.execCommand = (command) => {
         assert.equal(command, 'delete');
         nativeDeletes++;
@@ -79,17 +86,26 @@ async function createFixture(html, onNativeDelete = () => {}) {
         'hasDirectTextContent', 'getDirectTextContent', 'isRangeAtListItemStart',
         'hasCheckboxAtStart', 'hasCheckbox', 'getCheckboxInListItemDirectContent',
         'getFirstDirectTextNode', 'handleBackspaceAfterMathBlock', 'getClosestBlockElement',
-        'isAtBlockStartForRange'
+        'isAtBlockStartForRange', 'listItemHasDirectImage', 'unwrapListItemContent',
+        'isIgnorableEditorTextValue', 'isEditorEffectivelyEmpty', 'isRenderableEditorNode',
+        'getFirstDirectTextNodeAfterCheckbox', 'getCheckboxTextMinOffset',
+        'getNestedListContainerForListItem', 'hasNestedListChild',
+        'convertEmptyNestedListItemToIndentWrapper', 'handleEmptyNestedListItemDelete',
+        'handleBackspaceRemoveBlankLineBeforeNestedList', 'isRangeInListItemDirectContent',
     ];
-    const backspace = new Function('window', 'editor', 'domUtils', 'notifyChange', 'deferCaretPlacement',
-        'cursorManager', 'codeBlockManager', 'stateManager',
-        `${names.map(extractFunction).join('\n')}\nreturn handleBackspace;`
-    )(window, editor, new DOMUtils(editor), () => changes++, () => {},
+    const handlers = new Function('window', 'editor', 'domUtils', 'notifyChange', 'deferCaretPlacement',
+        'cursorManager', 'codeBlockManager', 'stateManager', 'listManager',
+        `${names.map(extractFunction).join('\n')}\nreturn { backspace: handleBackspace, emptyDelete: handleEmptyNestedListItemDelete, blankDelete: handleBackspaceRemoveBlankLineBeforeNestedList };`
+    )(window, editor, domUtils, () => changes++, callback => caretPlacements.push(callback),
         { getCodeBlockText: code => code.textContent },
         { _editMathSource: pre => editedMathBlocks.push(pre) },
-        { saveState: () => history.push('save'), saveStateDebounced: () => history.push('commit') });
+        { saveState: () => history.push('save'), saveStateDebounced: () => history.push('commit') }, listManager);
     return {
-        editor, selection, backspace, history, editedMathBlocks,
+        editor, selection, backspace: handlers.backspace, history, editedMathBlocks,
+        pressListBackspace() {
+            return handlers.blankDelete(selection, range) || handlers.emptyDelete(selection, range) || handlers.backspace();
+        },
+        flushCaretPlacements() { caretPlacements.splice(0).forEach(callback => callback()); },
         get nativeDeletes() { return nativeDeletes; },
         get changes() { return changes; },
         caret(node, offset = 0) { range = new TestRange(); range.setStart(node, offset); },
@@ -269,4 +285,79 @@ test('Backspace still uses normal deletion after text, inside a heading, and for
             assert.equal(fixture.editor.innerHTML, `${previous}<h2>Title</h2>`);
         } finally { fixture.restore(); }
     }
+});
+
+test('Backspace at a list-leading image removes only its list formatting', async () => {
+    const imageHtml = '<img src="display.png" data-md-path="images/original.png" alt="diagram|240x120">';
+    for (const tag of ['ul', 'ol']) {
+        for (const content of [imageHtml, `<p>${imageHtml}</p>`,
+            `<a href="https://example.test">${imageHtml}</a> caption`]) {
+            const fixture = await createFixture(`<${tag}><li>${content}</li></${tag}>`);
+            try {
+                const image = fixture.editor.querySelector('img');
+                fixture.caret(image.parentElement, Array.from(image.parentNode.childNodes).indexOf(image));
+                assert.equal(fixture.pressListBackspace(), true);
+                fixture.flushCaretPlacements();
+                assert.ok(image.isConnected);
+                assert.ok(!image.closest('li'));
+                assert.equal(image.outerHTML, imageHtml);
+                assert.equal(fixture.editor.querySelectorAll('li').length, 0);
+                assert.ok(!fixture.editor.querySelector('p p'));
+                assert.equal(fixture.nativeDeletes, 0);
+                assert.equal(fixture.changes, 1);
+                const caret = fixture.selection.getRangeAt(0);
+                assert.ok(caret.startContainer === fixture.editor.firstElementChild);
+                assert.equal(caret.startOffset, 0);
+            } finally { fixture.restore(); }
+        }
+    }
+});
+
+test('Backspace on an image in the middle of a list preserves both neighboring lists', async () => {
+    const fixture = await createFixture('<ul><li>before</li><li><img src="image.png"></li><li>after</li></ul>');
+    try {
+        const image = fixture.editor.querySelector('img');
+        const before = fixture.editor.querySelector('li');
+        const after = fixture.editor.querySelector('li:last-child');
+        fixture.caret(image.parentElement);
+        fixture.pressListBackspace();
+        fixture.flushCaretPlacements();
+        assert.equal(fixture.editor.innerHTML, '<ul><li>before</li></ul><p><img src="image.png"></p><ul><li>after</li></ul>');
+        assert.ok(before.isConnected && after.isConnected && image.isConnected);
+    } finally { fixture.restore(); }
+});
+
+test('Backspace on a nested image outdents it one level before removing list formatting', async () => {
+    for (const tag of ['ul', 'ol']) {
+        const fixture = await createFixture(`<${tag}><li>parent<${tag}><li><img src="image.png"></li></${tag}></li></${tag}>`);
+        try {
+            const image = fixture.editor.querySelector('img');
+            const item = image.closest('li');
+            fixture.caret(item);
+            fixture.pressListBackspace();
+            fixture.flushCaretPlacements();
+            assert.ok(item.parentElement === fixture.editor.firstElementChild);
+            assert.ok(image.closest('li') === item);
+            assert.equal(fixture.editor.querySelectorAll(tag).length, 1);
+            fixture.pressListBackspace();
+            fixture.flushCaretPlacements();
+            assert.ok(image.isConnected);
+            assert.ok(!image.closest('li'));
+        } finally { fixture.restore(); }
+    }
+});
+
+test('Backspace at an image with children keeps the image and child list in order', async () => {
+    const fixture = await createFixture('<ul><li>before</li><li><p><img src="image.png"></p><ul><li>child</li></ul></li><li>after</li></ul>');
+    try {
+        const image = fixture.editor.querySelector('img');
+        const childList = image.closest('li').querySelector('ul');
+        fixture.caret(image.parentElement);
+        fixture.pressListBackspace();
+        fixture.flushCaretPlacements();
+        assert.equal(fixture.editor.innerHTML,
+            '<ul><li>before</li></ul><p><img src="image.png"></p><ul><li>child</li></ul><ul><li>after</li></ul>');
+        assert.ok(image.isConnected && childList.isConnected);
+        assert.equal(fixture.nativeDeletes, 0);
+    } finally { fixture.restore(); }
 });

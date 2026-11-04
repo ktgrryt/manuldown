@@ -6,6 +6,7 @@ import { MarkdownDocument } from './MarkdownDocument';
 import { WorkspaceLinkPicker } from './WorkspaceLinkPicker';
 import { getNonce } from '../utils/getNonce';
 import {
+    encodeMarkdownRelativePath,
     isUriLexicallyWithinDirectory,
     isUriSecurelyWithinDirectory,
     normalizeExternalLinkHref,
@@ -3788,6 +3789,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             }
 
             const relativePath = `images/${documentFileName}/${filename}`;
+            const markdownPath = encodeMarkdownRelativePath(relativePath).replace(/^\.\//, '');
             const altText = typeof options.altText === 'string' && options.altText !== ''
                 ? options.altText
                 : 'image';
@@ -3796,7 +3798,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 void webview.postMessage({
                     type: 'insertImage',
                     requestId: options.requestId,
-                    markdown: `![${this.escapeMarkdownImageAltText(altText)}](${relativePath})`,
+                    markdown: `![${this.escapeMarkdownImageAltText(altText)}](${markdownPath})`,
+                    markdownPath,
                     src: webview.asWebviewUri(imageUri).toString(),
                     alt: altText
                 });

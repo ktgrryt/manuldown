@@ -26,7 +26,7 @@ export class ListManager {
         return Array.from(listItem.children || []).filter((child) => this._isListElement(child));
     }
 
-    _hasDirectTextContent(listItem) {
+    _hasDirectContent(listItem) {
         if (!listItem || listItem.tagName !== 'LI') {
             return false;
         }
@@ -37,6 +37,12 @@ export class ListManager {
                 continue;
             }
             if (child.nodeType === Node.ELEMENT_NODE && !this._isListElement(child)) {
+                // Images and empty task checkboxes are real list content even
+                // though they contribute no textContent.
+                const atomicContent = 'img, input, hr, table, [data-mdw-math], [data-mdw-opaque-source]';
+                if (child.matches(atomicContent) || child.querySelector(atomicContent)) {
+                    return true;
+                }
                 directText += child.textContent || '';
             }
         }
@@ -112,7 +118,7 @@ export class ListManager {
         if (!wrapper || wrapper.tagName !== 'LI') {
             return;
         }
-        if (this._hasDirectTextContent(wrapper)) {
+        if (this._hasDirectContent(wrapper)) {
             wrapper.removeAttribute('data-mdw-indent-wrapper');
             wrapper.classList.remove('nested-list-only');
             return;

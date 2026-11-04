@@ -74,13 +74,15 @@ async function cleanTableCell(cellHTML) {
 test('editor cleanup excludes transient cursor and selection classes', async () => {
     const cleanedHTML = await cleanEditorHTML(
         '<hr class="selected">' +
-        '<ul><li><input type="checkbox" class="cursor-on">task</li></ul>' +
+        '<ul><li><input type="checkbox" class="cursor-on">task</li>' +
+        '<li class="image-only-list-item"><img src="diagram.png"></li></ul>' +
         '<p><img src="image.png" class="photo image-caret-left-edge image-caret-right-edge"></p>' +
         '<table class="md-table"><tbody><tr><td>cell</td></tr></tbody></table>'
     );
 
     assert.doesNotMatch(cleanedHTML, /\bselected\b/);
     assert.doesNotMatch(cleanedHTML, /\bcursor-on\b/);
+    assert.doesNotMatch(cleanedHTML, /\bimage-only-list-item\b/);
     assert.doesNotMatch(cleanedHTML, /\bimage-caret-(?:left|right)-edge\b/);
     assert.doesNotMatch(cleanedHTML, /\bmd-table\b/);
     assert.match(cleanedHTML, /class="photo"/);

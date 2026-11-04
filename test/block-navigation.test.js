@@ -1975,13 +1975,15 @@ test('leaving a table into a code block selects its label downward and enters th
     }
 });
 
-// The editor stylesheet makes every image display: block. Domino ignores a
-// plain assignment to window.getComputedStyle.
-function useBlockImages() {
+// Image-only list rows use inline-block to keep their marker on the image
+// line. Domino ignores a plain assignment to window.getComputedStyle.
+function useBlockImages(listImageDisplay = 'block') {
     Object.defineProperty(window, 'getComputedStyle', {
         configurable: true,
         value: (element) => ({
-            display: element.tagName === 'IMG' ? 'block' : 'inline',
+            display: element.tagName === 'IMG'
+                ? (element.closest('li.image-only-list-item') ? listImageDisplay : 'block')
+                : 'inline',
             lineHeight: '20px',
             fontSize: '16px',
         }),
@@ -2006,6 +2008,75 @@ test('a paragraph with images is split into text and image lines', async () => {
         );
     } finally {
         fixture.restoreGlobals();
+    }
+});
+
+test('image-only list rows remain image lines with inline-block marker layout', async () => {
+    for (const imageHtml of ['<img src="a.png">', '<a href="a.png"><img src="a.png"></a>']) {
+        for (const direction of ['up', 'down']) {
+            const fixture = await createFixture(`<p>outside</p><ul><li class="image-only-list-item">${imageHtml}</li></ul>`);
+            try {
+                useBlockImages('inline-block');
+                const item = fixture.editor.querySelector('li');
+                const original = item.innerHTML;
+                fixture.placeCaret(fixture.editor.querySelector('p').firstChild, 0);
+
+                assert.equal(fixture.cursorManager._placeCursorInListItemAtX(item, 0, direction, fixture.selection), true);
+
+                const range = fixture.selection.getRangeAt(0);
+                assert.equal(range.startContainer === item, true);
+                assert.equal(range.startOffset, 0);
+                assert.equal(item.innerHTML, original, 'entering an image row must not create an empty-text caret row');
+                const lines = fixture.cursorManager._getImageLineItems(item);
+                assert.equal(lines.length, 1);
+                assert.equal(lines[0].image === item.querySelector('img'), true);
+            } finally {
+                fixture.restoreGlobals();
+            }
+        }
+    }
+});
+
+test('inline images in ordinary text and in a child item do not inherit image-row navigation', async () => {
+    const fixture = await createFixture('<p>text<img src="inline.png"></p>' +
+        '<ul><li class="image-only-list-item"><img src="parent.png"><ul><li>child<img src="child.png"></li></ul></li></ul>');
+    try {
+        Object.defineProperty(window, 'getComputedStyle', {
+            configurable: true,
+            value: () => ({ display: 'inline-block', lineHeight: '20px', fontSize: '16px' }),
+        });
+        const images = fixture.editor.querySelectorAll('img');
+        assert.equal(fixture.cursorManager._isBlockImage(images[0]), false);
+        assert.equal(fixture.cursorManager._isBlockImage(images[1]), true);
+        assert.equal(fixture.cursorManager._isBlockImage(images[2]), false);
+    } finally {
+        fixture.restoreGlobals();
+    }
+});
+
+test('ArrowUp from a child list item enters the image line of its parent', async () => {
+    for (const imageHtml of ['<img src="a.png">', '<p><img src="a.png"></p>', '<a href="a.png"><img src="a.png"></a>']) {
+        for (const childContent of ['child', '<br>', '&nbsp;']) {
+            const fixture = await createFixture(`<ul><li class="image-only-list-item">${imageHtml}<ul><li data-preserve-empty="true">${childContent}</li></ul></li></ul>`);
+            try {
+                useBlockImages('inline-block');
+                const parent = fixture.editor.querySelector('li');
+                const child = parent.querySelector('li');
+                const image = parent.querySelector('img');
+                const original = parent.innerHTML;
+                fixture.placeCaret(child.firstChild.nodeType === 3 ? child.firstChild : child, 0);
+
+                fixture.cursorManager.moveCursorUp(() => {});
+
+                const range = fixture.selection.getRangeAt(0);
+                const anchor = fixture.cursorManager._getImageCaretAnchorNode(image);
+                assert.equal(range.startContainer === anchor.parentElement, true, `${imageHtml}: ${childContent}`);
+                assert.equal(range.startOffset, childIndex(anchor));
+                assert.equal(parent.innerHTML, original);
+            } finally {
+                fixture.restoreGlobals();
+            }
+        }
     }
 });
 
@@ -2477,5 +2548,39 @@ test('temporary gaps do not add Undo steps or clear Redo, while input is undoabl
     } finally {
         history.clearHistory();
         fixture.restoreGlobals();
+    }
+});
+
+test('ArrowDown from a whole selected image reaches the following line in one step', async () => {
+    const imageForms = [
+        '<img src="image.png">',
+        '<a href="image.png"><img src="image.png"></a>',
+        '<p><img src="image.png"></p>',
+    ];
+    for (const imageHtml of imageForms) {
+        for (const childContent of [null, 'child', '<br>', '&nbsp;']) {
+            const html = childContent === null
+                ? `<div>${imageHtml}</div><p id="target">below</p>`
+                : `<ul><li>${imageHtml}<ul><li id="target">${childContent}</li></ul></li></ul><p>outside</p>`;
+            const fixture = await createFixture(html);
+            try {
+                const image = fixture.editor.querySelector('img');
+                const target = fixture.editor.querySelector('#target');
+                const range = document.createRange();
+                const anchor = image.parentElement.tagName === 'A' ? image.parentElement : image;
+                range.selectNode(anchor);
+                fixture.selection.addRange(range);
+
+                fixture.cursorManager.moveCursorDown(() => {});
+
+                const after = fixture.selection.getRangeAt(0);
+                assert.ok(target.contains(after.startContainer), `${imageHtml}: ${childContent}`);
+                assert.equal(after.collapsed, true);
+                assert.ok(fixture.editor.contains(image));
+                assert.equal(fixture.editor.querySelectorAll('img').length, 1);
+            } finally {
+                fixture.restoreGlobals();
+            }
+        }
     }
 });

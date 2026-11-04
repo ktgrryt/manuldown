@@ -81,6 +81,26 @@ function visibleText(html) {
     return html.replace(/<[^>]*>/g, '');
 }
 
+test('editing text beside a local image preserves ampersands and encoded filename characters', () => {
+    const domino = require('@mixmark-io/domino');
+    for (const destination of ['foo&bar.png', 'foo%26bar.png', 'foo%22bar.png', 'foo%2520bar.png']) {
+        const source = `![pic](${destination}) hello\n`;
+        const document = createTextDocument(source);
+        const resolved = [];
+        const webview = { asWebviewUri: uri => {
+            resolved.push(uri.fsPath);
+            return `webview-resource:${encodeURI(uri.fsPath)}`;
+        } };
+        const html = new MarkdownDocument(document, webview).toHtml();
+        const window = domino.createWindow(html);
+        assert.deepEqual(resolved, [`/workspace/${decodeURIComponent(destination)}`]);
+        assert.equal(window.document.querySelector('img').getAttribute('data-md-path'), destination);
+        window.document.querySelector('p').lastChild.nodeValue = ' changed';
+        const output = new MarkdownEditorProvider({}).htmlToMarkdown(window.document.body.innerHTML, document);
+        assert.equal(output, `![pic](${destination}) changed\n`);
+    }
+});
+
 test('Markdown clipboard output includes formatting, structure, code and math without a document-ending newline', () => {
     const provider = new MarkdownEditorProvider({});
     const html = '<h2>Heading</h2><p><strong>bold</strong> <em>italic</em> <a href="./note.md">link</a> <code>code</code></p><ul><li>item<ul><li>nested</li></ul></li></ul><pre><code class="language-js">let a = 1;\n</code></pre><p><span data-mdw-math="inline">x^2</span></p><table><thead><tr><th>H</th></tr></thead><tbody><tr><td>V</td></tr></tbody></table>';
@@ -726,6 +746,66 @@ test('a list nested under an ordered item is written at the item content column'
     assert.match(markdown, /^1\. one\n {3}[-*+] sub\n2\. two\n$/);
 });
 
+test('lists indented below images stay inside their parent after saving and reopening', async () => {
+    const fs = require('node:fs');
+    const moduleSource = fs.readFileSync(path.join(__dirname, '..', 'media', 'modules', 'ListManager.js'), 'utf8');
+    const { ListManager } = await import(`data:text/javascript;base64,${Buffer.from(moduleSource).toString('base64')}`);
+    const domino = require('@mixmark-io/domino');
+    for (const [marker, indent] of [['-', '  '], ['1.', '   '], ['10.', '    ']]) {
+        const source = `${marker} top\n\n${indent}![diagram](diagram.png)\n\n${marker} below\n`;
+        await withEditableDocument(source, (editor, domUtils) => {
+            const list = editor.querySelector('ul, ol');
+            const parent = list.firstElementChild;
+            const target = list.lastElementChild;
+            const manager = new ListManager(editor, domUtils, { deferCaretPlacement: () => {} });
+            manager.indentListItem(target);
+            assert.equal(target.parentElement.parentElement, parent);
+            let saved = new MarkdownEditorProvider({}).htmlToMarkdown(domUtils.getCleanedHTML(), createTextDocument(source));
+            for (let cycle = 0; cycle < 2; cycle++) {
+                const { html, markdown } = convert(saved);
+                const root = domino.createWindow(html).document;
+                const image = root.querySelector('img');
+                const child = Array.from(root.querySelectorAll('li')).find(li =>
+                    !li.querySelector('ul, ol') && li.textContent.trim() === 'below');
+                assert.ok(child, saved);
+                assert.ok(child.parentElement.parentElement === image.closest('li'), saved);
+                assert.equal(root.querySelectorAll('[data-mdw-indent-wrapper]').length, 0, saved);
+                assert.equal(markdown, saved);
+                saved = markdown;
+            }
+        });
+    }
+});
+
+test('making an image a list item with a typed marker saves without an empty item above it', async () => {
+    const source = '![diagram](images/diagram.png)\n';
+    const moduleSource = require('node:fs').readFileSync(
+        path.join(__dirname, '..', 'media', 'modules', 'MarkdownConverter.js'), 'utf8');
+    const { MarkdownConverter } = await import(`data:text/javascript;base64,${Buffer.from(moduleSource).toString('base64')}`);
+    await withEditableDocument(source, (editor, domUtils, document) => {
+        const image = editor.querySelector('img');
+        const marker = document.createTextNode('- ');
+        image.parentNode.insertBefore(marker, image);
+        let range = { startContainer: marker, startOffset: 2, commonAncestorContainer: marker, collapsed: true };
+        const selection = {
+            rangeCount: 1, getRangeAt: () => range,
+            removeAllRanges() {}, addRange(next) { range = next; },
+        };
+        window.getSelection = () => selection;
+        document.createRange = () => ({
+            setStart(node, offset) { this.startContainer = node; this.startOffset = offset; },
+            collapse() { this.collapsed = true; },
+        });
+        assert.equal(new MarkdownConverter(editor, domUtils).convertMarkdownSyntax(null, { insertedText: ' ' }), true);
+        assert.ok(image.closest('li'));
+        const saved = new MarkdownEditorProvider({}).htmlToMarkdown(domUtils.getCleanedHTML(), createTextDocument(source));
+        assert.match(saved, /^[*-] !\[diagram\]\(images\/diagram\.png\)\n$/);
+        const reopened = require('@mixmark-io/domino').createWindow(new MarkdownDocument(createTextDocument(saved)).toHtml());
+        assert.equal(reopened.document.querySelectorAll('li').length, 1);
+        assert.ok(reopened.document.querySelector('li > img'));
+    });
+});
+
 test('loose list round trips reach a fixed point', () => {
     const sources = [
         '- one\n\n- two\n\n## Next\n',
@@ -834,6 +914,29 @@ test('tabs inside fenced code blocks survive the round trip', () => {
         assert.doesNotMatch(visibleText(html), /MDW/);
         assert.equal(markdown, source);
     }
+});
+
+test('editing quoted fenced code preserves recipe tabs and quote indentation', async () => {
+    for (const prefix of ['> ', '> > ', '>\t']) {
+        const source = `${prefix}\`\`\`make\n${prefix}target:\n${prefix}\tcommand\n${prefix}\`\`\`\n`;
+        await withEditableDocument(source, (editor, domUtils) => {
+            const code = editor.querySelector('pre code');
+            assert.equal(code.textContent, 'target:\n\tcommand\n');
+            code.textContent = code.textContent.replace('command', 'new-command');
+            const output = new MarkdownEditorProvider({}).htmlToMarkdown(domUtils.getCleanedHTML(), createTextDocument(source));
+            const rendered = require('@mixmark-io/domino').createWindow(new MarkdownDocument(createTextDocument(output)).toHtml());
+            assert.equal(rendered.document.querySelector('pre code').textContent, 'target:\n\tnew-command\n');
+            assert.equal(rendered.document.querySelectorAll('blockquote').length, prefix === '> > ' ? 2 : 1);
+        });
+    }
+});
+
+test('top-level code keeps quote-looking content and tabs after a quoted fence closes', () => {
+    const source = '> ```make\n> \tcommand\n> ```\n\n```text\n> \tcontent\n```\n';
+    const { html, markdown } = convert(source);
+    const root = require('@mixmark-io/domino').createWindow(html).document;
+    assert.deepEqual(Array.from(root.querySelectorAll('pre code'), code => code.textContent), ['\tcommand\n', '> \tcontent\n']);
+    assert.equal(markdown, source);
 });
 
 test('table cells that hold only an image keep the image', () => {

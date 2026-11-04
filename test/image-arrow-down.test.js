@@ -231,6 +231,13 @@ function loadMoveCursorDownBelowTrailingImageBlock(fixture) {
         'isEffectivelyEmptyBlock',
         'placeCaretInEmptyParagraph',
         'placeCollapsedCaret',
+        'moveCursorDownFromSelectedImage',
+        'createAfterImageCaretRange',
+        'shouldCreateImageRightTextAnchor',
+        'getImageRightCaretTextAnchor',
+        'getImageCaretAnchorNode',
+        'getSelectedImageNodeFromRange',
+        'applySelectionRange',
     ].map(extractEditorFunction);
     const notifications = [];
     const factory = new Function(
@@ -239,7 +246,7 @@ function loadMoveCursorDownBelowTrailingImageBlock(fixture) {
         'cursorManager',
         'notifyChange',
         'syncImageCaretEdgeIndicatorsNow',
-        `${sources.join('\n\n')}\nreturn moveCursorDownBelowTrailingImageBlock;`
+        `${sources.join('\n\n')}\nreturn { moveCursorDownBelowTrailingImageBlock, moveCursorDownFromSelectedImage, getSelectedImageNodeFromRange };`
     );
     const moveDown = factory(
         fixture.editor,
@@ -250,7 +257,14 @@ function loadMoveCursorDownBelowTrailingImageBlock(fixture) {
     );
     return {
         notifications,
-        moveDown: (range) => moveDown(range, fixture.selection),
+        moveDown: (range) => moveDown.moveCursorDownBelowTrailingImageBlock(range, fixture.selection),
+        moveSelectedImageDown: () => {
+            const range = fixture.selection.getRangeAt(0);
+            const image = range.collapsed && range.startContainer.tagName === 'IMG'
+                ? range.startContainer
+                : moveDown.getSelectedImageNodeFromRange(range);
+            return moveDown.moveCursorDownFromSelectedImage(fixture.selection, image);
+        },
     };
 }
 
@@ -410,6 +424,141 @@ test('ArrowDown from a trailing image in the last list item or quote opens a lin
     }
 });
 
+test('ArrowDown at a list image does not skip an empty child list or image line', async () => {
+    const cases = [
+        ['empty bullet child', '<ul><li><img src="image.png"><ul><li><br></li></ul></li></ul>'],
+        ['empty numbered child', '<ol><li><a href="image.png"><img src="image.png"></a><ol><li>&nbsp;</li></ol></li></ol>'],
+        ['hard break after image', '<ul><li><img src="image.png"><br></li></ul>'],
+    ];
+    for (const [name, html] of cases) {
+        for (const edge of ['left', 'right']) {
+            const fixture = await createFixture(html);
+            try {
+                const { moveDown, notifications } = loadMoveCursorDownBelowTrailingImageBlock(fixture);
+                const image = fixture.editor.querySelector('img');
+                const anchor = image.parentElement.tagName === 'A' ? image.parentElement : image;
+                const range = fixture.placeCaret(anchor.parentNode, childIndex(anchor) + (edge === 'right' ? 1 : 0));
+                assert.equal(moveDown(range), false, `${name}: ${edge}`);
+                assert.equal(fixture.editor.innerHTML, html);
+                assert.equal(fixture.selection.getRangeAt(0), range);
+                assert.deepEqual(notifications, []);
+            } finally {
+                fixture.restoreGlobals();
+            }
+        }
+    }
+});
+
+test('ArrowDown at the first of two images does not leave their list item', async () => {
+    const html = '<ul><li><img src="image.png"><img src="next.png"></li></ul>';
+    const fixture = await createFixture(html);
+    try {
+        const { moveDown, notifications } = loadMoveCursorDownBelowTrailingImageBlock(fixture);
+        const range = fixture.placeCaret(fixture.editor.querySelector('li'), 0);
+        assert.equal(moveDown(range), false);
+        assert.equal(fixture.editor.innerHTML, html);
+        assert.equal(fixture.selection.getRangeAt(0), range);
+        assert.deepEqual(notifications, []);
+    } finally {
+        fixture.restoreGlobals();
+    }
+});
+
+test('ArrowDown on an empty parent line does not jump past an image in its child list', async () => {
+    const html = '<ul><li><br><ul><li><img src="image.png"></li></ul></li></ul>';
+    const fixture = await createFixture(html);
+    try {
+        const { moveDown, notifications } = loadMoveCursorDownBelowTrailingImageBlock(fixture);
+        const range = fixture.placeCaret(fixture.editor.querySelector('li'), 0);
+        assert.equal(moveDown(range), false);
+        assert.equal(fixture.editor.innerHTML, html);
+        assert.equal(fixture.selection.getRangeAt(0), range);
+        assert.deepEqual(notifications, []);
+    } finally {
+        fixture.restoreGlobals();
+    }
+});
+
+test('downward navigation from either image edge visits its child before the following paragraph', async () => {
+    for (const imageHtml of ['<img src="image.png">', '<a href="image.png"><img src="image.png"></a>', '<p><img src="image.png"></p>']) {
+        for (const placeholder of ['<br>', '&nbsp;', 'child']) {
+            for (const edge of ['left', 'right']) {
+                const preservedEmpty = placeholder === 'child' ? '' : ' data-preserve-empty="true"';
+                const fixture = await createFixture(`<ul><li>${imageHtml}<ul><li id="child"${preservedEmpty}>${placeholder}</li></ul></li></ul><p>outside</p>`);
+                try {
+                    const image = fixture.editor.querySelector('img');
+                    const child = fixture.editor.querySelector('#child');
+                    const imageRange = document.createRange();
+                    if (edge === 'left') fixture.cursorManager._collapseRangeBeforeNode(imageRange, image);
+                    else fixture.cursorManager._collapseRangeAfterNode(imageRange, image);
+                    fixture.selection.addRange(imageRange);
+                    fixture.cursorManager.moveCursorDown(() => {});
+                    assert.ok(child.contains(fixture.selection.getRangeAt(0).startContainer), `${imageHtml}: ${placeholder}: ${edge}`);
+                    assert.ok(fixture.editor.contains(image));
+                    assert.equal(child.closest('li li'), child);
+                } finally {
+                    fixture.restoreGlobals();
+                }
+            }
+        }
+    }
+});
+
+test('Down from a selected image reaches the following row in one keypress', async () => {
+    const cases = [
+        ['paragraph', '<p><img src="image.png"></p><p id="target">below</p>'],
+        ['list sibling', '<ul><li><img src="image.png"></li><li id="target">below</li></ul>'],
+        ['nested text', '<ul><li><img src="image.png"><ul><li id="target">below</li></ul></li></ul>'],
+        ['empty child', '<ul><li><img src="image.png"><ul><li id="target"><br></li></ul></li></ul>'],
+        ['linked image', '<ul><li><a href="image.png"><img src="image.png"></a><ul><li id="target">below</li></ul></li></ul>'],
+        ['wrapped image', '<ul><li><p><img src="image.png"></p><ul><li id="target"><br></li></ul></li></ul>'],
+    ];
+    for (const [name, html] of cases) {
+        for (const selectionKind of ['whole image', 'IMG container']) {
+            const fixture = await createFixture(html);
+            try {
+                const { moveSelectedImageDown, notifications } = loadMoveCursorDownBelowTrailingImageBlock(fixture);
+                const image = fixture.editor.querySelector('img');
+                const target = fixture.editor.querySelector('#target');
+                const range = document.createRange();
+                if (selectionKind === 'whole image') range.selectNode(image);
+                else range.setStart(image, 0);
+                fixture.selection.addRange(range);
+
+                assert.equal(moveSelectedImageDown(), true, name);
+                assert.ok(target.contains(fixture.selection.getRangeAt(0).startContainer), `${name}: ${selectionKind}`);
+                assert.equal(fixture.selection.isCollapsed, true);
+                assert.ok(fixture.editor.contains(image));
+                assert.deepEqual(notifications, [], 'moving to an existing row does not edit the document');
+            } finally {
+                fixture.restoreGlobals();
+            }
+        }
+    }
+});
+
+test('Down from a selected trailing image opens the line below it immediately', async () => {
+    for (const html of ['<p><img src="image.png"></p>', '<ul><li><img src="image.png"></li></ul>',
+        '<ul><li><p><a href="image.png"><img src="image.png"></a></p></li></ul>']) {
+        const fixture = await createFixture(html);
+        try {
+            const { moveSelectedImageDown, notifications } = loadMoveCursorDownBelowTrailingImageBlock(fixture);
+            const image = fixture.editor.querySelector('img');
+            const imageBlock = fixture.editor.firstElementChild;
+            const range = document.createRange();
+            range.selectNode(image);
+            fixture.selection.addRange(range);
+
+            assert.equal(moveSelectedImageDown(), true);
+            assertCaretInNewParagraphAfter(fixture, imageBlock);
+            assert.ok(fixture.editor.contains(image));
+            assert.deepEqual(notifications, ['change']);
+        } finally {
+            fixture.restoreGlobals();
+        }
+    }
+});
+
 function loadInsertImageBlockBesideTextLine(fixture) {
     const sources = [
         'insertImageBlockBesideTextLine',
@@ -507,6 +656,8 @@ function loadMoveCaretBelowImageForTextInput(fixture) {
         'getSingleImageFromImageOnlyBlock',
         'rangesShareSameCaretPosition',
         'getClosestBlockElement',
+        'getDirectTextContent',
+        'hasDirectTextContent',
         'isImageOnlyBlockElement',
         'hasMeaningfulTextContent',
         'isEffectivelyEmptyBlock',
@@ -604,6 +755,69 @@ test('text typed at an image in a list item stays in that item', async () => {
         assertCaretInEmptyLine(fixture, imageBlock.nextSibling);
     } finally {
         fixture.restoreGlobals();
+    }
+});
+
+test('typing at a direct list image creates a line inside the item before its child list', async () => {
+    for (const imageHtml of ['<img src="image.png">', '<a href="image.png"><img src="image.png"></a>']) {
+        for (const childContent of ['<br>', 'child']) {
+            const fixture = await createFixture(`<ul><li>${imageHtml}<ul><li>${childContent}</li></ul></li><li>next</li></ul>`);
+            try {
+                const moveBelowImage = loadMoveCaretBelowImageForTextInput(fixture);
+                const item = fixture.editor.querySelector('li');
+                const image = item.querySelector('img');
+                const children = item.lastChild;
+                fixture.placeCaret(item, 1);
+                assert.equal(moveBelowImage(), true);
+                const line = item.children[1];
+                assertCaretInEmptyLine(fixture, line);
+                assert.equal(line.nextSibling, children);
+                assert.equal(image.closest('li'), item);
+                assert.equal(fixture.editor.querySelectorAll('ul > p').length, 0);
+            } finally {
+                fixture.restoreGlobals();
+            }
+        }
+    }
+});
+
+test('image-only items are not empty input targets, while their empty child items are', async () => {
+    const sources = [
+        'getEmptyListItemAtRange', 'isRangeInListItemDirectContent', 'getDirectTextContent',
+        'listItemHasDirectImage', 'hasCheckboxAtStart', 'hasCheckbox', 'getCheckboxInListItemDirectContent',
+    ].map(extractEditorFunction);
+    for (const imageHtml of ['<img src="image.png">', '<p><img src="image.png"></p>']) {
+        const fixture = await createFixture(`<ul><li>${imageHtml}<ul><li><br></li></ul></li></ul>`);
+        try {
+            // These carets are inside LI, so the list-boundary fallback is not used.
+            const emptyItemAtRange = new Function('domUtils',
+                `const getListItemFromRange = () => null;\n${sources.join('\n')}\nreturn getEmptyListItemAtRange;`
+            )(fixture.domUtils);
+            const parent = fixture.editor.querySelector('li');
+            const child = parent.querySelector('li');
+            assert.equal(emptyItemAtRange(fixture.placeCaret(parent, 0)), null);
+            assert.equal(emptyItemAtRange(fixture.placeCaret(child, 0)), child);
+        } finally {
+            fixture.restoreGlobals();
+        }
+    }
+});
+
+test('typing inside the list below an image does not redirect to the image line', async () => {
+    for (const content of ['below', '<br>']) {
+        const fixture = await createFixture(`<ul><li><img src="image.png"><ul><li>${content}</li></ul></li></ul>`);
+        try {
+            const moveBelowImage = loadMoveCaretBelowImageForTextInput(fixture);
+            const target = fixture.editor.querySelector('li li');
+            const node = content === 'below' ? target.firstChild : target;
+            fixture.placeCaret(node, 0);
+            const before = fixture.editor.innerHTML;
+            assert.equal(moveBelowImage(), false);
+            assert.equal(fixture.editor.innerHTML, before);
+            assert.equal(fixture.selection.getRangeAt(0).startContainer, node);
+        } finally {
+            fixture.restoreGlobals();
+        }
     }
 });
 

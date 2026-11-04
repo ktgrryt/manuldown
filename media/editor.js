@@ -2198,6 +2198,7 @@ const {
         if (!listItem ||
             listItem.tagName !== 'LI' ||
             hasDirectTextContent(listItem) ||
+            listItemHasDirectImage(listItem) ||
             hasCheckboxAtStart(listItem)) {
             return false;
         }
@@ -2304,6 +2305,7 @@ const {
             getListItemFromRange(range, 'up');
         if (!listItem ||
             hasDirectTextContent(listItem) ||
+            listItemHasDirectImage(listItem) ||
             !getNestedListContainerForListItem(listItem) ||
             !isRangeInListItemDirectContent(range, listItem)) {
             return false;
@@ -2389,6 +2391,7 @@ const {
             currentListItem &&
             !hasCheckboxAtStart(currentListItem) &&
             !hasDirectTextContent(currentListItem) &&
+            !listItemHasDirectImage(currentListItem) &&
             isRangeInListItemDirectContent(range, currentListItem)
         ) {
             const previousItem = currentListItem.previousElementSibling &&
@@ -2506,6 +2509,7 @@ const {
         }
         if (!listItem) return null;
         if (hasCheckboxAtStart(listItem)) return null;
+        if (listItemHasDirectImage(listItem)) return null;
         if (!isRangeInListItemDirectContent(range, listItem)) return null;
         const directText = getDirectTextContent(listItem).replace(/[\u00A0\u200B\u2060]/g, '').trim();
         if (directText !== '') return null;
@@ -3815,7 +3819,7 @@ const {
             if (node.tagName === 'BR') {
                 return true;
             }
-            if (node.tagName === 'UL' || node.tagName === 'OL' || node.tagName === 'INPUT') {
+            if (node.tagName === 'UL' || node.tagName === 'OL' || node.tagName === 'INPUT' || node.tagName === 'IMG') {
                 return false;
             }
             const children = Array.from(node.childNodes || []);
@@ -6587,10 +6591,13 @@ const {
                 ensureCheckboxLeadingSpace(li);
             }
 
-            // Check if list item only contains nested lists (no text content)
+            // Images belong to the item even when it has no text. They must not
+            // get an empty-line placeholder when a child is indented below them.
             const directText = getDirectTextContent(li);
             const directTextWithoutPlaceholders = directText.replace(/[\u00A0\u200B\u2060]/g, '');
-            const hasTextContent = directTextWithoutPlaceholders.trim() !== '';
+            const hasImage = listItemHasDirectImage(li);
+            const hasItemContent = directTextWithoutPlaceholders.trim() !== '' || hasImage;
+            li.classList.toggle('image-only-list-item', hasImage && directTextWithoutPlaceholders.trim() === '');
             const hasNestedList = hasNestedListChild(li);
             let isPreservedEmpty = li.getAttribute('data-preserve-empty') === 'true';
             const isActiveItem = activeListItem && li === activeListItem;
@@ -6606,28 +6613,28 @@ const {
                 });
             };
 
-            if (isIndentWrapper && hasNestedList && !hasTextContent) {
+            if (isIndentWrapper && hasNestedList && !hasItemContent) {
                 li.removeAttribute('data-preserve-empty');
                 removeDirectPlaceholderText();
                 isPreservedEmpty = false;
             }
 
-            if (!isIndentWrapper && !isPreservedEmpty && !hasNestedList && !hasTextContent) {
+            if (!isIndentWrapper && !isPreservedEmpty && !hasNestedList && !hasItemContent) {
                 li.setAttribute('data-preserve-empty', 'true');
                 isPreservedEmpty = true;
             }
 
-            if (!isIndentWrapper && !isPreservedEmpty && isActiveItem && hasNestedList && !hasTextContent) {
+            if (!isIndentWrapper && !isPreservedEmpty && isActiveItem && hasNestedList && !hasItemContent) {
                 li.setAttribute('data-preserve-empty', 'true');
                 isPreservedEmpty = true;
             }
 
-            if (!isIndentWrapper && !isPreservedEmpty && hasNestedList && !hasTextContent && directText.includes('\u00A0')) {
+            if (!isIndentWrapper && !isPreservedEmpty && hasNestedList && !hasItemContent && directText.includes('\u00A0')) {
                 li.setAttribute('data-preserve-empty', 'true');
                 isPreservedEmpty = true;
             }
 
-            if (isPreservedEmpty && hasTextContent) {
+            if (isPreservedEmpty && hasItemContent) {
                 li.removeAttribute('data-preserve-empty');
                 const textNodes = domUtils.getTextNodes(li);
                 textNodes.forEach(textNode => {
@@ -6653,7 +6660,7 @@ const {
                 });
             }
 
-            if (isPreservedEmpty && !hasTextContent && hasNestedList) {
+            if (isPreservedEmpty && !hasItemContent && hasNestedList) {
                 const hasNbspNode = Array.from(li.childNodes).some(
                     child => child.nodeType === Node.TEXT_NODE && child.textContent.includes('\u00A0')
                 );
@@ -6666,7 +6673,7 @@ const {
                 }
             }
 
-            if (!isIndentWrapper && !isPreservedEmpty && hasNestedList && !hasTextContent) {
+            if (!isIndentWrapper && !isPreservedEmpty && hasNestedList && !hasItemContent) {
                 li.setAttribute('data-preserve-empty', 'true');
                 isPreservedEmpty = true;
                 const hasNbspNode = Array.from(li.childNodes).some(
@@ -6679,15 +6686,15 @@ const {
                     );
                     li.insertBefore(nbspNode, firstSublist || li.firstChild);
                 }
-            } else if (isIndentWrapper && (hasTextContent || !hasNestedList)) {
+            } else if (isIndentWrapper && (hasItemContent || !hasNestedList)) {
                 li.removeAttribute('data-mdw-indent-wrapper');
                 isIndentWrapper = false;
             }
 
             // Add or remove class based on content
-            // Always hide marker if there's a nested list and no text content
+            // Hide only wrappers without their own text or images.
             // Even if the cursor is in this list item
-            if (isIndentWrapper || (hasNestedList && !hasTextContent && !isPreservedEmpty)) {
+            if (isIndentWrapper || (hasNestedList && !hasItemContent && !isPreservedEmpty)) {
                 li.classList.add('nested-list-only');
             } else {
                 li.classList.remove('nested-list-only');
@@ -7844,6 +7851,44 @@ const {
         return true;
     }
 
+    // Remove the list marker while keeping existing blocks and image nodes.
+    // Inline content becomes a paragraph; paragraphs and child lists keep their
+    // order without being nested inside another paragraph.
+    function unwrapListItemContent(listItem) {
+        const content = document.createDocumentFragment();
+        let paragraph = null;
+        for (const child of Array.from(listItem.childNodes)) {
+            const isBlock = child.nodeType === Node.ELEMENT_NODE &&
+                (domUtils.isBlockElement(child) || ['UL', 'OL', 'TABLE', 'HR'].includes(child.tagName));
+            if (isBlock) {
+                content.appendChild(child);
+                paragraph = null;
+            } else {
+                if (!paragraph) {
+                    paragraph = document.createElement('p');
+                    content.appendChild(paragraph);
+                }
+                paragraph.appendChild(child);
+            }
+        }
+        if (content.childNodes.length > 1) {
+            Array.from(content.childNodes).forEach(block => {
+                if (block.tagName === 'P' && Array.from(block.childNodes).every(child =>
+                    child.nodeType === Node.TEXT_NODE && isIgnorableEditorTextValue(child.textContent))) {
+                    block.remove();
+                }
+            });
+        }
+        if (!content.firstChild) {
+            content.appendChild(document.createElement('p'));
+        }
+        if (content.childNodes.length === 1 && content.firstChild.tagName === 'P' &&
+            isEffectivelyEmptyBlock(content.firstChild)) {
+            content.firstChild.innerHTML = '<br>';
+        }
+        return { content, firstBlock: content.firstChild, lastBlock: content.lastChild };
+    }
+
     // Backspace処理
     function handleBackspace() {
         const selection = window.getSelection();
@@ -8076,7 +8121,7 @@ const {
                 const parentList = listItem.parentElement;
                 const grandParentItem = parentList ? parentList.parentElement : null;
 
-                const isEmpty = !hasDirectTextContent(listItem);
+                const isEmpty = !hasDirectTextContent(listItem) && !listItemHasDirectImage(listItem);
 
                 if (isEmpty && hasNestedListChild(listItem)) {
                     if (convertEmptyNestedListItemToIndentWrapper(listItem, selection)) {
@@ -8112,13 +8157,7 @@ const {
                     }
 
                     // トップレベルのリスト - 段落に変換
-                    const p = document.createElement('p');
-                    p.innerHTML = listItem.innerHTML;
-
-                    // 空の段落の場合、<br>を追加して表示・編集可能にする
-                    if (p.innerHTML.trim() === '' || p.textContent.trim() === '') {
-                        p.innerHTML = '<br>';
-                    }
+                    const { content, firstBlock: p, lastBlock } = unwrapListItemContent(listItem);
 
                     if (listItem.previousElementSibling || listItem.nextElementSibling) {
                         // リストに他のアイテムがある場合、リストを分割して段落を挿入
@@ -8132,12 +8171,12 @@ const {
                                 newList.appendChild(itemToMove);
                             }
                             // 段落を現在のリストの直後に挿入
-                            parentList.parentElement.insertBefore(p, parentList.nextSibling);
+                            parentList.parentElement.insertBefore(content, parentList.nextSibling);
                             // 新しいリストを段落の直後に挿入
-                            parentList.parentElement.insertBefore(newList, p.nextSibling);
+                            parentList.parentElement.insertBefore(newList, lastBlock.nextSibling);
                         } else {
                             // 後続のアイテムがない場合、段落をリストの直後に挿入
-                            parentList.parentElement.insertBefore(p, parentList.nextSibling);
+                            parentList.parentElement.insertBefore(content, parentList.nextSibling);
                         }
 
                         // 現在のアイテムを削除
@@ -8149,7 +8188,7 @@ const {
                         }
                     } else {
                         // リストに1つしかアイテムがない場合、リスト全体を段落に置き換え
-                        parentList.replaceWith(p);
+                        parentList.replaceWith(content);
                     }
 
                     // カーソル位置とフォーカスを復元
@@ -8167,7 +8206,11 @@ const {
                             newRange.setStart(editor, 0);
                         } else {
                             const firstNode = domUtils.getFirstTextNode(p);
-                            if (firstNode) {
+                            const firstImage = p.querySelector('img');
+                            if (firstImage && (!firstNode ||
+                                (firstImage.compareDocumentPosition(firstNode) & Node.DOCUMENT_POSITION_FOLLOWING))) {
+                                newRange.setStart(p, 0);
+                            } else if (firstNode) {
                                 newRange.setStart(firstNode, 0);
                             } else {
                                 newRange.setStart(p, 0);
@@ -14376,7 +14419,7 @@ const {
                         range.startContainer.nodeType === Node.ELEMENT_NODE &&
                         range.startContainer.tagName === 'IMG' &&
                         editor.contains(range.startContainer)) {
-                        if (setCaretToImageRightEdge(selection, range.startContainer)) {
+                        if (moveCursorDownFromSelectedImage(selection, range.startContainer)) {
                             e.preventDefault();
                             e.stopPropagation();
                             return true;
@@ -14387,7 +14430,7 @@ const {
                             ? cursorManager._getSelectedImageNode(range)
                             : null);
                     if (selectedImage) {
-                        if (setCaretToImageRightEdge(selection, selectedImage)) {
+                        if (moveCursorDownFromSelectedImage(selection, selectedImage)) {
                             e.preventDefault();
                             e.stopPropagation();
                             return true;
@@ -15905,11 +15948,26 @@ const {
         }
 
         const imageBlock = getClosestBlockElement(imageAtRightEdge);
-        if (!imageBlock || imageBlock === editor || !isImageOnlyBlockElement(imageBlock) || !imageBlock.parentNode) {
+        if (!imageBlock || imageBlock === editor || !imageBlock.parentNode) {
+            return false;
+        }
+        const isListItem = imageBlock.tagName === 'LI';
+        const isImageOnlyLine = isListItem
+            ? !hasDirectTextContent(imageBlock)
+            : isImageOnlyBlockElement(imageBlock);
+        if (!isImageOnlyLine) {
             return false;
         }
 
-        let targetParagraph = imageBlock.nextElementSibling;
+        // A tight Markdown list can hold the IMG directly in LI. Its next
+        // text line belongs inside that item, before any nested list.
+        let imageLine = imageAtRightEdge;
+        while (isListItem && imageLine.parentNode !== imageBlock) {
+            imageLine = imageLine.parentNode;
+        }
+        const insertionParent = isListItem ? imageBlock : imageBlock.parentNode;
+        const afterImageLine = isListItem ? imageLine : imageBlock;
+        let targetParagraph = afterImageLine.nextElementSibling;
         const canReuseExistingEmptyParagraph =
             options.newLine !== true &&
             targetParagraph &&
@@ -15919,7 +15977,7 @@ const {
         if (!canReuseExistingEmptyParagraph) {
             targetParagraph = document.createElement('p');
             targetParagraph.appendChild(document.createElement('br'));
-            imageBlock.parentNode.insertBefore(targetParagraph, imageBlock.nextSibling || null);
+            insertionParent.insertBefore(targetParagraph, afterImageLine.nextSibling || null);
         }
 
         const targetRange = createCollapsedRangeAtElementBoundary(targetParagraph, 'start');
@@ -16048,6 +16106,20 @@ const {
         );
     }
 
+    function moveCursorDownFromSelectedImage(selection, image) {
+        const imageRange = createAfterImageCaretRange(image, { ensureTextAnchor: true });
+        if (!applySelectionRange(selection, imageRange)) {
+            return false;
+        }
+        // The image edge is only an internal starting point. Finish the same
+        // downward step, including opening a line below a trailing image.
+        if (!moveCursorDownBelowTrailingImageBlock(imageRange, selection)) {
+            cursorManager.moveCursorDown(notifyChange);
+        }
+        syncImageCaretEdgeIndicatorsNow(selection);
+        return true;
+    }
+
     function moveCursorDownBelowTrailingImageBlock(range, selection) {
         if (!range || !range.collapsed || !selection) {
             return false;
@@ -16063,11 +16135,16 @@ const {
         }
         if (!imageBlock ||
             !imageBlock.querySelector('img') ||
-            !(isImageOnlyBlockElement(imageBlock) || isCaretOnTrailingImageLine(range, imageBlock)) ||
+            !(range.startContainer === editor
+                ? isImageOnlyBlockElement(imageBlock)
+                : isCaretOnTrailingImageLine(range, imageBlock)) ||
             imageBlock.closest('td, th, pre')) {
             return false;
         }
-        if (getNextNavigableNodeAfter(imageBlock)) {
+        // A list item may contain an image followed by empty child items or
+        // a hard break. Those are still lines to visit before leaving the list.
+        const trailingImage = cursorManager._getTrailingImageInBlock(imageBlock);
+        if (!trailingImage || getNextNavigableNodeAfter(trailingImage)) {
             return false;
         }
 
@@ -21900,7 +21977,7 @@ const {
                     return;
                 }
 
-                if (selection && !selection.isCollapsed && directLinkTarget) {
+                if (selection && !selection.isCollapsed && directLinkTarget && !isRangeInsideCodeBlock(pasteRange)) {
                     e.preventDefault();
 
                     const range = selection.getRangeAt(0);
@@ -24922,7 +24999,9 @@ const {
 
                     const markdown = typeof message.markdown === 'string' ? message.markdown : '';
                     const markdownMatch = markdown.match(/^!\[[^\]]*]\((?:<([^>]+)>|([^\s)]+))(?:\s+["'][^"']*["'])?\)$/);
-                    const markdownPath = markdownMatch ? (markdownMatch[1] || markdownMatch[2] || '').trim() : '';
+                    const markdownPath = typeof message.markdownPath === 'string' && message.markdownPath !== ''
+                        ? message.markdownPath
+                        : (markdownMatch ? (markdownMatch[1] || markdownMatch[2] || '').trim() : '');
 
                     const img = document.createElement('img');
                     const imageSrc = (typeof message.src === 'string' && message.src.trim() !== '') ? message.src : markdownPath;

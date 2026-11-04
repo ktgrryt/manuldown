@@ -639,6 +639,21 @@ export class SearchManager {
         }
 
         const searchText = this.caseSensitive ? cleanText : cleanText.toLowerCase();
+        // Unicode lowercase can expand a character (İ -> i + combining dot).
+        // Keep search indices mapped to the original clean-text offsets used
+        // by DOM ranges and by the next-match position after replacement.
+        let searchOffsets = null;
+        if (searchText.length !== cleanText.length) {
+            searchOffsets = [];
+            let cleanOffset = 0;
+            for (const character of cleanText) {
+                const foldedLength = character.toLowerCase().length;
+                for (let index = 0; index < foldedLength; index++) {
+                    searchOffsets.push(cleanOffset + Math.min(index, character.length - 1));
+                }
+                cleanOffset += character.length;
+            }
+        }
 
         // Find all occurrences, up to a limit (as VS Code's find widget does) so a
         // one-character query in a large document cannot freeze the editor.
@@ -651,10 +666,14 @@ export class SearchManager {
             const index = searchText.indexOf(searchQuery, searchStart);
             if (index === -1) break;
 
-            const range = this._cleanPositionToRange(index, searchQuery.length, originalPositions);
+            const cleanStart = searchOffsets ? searchOffsets[index] : index;
+            const cleanEnd = searchOffsets
+                ? searchOffsets[index + searchQuery.length - 1] + 1
+                : index + searchQuery.length;
+            const range = this._cleanPositionToRange(cleanStart, cleanEnd - cleanStart, originalPositions);
             if (range) {
                 this.matches.push(range);
-                this.matchOffsets.push(index);
+                this.matchOffsets.push(cleanStart);
             }
 
             // Find widgets conventionally report non-overlapping matches. This also

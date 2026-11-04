@@ -17,6 +17,9 @@ const tableManagerModulePromise = importModule('TableManager.js');
 async function withEditor(html, fn) {
     const window = domino.createWindow(`<div id="editor">${html}</div>`, 'https://example.test/');
     const document = window.document;
+    const nodeListPrototype = Object.getPrototypeOf(document.querySelectorAll('li'));
+    const previousIterator = nodeListPrototype[Symbol.iterator];
+    nodeListPrototype[Symbol.iterator] = Array.prototype[Symbol.iterator];
     document.createRange = () => ({ setStart() {}, setEnd() {}, collapse() {}, selectNodeContents() {} });
     const previous = {
         window: global.window,
@@ -33,6 +36,8 @@ async function withEditor(html, fn) {
     try {
         return await fn(document.getElementById('editor'));
     } finally {
+        if (previousIterator === undefined) delete nodeListPrototype[Symbol.iterator];
+        else nodeListPrototype[Symbol.iterator] = previousIterator;
         Object.assign(global, previous);
     }
 }
@@ -66,6 +71,12 @@ function compareBoundaryPoints(nodeA, offsetA, nodeB, offsetB) {
 
 // The parts of a DOM Range the list Tab code uses; domino has no Range.
 class TestRange {
+    get commonAncestorContainer() {
+        let node = this.startContainer;
+        while (node && node !== this.endContainer && !node.contains(this.endContainer)) node = node.parentNode;
+        return node;
+    }
+
     setStart(node, offset) {
         this.startContainer = node;
         this.startOffset = offset;
@@ -155,7 +166,7 @@ function pressTab(editor, listManager, range, { shift = false } = {}) {
         'editor', 'domUtils', 'cursorManager', 'document', 'Node',
         `${source}\nreturn getTabOperationTargetListItems;`
     )(editor, listManager.domUtils, null, global.document, global.Node);
-    const targets = getTargets(range, null);
+    const targets = getTargets(range, listManager.domUtils.getParentElement(range.startContainer, 'LI'));
     (shift ? targets.slice().reverse() : targets).forEach((item) => {
         if (!item.isConnected) return;
         if (shift) {
@@ -184,6 +195,247 @@ test('Tab and Shift+Tab on a selected parent and child keep the child under the 
         listManager.outdentListItem(items()[1], null, 0);
         assert.equal(structureOf(editor), '<ul><li>a</li><li>b<ul><li>b1</li></ul></li></ul>');
     });
+});
+
+test('outdenting the last child preserves image-only and empty task parents', async () => {
+    const { ListManager } = await listManagerModulePromise;
+    const { DOMUtils } = await domUtilsModulePromise;
+    for (const content of ['<img src="diagram.png" alt="diagram">', '<input type="checkbox">']) {
+        await withEditor(`<ul><li>${content}<ul><li>child</li></ul></li></ul>`, (editor) => {
+            const parent = editor.querySelector('li');
+            const originalContent = parent.firstChild;
+            const manager = new ListManager(editor, new DOMUtils(editor));
+            manager.outdentListItem(editor.querySelector('li li'));
+            assert.equal(parent.isConnected, true);
+            assert.equal(parent.firstChild, originalContent);
+            assert.equal(editor.querySelectorAll('ul > li').length, 2);
+            assert.equal(editor.querySelector('ul').lastElementChild.textContent, 'child');
+        });
+    }
+});
+
+function normalizeListRendering(editor, domUtils) {
+    const names = [
+        'getDirectTextContent', 'listItemHasDirectImage', 'getNestedListContainerForListItem',
+        'hasNestedListChild', 'listHasDirectListItems', 'cleanupEmptyListContainers',
+        'getCheckboxInListItemDirectContent', 'hasCheckbox', 'hasCheckboxAtStart',
+        'getFirstDirectTextNodeAfterCheckbox', 'ensureCheckboxLeadingSpace',
+        'ensureCheckboxTextAnchor', 'syncCheckboxPlaceholderBreak', 'releaseStrayCheckboxPlaceholderBreaks',
+        'stripListPlaceholderCharactersFromTextNode', 'updateListItemClasses',
+    ];
+    const source = names.map(name => {
+        const start = editorSource.indexOf(`    function ${name}(`);
+        const end = editorSource.indexOf('\n    }\n', start);
+        assert.ok(start >= 0 && end > start, name);
+        return editorSource.slice(start, end + 6);
+    }).join('\n');
+    // Domino omits NodeList.forEach, which is available in the Webview.
+    const prototype = Object.getPrototypeOf(editor.querySelectorAll('li'));
+    const previousForEach = prototype.forEach;
+    prototype.forEach = Array.prototype.forEach;
+    try {
+        new Function('editor', 'domUtils', 'document', 'window', 'Node', 'NodeFilter',
+            `const CHECKBOX_PLACEHOLDER_BREAK_ATTRIBUTE = 'data-mdw-checkbox-placeholder';\n${source}\nupdateListItemClasses();`
+        )(editor, domUtils, global.document, global.window, global.Node, global.NodeFilter);
+    } finally {
+        if (previousForEach === undefined) delete prototype.forEach;
+        else prototype.forEach = previousForEach;
+    }
+}
+
+test('Tab below an image does not add an empty line to the image parent', async () => {
+    const { ListManager } = await listManagerModulePromise;
+    const { DOMUtils } = await domUtilsModulePromise;
+    for (const tag of ['ul', 'ol']) {
+        for (const imageHtml of ['<img src="diagram.png">', '<p><img src="diagram.png"></p>']) {
+            const html = `<${tag}><li>top</li><li>${imageHtml}</li><li>below</li></${tag}>`;
+            await withEditor(html, editor => {
+                const domUtils = new DOMUtils(editor);
+                const manager = new ListManager(editor, domUtils);
+                const parent = editor.querySelector('img').closest('li');
+                const image = parent.querySelector('img');
+                for (let cycle = 0; cycle < 3; cycle++) {
+                    const text = findText(editor, 'below');
+                    pressTab(editor, manager, selectRange([text, 1], [text, 1]));
+                    normalizeListRendering(editor, domUtils);
+                    assert.equal(parent.hasAttribute('data-preserve-empty'), false);
+                    assert.equal(parent.hasAttribute('data-mdw-indent-wrapper'), false);
+                    assert.equal(parent.classList.contains('nested-list-only'), false);
+                    assert.ok(!Array.from(parent.childNodes).some(node => node.nodeType === 3 && node.data.includes('\u00a0')));
+                    assert.equal(text.parentElement.parentElement.parentElement, parent);
+                    assert.equal(parent.querySelector('img'), image);
+
+                    pressTab(editor, manager, selectRange([text, 1], [text, 1]), { shift: true });
+                    normalizeListRendering(editor, domUtils);
+                    assert.equal(parent.querySelector('img'), image);
+                    assert.equal(structureOf(editor), html);
+                }
+            });
+        }
+    }
+});
+
+test('an empty item below an image keeps only its own marker when repeatedly indented', async () => {
+    const [{ ListManager }, { DOMUtils }] = await Promise.all([listManagerModulePromise, domUtilsModulePromise]);
+    for (const tag of ['ul', 'ol']) {
+        for (const imageHtml of ['<img src="diagram.png">', '<p><img src="diagram.png"></p>',
+            '<a href="diagram.png"><img src="diagram.png"></a>']) {
+            for (const placeholder of ['<br>', '\u00a0']) {
+                await withEditor(`<${tag}><li>${imageHtml}</li><li id="target">${placeholder}</li></${tag}>`, editor => {
+                    const domUtils = new DOMUtils(editor);
+                    const manager = new ListManager(editor, domUtils);
+                    const image = editor.querySelector('img');
+                    const imageItem = image.closest('li');
+                    const target = editor.querySelector('#target');
+                    normalizeListRendering(editor, domUtils);
+                    for (let cycle = 0; cycle < 3; cycle++) {
+                        for (const shift of [false, false, true, true]) {
+                            pressTab(editor, manager, selectRange([target, 0], [target, 0]), { shift });
+                            normalizeListRendering(editor, domUtils);
+                            assert.ok(imageItem.classList.contains('image-only-list-item'), 'the parent marker stays on the image line');
+                            assert.ok(!target.classList.contains('image-only-list-item'));
+                            assert.ok(!target.classList.contains('nested-list-only'), 'the empty item still has its own marker');
+                            const wrappers = Array.from(editor.querySelectorAll('li')).filter(item => item !== target && item !== imageItem);
+                            assert.ok(wrappers.every(item => item.classList.contains('nested-list-only')), 'indent wrappers do not add a marker');
+                            assert.ok(image.isConnected);
+                            assert.equal(image.closest('li'), imageItem);
+                        }
+                    }
+                });
+            }
+        }
+    }
+});
+
+test('image marker layout follows direct image content as a list item is edited', async () => {
+    const { DOMUtils } = await domUtilsModulePromise;
+    await withEditor('<ul><li><p><img src="diagram.png"></p><ul><li>child</li></ul></li></ul>', editor => {
+        const domUtils = new DOMUtils(editor);
+        const item = editor.querySelector('li');
+        const image = item.querySelector('img');
+        const child = item.querySelector('li');
+        normalizeListRendering(editor, domUtils);
+        assert.ok(item.classList.contains('image-only-list-item'));
+        assert.ok(!child.classList.contains('image-only-list-item'));
+
+        const caption = editor.ownerDocument.createTextNode('caption');
+        item.firstChild.appendChild(caption);
+        normalizeListRendering(editor, domUtils);
+        assert.ok(!item.classList.contains('image-only-list-item'), 'text uses the normal list-line layout');
+
+        caption.remove();
+        normalizeListRendering(editor, domUtils);
+        assert.ok(item.classList.contains('image-only-list-item'));
+
+        image.remove();
+        child.appendChild(image);
+        normalizeListRendering(editor, domUtils);
+        assert.ok(!item.classList.contains('image-only-list-item'), 'a child image is not part of the parent line');
+    });
+});
+
+test('a list after a standalone image keeps its indent wrapper without moving the image', async () => {
+    const { ListManager } = await listManagerModulePromise;
+    const { DOMUtils } = await domUtilsModulePromise;
+    await withEditor('<ul><li>top</li></ul><p><img src="diagram.png"></p><ul><li>below</li></ul>', editor => {
+        const domUtils = new DOMUtils(editor);
+        const manager = new ListManager(editor, domUtils);
+        const imageBlock = editor.children[1];
+        const text = findText(editor, 'below');
+        pressTab(editor, manager, selectRange([text, 1], [text, 1]));
+        normalizeListRendering(editor, domUtils);
+        assert.equal(editor.children[1], imageBlock);
+        const wrapper = editor.lastElementChild.firstElementChild;
+        assert.equal(wrapper.getAttribute('data-mdw-indent-wrapper'), 'true');
+        assert.equal(wrapper.classList.contains('nested-list-only'), true);
+        assert.ok(!wrapper.hasAttribute('data-preserve-empty'));
+    });
+});
+
+test('Tab below an image-only task preserves its image and removes stale empty-item spacing', async () => {
+    const { ListManager } = await listManagerModulePromise;
+    const { DOMUtils } = await domUtilsModulePromise;
+    for (const imageHtml of ['<img src="diagram.png">', '<p><img src="diagram.png"></p>']) {
+        await withEditor(`<ul><li data-preserve-empty="true"><input type="checkbox">${imageHtml}</li><li>below</li></ul>`, editor => {
+            const domUtils = new DOMUtils(editor);
+            const manager = new ListManager(editor, domUtils);
+            const parent = editor.firstChild.firstChild;
+            const image = parent.querySelector('img');
+            supportScopeChildSelector([parent]);
+            const text = findText(editor, 'below');
+            pressTab(editor, manager, selectRange([text, 1], [text, 1]));
+            normalizeListRendering(editor, domUtils);
+            assert.ok(image.isConnected);
+            assert.ok(image.closest('li') === parent);
+            assert.ok(text.parentElement.parentElement.parentElement === parent);
+            assert.ok(parent.querySelector('input[type="checkbox"]'));
+            assert.ok(!parent.hasAttribute('data-preserve-empty'));
+            assert.ok(!parent.querySelector('br[data-mdw-checkbox-placeholder]'));
+            assert.ok(!Array.from(parent.childNodes).some(node => node.nodeType === 3 && node.data.includes('\u00a0')));
+        });
+    }
+});
+
+test('typing below an image preserves the image before and after Tab and Shift+Tab', async () => {
+    const [{ ListManager }, { DOMUtils }] = await Promise.all([listManagerModulePromise, domUtilsModulePromise]);
+    for (const tag of ['ul', 'ol']) {
+        for (const imageHtml of ['<img src="diagram.png">', '<p><a href="diagram.png"><img src="diagram.png"></a></p>']) {
+            await withEditor(`<${tag}><li>${imageHtml}</li><li>below</li></${tag}>`, editor => {
+                const domUtils = new DOMUtils(editor);
+                const manager = new ListManager(editor, domUtils);
+                const image = editor.querySelector('img');
+                const imageItem = image.closest('li');
+                const target = editor.lastChild.lastChild;
+                const text = target.firstChild;
+                let range = selectRange([text, 5], [text, 5]);
+                global.window.getSelection = () => ({
+                    rangeCount: 1,
+                    getRangeAt: () => range,
+                    removeAllRanges() {},
+                    addRange(next) { range = next; },
+                });
+                editor.ownerDocument.createRange = () => ({
+                    setStart(node, offset) {
+                        this.startContainer = this.endContainer = this.commonAncestorContainer = node;
+                        this.startOffset = this.endOffset = offset;
+                        this.collapsed = true;
+                    },
+                    collapse() {},
+                });
+                for (const action of ['type', 'indent', 'outdent', 'indent', 'outdent']) {
+                    if (action === 'indent') manager.indentListItem(target);
+                    if (action === 'outdent') manager.outdentListItem(target);
+                    text.data += 'a';
+                    range.setStart(text, text.length);
+                    normalizeListRendering(editor, domUtils);
+                    // The input handler runs this cleanup on the next task.
+                    domUtils.cleanupEmptyListItems();
+                    assert.ok(image.isConnected, `${tag}: ${action} must keep the image`);
+                    assert.equal(image.closest('li'), imageItem);
+                    assert.equal(target.parentElement.parentElement === imageItem, action === 'indent');
+                    assert.equal(range.startContainer, text);
+                }
+            });
+        }
+    }
+});
+
+test('input cleanup keeps image items and empty nested list rows but removes empty browser artifacts', async () => {
+    const { DOMUtils } = await domUtilsModulePromise;
+    for (const content of ['<img src="diagram.png">', '']) {
+        await withEditor(`<ul><li>${content}<ul><li id="target"><br></li></ul></li>` +
+            '<li>next</li><li><span><br></span></li><li>last</li></ul>', editor => {
+            const domUtils = new DOMUtils(editor);
+            const target = editor.querySelector('#target');
+            const image = editor.querySelector('img');
+            const artifact = editor.firstChild.children[2];
+            global.window.getSelection = () => ({ rangeCount: 1, getRangeAt: () => ({ commonAncestorContainer: target }) });
+            domUtils.cleanupEmptyListItems();
+            if (image) assert.ok(image.isConnected);
+            assert.ok(target.isConnected);
+            assert.equal(artifact.isConnected, false);
+        });
+    }
 });
 
 // a, then b, c and d one level deeper through an indent wrapper.

@@ -578,6 +578,18 @@ body[data-toc-visible="true"] {
     position: relative;
 }
 
+/* Give an image-only item its own first line. With only block-level content,
+   Chromium can align its marker with the first line of a nested list instead. */
+#editor li.image-only-list-item>img:first-child,
+#editor li.image-only-list-item>:is(p, div, a, span, strong, em, del):first-child:has(img) {
+    display: inline-block;
+    vertical-align: top;
+}
+
+#editor li.image-only-list-item>:is(p, div):first-child:has(img) {
+    margin: 0;
+}
+
 #editor li>ul,
 #editor li>ol {
     margin: 0.25em 0;
