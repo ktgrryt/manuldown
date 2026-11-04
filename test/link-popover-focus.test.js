@@ -80,6 +80,7 @@ function fixture(html = '<p>before link after</p>') {
         const repositionLinkPopoverWithinViewport = () => {};
         const scheduleWorkspaceLinkSuggestions = () => {};
         const syncLinkPopoverOpenButtonState = () => {};
+        ${extractFunction('resetLinkOpenCheck')}
         const linkPopoverInputAwaitsWorkspaceSuggestion = () => false;
         const linkPopoverInputNeedsHostResolution = () => false;
         const clearWorkspaceLinkSuggestions = () => {

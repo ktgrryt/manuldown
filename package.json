@@ -352,7 +352,7 @@
           "type": "boolean",
           "scope": "application",
           "default": false,
-          "description": "Allow file:// links in Markdown documents to be opened from ManulDown. Disabled by default because file links can open local files, applications, or network shares."
+          "description": "Allow file:// links and local file links outside the current workspace folder to be opened from ManulDown. Disabled by default because file links can open local files, applications, or network shares."
         }
       }
     }

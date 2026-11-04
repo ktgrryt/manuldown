@@ -671,6 +671,10 @@ test('relative link and image opening uses canonical workspace validation', () =
     );
     assert.match(
         providerSource.slice(openLinkStart, openLinkEnd),
+        /await this\.resolveLinkOpenTarget\(message\.url, document\)/
+    );
+    assert.match(
+        providerSource.slice(providerSource.indexOf('private async resolveLinkOpenTarget'), openImageStart),
         /await isUriSecurelyWithinDirectory/
     );
     assert.match(

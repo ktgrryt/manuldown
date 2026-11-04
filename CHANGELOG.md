@@ -23,6 +23,8 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 - Load Prism as one script, and load Mermaid only when a document has a Mermaid code block.
 
 ### Fixed
+- Resolve `~/` file links against the local home directory before checking workspace access, so blocked home paths show the appropriate explanation.
+- Disable Open for blocked or unavailable file links and show the reason, including the user setting that permits local file links outside the workspace.
 - Clicking above a code block at the start of a document opens a temporary input line, including for Mermaid previews.
 - Clicking below a Mermaid preview opens a temporary input line, including when its language label is selected; untouched lines are not saved.
 - Keep code-block language labels in the same font, size, and line height after language changes, and remove stale Prism language classes when switching to plaintext or Mermaid.

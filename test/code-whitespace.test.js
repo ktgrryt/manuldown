@@ -391,10 +391,11 @@ function createWebviewPanelHarness() {
     };
 }
 
-async function createEditorSyncHarness(initialText = 'before') {
+async function createEditorSyncHarness(initialText = 'before', documentUri = null) {
     resetVscodeMockState();
     const provider = new MarkdownEditorProvider({});
     const document = createMutableTextDocument(initialText);
+    if (documentUri) document.uri = documentUri;
     const webview = createWebviewPanelHarness();
 
     provider.explicitlyRequested = true;
@@ -1218,6 +1219,132 @@ test('opening document links validates external URLs and blocks decoded custom s
             url: 'https://example.com/inactive',
         });
         assert.equal(vscodeMockState.externalOpens.length, 1);
+    } finally {
+        webview.dispose();
+    }
+});
+
+test('link preflight disables outside paths and missing files using the same policy as Open', async t => {
+    const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'manuldown-link-open-'));
+    t.after(() => fs.rmSync(temporaryRoot, { recursive: true, force: true }));
+    const workspaceRoot = path.join(temporaryRoot, 'workspace');
+    const outsideRoot = path.join(temporaryRoot, 'outside');
+    fs.mkdirSync(workspaceRoot);
+    fs.mkdirSync(outsideRoot);
+    const insidePath = path.join(workspaceRoot, 'notes 日本語.md');
+    const outsidePath = path.join(outsideRoot, 'notes.md');
+    fs.writeFileSync(insidePath, 'inside');
+    fs.writeFileSync(outsidePath, 'outside');
+    const literalTildePath = path.join(workspaceRoot, '~', 'notes.md');
+    fs.mkdirSync(path.dirname(literalTildePath));
+    fs.writeFileSync(literalTildePath, 'literal tilde');
+    const { provider, webview } = await createEditorSyncHarness('before', createMockUri(path.join(workspaceRoot, 'document.md')));
+    t.after(() => webview.dispose());
+    vscodeMockState.workspaceFolder = { uri: createMockUri(workspaceRoot) };
+    vscodeMockState.stats.set(insidePath, { size: 6, type: 1 });
+    vscodeMockState.stats.set(outsidePath, { size: 7, type: 1 });
+    vscodeMockState.stats.set(literalTildePath, { size: 13, type: 1 });
+    let allowFileLinks = false;
+    const getSetting = provider.getBooleanSetting.bind(provider);
+    provider.getBooleanSetting = (key, fallback) => key === 'security.allowFileLinks' ? allowFileLinks : getSetting(key, fallback);
+    const cases = [
+        { url: './notes%20%E6%97%A5%E6%9C%AC%E8%AA%9E.md#section', allowed: true },
+        { url: '../outside/notes.md', allowed: false, reason: /outside the current workspace/ },
+        { url: outsidePath, allowed: false, reason: /Allow File Links/ },
+        { url: '~/code', allowed: false, reason: /Allow File Links/ },
+        { url: '%7E/code', allowed: false, reason: /Allow File Links/ },
+        { url: '~', allowed: false, reason: /Allow File Links/ },
+        { url: '~/../notes.md', allowed: false, reason: /Allow File Links/ },
+        { url: './~/notes.md', allowed: true },
+        { url: '~another/notes.md', allowed: false, reason: /does not exist/ },
+        { url: 'file:///outside/notes.md', allowed: false, reason: /file:\/\/ links is disabled/ },
+        { url: './missing.md', allowed: false, reason: /does not exist/ },
+        { url: 'command%3Aworkbench.action.openSettings', allowed: false, reason: /unsupported/ },
+    ];
+    if (process.platform !== 'win32') {
+        const symlinkPath = path.join(workspaceRoot, 'escape.md');
+        fs.symlinkSync(outsidePath, symlinkPath);
+        vscodeMockState.stats.set(symlinkPath, { size: 7, type: 65 });
+        cases.push({ url: './escape.md', allowed: false, reason: /outside the current workspace/ });
+    }
+    let sequence = 0;
+    for (const { url, allowed, reason } of cases) {
+        const errorsBefore = vscodeMockState.errors.length;
+        const commandsBefore = vscodeMockState.executedCommands.length;
+        await webview.sendMessage({ type: 'checkLinkOpen', url, requestId: `link-open-123-${++sequence}` });
+        const response = webview.postedMessages.at(-1);
+        assert.equal(response.type, 'linkOpenState');
+        assert.equal(response.url, url);
+        assert.equal(response.allowed, allowed, url);
+        if (reason) assert.match(response.message, reason);
+        assert.equal(vscodeMockState.errors.length, errorsBefore, 'preflight feedback stays in the popover');
+        assert.equal(vscodeMockState.executedCommands.length, commandsBefore, 'preflight must never open files');
+
+        await webview.sendMessage({ type: 'openLink', url });
+        assert.equal(vscodeMockState.executedCommands.length, commandsBefore + Number(allowed));
+        assert.equal(vscodeMockState.errors.length, errorsBefore + Number(!allowed), 'blocked shortcuts must not fail silently');
+    }
+
+    allowFileLinks = true;
+    await webview.sendMessage({ type: 'checkLinkOpen', url: '../outside/notes.md', requestId: 'link-open-123-99' });
+    assert.equal(webview.postedMessages.at(-1).allowed, true);
+    await webview.sendMessage({ type: 'openLink', url: '../outside/notes.md' });
+    assert.equal(vscodeMockState.executedCommands.at(-1)[1].path, outsidePath);
+    await webview.sendMessage({ type: 'checkLinkOpen', url: `file://${outsidePath}`, requestId: 'link-open-123-100' });
+    assert.equal(webview.postedMessages.at(-1).allowed, true);
+    await webview.sendMessage({ type: 'openLink', url: `file://${outsidePath}` });
+    assert.equal(vscodeMockState.externalOpens.at(-1).path, outsidePath);
+    const homeTargetPath = path.join(os.homedir(), 'notes.md');
+    vscodeMockState.stats.set(homeTargetPath, { size: 5, type: 1 });
+    await webview.sendMessage({ type: 'checkLinkOpen', url: '~/notes.md', requestId: 'link-open-123-102' });
+    assert.equal(webview.postedMessages.at(-1).allowed, true);
+    await webview.sendMessage({ type: 'openLink', url: '~/notes.md' });
+    assert.equal(vscodeMockState.executedCommands.at(-1)[1].path, homeTargetPath);
+
+    // The file can disappear after validation; Open must recheck it.
+    vscodeMockState.stats.delete(outsidePath);
+    const commandsBefore = vscodeMockState.executedCommands.length;
+    await webview.sendMessage({ type: 'openLink', url: '../outside/notes.md' });
+    assert.equal(vscodeMockState.executedCommands.length, commandsBefore);
+    assert.match(vscodeMockState.errors.at(-1), /does not exist/);
+    await webview.sendMessage({ type: 'checkLinkOpen', url: `file://${outsidePath}`, requestId: 'link-open-123-101' });
+    assert.equal(webview.postedMessages.at(-1).allowed, false);
+    assert.match(webview.postedMessages.at(-1).message, /does not exist/);
+});
+
+test('home-relative paths in remote documents do not resolve against the local home directory', async () => {
+    const { document, webview } = await createEditorSyncHarness();
+    try {
+        document.uri = createMockUri('/workspace/document.md', 'vscode-remote', 'remote');
+        await webview.sendMessage({ type: 'checkLinkOpen', url: '~/code', requestId: 'link-open-123-1' });
+        const response = webview.postedMessages.at(-1);
+        assert.equal(response.allowed, false);
+        assert.match(response.message, /path in the remote workspace/);
+        assert.equal(vscodeMockState.statCalls.length, 0);
+    } finally {
+        webview.dispose();
+    }
+});
+
+test('link checks reject invalid request IDs and do not finish opening after the panel becomes inactive', async () => {
+    const { provider, webview } = await createEditorSyncHarness();
+    try {
+        let complete;
+        let checks = 0;
+        provider.resolveLinkOpenTarget = () => {
+            checks++;
+            return new Promise(resolve => { complete = resolve; });
+        };
+        await webview.sendMessage({ type: 'checkLinkOpen', url: './notes.md', requestId: 'invalid' });
+        assert.equal(checks, 0);
+        const opening = webview.sendMessage({ type: 'openLink', url: './notes.md' });
+        await waitFor(() => checks === 1, 'link validation did not start');
+        webview.setActive(false);
+        complete({ uri: createMockUri('/workspace/notes.md'), external: false });
+        await opening;
+        assert.equal(vscodeMockState.executedCommands.filter(command => command[0] === 'vscode.open').length, 0);
+        await webview.sendMessage({ type: 'checkLinkOpen', url: './notes.md', requestId: 'link-open-123-1' });
+        assert.equal(checks, 1, 'inactive panels cannot request path checks');
     } finally {
         webview.dispose();
     }

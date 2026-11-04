@@ -101,6 +101,8 @@ const {
     let finishInlineLinkRequest = () => {};
     let shouldApplyInlineLinkResponse = () => true;
     let receiveWorkspaceLinkSuggestions = () => false;
+    let receiveLinkOpenState = () => false;
+    let refreshLinkOpenState = () => {};
     let trustedClipboardPayload = null;
     let clipboardCopySequence = 0;
     let markdownCopyContextHtml = '';
@@ -1900,6 +1902,8 @@ const {
 
     function applySettings(nextSettings) {
         if (!nextSettings) return;
+        const shouldRefreshLinkPolicy = typeof nextSettings.allowFileLinks === 'boolean' &&
+            nextSettings.allowFileLinks !== settingsState.allowFileLinks;
         const shouldRefreshImagePolicy =
             typeof nextSettings.allowRemoteImages === 'boolean' &&
             nextSettings.allowRemoteImages !== settingsState.allowRemoteImages;
@@ -1940,6 +1944,7 @@ const {
             reapplyImageSecurityPolicy();
             applyImageRenderSizes();
         }
+        if (shouldRefreshLinkPolicy) refreshLinkOpenState();
         scheduleEditorOverflowStateUpdate();
     }
 
@@ -22675,6 +22680,9 @@ const {
         let linkSuggestions = [];
         let activeLinkSuggestionIndex = -1;
         let selectedLinkSuggestion = null;
+        let linkOpenCheck = null;
+        let linkOpenCheckTimer = null;
+        let linkOpenCheckSequence = 0;
         function createLinkPopover() {
             const popover = document.createElement('div');
             popover.className = 'link-popover';
@@ -22683,8 +22691,9 @@ const {
                     <input type="text" class="link-popover-input" role="combobox" aria-label="Link URL, heading, or workspace file path" aria-autocomplete="list" aria-controls="link-workspace-suggestions" aria-expanded="false" autocomplete="off" spellcheck="false" placeholder="URL, heading, or workspace file path">
                     <button class="link-popover-btn danger" data-action="unlink">Unlink</button>
                     <button class="link-popover-btn primary" data-action="apply">Apply</button>
-                    <button class="link-popover-btn primary" data-action="open">Open</button>
+                    <button class="link-popover-btn primary" data-action="open" aria-describedby="link-open-message">Open</button>
                 </div>
+                <div id="link-open-message" class="link-popover-open-status" role="status" hidden></div>
                 <div id="link-workspace-suggestions" class="link-popover-suggestions" role="listbox" aria-label="Headings and workspace files" hidden></div>
             `;
             const input = popover.querySelector('.link-popover-input');
@@ -22795,7 +22804,7 @@ const {
                 return true;
             }
             if (linkInputLooksLikeNativeAbsolutePath(value)) {
-                return true;
+                return !isStoredCurrentLinkHref(value);
             }
             if (getWorkspaceLinkSuggestionQuery(value) !== null) {
                 return !isStoredCurrentLinkHref(value);
@@ -23099,6 +23108,64 @@ const {
             linkPopover.style.top = `${window.scrollY + Math.max(minTop, Math.min(top, maxTop))}px`;
         }
 
+        function resetLinkOpenCheck() {
+            clearTimeout(linkOpenCheckTimer);
+            linkOpenCheckTimer = null;
+            linkOpenCheck = null;
+        }
+
+        function getLinkPopoverOpenState(url) {
+            if (!sanitizeLinkHref(url)) {
+                resetLinkOpenCheck();
+                return { allowed: false, message: url ? 'This link cannot be opened.' : '' };
+            }
+            if (url.startsWith('#')) {
+                resetLinkOpenCheck();
+                return { allowed: true, message: '' };
+            }
+            if (linkOpenCheck && linkOpenCheck.url === url) return linkOpenCheck;
+            resetLinkOpenCheck();
+            const check = {
+                url, requestId: `link-open-${Date.now()}-${++linkOpenCheckSequence}`,
+                allowed: false, message: 'Checking link access…',
+            };
+            linkOpenCheck = check;
+            linkOpenCheckTimer = setTimeout(() => {
+                vscode.postMessage({ type: 'checkLinkOpen', url, requestId: check.requestId });
+                linkOpenCheckTimer = setTimeout(() => {
+                    if (linkOpenCheck !== check) return;
+                    check.message = 'Could not check this link. Close and reopen the link popup to try again.';
+                    syncLinkPopoverOpenButtonState(url);
+                    repositionLinkPopoverWithinViewport();
+                }, 5000);
+            }, 120);
+            return check;
+        }
+
+        receiveLinkOpenState = (message) => {
+            const check = linkOpenCheck;
+            const input = linkPopover?.querySelector('.link-popover-input');
+            if (!check || message.requestId !== check.requestId || message.url !== check.url ||
+                !linkPopover || linkPopover.style.display === 'none' || input?.value.trim() !== check.url) {
+                return false;
+            }
+            clearTimeout(linkOpenCheckTimer);
+            linkOpenCheckTimer = null;
+            check.allowed = message.allowed === true;
+            check.message = check.allowed ? '' : String(message.message || 'This link cannot be opened.');
+            syncLinkPopoverOpenButtonState(check.url);
+            repositionLinkPopoverWithinViewport();
+            return true;
+        };
+
+        refreshLinkOpenState = () => {
+            resetLinkOpenCheck();
+            if (linkPopover && linkPopover.style.display !== 'none') {
+                syncLinkPopoverOpenButtonState(linkPopover.querySelector('.link-popover-input')?.value || '');
+            }
+        };
+        window.addEventListener('focus', refreshLinkOpenState);
+
         function syncLinkPopoverOpenButtonState(urlValue) {
             if (!linkPopover) return;
             const input = linkPopover.querySelector('.link-popover-input');
@@ -23112,6 +23179,9 @@ const {
                 linkPopoverInputAwaitsWorkspaceSuggestion(urlValue);
             const isCreation = !!linkCreationRange && !currentLink;
             const isBusy = activeLinkPopoverRequestId !== null;
+            const openState = !isCreation && !needsHostResolution && !awaitsWorkspaceSuggestion
+                ? getLinkPopoverOpenState(normalized) : null;
+            if (!openState) resetLinkOpenCheck();
             if (input) {
                 input.disabled = isBusy;
             }
@@ -23121,9 +23191,10 @@ const {
                 openButton.disabled = isBusy || awaitsWorkspaceSuggestion || (
                     needsHostResolution
                         ? !normalized || String(urlValue || '').length > 4096
-                        : !canOpen
+                        : !canOpen || !openState?.allowed
                 );
                 openButton.setAttribute('aria-disabled', !openButton.disabled ? 'false' : 'true');
+                openButton.title = openState?.message || '';
             }
             if (applyButton) {
                 applyButton.hidden = !isCreation;
@@ -23134,9 +23205,15 @@ const {
             if (unlinkButton) {
                 unlinkButton.hidden = isCreation;
             }
+            const status = linkPopover.querySelector('.link-popover-open-status');
+            if (status) {
+                status.hidden = !openState?.message;
+                status.textContent = openState?.message || '';
+            }
         }
 
         function showLinkPopover(link) {
+            resetLinkOpenCheck();
             if (!linkPopover) {
                 linkPopover = createLinkPopover();
             }
@@ -23189,6 +23266,7 @@ const {
             if (!range || !selectionCanBecomeWorkspaceLink(range)) {
                 return false;
             }
+            resetLinkOpenCheck();
             if (!linkPopover) {
                 linkPopover = createLinkPopover();
             }
@@ -23620,6 +23698,7 @@ const {
         }
 
         function hideLinkPopover(skipSave = false) {
+            resetLinkOpenCheck();
             // Hiding a focused input drops focus onto the page. Capture the
             // editor bookmark before clearing it, but respect an outside click.
             const shouldRestoreSelection = linkPopover &&
@@ -23749,6 +23828,10 @@ const {
                 // reduce it to a safe workspace-relative href first; a second
                 // click on Open can then open the validated result.
                 submitLinkPopoverInput();
+                return;
+            }
+            if (!input || !getLinkPopoverOpenState(input.value.trim()).allowed) {
+                syncLinkPopoverOpenButtonState(input?.value || '');
                 return;
             }
             // 先にURLを保存してから開く
@@ -24265,9 +24348,11 @@ const {
                         restoreLinkHrefToBaseline();
                     }
                 }
+                resetLinkOpenCheck();
                 return;
             }
             scheduleWorkspaceLinkSuggestions(input.value);
+            refreshLinkOpenState();
         });
 
         // ポップオーバー内でEnter/Escapeキーで閉じる
@@ -24680,6 +24765,9 @@ const {
                 break;
             case 'settings':
                 applySettings(message.settings);
+                break;
+            case 'linkOpenState':
+                receiveLinkOpenState(message);
                 break;
             case 'customSlashCommands':
                 isCustomSlashCommandRequestInFlight = false;

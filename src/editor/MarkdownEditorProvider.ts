@@ -32,6 +32,13 @@ type MarkdownListLineInfo = {
     textKey: string;
     isEmpty: boolean;
 };
+type LinkOpenTarget = {
+    uri: vscode.Uri;
+    external: boolean;
+} | {
+    uri: null;
+    message: string;
+};
 
 class ImageImportError extends Error {
     constructor(message: string) {
@@ -1711,73 +1718,46 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                             });
                         }
                         break;
+                    case 'checkLinkOpen':
                     case 'openLink':
-                        // Open external links. file:// links are opt-in because they can
-                        // launch local files, applications, or network shares.
                         if (
                             typeof message.url === 'string' &&
                             !editorDisposed &&
                             this.webviewPanels.get(documentKey) === webviewPanel &&
                             webviewPanel.active
                         ) {
-                            const rawUrl = message.url.trim();
-                            const unsafeLinkTextPattern = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069\s\\]/u;
-                            const unsafeDecodedLinkTextPattern = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u;
-                            if (
-                                !rawUrl ||
-                                rawUrl !== message.url ||
-                                rawUrl.length > 4096 ||
-                                unsafeLinkTextPattern.test(rawUrl)
-                            ) {
+                            if (message.type === 'checkLinkOpen' && (
+                                typeof message.requestId !== 'string' ||
+                                !/^link-open-\d{1,16}-\d{1,10}$/.test(message.requestId)
+                            )) {
                                 break;
                             }
-                            let decodedUrl = rawUrl;
-                            try {
-                                decodedUrl = decodeURIComponent(rawUrl);
-                            } catch {
+                            const target = await this.resolveLinkOpenTarget(message.url, document);
+                            if (editorDisposed || !webviewPanel.active ||
+                                this.webviewPanels.get(documentKey) !== webviewPanel) {
                                 break;
                             }
-                            if (unsafeDecodedLinkTextPattern.test(decodedUrl)) {
-                                break;
-                            }
-                            const allowFileLinks = this.getBooleanSetting('security.allowFileLinks', false);
-                            const externalHref = normalizeExternalLinkHref(rawUrl);
-                            if (externalHref) {
-                                await vscode.env.openExternal(vscode.Uri.parse(externalHref));
-                            } else if (/^file:/i.test(rawUrl) && allowFileLinks) {
-                                const fileTarget = vscode.Uri.parse(rawUrl);
-                                if (fileTarget.scheme === 'file') {
-                                    await vscode.env.openExternal(fileTarget);
-                                }
-                            } else if (!/^[a-z][a-z0-9+.-]*:/i.test(rawUrl) && !rawUrl.startsWith('#')) {
-                                const fragmentIndex = rawUrl.indexOf('#');
-                                const rawPath = fragmentIndex >= 0 ? rawUrl.slice(0, fragmentIndex) : rawUrl;
-                                const fragment = fragmentIndex >= 0 ? rawUrl.slice(fragmentIndex + 1) : '';
-                                let decodedPath = rawPath;
+                            if (message.type === 'checkLinkOpen') {
+                                void webviewPanel.webview.postMessage({
+                                    type: 'linkOpenState',
+                                    requestId: message.requestId,
+                                    url: message.url,
+                                    allowed: target.uri !== null,
+                                    message: target.uri === null ? target.message : '',
+                                });
+                            } else if (target.uri === null) {
+                                void vscode.window.showErrorMessage(target.message);
+                            } else {
                                 try {
-                                    decodedPath = decodeURIComponent(rawPath);
+                                    if (target.external) {
+                                        if (!await vscode.env.openExternal(target.uri)) {
+                                            void vscode.window.showErrorMessage('Could not open this link.');
+                                        }
+                                    } else {
+                                        await vscode.commands.executeCommand('vscode.open', target.uri);
+                                    }
                                 } catch {
-                                    // Use the literal Markdown path if decoding fails.
-                                }
-                                const relativeTarget = this.resolveImageSourceUri(decodedPath, document).with({ fragment });
-                                const targetsDocumentFileSystem =
-                                    relativeTarget.scheme === document.uri.scheme &&
-                                    relativeTarget.authority === document.uri.authority;
-                                const isOptInLocalFileTarget =
-                                    allowFileLinks && relativeTarget.scheme === 'file';
-                                if (!targetsDocumentFileSystem && !isOptInLocalFileTarget) {
-                                    break;
-                                }
-                                const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
-                                const isInsideWorkspace = targetsDocumentFileSystem &&
-                                    !!workspaceFolder &&
-                                    await isUriSecurelyWithinDirectory(
-                                        relativeTarget.with({ fragment: '' }),
-                                        workspaceFolder.uri,
-                                        (componentUri) => vscode.workspace.fs.stat(componentUri)
-                                    );
-                                if (isInsideWorkspace || isOptInLocalFileTarget) {
-                                    await vscode.commands.executeCommand('vscode.open', relativeTarget);
+                                    void vscode.window.showErrorMessage('Could not open this link. The file may have moved or become unavailable.');
                                 }
                             }
                         }
@@ -4206,6 +4186,102 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 ? error.message
                 : 'Failed to save dropped image.';
             void vscode.window.showErrorMessage(message);
+        }
+    }
+
+    private async resolveLinkOpenTarget(rawUrl: string, document: vscode.TextDocument): Promise<LinkOpenTarget> {
+        const invalid: LinkOpenTarget = { uri: null, message: 'This link is invalid or uses an unsupported URL scheme.' };
+        const unavailable: LinkOpenTarget = { uri: null, message: 'This file does not exist or cannot be accessed.' };
+        const fileLinksDisabled: LinkOpenTarget = {
+            uri: null,
+            message: 'Opening file:// links is disabled. Enable ManulDown › Security: Allow File Links in User Settings to open them.',
+        };
+        const outsideWorkspace: LinkOpenTarget = {
+            uri: null,
+            message: 'Opening files outside the current workspace folder is blocked.' + (document.uri.scheme === 'file'
+                ? ' To allow local files outside the project, enable ManulDown › Security: Allow File Links in User Settings.' : ''),
+        };
+        if (!rawUrl || rawUrl !== rawUrl.trim() || rawUrl.length > 4096 ||
+            /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069\s\\]/u.test(rawUrl)) {
+            return invalid;
+        }
+        try {
+            const decodedUrl = decodeURIComponent(rawUrl);
+            if (/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u.test(decodedUrl)) {
+                return invalid;
+            }
+            const externalHref = normalizeExternalLinkHref(rawUrl);
+            if (externalHref) {
+                return { uri: vscode.Uri.parse(externalHref), external: true };
+            }
+
+            const allowFileLinks = this.getBooleanSetting('security.allowFileLinks', false);
+            if (/^file:/i.test(rawUrl)) {
+                if (!allowFileLinks) {
+                    return fileLinksDisabled;
+                }
+                const uri = vscode.Uri.parse(rawUrl);
+                if (uri.scheme !== 'file') {
+                    return invalid;
+                }
+                try {
+                    await vscode.workspace.fs.stat(uri.with({ fragment: '' }));
+                } catch {
+                    return unavailable;
+                }
+                return { uri, external: true };
+            }
+            if (/^[a-z][a-z0-9+.-]*:/i.test(rawUrl) || rawUrl.startsWith('#')) {
+                return invalid;
+            }
+            const fragmentIndex = rawUrl.indexOf('#');
+            const rawPath = fragmentIndex >= 0 ? rawUrl.slice(0, fragmentIndex) : rawUrl;
+            const fragment = fragmentIndex >= 0 ? rawUrl.slice(fragmentIndex + 1) : '';
+            const decodedPath = decodeURIComponent(rawPath);
+            const isHomeRelativePath = decodedPath === '~' || decodedPath.startsWith('~/');
+            if (isHomeRelativePath && document.uri.scheme !== 'file') {
+                return {
+                    uri: null,
+                    message: 'Home-relative paths (~/…) are supported in local Markdown files. Use a path in the remote workspace for this document.',
+                };
+            }
+            // Expand only the leading home-directory shorthand. Explicit
+            // relative paths such as ./~/notes.md keep their literal meaning.
+            const target = isHomeRelativePath
+                ? vscode.Uri.file(path.join(os.homedir(), decodedPath === '~' ? '' : decodedPath.slice(2)))
+                : this.resolveImageSourceUri(decodedPath, document);
+            const uri = target.with({ fragment });
+            const targetsDocumentFileSystem = uri.scheme === document.uri.scheme &&
+                uri.authority === document.uri.authority;
+            const isOptInLocalFileTarget = allowFileLinks && uri.scheme === 'file';
+            if (!targetsDocumentFileSystem && !isOptInLocalFileTarget) {
+                return invalid;
+            }
+
+            const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
+            const isLexicallyInside = targetsDocumentFileSystem && !!workspaceFolder &&
+                isUriLexicallyWithinDirectory(uri, workspaceFolder.uri);
+            if (!isLexicallyInside && !isOptInLocalFileTarget) {
+                return outsideWorkspace;
+            }
+            try {
+                await vscode.workspace.fs.stat(uri.with({ fragment: '' }));
+            } catch {
+                return unavailable;
+            }
+            const isInsideWorkspace = isLexicallyInside && !!workspaceFolder &&
+                await isUriSecurelyWithinDirectory(
+                    uri.with({ fragment: '' }), workspaceFolder.uri,
+                    componentUri => vscode.workspace.fs.stat(componentUri)
+                );
+            if (!isInsideWorkspace && !isOptInLocalFileTarget) {
+                return document.uri.scheme === 'file' ? outsideWorkspace : {
+                    uri: null, message: 'This path is outside the current workspace folder or passes through a symbolic link.',
+                };
+            }
+            return { uri, external: false };
+        } catch {
+            return invalid;
         }
     }
 

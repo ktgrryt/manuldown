@@ -2091,6 +2091,17 @@ body.toc-resizing #toc-resizer::before {
     min-width: 0;
 }
 
+.link-popover-open-status {
+    color: var(--vscode-descriptionForeground);
+    font-size: 12px;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+}
+
+.link-popover-open-status[hidden] {
+    display: none;
+}
+
 .image-resize-overlay {
     position: absolute;
     display: none;
