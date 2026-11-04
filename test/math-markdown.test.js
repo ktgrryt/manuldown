@@ -125,6 +125,25 @@ test('formulas written and reopened stay formulas', () => {
     assert.ok(reopened.includes(mathBlock('\\frac{1}{2}\n')));
 });
 
+test('digits beside an inline formula remain text outside the formula after saving', () => {
+    const domino = require('@mixmark-io/domino');
+    for (const html of [
+        `<p>Value ${formula('x')}2</p>`,
+        `<p>Value ${formula('x')}<span>23</span></p>`,
+        `<p>Value <span>${formula('x')}</span>2</p>`,
+    ]) {
+        for (const source of ['', 'Value $x$ 2\n']) {
+            const markdown = toMarkdown(html, source);
+            const root = domino.createWindow(toHtml(markdown)).document;
+            assert.equal(root.querySelector('[data-mdw-math]')?.textContent, 'x', markdown);
+            assert.equal(root.querySelector('p').textContent, html.includes('23') ? 'Value x23' : 'Value x2');
+            assert.equal(toMarkdown(root.body.innerHTML, markdown), markdown);
+        }
+    }
+    assert.equal(toMarkdown(toHtml('Value $x$&#x32;\n'), 'Value $x$&#x32;\n'), 'Value $x$&#x32;\n');
+    assert.doesNotMatch(toHtml('Costs $5 and $10\n'), /data-mdw-math/);
+});
+
 test('editing text beside a formula keeps the formula source as written', () => {
     const source = 'Keep $$\nx\n$$ here\n';
     const html = toHtml(source).replace('Keep ', 'Kept ');

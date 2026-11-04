@@ -112,6 +112,15 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             }
         });
         this.turndownService.use(gfm);
+        // Marked puts a loose task item's checkbox in its first paragraph.
+        this.turndownService.addRule('taskListCheckbox', {
+            filter: (node: any) => node.nodeName === 'INPUT' && node.type === 'checkbox' && (
+                node.parentNode.nodeName === 'LI' ||
+                (node.parentNode.nodeName === 'P' && node.parentNode.parentNode?.nodeName === 'LI' &&
+                    node.parentNode.parentNode.firstElementChild === node.parentNode)
+            ),
+            replacement: (_content: string, node: any) => (node.checked ? '[x]' : '[ ]') + ' '
+        });
 
         // Handle strikethrough tags produced by execCommand and markdown conversions
         this.turndownService.addRule('legacyStrikethrough', {
@@ -2831,6 +2840,77 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             });
     }
 
+    /** Keep adjacent literal text from joining generated inline Markdown. */
+    private protectInlineSyntaxBoundaries(html: string): { html: string; restore: (markdown: string) => string } {
+        if (!/<(?:a|del|s|strike)\b|data-mdw-math=/i.test(html)) {
+            return { html, restore: markdown => markdown };
+        }
+        const document = createWindow(`<div id="inline-boundary-root">${html}</div>`).document;
+        const root = document.getElementById('inline-boundary-root');
+        const namespace = this.createPlaceholderNamespace(html + (this.currentConversionDocumentText ?? ''), 'INLINE_BOUNDARY');
+        const replacements: string[] = [];
+        const transparent = (node: any): boolean => node?.nodeName === 'SPAN' &&
+            !node.hasAttribute('data-mdw-math') && !node.hasAttribute('data-mdw-opaque-source') &&
+            !node.hasAttribute('data-mdw-escaped-character');
+        // Formatting delimiters, atomic nodes and line breaks interrupt syntax
+        // adjacency. Only plain text and transparent spans can touch a token.
+        const neighbor = (node: any, backwards: boolean): any => {
+            let current = node;
+            while (current && current !== root) {
+                let sibling = backwards ? current.previousSibling : current.nextSibling;
+                if (sibling) {
+                    while (transparent(sibling) && sibling.firstChild) {
+                        sibling = backwards ? sibling.lastChild : sibling.firstChild;
+                    }
+                    if (sibling.nodeType === 3 && sibling.nodeValue !== '') {
+                        return sibling;
+                    }
+                    if (sibling.nodeType !== 3 && !transparent(sibling)) {
+                        return null;
+                    }
+                    current = sibling;
+                } else if (transparent(current.parentNode)) {
+                    current = current.parentNode;
+                } else {
+                    return null;
+                }
+            }
+            return null;
+        };
+        const protect = (node: any, pattern: RegExp, replacement: (text: string) => string): void => {
+            if (!node) {
+                return;
+            }
+            node.nodeValue = node.nodeValue.replace(pattern, (text: string) => {
+                const marker = `${namespace}${replacements.length}END`;
+                replacements.push(replacement(text));
+                return marker;
+            });
+        };
+        for (const node of Array.from<any>(root.querySelectorAll('a,del,s,strike,span[data-mdw-math]'))) {
+            if (node.closest('pre,code')) {
+                continue;
+            }
+            if (node.nodeName === 'A') {
+                protect(neighbor(node, true), /!$/, () => '\\!');
+            } else if (node.hasAttribute('data-mdw-math')) {
+                // The closing "$" cannot precede an ASCII digit. An entity
+                // keeps the digit outside the formula without adding a space.
+                if (node.getAttribute('data-mdw-math') !== 'display') {
+                    protect(neighbor(node, false), /^[0-9]/, digit => `&#${digit.charCodeAt(0)};`);
+                }
+            } else {
+                protect(neighbor(node, true), /~+$/, text => text.replace(/~/g, '\\~'));
+                protect(neighbor(node, false), /^~+/, text => text.replace(/~/g, '\\~'));
+            }
+        }
+        return {
+            html: replacements.length ? root.innerHTML : html,
+            restore: markdown => markdown.replace(new RegExp(`${this.escapeRegExp(namespace)}(\\d+)END`, 'g'),
+                (_match, index: string) => replacements[Number(index)])
+        };
+    }
+
     /**
      * Marked percent-encodes non-ASCII link targets, which would rewrite
      * [wiki](https://ja.wikipedia.org/wiki/日本) as .../%E6%97%A5%E6%9C%AC.
@@ -3168,6 +3248,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             html = preservedSource.html;
             const protectedFootnotes = this.protectEditableFootnotes(html, document, footnoteContext.depth, footnoteContext.trustedBodySource);
             html = protectedFootnotes.html;
+            const protectedInlineSyntax = this.protectInlineSyntaxBoundaries(html);
+            html = protectedInlineSyntax.html;
 
             // Raw HTML, front matter, comments, and reference definitions cannot
             // be represented faithfully by the editable DOM. MarkdownDocument
@@ -3551,10 +3633,10 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     mathBlockFenceInfo
                 ))
             ));
-            const restoredMarkdown = emphasisSerializer.restore(restoredContent.replace(
+            const restoredMarkdown = emphasisSerializer.restore(protectedInlineSyntax.restore(restoredContent.replace(
                 new RegExp(`${this.escapeRegExp(zeroWidthNamespace)}(200b|2060|feff)END`, 'g'),
                 (_match, characterCode) => String.fromCharCode(parseInt(characterCode, 16))
-            ));
+            )));
             this.assertNoLeakedPlaceholderMarkers(restoredMarkdown, documentText);
             return restoredMarkdown;
         } catch (error) {

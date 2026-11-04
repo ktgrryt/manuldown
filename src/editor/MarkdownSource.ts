@@ -98,13 +98,20 @@ function canReuseInlineSource(node: any, block: MarkdownSourceBlock): boolean {
     if (node.closest('td,th') && /[|\r\n]/.test(block.source)) {
         return false;
     }
+    const before = inlineNeighbor(node, true);
+    const after = inlineNeighbor(node, false);
+    // Leave these nodes visible to the serializer's boundary protection. Their
+    // old spelling can acquire new syntax when neighboring text is edited.
+    if ((node.nodeName === 'A' && before === '!') ||
+        (/^(DEL|S|STRIKE)$/.test(node.nodeName) && (before === '~' || after === '~')) ||
+        (node.hasAttribute('data-mdw-math') && /^[0-9]$/.test(after))) {
+        return false;
+    }
     if (!/^(EM|STRONG|DEL|S)$/.test(node.nodeName)) {
         return true;
     }
     // A delimiter valid in the old paragraph may cease to be emphasis after
     // neighboring text changes (e.g. "a _word_" -> "a_word_").
-    const before = inlineNeighbor(node, true);
-    const after = inlineNeighbor(node, false);
     const escape = (value: string): string => value.replace(/([\\`*_{}\[\]()#+.!|>~-])/g, '\\$1');
     const expected = root(block.html);
     if (before) {

@@ -402,6 +402,54 @@ test('new images escape alt brackets, backslashes and quoted titles', () => {
     assert.equal(image.getAttribute('title'), 'a "quote"');
 });
 
+test('literal punctuation beside links and strikethrough stays literal after saving', () => {
+    const domino = require('@mixmark-io/domino');
+    for (const [html, selector, text] of [
+        ['<p>!<a href="foo">x</a> hello</p>', 'a', '!x hello'],
+        ['<p><span>!</span><span><a href="foo">x</a></span> hello</p>', 'a', '!x hello'],
+        ['<p>~<del>x</del> hello</p>', 'del', '~x hello'],
+        ['<p>~~<del>x</del>~~ hello</p>', 'del', '~~x~~ hello'],
+        ['<p><span>~</span><s>x</s><span>~</span> hello</p>', 'del', '~x~ hello'],
+    ]) {
+        for (const source of ['', selector === 'a' ? '[x](foo) hello\n' : '~~x~~ hello\n']) {
+            const provider = new MarkdownEditorProvider({});
+            const markdown = provider.htmlToMarkdown(html, createTextDocument(source));
+            const root = domino.createWindow(new MarkdownDocument(createTextDocument(markdown)).toHtml()).document;
+            assert.equal(root.querySelector('p')?.textContent, text, markdown);
+            assert.equal(root.querySelector(selector)?.textContent, 'x', markdown);
+            assert.ok(!root.querySelector('img,pre'), markdown);
+            assert.equal(provider.htmlToMarkdown(root.body.innerHTML, createTextDocument(markdown)), markdown);
+        }
+    }
+});
+
+test('literal punctuation protection leaves ordinary text, code, images and destinations intact', () => {
+    const source = 'Hello! ~text~ ![image](a!~b.png) [link](a!~b.md) `!~`\n\n```text\n!~\n```\n';
+    const document = createTextDocument(source);
+    const html = new MarkdownDocument(document).toHtml();
+    assert.equal(new MarkdownEditorProvider({}).htmlToMarkdown(html, document), source);
+    const rendered = require('@mixmark-io/domino').createWindow(html).document;
+    rendered.querySelector('p').appendChild(rendered.createTextNode(' added!'));
+    const output = new MarkdownEditorProvider({}).htmlToMarkdown(rendered.body.innerHTML, document);
+    assert.match(output, /^Hello! ~text~ /);
+    assert.match(output, /!\[image\]\(a!~b\.png\) \[link\]\(a!~b\.md\) `!~` added!/);
+    assert.match(output, /```text\n!~\n```/);
+});
+
+test('literal bangs before reference links do not turn them into reference images', () => {
+    const source = '[x][ref] hello\n\n[ref]: foo\n';
+    const document = createTextDocument(source);
+    const root = require('@mixmark-io/domino').createWindow(new MarkdownDocument(document).toHtml()).document;
+    const paragraph = root.querySelector('p');
+    paragraph.insertBefore(root.createTextNode('!'), paragraph.firstChild);
+    const output = new MarkdownEditorProvider({}).htmlToMarkdown(root.body.innerHTML, document);
+    const reopened = require('@mixmark-io/domino').createWindow(convert(output).html).document;
+    assert.equal(reopened.querySelector('a')?.textContent, 'x', output);
+    assert.equal(reopened.querySelector('p').textContent, '!x hello', output);
+    assert.ok(!reopened.querySelector('img'), output);
+    assert.ok(output.includes('[ref]: foo'));
+});
+
 test('changing code preserves original zero-width characters while caret anchors are removed', async () => {
     const source = '`a\u200bb`\n\n```text\na\u2060b\ufeffc\n```\n';
     await withEditableDocument(source, (editor, domUtils, document) => {

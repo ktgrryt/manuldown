@@ -138,8 +138,9 @@ export class MarkdownConverter {
         }
     }
 
-    /** Keep inline content after a typed list marker in the new list item. */
-    moveLineContentAfter(textNode, target) {
+    /** Collect the inline content after a marker without crossing a line. */
+    getLineContentAfter(textNode) {
+        const nodes = [];
         let node = textNode.nextSibling;
         while (node) {
             if (node.nodeType === Node.ELEMENT_NODE &&
@@ -147,10 +148,15 @@ export class MarkdownConverter {
                     ['UL', 'OL', 'TABLE', 'HR'].includes(node.tagName))) {
                 break;
             }
-            const next = node.nextSibling;
-            target.appendChild(node);
-            node = next;
+            nodes.push(node);
+            node = node.nextSibling;
         }
+        return nodes;
+    }
+
+    /** Keep inline content after a typed block marker in its new block. */
+    moveLineContentAfter(textNode, target) {
+        this.getLineContentAfter(textNode).forEach(node => target.appendChild(node));
     }
 
     /**
@@ -248,10 +254,14 @@ export class MarkdownConverter {
     mergeAdjacentLists(listElement) {
         if (!listElement) return listElement;
         const tagName = listElement.tagName;
+        // An explicit start belongs to a separate ordered list unless it
+        // continues the preceding sequence. Merging it would discard that number.
+        const canMerge = (left, right) => tagName !== 'OL' || !right.hasAttribute('start') ||
+            Number(right.getAttribute('start')) === Number(left.getAttribute('start') || 1) + left.children.length;
 
         // 前の兄弟とマージ
         const prev = listElement.previousElementSibling;
-        if (prev && prev.tagName === tagName) {
+        if (prev && prev.tagName === tagName && canMerge(prev, listElement)) {
             while (listElement.firstChild) {
                 prev.appendChild(listElement.firstChild);
             }
@@ -261,7 +271,7 @@ export class MarkdownConverter {
 
         // 次の兄弟とマージ
         const next = listElement.nextElementSibling;
-        if (next && next.tagName === tagName) {
+        if (next && next.tagName === tagName && canMerge(listElement, next)) {
             while (next.firstChild) {
                 listElement.appendChild(next.firstChild);
             }
@@ -519,22 +529,26 @@ export class MarkdownConverter {
         };
 
         // 見出し構文をチェック（行頭）
-        const headingMatch = rawText.match(/^\s*(#{1,6})\s+(.+)$/);
-        if (!isInTableCell && !isInListItem && headingMatch && blockMarkerTyped(/^\s*#{1,6}\s+$/)) {
+        const headingMatch = rawText.match(/^\s*(#{1,6})\s+(.*)$/);
+        if (!isInTableCell && !isInListItem && headingMatch &&
+            (headingMatch[2] !== '' || this.hasMeaningfulNodes(this.getLineContentAfter(textNode))) &&
+            blockMarkerTyped(/^\s*#{1,6}\s+$/)) {
             const level = headingMatch[1].length;
             const content = headingMatch[2];
             const headingTag = 'h' + level;
 
             const heading = document.createElement(headingTag);
-            heading.textContent = content;
+            const textContent = document.createTextNode(content);
+            heading.appendChild(textContent);
+            this.moveLineContentAfter(textNode, heading);
 
             this.replaceLineWithBlock(textNode, heading);
 
             // カーソル位置を復元
             const newRange = document.createRange();
-            const textContent = heading.firstChild;
             if (textContent) {
-                const newOffset = Math.min(content.length, cursorOffset - headingMatch[1].length - 1);
+                const markerLength = headingMatch[0].length - content.length;
+                const newOffset = Math.min(content.length, cursorOffset - markerLength);
                 newRange.setStart(textContent, Math.max(0, newOffset));
                 newRange.collapse(true);
                 selection.removeAllRanges();
@@ -901,14 +915,15 @@ export class MarkdownConverter {
         }
 
         // 順序付きリスト構文をチェック 1. item
-        const olMatch = rawText.match(/^\s*\d+\.\s+(.*)$/);
+        const olMatch = rawText.match(/^\s*(\d+)\.\s+(.*)$/);
         if (
             !isInTableCell &&
             !isInHeading &&
             olMatch &&
             blockMarkerTyped(/^\s*\d+\.\s+$/, { requireBlockStart: isInListItem })
         ) {
-            const rawContent = olMatch[1] ?? '';
+            const startNumber = Number(olMatch[1]);
+            const rawContent = olMatch[2] ?? '';
             const content = rawContent.trim() === '' ? '' : rawContent;
 
             const li = document.createElement('li');
@@ -923,6 +938,7 @@ export class MarkdownConverter {
 
             const parent = textNode.parentElement;
             let ol = this.domUtils.getParentElement(textNode, 'OL');
+            const isNewList = !ol;
 
             if (!ol) {
                 // ULの中にいる場合、リストタイプを変換する（ネストしない）
@@ -965,6 +981,10 @@ export class MarkdownConverter {
                 }
             }
 
+            if (isNewList && startNumber !== 1) {
+                ol.setAttribute('start', String(startNumber));
+            }
+
             // 隣接する同タイプのリストをマージ
             this.mergeAdjacentLists(ol);
 
@@ -984,14 +1004,17 @@ export class MarkdownConverter {
         }
 
         // 引用構文をチェック > text（テキストが必要）
-        const blockquoteMatch = rawText.match(/^\s*>\s+(.+)$/);
-        if (!isInTableCell && !isInListItem && blockquoteMatch && blockMarkerTyped(/^\s*>\s+$/)) {
+        const blockquoteMatch = rawText.match(/^\s*>\s+(.*)$/);
+        if (!isInTableCell && !isInListItem && blockquoteMatch &&
+            (blockquoteMatch[1] !== '' || this.hasMeaningfulNodes(this.getLineContentAfter(textNode))) &&
+            blockMarkerTyped(/^\s*>\s+$/)) {
             const content = blockquoteMatch[1];
 
             const blockquote = document.createElement('blockquote');
             const p = document.createElement('p');
-            p.textContent = content;
-            const textContentNode = p.firstChild;
+            const textContentNode = document.createTextNode(content);
+            p.appendChild(textContentNode);
+            this.moveLineContentAfter(textNode, p);
             blockquote.appendChild(p);
 
             this.replaceLineWithBlock(textNode, blockquote);
@@ -1024,7 +1047,8 @@ export class MarkdownConverter {
                     .replace(/\\\]/g, ']')
                     .replace(/\\\[/g, '[');
                 const rawTarget = (markdownImageMatch[2] || '').trim();
-                const targetMatch = rawTarget.match(/^(<[^>]+>|[^\s]+)(?:\s+["'][^"']*["'])?$/);
+                const targetMatch = rawTarget.match(/^(<[^>]+>|[^\s]+)(?:\s+(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'))?$/);
+                const title = targetMatch?.[2] ?? targetMatch?.[3];
                 let src = targetMatch ? targetMatch[1] : '';
                 if (src && src.startsWith('<') && src.endsWith('>')) {
                     src = src.slice(1, -1);
@@ -1049,6 +1073,9 @@ export class MarkdownConverter {
 
                         const image = document.createElement('img');
                         image.setAttribute('alt', alt);
+                        if (title !== undefined) {
+                            image.setAttribute('title', title.replace(/\\([!-/:-@[-`{-~])/g, '$1'));
+                        }
                         if (this.applyImageSourcePolicy) {
                             image.setAttribute('data-md-path', src);
                             this.applyImageSourcePolicy(image, src, { markdownPath: src });
@@ -1094,7 +1121,8 @@ export class MarkdownConverter {
                     .replace(/\\\]/g, ']')
                     .replace(/\\\[/g, '[');
                 const rawTarget = (markdownLinkMatch[2] || '').trim();
-                const targetMatch = rawTarget.match(/^(<[^>]+>|[^\s]+)(?:\s+["'][^"']*["'])?$/);
+                const targetMatch = rawTarget.match(/^(<[^>]+>|[^\s]+)(?:\s+(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'))?$/);
+                const title = targetMatch?.[2] ?? targetMatch?.[3];
                 let href = targetMatch ? targetMatch[1] : '';
                 if (href && href.startsWith('<') && href.endsWith('>')) {
                     href = href.slice(1, -1);
@@ -1122,6 +1150,9 @@ export class MarkdownConverter {
 
                         const link = document.createElement('a');
                         link.setAttribute('href', href);
+                        if (title !== undefined) {
+                            link.setAttribute('title', title.replace(/\\([!-/:-@[-`{-~])/g, '$1'));
+                        }
                         link.textContent = label;
                         fragment.appendChild(link);
 

@@ -84,6 +84,13 @@ marked.use({
     pedantic: false,
     extensions: [
         {
+            name: 'listSourceIndent',
+            // Only the per-document lexer below creates these tokens. Keeping
+            // the marker outside the following block lets Marked recognize an
+            // item's leading quote, heading or code fence normally.
+            renderer(token) { return token.raw; }
+        },
+        {
             name: 'mathBlock',
             level: 'block',
             start(source: string) {
@@ -325,7 +332,24 @@ export class MarkdownDocument {
                 listIndentWrapperMarker,
                 listIndentMarkerPrefix
             );
-            const lexer = new marked.Lexer({ ...marked.defaults });
+            const listBlockMarker = new RegExp(
+                `^${listIndentMarkerPrefix}\\d+M[0-9a-f]{2}END ` +
+                '(?= {0,3}(?:>|#{1,6}(?:[ \\t]|$)|`{3,}|~{3,}|' +
+                '(?:[*+-]|\\d+[.)])(?:[ \\t]|$)|(?:[*_-][ \\t]*){3,}(?:\\n|$)))'
+            );
+            const lexer = new marked.Lexer({
+                ...marked.defaults,
+                extensions: {
+                    ...marked.defaults.extensions!,
+                    block: [
+                        (source: string) => {
+                            const match = source.match(listBlockMarker);
+                            return match ? { type: 'listSourceIndent', raw: match[0] } : undefined;
+                        },
+                        ...(marked.defaults.extensions?.block ?? []),
+                    ],
+                },
+            });
             if (this.footnoteContext) {
                 Object.assign(lexer.tokens.links, this.footnoteContext.links);
             }
@@ -561,29 +585,13 @@ export class MarkdownDocument {
 
     private detectListIndentSize(markdown: string): number | null {
         const lines = markdown.split(/\r?\n/);
-        let activeFenceChar: '`' | '~' | null = null;
-        let activeFenceLength = 0;
+        const fencedLines = this.getFencedCodeLines(markdown);
         const indentDeltaCandidates: number[] = [];
         const positiveIndentSamples: number[] = [];
         const previousIndentByBlockquoteDepth = new Map<number, number>();
 
-        for (const line of lines) {
-            const fenceMatch = line.match(/^ {0,3}(`{3,}|~{3,})/);
-            if (fenceMatch) {
-                const fenceToken = fenceMatch[1];
-                const fenceChar = fenceToken[0] as '`' | '~';
-                const fenceLength = fenceToken.length;
-                if (activeFenceChar === null) {
-                    activeFenceChar = fenceChar;
-                    activeFenceLength = fenceLength;
-                } else if (activeFenceChar === fenceChar && fenceLength >= activeFenceLength) {
-                    activeFenceChar = null;
-                    activeFenceLength = 0;
-                }
-                continue;
-            }
-
-            if (activeFenceChar !== null) {
+        for (const [index, line] of lines.entries()) {
+            if (fencedLines[index]) {
                 continue;
             }
 
@@ -646,8 +654,7 @@ export class MarkdownDocument {
         }
 
         const output: string[] = [];
-        let activeFenceChar: '`' | '~' | null = null;
-        let activeFenceLength = 0;
+        const fencedLines = this.getFencedCodeLines(markdown);
         const activeListStacks = new Map<string, Array<{
             sourceIndent: number;
             depth: number;
@@ -674,23 +681,7 @@ export class MarkdownDocument {
                 continue;
             }
 
-            const fenceMatch = lineWithoutEnding.match(/^ {0,3}(`{3,}|~{3,})/);
-            if (fenceMatch) {
-                output.push(segment);
-                const fenceToken = fenceMatch[1];
-                const fenceChar = fenceToken[0] as '`' | '~';
-                const fenceLength = fenceToken.length;
-                if (activeFenceChar === null) {
-                    activeFenceChar = fenceChar;
-                    activeFenceLength = fenceLength;
-                } else if (activeFenceChar === fenceChar && fenceLength >= activeFenceLength) {
-                    activeFenceChar = null;
-                    activeFenceLength = 0;
-                }
-                continue;
-            }
-
-            if (activeFenceChar !== null) {
+            if (fencedLines[index] && fencedLines[index]!.kind !== 'open') {
                 output.push(segment);
                 continue;
             }
@@ -846,7 +837,7 @@ export class MarkdownDocument {
         const escapedWrapperMarker = indentWrapperMarker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         const escapedIndentMarkerPrefix = sourceIndentMarkerPrefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         // Items of a loose list wrap their content in <p>.
-        const itemContentPrefix = '((?:\\s|<p\\b[^>]*>|<input\\b[^>]*>\\s*)*)';
+        const itemContentPrefix = '((?:\\s|<p\\b[^>]*>|<\\/p>|<input\\b[^>]*>\\s*)*)';
         return html
             .replace(
                 new RegExp(`(<li\\b[^>]*>)${itemContentPrefix}${escapedWrapperMarker}`, 'gi'),
@@ -932,8 +923,7 @@ export class MarkdownDocument {
         // containers before lexing so the original bytes stay together.
         const rawHtmlSegments = protectedMarkdown.match(/[^\n]*\n|[^\n]+$/g) ?? [];
         const rawHtmlOutput: string[] = [];
-        let rawHtmlFenceMarker: '`' | '~' | null = null;
-        let rawHtmlFenceLength = 0;
+        const rawHtmlFencedLines = this.getFencedCodeLines(protectedMarkdown);
         const voidHtmlTags = new Set([
             'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input',
             'link', 'meta', 'param', 'source', 'track', 'wbr',
@@ -941,27 +931,12 @@ export class MarkdownDocument {
         for (let index = 0; index < rawHtmlSegments.length; index++) {
             const segment = rawHtmlSegments[index];
             const line = segment.replace(/\r?\n$/, '');
-            const fenceMatch = line.match(/^ {0,3}(`{3,}|~{3,})/);
-            if (fenceMatch) {
-                const run = fenceMatch[1];
-                const marker = run[0] as '`' | '~';
-                if (rawHtmlFenceMarker === null) {
-                    rawHtmlFenceMarker = marker;
-                    rawHtmlFenceLength = run.length;
-                } else if (
-                    rawHtmlFenceMarker === marker &&
-                    run.length >= rawHtmlFenceLength
-                ) {
-                    rawHtmlFenceMarker = null;
-                    rawHtmlFenceLength = 0;
-                }
+            if (rawHtmlFencedLines[index]) {
                 rawHtmlOutput.push(segment);
                 continue;
             }
 
-            const openingTag = rawHtmlFenceMarker === null
-                ? line.match(/^ {0,3}<([A-Za-z][\w:-]*)\b[^>]*>[ \t]*$/)
-                : null;
+            const openingTag = line.match(/^ {0,3}<([A-Za-z][\w:-]*)\b[^>]*>[ \t]*$/);
             const tagName = openingTag?.[1]?.toLowerCase();
             if (!tagName || voidHtmlTags.has(tagName)) {
                 rawHtmlOutput.push(segment);
@@ -1021,30 +996,14 @@ export class MarkdownDocument {
         const isBlankSegment = (segment: string): boolean => segment.replace(/\r?\n$/, '').trim() === '';
         const footnoteSegments = protectedMarkdown.match(/[^\n]*\n|[^\n]+$/g) ?? [];
         const footnoteOutput: string[] = [];
-        let footnoteFenceMarker: '`' | '~' | null = null;
-        let footnoteFenceLength = 0;
+        const footnoteFencedLines = this.getFencedCodeLines(protectedMarkdown);
         for (let index = 0; index < footnoteSegments.length; index++) {
             const segment = footnoteSegments[index];
             const line = segment.replace(/\r?\n$/, '');
-            const fenceMatch = line.match(/^ {0,3}(`{3,}|~{3,})/);
-            if (fenceMatch) {
-                const run = fenceMatch[1];
-                const marker = run[0] as '`' | '~';
-                if (footnoteFenceMarker === null) {
-                    footnoteFenceMarker = marker;
-                    footnoteFenceLength = run.length;
-                } else if (footnoteFenceMarker === marker && run.length >= footnoteFenceLength) {
-                    footnoteFenceMarker = null;
-                    footnoteFenceLength = 0;
-                }
-                footnoteOutput.push(segment);
-                continue;
-            }
-
             // Like a reference definition, a footnote definition cannot
             // interrupt a paragraph.
             if (
-                footnoteFenceMarker !== null ||
+                footnoteFencedLines[index] ||
                 !footnoteDefinitionPattern.test(line) ||
                 !endsWithBlankLine(footnoteOutput[footnoteOutput.length - 1])
             ) {
@@ -1097,8 +1056,7 @@ export class MarkdownDocument {
         const segments = protectedMarkdown.match(/[^\n]*\n|[^\n]+$/g) ?? [];
         const output: string[] = [];
         const pendingReferenceDefinitions: string[] = [];
-        let fenceMarker: '`' | '~' | null = null;
-        let fenceLength = 0;
+        const referenceFencedLines = this.getFencedCodeLines(protectedMarkdown);
         const flushReferenceDefinitions = (): void => {
             if (pendingReferenceDefinitions.length === 0) {
                 return;
@@ -1113,42 +1071,30 @@ export class MarkdownDocument {
             output.push(`${marker}${sourceLineEnding}${sourceLineEnding}`);
             pendingReferenceDefinitions.length = 0;
         };
-        for (const segment of segments) {
+        for (const [index, segment] of segments.entries()) {
             const lineEnding = segment.endsWith('\r\n')
                 ? '\r\n'
                 : (segment.endsWith('\n') ? '\n' : '');
             const line = lineEnding ? segment.slice(0, -lineEnding.length) : segment;
-            const fenceMatch = line.match(/^ {0,3}(`{3,}|~{3,})/);
-            if (fenceMatch) {
+            if (referenceFencedLines[index]) {
                 flushReferenceDefinitions();
-                const run = fenceMatch[1];
-                const marker = run[0] as '`' | '~';
-                if (fenceMarker === null) {
-                    fenceMarker = marker;
-                    fenceLength = run.length;
-                } else if (fenceMarker === marker && run.length >= fenceLength) {
-                    fenceMarker = null;
-                    fenceLength = 0;
-                }
                 output.push(segment);
                 continue;
             }
 
             if (
-                fenceMarker === null &&
                 pendingReferenceDefinitions.length > 0 &&
                 line.trim() === ''
             ) {
                 pendingReferenceDefinitions.push(segment);
                 continue;
             }
-            if (fenceMarker === null && /^ {0,3}\[[^\]\r\n]+\]:[ \t]*\S/.test(line)) {
+            if (/^ {0,3}\[[^\]\r\n]+\]:[ \t]*\S/.test(line)) {
                 output.push(segment);
                 pendingReferenceDefinitions.push(segment);
                 continue;
             }
             if (
-                fenceMarker === null &&
                 pendingReferenceDefinitions.length > 0 &&
                 /^[ \t]+(?:["'(])/.test(line)
             ) {
@@ -1236,6 +1182,69 @@ export class MarkdownDocument {
         return { content: line.slice(offset), offset, depth };
     }
 
+    /** Locate fences without treating list/quote prefixes as code content. */
+    private getFencedCodeLines(markdown: string): Array<{ kind: 'open' | 'body' | 'close'; offset: number } | null> {
+        type Container = { kind: 'quote' } | { kind: 'list'; width: number };
+        let fence: { marker: '`' | '~'; length: number; containers: Container[] } | null = null;
+        return (markdown.match(/[^\n]*\n|[^\n]+$/g) ?? []).map(segment => {
+            const line = segment.replace(/\r?\n$/, '');
+            let offset = 0;
+            if (fence) {
+                for (const container of fence.containers) {
+                    if (container.kind === 'quote') {
+                        const quote = this.stripBlockquotePrefix(line.slice(offset), 1);
+                        if (!quote.depth) {
+                            fence = null;
+                            break;
+                        }
+                        offset += quote.offset;
+                    } else {
+                        const indent = line.slice(offset).match(/^[ \t]*/)?.[0] ?? '';
+                        let consumed = 0;
+                        let width = 0;
+                        while (width < container.width && consumed < indent.length) {
+                            width += indent[consumed++] === '\t' ? 4 : 1;
+                        }
+                        if (width < container.width && line.slice(offset).trim() !== '') {
+                            fence = null;
+                            break;
+                        }
+                        offset += consumed;
+                    }
+                }
+                if (fence) {
+                    if (this.isFenceClosingLine(line.slice(offset), fence.marker, fence.length)) {
+                        fence = null;
+                        return { kind: 'close', offset };
+                    }
+                    return { kind: 'body', offset };
+                }
+            }
+            offset = 0;
+            const containers: Container[] = [];
+            while (offset < line.length) {
+                const quote = this.stripBlockquotePrefix(line.slice(offset), 1);
+                if (quote.depth) {
+                    containers.push({ kind: 'quote' });
+                    offset += quote.offset;
+                    continue;
+                }
+                const list = line.slice(offset).match(/^( {0,3}(?:[*+-]|\d{1,9}[.)])[ \t]+)(?:\[[ xX]\][ \t]+)?/);
+                if (!list) {
+                    break;
+                }
+                containers.push({ kind: 'list', width: this.getVisualIndentWidth(list[1]) });
+                offset += list[0].length;
+            }
+            const opening = this.parseFenceOpeningLine(line.slice(offset));
+            if (!opening) {
+                return null;
+            }
+            fence = { ...opening, containers };
+            return { kind: 'open', offset };
+        });
+    }
+
     /**
      * Marked expands tabs to spaces, so tab-indented code (Makefiles, Go)
      * would be rewritten with spaces on save. Hide content tabs inside fenced
@@ -1250,39 +1259,20 @@ export class MarkdownDocument {
             return { markdown, restore: (html) => html };
         }
         const segments = markdown.match(/[^\n]*\n|[^\n]+$/g) ?? [];
+        const fencedLines = this.getFencedCodeLines(markdown);
         const tabMarker = this.createPlaceholderMarker(markdown, 'CODE_TAB');
-        let fenceMarker: '`' | '~' | null = null;
-        let fenceLength = 0;
-        let fenceQuoteDepth = 0;
         let protectedAny = false;
-        const output = segments.map((segment) => {
-            const line = this.stripTrailingCarriageReturn(segment.replace(/\n$/, ''));
-            let quoted = this.stripBlockquotePrefix(line, fenceMarker === null ? undefined : fenceQuoteDepth);
-            if (fenceMarker !== null && quoted.depth < fenceQuoteDepth) {
-                // An unterminated quoted fence stops when its quote ends.
-                fenceMarker = null;
-                quoted = this.stripBlockquotePrefix(line);
-            }
-            if (fenceMarker === null) {
-                const openingFence = this.parseFenceOpeningLine(quoted.content);
-                if (openingFence) {
-                    fenceMarker = openingFence.marker;
-                    fenceLength = openingFence.length;
-                    fenceQuoteDepth = quoted.depth;
-                }
+        const output = segments.map((segment, index) => {
+            const fenced = fencedLines[index];
+            if (fenced?.kind !== 'body') {
                 return segment;
             }
-            if (this.isFenceClosingLine(quoted.content, fenceMarker, fenceLength)) {
-                fenceMarker = null;
-                fenceLength = 0;
-                return segment;
-            }
-            const contentSegment = segment.slice(quoted.offset);
+            const contentSegment = segment.slice(fenced.offset);
             if (!contentSegment.includes('\t')) {
                 return segment;
             }
             protectedAny = true;
-            return segment.slice(0, quoted.offset) + contentSegment.replace(/\t/g, tabMarker);
+            return segment.slice(0, fenced.offset) + contentSegment.replace(/\t/g, tabMarker);
         });
         if (!protectedAny) {
             return { markdown, restore: (html) => html };
@@ -1298,39 +1288,29 @@ export class MarkdownDocument {
      * language), so "```js title=\"a.js\"" would lose `title="a.js"` on save.
      * Put a marker in place of such an info string while Marked parses, then
      * turn the marker back into the language and keep the whole info string
-     * in data-mdw-code-info. Only top-level fences are handled.
+     * in data-mdw-code-info.
      */
     private protectFencedCodeInfoStrings(markdown: string): {
         markdown: string;
         restore: (html: string) => string;
     } {
         const segments = markdown.match(/[^\n]*\n|[^\n]+$/g) ?? [];
+        const fencedLines = this.getFencedCodeLines(markdown);
         const infoMarker = this.createPlaceholderMarker(markdown, 'CODE_INFO');
         const infoStrings: string[] = [];
-        let fenceMarker: '`' | '~' | null = null;
-        let fenceLength = 0;
-        const output = segments.map((segment) => {
+        const output = segments.map((segment, index) => {
+            const fenced = fencedLines[index];
+            if (fenced?.kind !== 'open') {
+                return segment;
+            }
             const lineEnding = segment.endsWith('\n') ? (segment.endsWith('\r\n') ? '\r\n' : '\n') : '';
-            const line = segment.slice(0, segment.length - lineEnding.length);
-            if (fenceMarker !== null) {
-                if (this.isFenceClosingLine(line, fenceMarker, fenceLength)) {
-                    fenceMarker = null;
-                    fenceLength = 0;
-                }
-                return segment;
-            }
-            const openingFence = this.parseFenceOpeningLine(line);
-            if (!openingFence) {
-                return segment;
-            }
-            fenceMarker = openingFence.marker;
-            fenceLength = openingFence.length;
+            const line = segment.slice(fenced.offset, segment.length - lineEnding.length);
             const match = line.match(/^( {0,3}(?:`{3,}|~{3,}))[ \t]*(\S+)[ \t]+(\S.*?)[ \t]*$/);
             if (!match || match[2].startsWith('{')) {
                 return segment;
             }
             infoStrings.push(`${match[2]} ${match[3]}`);
-            return `${match[1]}${infoMarker}${infoStrings.length - 1}END${lineEnding}`;
+            return `${segment.slice(0, fenced.offset)}${match[1]}${infoMarker}${infoStrings.length - 1}END${lineEnding}`;
         });
         if (infoStrings.length === 0) {
             return { markdown, restore: (html) => html };
@@ -1356,11 +1336,9 @@ export class MarkdownDocument {
         }
 
         const output: string[] = [];
-        let inFence = false;
-        let fenceMarker: '`' | '~' | null = null;
-        let fenceLength = 0;
+        const fencedLines = this.getFencedCodeLines(markdown);
 
-        for (const segment of segments) {
+        for (const [index, segment] of segments.entries()) {
             const lineEnding = segment.endsWith('\r\n')
                 ? '\r\n'
                 : (segment.endsWith('\n') ? '\n' : '');
@@ -1369,22 +1347,8 @@ export class MarkdownDocument {
                 : segment;
             const line = this.stripTrailingCarriageReturn(lineWithoutEnding);
 
-            if (inFence) {
+            if (fencedLines[index]) {
                 output.push(segment);
-                if (fenceMarker && this.isFenceClosingLine(line, fenceMarker, fenceLength)) {
-                    inFence = false;
-                    fenceMarker = null;
-                    fenceLength = 0;
-                }
-                continue;
-            }
-
-            const openingFence = this.parseFenceOpeningLine(line);
-            if (openingFence) {
-                output.push(segment);
-                inFence = true;
-                fenceMarker = openingFence.marker;
-                fenceLength = openingFence.length;
                 continue;
             }
 
@@ -1404,9 +1368,7 @@ export class MarkdownDocument {
 
         const output: string[] = [];
         const pendingBlankSegments: string[] = [];
-        let inFence = false;
-        let fenceMarker: '`' | '~' | null = null;
-        let fenceLength = 0;
+        const fencedLines = this.getFencedCodeLines(markdown);
 
         const isBlankSegment = (segment: string): boolean => {
             if (!segment.endsWith('\n')) {
@@ -1433,26 +1395,10 @@ export class MarkdownDocument {
             pendingBlankSegments.length = 0;
         };
 
-        for (const segment of segments) {
-            const line = segment.endsWith('\n') ? segment.slice(0, -1) : segment;
-
-            if (inFence) {
-                output.push(segment);
-                if (fenceMarker && this.isFenceClosingLine(line, fenceMarker, fenceLength)) {
-                    inFence = false;
-                    fenceMarker = null;
-                    fenceLength = 0;
-                }
-                continue;
-            }
-
-            const openingFence = this.parseFenceOpeningLine(line);
-            if (openingFence) {
+        for (const [index, segment] of segments.entries()) {
+            if (fencedLines[index]) {
                 flushPendingBlankSegments();
                 output.push(segment);
-                inFence = true;
-                fenceMarker = openingFence.marker;
-                fenceLength = openingFence.length;
                 continue;
             }
 
@@ -1476,10 +1422,7 @@ export class MarkdownDocument {
         }
 
         const output: string[] = [];
-        let inFence = false;
-        let fenceMarker: '`' | '~' | null = null;
-        let fenceLength = 0;
-        let fenceQuoteDepth = 0;
+        const fencedLines = this.getFencedCodeLines(markdown);
         const getSegmentLineInfo = (segment: string): { line: string; lineEnding: string } => {
             const lineEnding = segment.endsWith('\r\n')
                 ? '\r\n'
@@ -1502,33 +1445,8 @@ export class MarkdownDocument {
         for (let i = 0; i < segments.length; i++) {
             const segment = segments[i];
             const { line } = getSegmentLineInfo(segment);
-            let quoted = this.stripBlockquotePrefix(line, inFence ? fenceQuoteDepth : undefined);
-            if (inFence && quoted.depth < fenceQuoteDepth) {
-                // A quoted fence ends with its containing quote, even without
-                // an explicit closing fence. Resume normal empty-line handling.
-                inFence = false;
-                fenceMarker = null;
-                fenceLength = 0;
-                quoted = this.stripBlockquotePrefix(line);
-            }
-
-            if (inFence) {
+            if (fencedLines[i]) {
                 output.push(segment);
-                if (fenceMarker && this.isFenceClosingLine(quoted.content, fenceMarker, fenceLength)) {
-                    inFence = false;
-                    fenceMarker = null;
-                    fenceLength = 0;
-                }
-                continue;
-            }
-
-            const openingFence = this.parseFenceOpeningLine(quoted.content);
-            if (openingFence) {
-                output.push(segment);
-                inFence = true;
-                fenceMarker = openingFence.marker;
-                fenceLength = openingFence.length;
-                fenceQuoteDepth = quoted.depth;
                 continue;
             }
 
@@ -1637,11 +1555,9 @@ export class MarkdownDocument {
         }
 
         const output: string[] = [];
-        let inFence = false;
-        let fenceMarker: '`' | '~' | null = null;
-        let fenceLength = 0;
+        const fencedLines = this.getFencedCodeLines(markdown);
 
-        for (const segment of segments) {
+        for (const [index, segment] of segments.entries()) {
             const lineEnding = segment.endsWith('\r\n')
                 ? '\r\n'
                 : (segment.endsWith('\n') ? '\n' : '');
@@ -1650,22 +1566,8 @@ export class MarkdownDocument {
                 : segment;
             const line = this.stripTrailingCarriageReturn(lineWithoutEnding);
 
-            if (inFence) {
+            if (fencedLines[index]) {
                 output.push(segment);
-                if (fenceMarker && this.isFenceClosingLine(line, fenceMarker, fenceLength)) {
-                    inFence = false;
-                    fenceMarker = null;
-                    fenceLength = 0;
-                }
-                continue;
-            }
-
-            const openingFence = this.parseFenceOpeningLine(line);
-            if (openingFence) {
-                output.push(segment);
-                inFence = true;
-                fenceMarker = openingFence.marker;
-                fenceLength = openingFence.length;
                 continue;
             }
 

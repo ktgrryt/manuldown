@@ -2,7 +2,36 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
+const Module = require('node:module');
 const domino = require('@mixmark-io/domino');
+const { marked } = require('marked');
+
+function loadMarkdownEditorProvider() {
+    const originalLoad = Module._load;
+    const vscodeMock = {
+        workspace: {
+            getWorkspaceFolder: () => null,
+            getConfiguration: () => ({ get: (_key, defaultValue) => defaultValue }),
+        },
+        window: {},
+    };
+    Module._load = function (request, parent, isMain) {
+        return request === 'vscode' ? vscodeMock : originalLoad.call(this, request, parent, isMain);
+    };
+    try {
+        return require('../out/editor/MarkdownEditorProvider').MarkdownEditorProvider;
+    } finally {
+        Module._load = originalLoad;
+    }
+}
+
+const MarkdownEditorProvider = loadMarkdownEditorProvider();
+function toMarkdown(html) {
+    return new MarkdownEditorProvider({}).htmlToMarkdown(html, {
+        getText: () => '',
+        uri: { fsPath: '/workspace/document.md', path: '/workspace/document.md', scheme: 'file', authority: '' },
+    });
+}
 
 function importModule(fileName) {
     const source = fs.readFileSync(path.join(__dirname, '..', 'media', 'modules', fileName), 'utf8');
@@ -139,6 +168,59 @@ test('a heading needs a marker the user just typed', async () => {
     const composed = await convertAt('<p># 見出し</p>', (editor) => editor.querySelector('p').firstChild, undefined, '見出し');
     assert.equal(composed.converted, true);
     assert.equal(composed.html, '<h1>見出し</h1>');
+});
+
+test('heading and quote shortcuts keep the rich inline content of their line', async () => {
+    const rich = '<strong>world</strong> <a href="./note.md">link</a> <img src="image.png" alt="diagram">';
+    for (const [marker, selector] of [['#', 'h1'], ['>', 'blockquote p']]) {
+        for (const text of ['hello\u00a0', '']) {
+            let originalStrong;
+            let originalImage;
+            const html = `<p>before<br>${marker} ${text}${rich}<br>after</p>`;
+            const result = await convertAt(html, editor => {
+                originalStrong = editor.querySelector('strong');
+                originalImage = editor.querySelector('img');
+                return editor.querySelector('p').childNodes[2];
+            }, marker.length + 1, ' ');
+            assert.equal(result.converted, true, html);
+            const block = result.editor.querySelector(selector);
+            assert.ok(block.querySelector('strong') === originalStrong, 'bold content stays in the converted block');
+            assert.ok(block.querySelector('img') === originalImage, 'the image stays in the converted block');
+            assert.equal(block.textContent, text + 'world link ');
+            assert.equal(result.editor.firstElementChild.outerHTML, '<p>before</p>');
+            assert.equal(result.editor.lastElementChild.outerHTML, '<p>after</p>');
+            assert.equal(result.range.startContainer, block.firstChild);
+            assert.equal(result.range.startOffset, 0);
+            assert.equal(toMarkdown(result.html),
+                `before\n\n${marker} ${text}**world** [link](./note.md) ![diagram](image.png)\n\nafter\n`);
+        }
+    }
+});
+
+test('new ordered list shortcuts preserve their starting number when saved', async () => {
+    for (const number of [0, 1, 3, 10]) {
+        const marker = `${number}. `;
+        const result = await convertAt(`<p>${marker}item</p>`, editor => editor.querySelector('p').firstChild,
+            marker.length, ' ');
+        assert.equal(result.converted, true);
+        assert.equal(Number(result.editor.querySelector('ol').getAttribute('start') ?? 1), number);
+        assert.equal(toMarkdown(result.html), `${number}. item\n`);
+    }
+
+    const converted = await convertAt('<ul><li>before</li><li>3. item</li><li>after</li></ul>',
+        editor => editor.querySelectorAll('li')[1].firstChild, 3, ' ');
+    assert.equal(converted.editor.querySelector('ol').getAttribute('start'), '3');
+    assert.match(toMarkdown(converted.html), /(?:^|\n)3\. item(?:\n|$)/);
+
+    const existing = await convertAt('<ol start="7"><li>3. item</li></ol>',
+        editor => editor.querySelector('li').firstChild, 3, ' ');
+    assert.equal(existing.editor.querySelector('ol').getAttribute('start'), '7');
+    assert.equal(toMarkdown(existing.html), '7. item\n');
+
+    const adjacent = await convertAt('<ol start="7"><li>before</li></ol><p>3. item</p>',
+        editor => editor.querySelector('p').firstChild, 3, ' ');
+    assert.equal(adjacent.editor.querySelectorAll('ol').length, 2);
+    assert.equal(toMarkdown(adjacent.html), '7. before\n\n3. item\n');
 });
 
 test('shortcuts never fire inside code', async () => {
@@ -332,6 +414,51 @@ test('link and image shortcuts wait for balanced parentheses in their destinatio
                 first, undefined, ')');
             assert.equal(result.converted, true, target);
             assert.equal(result.editor.querySelector(tag).getAttribute(attribute), expected);
+        }
+    }
+});
+
+test('link and image shortcuts preserve quoted titles through Markdown saving', async () => {
+    const before = 'Hello\u00a0world ';
+    const after = '\u00a0after\u00a0text';
+    const title = 'Title (detail)';
+    const destination = 'https://example.test/a(b)';
+    for (const [marker, tag, attribute] of [['', 'a', 'href'], ['!', 'img', 'src']]) {
+        for (const quote of ['"', "'"]) {
+            for (const target of [destination, `<${destination}>`]) {
+                const syntax = `${marker}[x](${target} ${quote}${title}${quote})`;
+                const html = `<p>${before}${syntax.replace(/</g, '&lt;').replace(/>/g, '&gt;')}${after}</p>`;
+                const result = await convertAt(html, editor => editor.querySelector('p').firstChild,
+                    before.length + syntax.length, ')');
+                assert.equal(result.converted, true, syntax);
+                const node = result.editor.querySelector(tag);
+                assert.equal(node.getAttribute(attribute), destination);
+                assert.equal(node.getAttribute('title'), title);
+                assert.equal(result.editor.querySelector('p').firstChild.textContent, before);
+                assert.equal(result.editor.querySelector('p').lastChild.textContent, after);
+                const saved = toMarkdown(result.html);
+                const reopened = domino.createWindow(marked.parse(saved)).document;
+                assert.equal(reopened.querySelector(tag).getAttribute(attribute), destination);
+                assert.equal(reopened.querySelector(tag).getAttribute('title'), title);
+                assert.ok(saved.startsWith(before));
+                assert.ok(saved.endsWith(after + '\n'));
+            }
+        }
+    }
+});
+
+test('quoted shortcut titles decode escaped punctuation and keep it when reopened', async () => {
+    const rawTitle = 'Title \\(detail\\) & \\"quoted\\"';
+    const title = 'Title (detail) & "quoted"';
+    for (const [marker, tag] of [['', 'a'], ['!', 'img']]) {
+        for (const quote of ['"', "'"]) {
+            const syntax = `${marker}[x](https://example.test ${quote}${rawTitle}${quote})`;
+            const result = await convertAt(`<p>${syntax}</p>`, editor => editor.querySelector('p').firstChild,
+                undefined, ')');
+            assert.equal(result.converted, true);
+            assert.equal(result.editor.querySelector(tag).getAttribute('title'), title);
+            const reopened = domino.createWindow(marked.parse(toMarkdown(result.html))).document;
+            assert.equal(reopened.querySelector(tag).getAttribute('title'), title);
         }
     }
 });

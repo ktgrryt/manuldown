@@ -1281,6 +1281,16 @@ export class CodeBlockManager {
         
         if (selection && selection.rangeCount > 0) {
             const range = selection.getRangeAt(0);
+            // Rebuilding syntax spans invalidates native selection endpoints.
+            // Leave an active selection (including one crossing this block)
+            // intact; the next edit will schedule another highlighting pass.
+            if (!range.collapsed && (
+                codeBlock.contains(range.startContainer) ||
+                codeBlock.contains(range.endContainer) ||
+                (typeof range.intersectsNode === 'function' && range.intersectsNode(codeBlock))
+            )) {
+                return;
+            }
             if (codeBlock.contains(range.startContainer)) {
                 hasFocus = true;
                 let offset = null;
