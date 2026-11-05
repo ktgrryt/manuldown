@@ -2584,3 +2584,109 @@ test('ArrowDown from a whole selected image reaches the following line in one st
         }
     }
 });
+
+test('ArrowUp from a whole selected image reaches the preceding row in one step', async () => {
+    const imageForms = [
+        ['img', '<img src="image.png">'],
+        ['a', '<a href="image.png"><img src="image.png"></a>'],
+        ['p', '<p><img src="image.png"></p>'],
+    ];
+    const layouts = [
+        ['paragraph', image => `<p id="target">above</p><div>${image}</div>`],
+        ['empty row', image => `<p>earlier</p><p id="target"><br></p><div>${image}</div>`],
+        ['list sibling', image => `<ul><li id="target">above</li><li class="image-only-list-item">${image}</li></ul>`],
+        ['deepest previous item', image => `<ul><li>parent<ul><li id="target">above</li></ul></li><li class="image-only-list-item">${image}</li></ul>`],
+        ['parent item', image => `<ul><li><span id="target">above</span><ul><li class="image-only-list-item">${image}</li></ul></li></ul>`],
+    ];
+    for (const [selector, imageHtml] of imageForms) {
+        for (const [name, layout] of layouts) {
+            const fixture = await createFixture(layout(imageHtml));
+            try {
+                useBlockImages('inline-block');
+                const image = fixture.editor.querySelector('img');
+                const target = fixture.editor.querySelector('#target');
+                const original = fixture.editor.innerHTML;
+                const notifications = [];
+                const range = document.createRange();
+                range.selectNode(selector === 'img' ? image : image.closest(selector));
+                fixture.selection.addRange(range);
+
+                fixture.cursorManager.moveCursorUp(() => notifications.push('change'));
+
+                const after = fixture.selection.getRangeAt(0);
+                assert.ok(target.contains(after.startContainer), `${selector}: ${name}`);
+                assert.equal(after.collapsed, true);
+                assert.equal(fixture.editor.innerHTML, original);
+                assert.deepEqual(notifications, [], 'moving to an existing row does not edit the document');
+            } finally {
+                fixture.restoreGlobals();
+            }
+        }
+    }
+});
+
+test('ArrowUp from a selected image stops at the preceding image in the same paragraph', async () => {
+    for (const imageHtml of ['<img id="selected" src="b.png">', '<a id="selected" href="b.png"><img src="b.png"></a>']) {
+        const fixture = await createFixture(`<p><img id="target" src="a.png"> ${imageHtml}</p>`);
+        try {
+            useBlockImages();
+            const paragraph = fixture.editor.querySelector('p');
+            const target = fixture.editor.querySelector('#target');
+            const original = fixture.editor.innerHTML;
+            const notifications = [];
+            const range = document.createRange();
+            range.selectNode(fixture.editor.querySelector('#selected'));
+            fixture.selection.addRange(range);
+
+            fixture.cursorManager.moveCursorUp(() => notifications.push('change'));
+
+            const after = fixture.selection.getRangeAt(0);
+            assert.equal(after.startContainer, paragraph);
+            assert.equal(after.startOffset, childIndex(target));
+            assert.equal(after.collapsed, true);
+            assert.equal(fixture.editor.innerHTML, original);
+            assert.deepEqual(notifications, []);
+        } finally {
+            fixture.restoreGlobals();
+        }
+    }
+});
+
+test('ArrowUp from a selected block image reaches the text line in its paragraph', async () => {
+    const fixture = await createFixture('<p>above<img src="image.png"></p>');
+    try {
+        useBlockImages();
+        const paragraph = fixture.editor.querySelector('p');
+        const text = paragraph.firstChild;
+        const original = fixture.editor.innerHTML;
+        const notifications = [];
+        // Supply character geometry for the text row; the selection and image
+        // navigation use the real CursorManager methods.
+        document.createRange = () => {
+            const range = new TestRange();
+            range.getBoundingClientRect = function () {
+                const left = this.startContainer === text ? this.startOffset * 8 : 0;
+                const width = this.startContainer === text
+                    ? Math.max(0, this.endOffset - this.startOffset) * 8
+                    : text.textContent.length * 8;
+                return { left, right: left + width, top: 10, bottom: 30, width, height: 20, x: left, y: 10 };
+            };
+            range.getClientRects = () => [range.getBoundingClientRect()];
+            return range;
+        };
+        const range = document.createRange();
+        range.selectNode(paragraph.querySelector('img'));
+        fixture.selection.addRange(range);
+
+        fixture.cursorManager.moveCursorUp(() => notifications.push('change'));
+
+        const after = fixture.selection.getRangeAt(0);
+        assert.equal(after.startContainer, text);
+        assert.equal(after.startOffset, 0);
+        assert.equal(after.collapsed, true);
+        assert.equal(fixture.editor.innerHTML, original);
+        assert.deepEqual(notifications, []);
+    } finally {
+        fixture.restoreGlobals();
+    }
+});

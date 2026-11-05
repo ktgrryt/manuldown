@@ -4704,13 +4704,15 @@ export class CursorManager {
             return;
         }
 
-        // 画像全体選択で↑ → 画像左エッジ（画像直前）
+        // A whole-image selection represents the image's line. Collapse it
+        // internally, then finish the same upward step on the preceding line.
         const selectedImageForUp = this._getSelectedImageNode(range);
         if (selectedImageForUp) {
             const imageLeftRange = document.createRange();
             if (this._collapseRangeBeforeNode(imageLeftRange, selectedImageForUp)) {
                 selection.removeAllRanges();
                 selection.addRange(imageLeftRange);
+                this.moveCursorUp(notifyCallback);
                 return;
             }
         }
