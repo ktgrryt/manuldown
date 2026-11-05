@@ -300,6 +300,95 @@ export class MarkdownConverter {
         return backslashCount % 2 === 1;
     }
 
+    /** Find the outer closing parenthesis, keeping URL/title parentheses literal. */
+    findMarkdownLinkTargetEnd(text, targetStart) {
+        let destinationStart = targetStart;
+        while (text[destinationStart] === ' ' || text[destinationStart] === '\t') {
+            destinationStart++;
+        }
+        let depth = 1;
+        let angle = text[destinationStart] === '<';
+        let quote = null;
+        for (let index = destinationStart; index < text.length; index++) {
+            const character = text[index];
+            if (character === '\n') break;
+            if (character === '\\') {
+                index++;
+                continue;
+            }
+            if (angle) {
+                if (character === '>') angle = false;
+            } else if (quote) {
+                if (character === quote) quote = null;
+            } else if ((character === '"' || character === "'") && /\s/.test(text[index - 1] || '')) {
+                quote = character;
+            } else if (character === '(') {
+                depth++;
+            } else if (character === ')' && --depth === 0) {
+                return index;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * Keep unfinished code and link targets as text. Otherwise an inner shortcut
+     * splits their text node before the enclosing construct can be recognized.
+     * Scan in source order so a URL inside code, or backticks in a link title,
+     * belong to the enclosing construct rather than starting another shortcut.
+     */
+    getInlineSyntaxAtCursor(text) {
+        const linkOpening = /(!?)\[((?:\\[^\n]|[^\]\\\n])*)\]\(/y;
+        for (let index = 0; index < text.length;) {
+            if (text[index] === '\\') {
+                index += 2;
+                continue;
+            }
+            if (text[index] === '$' && text[index - 1] !== '$') {
+                // TeX owns literal backticks. Once its closing dollar arrives,
+                // leave the complete formula to the existing math shortcut.
+                const math = text.slice(index).match(/^\$([^$\s](?:[^$]*[^$\s\\])?)\$/);
+                if (math) {
+                    index += math[0].length;
+                    continue;
+                }
+            }
+            if (text[index] === '`') {
+                const start = index;
+                while (text[index] === '`') index++;
+                const contentStart = index;
+                const delimiterLength = contentStart - start;
+                let closingStart = text.indexOf('`', contentStart);
+                while (closingStart !== -1) {
+                    let closingEnd = closingStart;
+                    while (text[closingEnd] === '`') closingEnd++;
+                    if (closingEnd - closingStart === delimiterLength) {
+                        index = closingEnd;
+                        break;
+                    }
+                    closingStart = text.indexOf('`', closingEnd);
+                }
+                if (closingStart === -1) return { kind: 'code', incomplete: true, start };
+                if (index === text.length) {
+                    return { kind: 'code', start, contentStart, contentEnd: closingStart };
+                }
+                continue;
+            }
+            if (text[index] === '[' || text[index] === '!') {
+                linkOpening.lastIndex = index;
+                if (linkOpening.exec(text)) {
+                    const end = this.findMarkdownLinkTargetEnd(text, linkOpening.lastIndex);
+                    if (end === -1) return { kind: 'link', incomplete: true, start: index };
+                    if (end === text.length - 1) return { kind: 'link', start: index };
+                    index = end + 1;
+                    continue;
+                }
+            }
+            index++;
+        }
+        return null;
+    }
+
     /** Match a link ending at the caret, after its outer parentheses close. */
     matchMarkdownLinkAtCursor(text, image = false) {
         if (!text.endsWith(')')) return null;
@@ -308,38 +397,11 @@ export class MarkdownConverter {
         while ((match = opening.exec(text))) {
             if (!!match[1] !== image || this.isEscapedAt(text, match.index)) continue;
             const targetStart = opening.lastIndex;
-            let destinationStart = targetStart;
-            // Whitespace may separate "(" from an angle-delimited destination.
-            // Its parentheses are literal URL characters until ">" is typed.
-            while (text[destinationStart] === ' ' || text[destinationStart] === '\t') {
-                destinationStart++;
-            }
-            let depth = 1;
-            let angle = text[destinationStart] === '<';
-            let quote = null;
-            for (let index = destinationStart; index < text.length; index++) {
-                const character = text[index];
-                if (character === '\n') break;
-                if (character === '\\') {
-                    index++;
-                    continue;
-                }
-                if (angle) {
-                    if (character === '>') angle = false;
-                } else if (quote) {
-                    if (character === quote) quote = null;
-                } else if ((character === '"' || character === "'") && /\s/.test(text[index - 1] || '')) {
-                    quote = character;
-                } else if (character === '(') {
-                    depth++;
-                } else if (character === ')' && --depth === 0) {
-                    if (index === text.length - 1) {
-                        const result = [text.slice(match.index), match[2], text.slice(targetStart, index)];
-                        result.index = match.index;
-                        return result;
-                    }
-                    break;
-                }
+            const end = this.findMarkdownLinkTargetEnd(text, targetStart);
+            if (end === text.length - 1) {
+                const result = [text.slice(match.index), match[2], text.slice(targetStart, end)];
+                result.index = match.index;
+                return result;
             }
         }
         return null;
@@ -487,6 +549,42 @@ export class MarkdownConverter {
         if (this.isInsideCode(textNode) || textNode.parentElement?.closest('[data-mdw-escaped-character]')) return false;
 
         const rawText = textNode.textContent || '';
+        const inlineSyntax = this.getInlineSyntaxAtCursor(rawText.slice(0, cursorOffset));
+        // A first backtick can also be the first content after "# ", "- ",
+        // "3. " or "> ". Let that existing block shortcut create its container
+        // before keeping the following code content literal.
+        const beginsBlockContent = inlineSyntax?.kind === 'code' && inlineSyntax.incomplete &&
+            cursorOffset === inlineSyntax.start + 1 &&
+            /^(?:\s*#{1,6}\s+|\s*[-*]\s+|\s*\d+\.\s+|\s*>\s+)$/.test(rawText.slice(0, inlineSyntax.start));
+        if (inlineSyntax?.incomplete && !beginsBlockContent) return false;
+        if (inlineSyntax?.kind === 'code' && !inlineSyntax.incomplete) {
+            // A caret inside a longer delimiter run must not close a shorter one.
+            if (rawText[cursorOffset] === '`') return false;
+            let codeText = rawText.slice(inlineSyntax.contentStart, inlineSyntax.contentEnd)
+                .replace(/\r\n?|\n/g, ' ')
+                .replace(/ /g, ' ');
+            if (codeText.startsWith(' ') && codeText.endsWith(' ') && /[^ ]/.test(codeText)) {
+                codeText = codeText.slice(1, -1);
+            }
+            const fragment = document.createDocumentFragment();
+            const beforeText = rawText.slice(0, inlineSyntax.start);
+            if (beforeText) fragment.appendChild(document.createTextNode(beforeText));
+            const code = document.createElement('code');
+            code.textContent = codeText;
+            fragment.appendChild(code);
+            const spacer = document.createTextNode('');
+            fragment.appendChild(spacer);
+            const afterText = rawText.slice(cursorOffset);
+            if (afterText) fragment.appendChild(document.createTextNode(afterText));
+            textNode.replaceWith(fragment);
+            const newRange = document.createRange();
+            newRange.setStart(spacer, 0);
+            newRange.collapse(true);
+            selection.removeAllRanges();
+            selection.addRange(newRange);
+            if (notifyCallback) notifyCallback();
+            return true;
+        }
         if (this.applySingleCharacterEscapeAtCursor(textNode, cursorOffset, selection, notifyCallback)) {
             return true;
         }
@@ -695,52 +793,6 @@ export class MarkdownConverter {
                 if (notifyCallback) notifyCallback();
                 return true;
             }
-        }
-
-        // インラインコード構文をチェック `code`
-        // カーソル位置基準で判定し、既存テキストの途中入力（例: aa`bb`cc）も変換対象にする
-        const codeMatch = beforeCursorText.match(/`([^`]+)`$/);
-        const parentIsCode = textNode.parentNode && textNode.parentNode.tagName === 'CODE';
-
-        if (codeMatch && !parentIsCode) {
-            const matchedText = codeMatch[0];
-            const codeStart = beforeCursorText.length - matchedText.length;
-            const beforeText = rawText.slice(0, codeStart);
-            // Code keeps its spaces as ordinary spaces, not no-break spaces.
-            const codeText = rawText.slice(codeStart + 1, beforeCursorText.length - 1)
-                .replace(/ /g, ' ');
-            const afterText = rawText.slice(cursorOffset);
-
-            const parent = textNode.parentElement;
-            const fragment = document.createDocumentFragment();
-
-            if (beforeText) {
-                fragment.appendChild(document.createTextNode(beforeText));
-            }
-
-            const code = document.createElement('code');
-            code.textContent = codeText;
-            fragment.appendChild(code);
-
-            const spacer = document.createTextNode('');
-            fragment.appendChild(spacer);
-
-            if (afterText) {
-                fragment.appendChild(document.createTextNode(afterText));
-            }
-
-            // テキストノードをフラグメントで置き換え
-            const parentNode = textNode.parentNode;
-            parentNode.replaceChild(fragment, textNode);
-
-            const newRange = document.createRange();
-            newRange.setStart(spacer, 0);
-            newRange.collapse(true);
-            selection.removeAllRanges();
-            selection.addRange(newRange);
-
-            if (notifyCallback) notifyCallback();
-            return true;
         }
 
         // インライン数式構文をチェック $tex$（閉じる "$" を入力した時）

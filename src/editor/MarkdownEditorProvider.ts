@@ -136,6 +136,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         (this.turndownService as any).escape = function (text: string) {
             const escaped = originalEscape.call(this, text);
             return provider.escapeHtmlLikeText(escaped
+                .replace(/~/g, '\\~')
                 .replace(/(?<=[\p{L}\p{N}])\\_(?=[\p{L}\p{N}])/gu, '_')
                 .replace(/(?<=^|\s)\\_(?=$|\s)/gu, '_'));
         };
@@ -472,7 +473,15 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     // Continuation lines (nested lists, further paragraphs) must reach
                     // the item's content column, which is wider than the indent unit
                     // for ordered markers such as "1. " or "10. ".
-                    const continuationIndent = provider.getVisualIndentWidth(provider.currentListIndent) >= prefix.length
+                    const firstContent = Array.from<any>(node.childNodes).find(child =>
+                        child.nodeType === 3 ? child.textContent.trim() !== '' :
+                            child.nodeType === 1 && child.nodeName !== 'INPUT');
+                    // A fence on the marker line has no extra indentation of
+                    // its own. Indent its body by exactly the marker's width,
+                    // otherwise the extra columns become literal code spaces.
+                    const continuationIndent = firstContent?.nodeName === 'PRE'
+                        ? ' '.repeat(prefix.length)
+                        : provider.getVisualIndentWidth(provider.currentListIndent) >= prefix.length
                         ? provider.currentListIndent
                         : ' '.repeat(prefix.length);
                     content = content

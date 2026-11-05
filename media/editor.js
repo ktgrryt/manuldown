@@ -20370,7 +20370,7 @@ const {
             rawHtml,
             trustedImages = null,
             requireTrustedImagePaths = false,
-            trustedFootnotes = false
+            trustedInternalContent = false
         ) => {
             if (typeof rawHtml !== 'string' || rawHtml.trim() === '') {
                 return false;
@@ -20510,7 +20510,10 @@ const {
                 });
             };
 
-            const containsDeferredMarkdownImage = convertInlineMarkdownTextNodesInContainer(container);
+            // An exact local copy already describes rendered content. Its text
+            // may deliberately spell Markdown or a URL without being formatted.
+            const containsDeferredMarkdownImage = !trustedInternalContent &&
+                convertInlineMarkdownTextNodesInContainer(container);
             if (containsDeferredMarkdownImage) {
                 // Fall back to the clipboard's plain-text representation. This
                 // prevents both forged internal MIME and external rich HTML from
@@ -20528,8 +20531,10 @@ const {
             )) {
                 return false;
             }
-            autoLinkUrlTextNodesInContainer(container);
-            const importedFootnotes = footnoteManager.restoreClipboardImport(container, preparedFootnotes, trustedFootnotes);
+            if (!trustedInternalContent) {
+                autoLinkUrlTextNodesInContainer(container);
+            }
+            const importedFootnotes = footnoteManager.restoreClipboardImport(container, preparedFootnotes, trustedInternalContent);
             mathManager.restoreClipboardImport(container, preparedMath);
             const nodes = Array.from(container.childNodes || []);
             if (nodes.length === 0) {

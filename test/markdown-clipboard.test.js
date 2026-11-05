@@ -70,6 +70,7 @@ class FixtureRange {
     setEnd(node, offset) { this.endContainer = node; this.endOffset = offset; }
     get collapsed() { return this.startContainer === this.endContainer && this.startOffset === this.endOffset; }
     get commonAncestorContainer() { return this.startContainer; }
+    toString() { return this.cloneContents().textContent; }
     cloneContents() {
         assert.equal(this.startContainer, this.endContainer);
         const node = this.startContainer;
@@ -81,6 +82,107 @@ class FixtureRange {
         }
         return fragment;
     }
+}
+
+function clipboardPasteFixture({ editor, document, window, range }) {
+    const slice = (startMarker, endMarker) => {
+        const start = editorSource.indexOf(startMarker);
+        const end = editorSource.indexOf(endMarker, start);
+        assert.ok(start >= 0 && end > start, startMarker);
+        return editorSource.slice(start, end);
+    };
+    let currentRange = range(editor);
+    const selection = {
+        rangeCount: 1,
+        get isCollapsed() { return currentRange.collapsed; },
+        getRangeAt: () => currentRange,
+        toString: () => currentRange.toString(),
+    };
+    window.getSelection = () => selection;
+    const imagePolicyCalls = [];
+    const messages = [];
+    const env = {
+        editor, document, window, Node: window.Node, NodeFilter: window.NodeFilter,
+        isUpdating: false,
+        domUtils: {
+            getParentElement(node, tag) {
+                const element = node.nodeType === 3 ? node.parentElement : node;
+                return element.closest(tag);
+            },
+            ensureInlineCodeSpaces() {}, cleanupGhostStyles() {},
+        },
+        stateManager: { saveState() {}, saveStateDebounced() {} },
+        footnoteManager: {
+            appendClipboardDefinitions() {},
+            prepareClipboardImport: html => ({ html }),
+            restoreClipboardImport: () => [],
+        },
+        mathManager: {
+            prepareClipboardImport: html => ({ html }), restoreClipboardImport() {},
+        },
+        tableManager: {
+            handleEdgePaste: () => false, handlePaste: () => false, wrapTables() {},
+            _insertNodeAsBlock(_range, fragment) {
+                editor.innerHTML = '';
+                editor.appendChild(fragment);
+            },
+        },
+        getCheckboxInListItemDirectContent: item => Array.from(item.children)
+            .find(node => node.tagName === 'INPUT' && node.type === 'checkbox'),
+        classifyImageSourceForEditor: src => /^https?:|^data:/i.test(src)
+            ? { kind: 'direct' } : { kind: 'resolve-local' },
+        applyImageSourcePolicy: (_image, src) => imagePolicyCalls.push(src),
+        applyImageRenderSizeFromAlt() {},
+        applyImageRenderSizes() {}, normalizeCheckboxListItems() {}, updateListItemClasses() {},
+        setCaretToEndOfInsertedNode() {}, notifyChange() {}, finalizePendingPastedPathLinks() {},
+        getPastedAbsolutePathCandidate: () => null,
+        pastedTextLooksLikeList: text => /^[-*] /.test(text),
+        internalHtmlIsListlessPlainText: html => !/<(?:ul|ol|li|strong|a|code)\b/i.test(html),
+        insertTextWithPasteBehavior(text, { allowPlainTextFallback }) {
+            if (!allowPlainTextFallback) return false;
+            editor.textContent = text;
+            return true;
+        },
+        vscode: { postMessage: message => messages.push(message) },
+    };
+    const rootFunctions = [
+        'hasExplicitScheme', 'sanitizeLinkHref', 'unwrapElement', 'sanitizeFragmentForEditor',
+        'createSanitizedContainerFromHtml', 'isBlockElement',
+        'selectionContainsImage', 'selectionContainsListStructure', 'fragmentToClipboardPlainText',
+        'createClipboardPayloadFromRange', 'createClipboardPayloadFromSelection',
+    ].map(extractEditorFunction).join('\n');
+    const declarations = [
+        slice('const INTERNAL_EDITOR_PLAIN_TEXT_CLIPBOARD_TYPE =', 'const SOFT_LINE_BREAK_ATTRIBUTE ='),
+        slice('const SAFE_EDITOR_TAGS =', 'function isLikelyAbsoluteFsPath('),
+        rootFunctions,
+        slice('function normalizeClipboardPlainText(', 'function focusEditorWithoutScroll('),
+        slice('const absoluteUrlPattern =', 'const isImageFile ='),
+        slice('const getSelectionRangeForPaste =', 'const hasVisibleLinkText ='),
+        slice('const tryInsertInternalHtmlFromClipboard =', 'const tryInsertInlineMarkdownFromPastedText ='),
+        slice('const handleEditorCopy =', '// カットを補助:'),
+        slice("editor.addEventListener('paste', (e) => {", '// Snapshot the selection before the native context menu'),
+    ].join('\n');
+    new Function(...Object.keys(env), `let trustedClipboardPayload = null; let clipboardCopySequence = 0;\n${declarations}\n//# sourceURL=clipboard-paste-fixture.js`)(...Object.values(env));
+    const data = new Map();
+    const clipboardData = {
+        items: [], getData: type => data.get(type) || '', setData: (type, value) => data.set(type, value),
+    };
+    const dispatch = type => {
+        const event = document.createEvent('Event');
+        event.initEvent(type, true, true);
+        event.clipboardData = clipboardData;
+        editor.dispatchEvent(event);
+        return event;
+    };
+    return {
+        data, imagePolicyCalls, messages,
+        copy() { currentRange = range(editor); return dispatch('copy'); },
+        paste() { currentRange = range(editor, 0, 0); return dispatch('paste'); },
+        forgetCustomTypes() {
+            data.delete('application/x-manuldown-editor-html');
+            data.delete('application/x-manuldown-editor-plain-text');
+        },
+    };
 }
 
 async function withFixture(html, callback) {
@@ -319,5 +421,80 @@ test('shortcut commands do nothing without a selection, during composition or af
         shortcut.setComposing(true);
         shortcut.receive(command);
         assert.deepEqual(shortcut.messages, []);
+    });
+});
+
+for (const markersOnly of [false, true]) {
+    test(`copy and paste keeps rendered literal Markdown${markersOnly ? ' with only HTML clipboard markers' : ' with custom clipboard types'}`, async () => {
+        const html = '<ul><li><strong>bold</strong> [x](u) `hello` ![literal](../secret.png) https://example.test ' +
+            '<a href="real.md">real link</a> <code>real code</code></li></ul>';
+        await withFixture(html, f => {
+            const clipboard = clipboardPasteFixture(f);
+            const expectedText = f.editor.textContent;
+            assert.equal(clipboard.copy().defaultPrevented, true);
+            assert.equal(clipboard.data.get('application/x-manuldown-editor-html'), html);
+            if (markersOnly) clipboard.forgetCustomTypes();
+            f.editor.innerHTML = '<p><br></p>';
+
+            assert.equal(clipboard.paste().defaultPrevented, true);
+
+            assert.equal(f.editor.textContent, expectedText);
+            assert.equal(f.editor.querySelector('strong').textContent, 'bold');
+            assert.equal(f.editor.querySelectorAll('a').length, 1);
+            assert.equal(f.editor.querySelector('a').getAttribute('href'), 'real.md');
+            assert.equal(f.editor.querySelectorAll('code').length, 1);
+            assert.equal(f.editor.querySelector('code').textContent, 'real code');
+            assert.ok(!f.editor.querySelector('img'));
+            assert.deepEqual(clipboard.imagePolicyCalls, []);
+            assert.deepEqual(clipboard.messages, []);
+        });
+    });
+}
+
+test('an altered internal clipboard payload still follows untrusted Markdown conversion', async () => {
+    await withFixture('<ul><li><strong>bold</strong> [x](u) `hello`</li></ul>', f => {
+        const clipboard = clipboardPasteFixture(f);
+        clipboard.copy();
+        // Exact local provenance requires matching both HTML and plain text.
+        const changed = clipboard.data.get('text/plain') + ' changed';
+        clipboard.data.set('text/plain', changed);
+        clipboard.data.set('application/x-manuldown-editor-plain-text', changed);
+        f.editor.innerHTML = '<p><br></p>';
+
+        assert.equal(clipboard.paste().defaultPrevented, true);
+
+        assert.equal(f.editor.querySelector('a').getAttribute('href'), 'u');
+        assert.equal(f.editor.querySelector('code').textContent, 'hello');
+        assert.equal(f.editor.querySelector('strong').textContent, 'bold');
+    });
+});
+
+test('external Office rich text retains its Markdown conversion and URL linking', async () => {
+    await withFixture('<p><br></p>', f => {
+        const clipboard = clipboardPasteFixture(f);
+        clipboard.data.set('text/html', '<p class="MsoNormal"><strong>bold</strong> [x](u) `hello` https://example.test</p>');
+        clipboard.data.set('text/plain', 'bold [x](u) `hello` https://example.test');
+
+        assert.equal(clipboard.paste().defaultPrevented, true);
+
+        assert.equal(f.editor.querySelector('strong').textContent, 'bold');
+        assert.equal(f.editor.querySelector('code').textContent, 'hello');
+        assert.deepEqual(Array.from(f.editor.querySelectorAll('a'), link => link.getAttribute('href')),
+            ['u', 'https://example.test']);
+    });
+});
+
+test('forged internal image HTML cannot gain provenance from the literal-preserving path', async () => {
+    await withFixture('<p><br></p>', f => {
+        const clipboard = clipboardPasteFixture(f);
+        clipboard.data.set('application/x-manuldown-editor-html', '<p><img src="file:///private/secret.png"></p>');
+        clipboard.data.set('text/plain', 'image copy');
+
+        assert.equal(clipboard.paste().defaultPrevented, true);
+
+        assert.equal(f.editor.textContent, 'image copy');
+        assert.ok(!f.editor.querySelector('img'));
+        assert.deepEqual(clipboard.imagePolicyCalls, []);
+        assert.deepEqual(clipboard.messages, []);
     });
 });

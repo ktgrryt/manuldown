@@ -59,9 +59,10 @@ function imageAltAttribute(raw: string, fallback: string): string {
 }
 
 // "$$" on a line of its own (up to three spaces of indentation) opens a display
-// formula that runs to the next "$$" at the end of a line. Like a paragraph,
-// it cannot span a blank line.
-const mathBlockPattern = / {0,3}\$\$((?:(?!\n[ \t]*\n)[\s\S])*?)\$\$[ \t]*(?=\n|$)/y;
+// formula whose first closing "$$" ends its line. Never combine neighboring
+// inline display formulas into one block. Like a paragraph, it cannot span a
+// blank line.
+const mathBlockPattern = / {0,3}\$\$((?:(?!\$\$|\n[ \t]*\n)[\s\S])*?)\$\$[ \t]*(?=\n|$)/y;
 
 function matchMathBlock(source: string, index: number): RegExpExecArray | null {
     mathBlockPattern.lastIndex = index;
@@ -591,7 +592,7 @@ export class MarkdownDocument {
         const previousIndentByBlockquoteDepth = new Map<number, number>();
 
         for (const [index, line] of lines.entries()) {
-            if (fencedLines[index]) {
+            if (fencedLines[index] && fencedLines[index]!.kind !== 'open') {
                 continue;
             }
 
@@ -665,6 +666,7 @@ export class MarkdownDocument {
         }>>();
         const parserNestedIndent = this.detectListIndentSize(markdown) ?? 2;
         let mathBlockEnd = -1;
+        let leadingIndentedCode: { quoteDepth: number; minIndent: number } | null = null;
 
         for (let index = 0; index < segments.length; index++) {
             const segment = segments[index];
@@ -674,6 +676,19 @@ export class MarkdownDocument {
             const lineWithoutEnding = lineEnding
                 ? segment.slice(0, -lineEnding.length)
                 : segment;
+
+            if (leadingIndentedCode) {
+                const quoted = this.stripBlockquotePrefix(lineWithoutEnding, leadingIndentedCode.quoteDepth);
+                const indent = quoted.content.match(/^[ \t]*/)?.[0] ?? '';
+                if (quoted.depth === leadingIndentedCode.quoteDepth &&
+                    (quoted.content.trim() === '' || this.getVisualIndentWidth(indent) >= leadingIndentedCode.minIndent)) {
+                    // List-looking lines inside this code block are literal
+                    // code; inserting more item markers would split the block.
+                    output.push(segment);
+                    continue;
+                }
+                leadingIndentedCode = null;
+            }
 
             // TeX lines such as "+ c" or "- x" in a "$$" block are not items.
             if (index <= mathBlockEnd) {
@@ -719,7 +734,10 @@ export class MarkdownDocument {
                 continue;
             }
 
-            const [, blockquotePrefix, indent, marker, spacing, taskPrefix] = listMatch;
+            const [, blockquotePrefix, indent, marker, spacing, possibleTaskPrefix] = listMatch;
+            // At least five spaces after the bullet start indented code, so a
+            // following "[ ]" is literal code rather than a task checkbox.
+            const taskPrefix = this.getVisualIndentWidth(spacing) >= 5 ? '' : possibleTaskPrefix;
             const originalMarkerPrefix = `${blockquotePrefix}${indent}${marker}${spacing}${taskPrefix}`;
             const rest = lineWithoutEnding.slice(originalMarkerPrefix.length);
             const sourceIndent = this.getVisualIndentWidth(indent);
@@ -793,6 +811,12 @@ export class MarkdownDocument {
             // code block that starts one space after the marker.
             const spacingWidth = this.getVisualIndentWidth(spacing);
             const contentOffset = marker.length + (spacingWidth >= 5 ? 1 : spacingWidth);
+            if (spacingWidth >= 5) {
+                leadingIndentedCode = {
+                    quoteDepth: (blockquotePrefix.match(/>/g) ?? []).length,
+                    minIndent: sourceIndent + contentOffset + 4,
+                };
+            }
             stack.push({
                 sourceIndent,
                 depth: sourceDepth,
@@ -836,8 +860,9 @@ export class MarkdownDocument {
     ): string {
         const escapedWrapperMarker = indentWrapperMarker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         const escapedIndentMarkerPrefix = sourceIndentMarkerPrefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        // Items of a loose list wrap their content in <p>.
-        const itemContentPrefix = '((?:\\s|<p\\b[^>]*>|<\\/p>|<input\\b[^>]*>\\s*)*)';
+        // Metadata can lead a loose paragraph or an indented code block. Move
+        // it onto LI while keeping the surrounding content and indentation.
+        const itemContentPrefix = '((?:\\s|<p\\b[^>]*>|<\\/p>|<pre\\b[^>]*>|<code\\b[^>]*>|<input\\b[^>]*>\\s*)*)';
         return html
             .replace(
                 new RegExp(`(<li\\b[^>]*>)${itemContentPrefix}${escapedWrapperMarker}`, 'gi'),
@@ -1186,42 +1211,53 @@ export class MarkdownDocument {
     private getFencedCodeLines(markdown: string): Array<{ kind: 'open' | 'body' | 'close'; offset: number } | null> {
         type Container = { kind: 'quote' } | { kind: 'list'; width: number };
         let fence: { marker: '`' | '~'; length: number; containers: Container[] } | null = null;
+        let activeContainers: Container[] = [];
+        const consumeContainers = (line: string, containers: Container[]) => {
+            let offset = 0;
+            const matched: Container[] = [];
+            for (const container of containers) {
+                if (container.kind === 'quote') {
+                    const quote = this.stripBlockquotePrefix(line.slice(offset), 1);
+                    if (!quote.depth) {
+                        break;
+                    }
+                    offset += quote.offset;
+                } else {
+                    const indent = line.slice(offset).match(/^[ \t]*/)?.[0] ?? '';
+                    let consumed = 0;
+                    let width = 0;
+                    while (width < container.width && consumed < indent.length) {
+                        width += indent[consumed++] === '\t' ? 4 : 1;
+                    }
+                    if (width < container.width && line.slice(offset).trim() !== '') {
+                        break;
+                    }
+                    offset += consumed;
+                }
+                matched.push(container);
+            }
+            return { offset, matched };
+        };
         return (markdown.match(/[^\n]*\n|[^\n]+$/g) ?? []).map(segment => {
             const line = segment.replace(/\r?\n$/, '');
-            let offset = 0;
             if (fence) {
-                for (const container of fence.containers) {
-                    if (container.kind === 'quote') {
-                        const quote = this.stripBlockquotePrefix(line.slice(offset), 1);
-                        if (!quote.depth) {
-                            fence = null;
-                            break;
-                        }
-                        offset += quote.offset;
-                    } else {
-                        const indent = line.slice(offset).match(/^[ \t]*/)?.[0] ?? '';
-                        let consumed = 0;
-                        let width = 0;
-                        while (width < container.width && consumed < indent.length) {
-                            width += indent[consumed++] === '\t' ? 4 : 1;
-                        }
-                        if (width < container.width && line.slice(offset).trim() !== '') {
-                            fence = null;
-                            break;
-                        }
-                        offset += consumed;
-                    }
-                }
-                if (fence) {
+                const { offset, matched } = consumeContainers(line, fence.containers);
+                if (matched.length === fence.containers.length) {
+                    activeContainers = matched;
                     if (this.isFenceClosingLine(line.slice(offset), fence.marker, fence.length)) {
                         fence = null;
                         return { kind: 'close', offset };
                     }
                     return { kind: 'body', offset };
                 }
+                fence = null;
             }
-            offset = 0;
-            const containers: Container[] = [];
+            // A child item may start more than three columns from the left
+            // edge. Remove its enclosing item's continuation indentation
+            // before looking for new quote/list prefixes and a fence.
+            const continued = consumeContainers(line, activeContainers);
+            let offset = continued.offset;
+            const containers = continued.matched;
             while (offset < line.length) {
                 const quote = this.stripBlockquotePrefix(line.slice(offset), 1);
                 if (quote.depth) {
@@ -1229,13 +1265,16 @@ export class MarkdownDocument {
                     offset += quote.offset;
                     continue;
                 }
-                const list = line.slice(offset).match(/^( {0,3}(?:[*+-]|\d{1,9}[.)])[ \t]+)(?:\[[ xX]\][ \t]+)?/);
+                const list = line.slice(offset).match(/^( {0,3}(?:[*+-]|\d{1,9}[.)]))([ \t]+)(?:\[[ xX]\][ \t]+)?/);
                 if (!list) {
                     break;
                 }
-                containers.push({ kind: 'list', width: this.getVisualIndentWidth(list[1]) });
-                offset += list[0].length;
+                const indentedCode = this.getVisualIndentWidth(list[2]) >= 5;
+                const prefix = indentedCode ? list[1] + list[2][0] : list[1] + list[2];
+                containers.push({ kind: 'list', width: this.getVisualIndentWidth(prefix) });
+                offset += indentedCode ? prefix.length : list[0].length;
             }
+            activeContainers = containers;
             const opening = this.parseFenceOpeningLine(line.slice(offset));
             if (!opening) {
                 return null;
@@ -1627,6 +1666,11 @@ export class MarkdownDocument {
 
         const markerRun = match[1];
         const marker = markerRun[0] as '`' | '~';
+        // Backticks in the info string make a backtick fence invalid. Such a
+        // line may instead be a valid multi-backtick inline code span.
+        if (marker === '`' && match[2].includes('`')) {
+            return null;
+        }
         return { marker, length: markerRun.length };
     }
 

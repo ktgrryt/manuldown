@@ -125,6 +125,33 @@ test('formulas written and reopened stay formulas', () => {
     assert.ok(reopened.includes(mathBlock('\\frac{1}{2}\n')));
 });
 
+test('adjacent display formulas stay separate when surrounding prose is removed', () => {
+    const domino = require('@mixmark-io/domino');
+    const source = 'A $$x$$ $$y$$ B\n';
+    const document = createTextDocument(source);
+    const root = domino.createWindow(new MarkdownDocument(document).toHtml()).document;
+    const paragraph = root.querySelector('p');
+    for (const node of Array.from(paragraph.childNodes)) {
+        if (node.nodeType === 3) node.remove();
+    }
+    const output = new MarkdownEditorProvider({}).htmlToMarkdown(root.body.innerHTML, document);
+    const reopened = domino.createWindow(toHtml(output)).document;
+    assert.deepEqual(Array.from(reopened.querySelectorAll('[data-mdw-math="display"]'), node => node.textContent), ['x', 'y'], output);
+    assert.equal(reopened.querySelectorAll('pre').length, 0, output);
+    assert.equal(toMarkdown(reopened.body.innerHTML, output), output);
+});
+
+test('display formula delimiters do not absorb neighboring formulas into one math block', () => {
+    const domino = require('@mixmark-io/domino');
+    for (const separator of ['', ' ', '\n']) {
+        const source = `$$x$$${separator}$$y$$`;
+        const root = domino.createWindow(toHtml(source)).document;
+        const formulas = Array.from(root.querySelectorAll('[data-mdw-math],code.language-math'), node => node.textContent.trim());
+        assert.deepEqual(formulas, ['x', 'y'], source);
+    }
+    assert.ok(toHtml('$$\nx + y\n$$\n').includes(mathBlock('x + y\n')));
+});
+
 test('digits beside an inline formula remain text outside the formula after saving', () => {
     const domino = require('@mixmark-io/domino');
     for (const html of [

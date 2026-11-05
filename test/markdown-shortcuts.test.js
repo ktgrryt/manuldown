@@ -26,11 +26,19 @@ function loadMarkdownEditorProvider() {
 }
 
 const MarkdownEditorProvider = loadMarkdownEditorProvider();
-function toMarkdown(html) {
-    return new MarkdownEditorProvider({}).htmlToMarkdown(html, {
-        getText: () => '',
+const { MarkdownDocument } = require('../out/editor/MarkdownDocument');
+function textDocument(text = '') {
+    return {
+        getText: () => text,
         uri: { fsPath: '/workspace/document.md', path: '/workspace/document.md', scheme: 'file', authority: '' },
-    });
+    };
+}
+function toMarkdown(html) {
+    return new MarkdownEditorProvider({}).htmlToMarkdown(html, textDocument());
+}
+function reopen(html) {
+    const markdown = toMarkdown(html);
+    return domino.createWindow(new MarkdownDocument(textDocument(markdown)).toHtml()).document;
 }
 
 function importModule(fileName) {
@@ -116,6 +124,54 @@ async function convertAt(html, findTextNode, offset, insertedText) {
             notified++;
         }, { insertedText });
         return { converted, notified, editor, html: editor.innerHTML, range: activeRange };
+    } finally {
+        Object.assign(global, previous);
+    }
+}
+
+// Keep the DOM and the converter's restored selection between native inputs.
+// Rebuilding a fresh DOM per prefix misses shortcuts that fire too early and
+// split the text node needed to recognize the rest of a construct.
+async function typeCharacters(text, { tableCell = false, afterInput = () => {} } = {}) {
+    const { MarkdownConverter } = await markdownConverterModulePromise;
+    const { DOMUtils } = await domUtilsModulePromise;
+    const window = domino.createWindow(`<div id="editor">${tableCell
+        ? '<table><thead><tr><th>H</th></tr></thead><tbody><tr><td></td></tr></tbody></table>'
+        : '<p></p>'}</div>`);
+    const document = window.document;
+    const editor = document.getElementById('editor');
+    const target = editor.querySelector(tableCell ? 'td' : 'p');
+    const initial = document.createTextNode('');
+    target.appendChild(initial);
+    let range = new CaretRange(initial, 0);
+    const selection = {
+        get rangeCount() { return range ? 1 : 0; },
+        getRangeAt: () => range,
+        removeAllRanges: () => { range = null; },
+        addRange: next => { range = next; },
+    };
+    document.createRange = () => new CaretRange();
+    const previous = { window: global.window, document: global.document, Node: global.Node, NodeFilter: global.NodeFilter };
+    Object.assign(global, { window: { getSelection: () => selection }, document, Node: window.Node, NodeFilter: window.NodeFilter });
+    try {
+        const converter = new MarkdownConverter(editor, new DOMUtils(editor));
+        let typed = '';
+        for (const character of text) {
+            const node = range.startContainer;
+            const offset = range.startOffset;
+            if (node.nodeType === Node.TEXT_NODE) {
+                node.insertData(offset, character);
+                range.setStart(node, offset + character.length);
+            } else {
+                const inserted = document.createTextNode(character);
+                node.insertBefore(inserted, node.childNodes[offset] || null);
+                range.setStart(inserted, character.length);
+            }
+            typed += character;
+            const converted = converter.convertMarkdownSyntax(() => {}, { insertedText: character });
+            afterInput({ typed, converted, editor, target });
+        }
+        return { editor, target, html: editor.innerHTML, range };
     } finally {
         Object.assign(global, previous);
     }
@@ -233,6 +289,97 @@ test('shortcuts never fire inside code', async () => {
     const result = await convertAt(codeBlock, (editor) => editor.querySelector('code').firstChild, undefined, 't');
     assert.equal(result.converted, false);
     assert.equal(result.html, codeBlock);
+});
+
+test('typing inline code preserves its literal content until a matching backtick run closes', async () => {
+    const before = 'Before\u00a0';
+    const after = '\u00a0after';
+    for (const tableCell of [false, true]) {
+        for (const [delimiter, body, expected] of [
+            ['`', '*value* **bold** ~~gone~~ $x$ \\*literal\\*', '*value* **bold** ~~gone~~ $x$ \\*literal\\*'],
+            ['`', '[x](https://example.test "Title") https://example.test ', '[x](https://example.test "Title") https://example.test '],
+            ['``', 'a`b', 'a`b'],
+            ['```', 'a``b `c` d', 'a``b `c` d'],
+            ['``', ' `quoted` ', '`quoted`'],
+        ]) {
+            const syntax = delimiter + body + delimiter;
+            const end = before.length + syntax.length;
+            const result = await typeCharacters(before + syntax + after, {
+                tableCell,
+                afterInput({ typed, converted, target }) {
+                    if (typed.length < end) {
+                        assert.equal(converted, false, typed);
+                        assert.equal(target.textContent, typed);
+                        assert.ok(!target.querySelector('code,a,strong,em,del,span'), typed);
+                    }
+                },
+            });
+            assert.equal(result.target.querySelector('code').textContent, expected, syntax);
+            assert.equal(result.target.firstChild.textContent, before);
+            assert.equal(result.target.lastChild.textContent, after);
+            const reloaded = reopen(result.html);
+            assert.equal(reloaded.querySelector('code').textContent, expected, syntax);
+            assert.equal(reloaded.querySelector(tableCell ? 'td' : 'p').textContent, before + expected + after);
+        }
+    }
+});
+
+test('typing link and image titles waits until their entire destination has closed', async () => {
+    const before = 'Before\u00a0';
+    const after = '\u00a0after';
+    for (const tableCell of [false, true]) {
+        for (const [marker, tag, attribute] of [['', 'a', 'href'], ['!', 'img', 'src']]) {
+            for (const [destination, titleSyntax, title] of [
+                ['https://example.test/a(b)', '"Title (detail)"', 'Title (detail)'],
+                ['https://example.test', "'Title *detail* `code`'", 'Title *detail* `code`'],
+                [' <https://example.test/a)b>', '"Title \\(detail\\)"', 'Title (detail)'],
+            ]) {
+                const syntax = `${marker}[x](${destination} ${titleSyntax})`;
+                const end = before.length + syntax.length;
+                const result = await typeCharacters(before + syntax + after, {
+                    tableCell,
+                    afterInput({ typed, converted, target }) {
+                        if (typed.length < end) {
+                            assert.equal(converted, false, typed);
+                            assert.equal(target.textContent, typed);
+                            assert.ok(!target.querySelector('a,img,code,strong,em,span'), typed);
+                        }
+                    },
+                });
+                const expectedDestination = destination.trim().replace(/^<|>$/g, '');
+                const node = result.target.querySelector(tag);
+                assert.equal(node.getAttribute(attribute), expectedDestination);
+                assert.equal(node.getAttribute('title'), title);
+                assert.equal(result.target.firstChild.textContent, before);
+                assert.equal(result.target.lastChild.textContent, after);
+                const reloaded = reopen(result.html).querySelector(tag);
+                assert.equal(reloaded.getAttribute(attribute), expectedDestination);
+                assert.equal(reloaded.getAttribute('title'), title);
+            }
+        }
+    }
+});
+
+test('code context detection preserves block shortcuts and math containing backticks', async () => {
+    for (const [marker, selector] of [['# ', 'h1'], ['- ', 'li'], ['3. ', 'li'], ['> ', 'blockquote p']]) {
+        const result = await typeCharacters(marker + '`code`');
+        const block = result.editor.querySelector(selector);
+        assert.ok(block, marker);
+        assert.equal(block.querySelector('code').textContent, 'code');
+        assert.equal(reopen(result.html).querySelector(selector).querySelector('code').textContent, 'code');
+    }
+    const currency = await typeCharacters('cost $5 and `code`');
+    assert.equal(currency.target.querySelector('code').textContent, 'code');
+    assert.equal(reopen(currency.html).querySelector('code').textContent, 'code');
+    for (const tableCell of [false, true]) {
+        for (const tex of ['a`b', "\\text{`quoted'}"]) {
+            const result = await typeCharacters('$' + tex + '$', { tableCell });
+            const math = result.target.querySelector('[data-mdw-math="inline"]');
+            assert.ok(math, tex);
+            assert.equal(math.textContent, tex);
+            assert.equal(reopen(result.html).querySelector('[data-mdw-math="inline"]').textContent, tex);
+        }
+    }
 });
 
 test('typing an escaped block marker keeps it literal when the next space is typed', async () => {

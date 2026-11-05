@@ -436,6 +436,43 @@ test('literal punctuation protection leaves ordinary text, code, images and dest
     assert.match(output, /```text\n!~\n```/);
 });
 
+test('editing literal tildes does not introduce strikethrough after saving', () => {
+    const domino = require('@mixmark-io/domino');
+    for (const source of ['~ foo~ after\n', '~ [x](u)~ after\n', '~ $x$~ after\n']) {
+        const document = createTextDocument(source);
+        const root = domino.createWindow(new MarkdownDocument(document).toHtml()).document;
+        const paragraph = root.querySelector('p');
+        assert.equal(root.querySelectorAll('del').length, 0);
+        paragraph.firstChild.data = paragraph.firstChild.data.replace('~ ', '~');
+        const expected = paragraph.textContent;
+        const output = new MarkdownEditorProvider({}).htmlToMarkdown(root.body.innerHTML, document);
+        const reopened = domino.createWindow(convert(output).html).document;
+        assert.equal(reopened.querySelectorAll('del').length, 0, output);
+        assert.equal(reopened.querySelector('p').textContent, expected, output);
+        if (source.includes('[x]')) assert.equal(reopened.querySelector('a')?.textContent, 'x', output);
+        if (source.includes('$x$')) assert.equal(reopened.querySelector('[data-mdw-math]')?.textContent, 'x', output);
+        assert.equal(new MarkdownEditorProvider({}).htmlToMarkdown(reopened.body.innerHTML, createTextDocument(output)), output);
+    }
+});
+
+test('new literal tildes stay literal across text nodes, links, math and tables', () => {
+    const domino = require('@mixmark-io/domino');
+    const formula = '<span data-mdw-math="inline" contenteditable="false">x</span>';
+    for (const content of ['~foo~', '<span>~</span>foo<span>~</span>', '~<a href="u">x</a>~', `~${formula}~`]) {
+        for (const html of [`<p>${content}</p>`, `<table><thead><tr><th>H</th></tr></thead><tbody><tr><td>${content}</td></tr></tbody></table>`]) {
+            const output = new MarkdownEditorProvider({}).htmlToMarkdown(html, createTextDocument(''));
+            const reopened = domino.createWindow(convert(output).html).document;
+            assert.equal(reopened.querySelectorAll('del').length, 0, output);
+            assert.equal(reopened.querySelector(html.startsWith('<p>') ? 'p' : 'td').textContent,
+                content.includes('foo') ? '~foo~' : '~x~', output);
+        }
+    }
+    const formatted = new MarkdownEditorProvider({}).htmlToMarkdown('<p><del>foo</del> ~ bar ~</p>', createTextDocument(''));
+    const root = domino.createWindow(convert(formatted).html).document;
+    assert.equal(root.querySelector('del')?.textContent, 'foo');
+    assert.equal(root.querySelector('p').textContent, 'foo ~ bar ~');
+});
+
 test('literal bangs before reference links do not turn them into reference images', () => {
     const source = '[x][ref] hello\n\n[ref]: foo\n';
     const document = createTextDocument(source);

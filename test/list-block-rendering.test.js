@@ -48,6 +48,16 @@ for (const [name, source, selector, text] of [
     ['code with literal references', '- ```md\n  [ref]: target.md\n\n  literal\n  ```\n', 'li pre code', '[ref]: target.md\n\nliteral\n'],
     ['quoted code with tabs and blank lines', '- > ```make\n  > target:\n  >\n  > \tcommand\n  > ```\n', 'li blockquote pre code', 'target:\n\n\tcommand\n'],
     ['task quoted code', '- [x] > ```make\n  > target:\n  >\n  > \tcommand\n  > ```\n', 'li blockquote pre code', 'target:\n\n\tcommand\n'],
+    ['indented code', '-     echo hello\n', 'li pre code', 'echo hello\n'],
+    ['ordered indented code', '1.     echo hello\n', 'li pre code', 'echo hello\n'],
+    ['indented code with a literal checkbox', '-     [ ] echo hello\n', 'li pre code', '[ ] echo hello\n'],
+    ['indented code with extra content indentation', '-       echo hello\n', 'li pre code', '  echo hello\n'],
+    ['indented code with Markdown-looking continuation', '-     echo hello\n      - literal\n      > quote\n', 'li pre code', 'echo hello\n- literal\n> quote\n'],
+    ['quoted indented code', '> -     echo hello\n>       - literal\n', 'li pre code', 'echo hello\n- literal\n'],
+    ['nested indented code', '- parent\n    -     echo hello\n', 'li li pre code', 'echo hello\n'],
+    ['four-space nested code with tabs', '- parent\n    - ```make\n      \tcommand\n      ```\n', 'li li pre code', '\tcommand\n'],
+    ['deeply nested code with tabs', '- parent\n    - child\n        - ```make\n          \tcommand\n          ```\n', 'li li li pre code', '\tcommand\n'],
+    ['four-space nested quoted code', '- parent\n    - > ```make\n      > target:\n      >\n      > \tcommand\n      > ```\n', 'li li blockquote pre code', 'target:\n\n\tcommand\n'],
 ]) {
     test(`list-leading ${name} survives loading, editing and saving`, () => {
         const document = textDocument(source);
@@ -56,6 +66,7 @@ for (const [name, source, selector, text] of [
         assert.ok(target, source);
         assert.equal(target.textContent, text, source);
         assert.doesNotMatch(root.body.textContent, /MDW_/);
+        const hadCheckbox = !!root.querySelector('li input[type="checkbox"]');
         const provider = new MarkdownEditorProvider({});
         assert.equal(provider.htmlToMarkdown(root.body.innerHTML, document), source);
         target.textContent = text.replace(/\n$/, '') + ' changed' + (text.endsWith('\n') ? '\n' : '');
@@ -64,8 +75,39 @@ for (const [name, source, selector, text] of [
         assert.equal(reopened.querySelector(selector)?.textContent, target.textContent, saved);
         assert.doesNotMatch(saved, /MDW_/);
         assert.equal(provider.htmlToMarkdown(reopened.body.innerHTML, textDocument(saved)), saved);
-        if (source.includes('[ ]') || source.includes('[x]')) {
-            assert.ok(reopened.querySelector('li input[type="checkbox"]'));
-        }
+        assert.equal(!!reopened.querySelector('li input[type="checkbox"]'), hadCheckbox);
     });
 }
+
+test('triple-backtick inline code with backticks does not become a block fence', () => {
+    for (const prefix of ['', '- ', '1. ']) {
+        const source = `${prefix}\`\`\`a \`b\` c\`\`\`\n\nHello\n`;
+        const document = textDocument(source);
+        const root = render(source);
+        const code = root.querySelector('code');
+        assert.equal(code.textContent, 'a `b` c', source);
+        assert.ok(!root.querySelector('pre'), source);
+        assert.equal(root.querySelectorAll('p').length, prefix ? 1 : 2);
+        const provider = new MarkdownEditorProvider({});
+        assert.equal(provider.htmlToMarkdown(root.body.innerHTML, document), source);
+        code.textContent = 'a `new-b` c';
+        const saved = provider.htmlToMarkdown(root.body.innerHTML, document);
+        const reopened = render(saved);
+        assert.equal(reopened.querySelector('code').textContent, 'a `new-b` c');
+        assert.ok(!reopened.querySelector('pre'), saved);
+        assert.equal(reopened.querySelector('p:last-child').textContent, 'Hello');
+        assert.doesNotMatch(saved, /MDW_/);
+    }
+});
+
+test('a fence-looking indented code line does not protect later ordinary blocks', () => {
+    const source = '-     ```js\n      echo hello\n      ```\n\n> quote\n>\n> next\n';
+    const root = render(source);
+    assert.equal(root.querySelector('li pre code').textContent, '```js\necho hello\n```\n');
+    assert.equal(root.querySelectorAll('blockquote p').length, 3);
+    assert.doesNotMatch(root.body.textContent, /MDW_/);
+    root.querySelector('li pre code').textContent += 'changed\n';
+    const saved = new MarkdownEditorProvider({}).htmlToMarkdown(root.body.innerHTML, textDocument(source));
+    assert.equal(render(saved).querySelector('li pre code').textContent, '```js\necho hello\n```\nchanged\n');
+    assert.equal(render(saved).querySelectorAll('blockquote p').length, 3);
+});
