@@ -900,6 +900,63 @@ export class MarkdownDocument {
             .replace(/<span\b[^>]*data-mdw-list-indent-marker=(["'])\d+\1[^>]*>\s*<\/span>/gi, '');
     }
 
+    /** Match line-oriented HTML tags without rescanning the remaining document. */
+    private findRawHtmlClosingLines(segments: string[]): Map<number, number> {
+        type TagNode = {
+            children?: Map<string, TagNode>;
+            openLines?: number[];
+        };
+        const tags: TagNode = {};
+        const closingLines = new Map<number, number>();
+        // Include tags inside code fences here: the existing raw HTML block
+        // search counts them too. Only the outer block selection skips fences.
+        for (const [index, segment] of segments.entries()) {
+            const line = segment.replace(/\r?\n$/, '');
+            const openingTag = line.match(/^ {0,3}<([A-Za-z][\w:-]*)\b[^>]*>[ \t]*$/);
+            if (openingTag) {
+                const name = openingTag[1].toLowerCase();
+                let node = tags;
+                for (let offset = 0; offset < name.length; offset++) {
+                    const character = name[offset];
+                    let child = node.children?.get(character);
+                    if (!child) {
+                        child = {};
+                        (node.children ??= new Map()).set(character, child);
+                    }
+                    node = child;
+                    if (offset === name.length - 1) {
+                        (node.openLines ??= []).push(index);
+                    } else if ((name[offset + 1] === '-' || name[offset + 1] === ':') && node.openLines?.length) {
+                        // Preserve the old <tag\b...> nesting rule: <tag-other>
+                        // also increases an already-open <tag>'s depth. A
+                        // sentinel balances that depth without pairing this
+                        // line with the shorter tag's closing tag. Walking a
+                        // trie avoids constructing and hashing every prefix.
+                        node.openLines.push(-1);
+                    }
+                }
+                continue;
+            }
+
+            const closingTag = line.match(/^ {0,3}<\/([A-Za-z][\w:-]*)\s*>[ \t]*$/);
+            if (!closingTag) {
+                continue;
+            }
+            let node: TagNode | undefined = tags;
+            for (const character of closingTag[1].toLowerCase()) {
+                node = node.children?.get(character);
+                if (!node) {
+                    break;
+                }
+            }
+            const openingIndex = node?.openLines?.pop();
+            if (openingIndex !== undefined && openingIndex >= 0) {
+                closingLines.set(openingIndex, index);
+            }
+        }
+        return closingLines;
+    }
+
     private protectNonRenderedMarkdown(markdown: string): {
         markdown: string;
         sources: string[];
@@ -949,6 +1006,7 @@ export class MarkdownDocument {
         const rawHtmlSegments = protectedMarkdown.match(/[^\n]*\n|[^\n]+$/g) ?? [];
         const rawHtmlOutput: string[] = [];
         const rawHtmlFencedLines = this.getFencedCodeLines(protectedMarkdown);
+        const rawHtmlClosingLines = this.findRawHtmlClosingLines(rawHtmlSegments);
         const voidHtmlTags = new Set([
             'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input',
             'link', 'meta', 'param', 'source', 'track', 'wbr',
@@ -968,28 +1026,8 @@ export class MarkdownDocument {
                 continue;
             }
 
-            const closingTagPattern = new RegExp(`^ {0,3}<\\/${tagName}\\s*>[ \\t]*$`, 'i');
-            const nestedOpeningTagPattern = new RegExp(
-                `^ {0,3}<${tagName}\\b[^>]*>[ \\t]*$`,
-                'i'
-            );
-            let closingIndex = -1;
-            let nestedDepth = 1;
-            for (let candidate = index + 1; candidate < rawHtmlSegments.length; candidate++) {
-                const candidateLine = rawHtmlSegments[candidate].replace(/\r?\n$/, '');
-                if (nestedOpeningTagPattern.test(candidateLine)) {
-                    nestedDepth++;
-                    continue;
-                }
-                if (closingTagPattern.test(candidateLine)) {
-                    nestedDepth--;
-                    if (nestedDepth === 0) {
-                        closingIndex = candidate;
-                        break;
-                    }
-                }
-            }
-            if (closingIndex < 0) {
+            const closingIndex = rawHtmlClosingLines.get(index);
+            if (closingIndex === undefined) {
                 rawHtmlOutput.push(segment);
                 continue;
             }
