@@ -31,6 +31,47 @@ const textDocument = source => ({
 });
 const render = source => domino.createWindow(new MarkdownDocument(textDocument(source)).toHtml()).document;
 
+for (const [name, paragraph] of [
+    ['an ordered marker after a soft break', 'Body\n2. ordinary text'],
+    ['a parenthesized ordered marker', 'Body\n2) ordinary text'],
+    ['an ordered marker after a hard break', 'Body  \n2. ordinary text'],
+    ['an ordered marker inside a quote', '> Body\n> 2. ordinary text'],
+    ['a quote-like line after a nonbreaking space', '\u00a0> - ordinary text'],
+]) {
+    test(`${name} stays editable after reopening`, () => {
+        const source = `${paragraph}\n\nEdit target\n`;
+        const provider = new MarkdownEditorProvider({});
+        const root = render(source);
+        assert.doesNotMatch(root.body.textContent, /MDW_/);
+        assert.equal(root.querySelectorAll('li').length, 0);
+        assert.equal(provider.htmlToMarkdown(root.body.innerHTML, textDocument(source)), source);
+
+        root.body.lastElementChild.textContent = 'Changed';
+        const saved = provider.htmlToMarkdown(root.body.innerHTML, textDocument(source));
+        assert.equal(saved, source.replace('Edit target', 'Changed'));
+        const reopened = render(saved);
+        assert.doesNotMatch(reopened.body.textContent, /MDW_/);
+        reopened.body.lastElementChild.textContent = 'Changed again';
+        assert.equal(provider.htmlToMarkdown(reopened.body.innerHTML, textDocument(saved)),
+            source.replace('Edit target', 'Changed again'));
+    });
+}
+
+test('a multiline Word paragraph can be saved and edited again after reopening', () => {
+    const provider = new MarkdownEditorProvider({});
+    const pasted = '<p class="MsoNormal">Body<br>2) ordinary text</p><p>Edit target</p>';
+    const saved = provider.htmlToMarkdown(pasted, textDocument(''));
+    assert.equal(saved, 'Body  \n2) ordinary text\n\nEdit target\n');
+    const reopened = render(saved);
+    assert.doesNotMatch(reopened.body.textContent, /MDW_/);
+    reopened.body.lastElementChild.textContent = 'Changed';
+    assert.equal(provider.htmlToMarkdown(reopened.body.innerHTML, textDocument(saved)),
+        saved.replace('Edit target', 'Changed'));
+    reopened.body.firstElementChild.lastChild.nodeValue = '2) updated text';
+    assert.equal(provider.htmlToMarkdown(reopened.body.innerHTML, textDocument(saved)),
+        saved.replace('ordinary text', 'updated text').replace('Edit target', 'Changed'));
+});
+
 for (const [name, source, selector, text] of [
     ['quote', '- > quote\n', 'li blockquote p', 'quote'],
     ['ordered quote', '3. > quote\n', 'li blockquote p', 'quote'],

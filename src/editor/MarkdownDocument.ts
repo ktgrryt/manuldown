@@ -710,7 +710,7 @@ export class MarkdownDocument {
                 continue;
             }
 
-            const listMatch = lineWithoutEnding.match(/^((?:\s*>[ \t]?)*)([ \t]*)([*+-]|\d+[.)])([ \t]+|$)((?:\[[ xX]\][ \t]+)?)/);
+            const listMatch = lineWithoutEnding.match(/^((?:[ \t]*>[ \t]?)*)([ \t]*)([*+-]|\d+[.)])([ \t]+|$)((?:\[[ xX]\][ \t]+)?)/);
             if (!listMatch) {
                 if (trimmed !== '' && !/^<p\b[^>]*\bdata-mdw-blankline=/i.test(trimmed)) {
                     // An image or another indented block continues its list
@@ -878,6 +878,12 @@ export class MarkdownDocument {
                     `<li data-mdw-source-indent="${indent}" data-mdw-list-marker="${Buffer.from(markerStyle, 'hex').toString('utf8')}"`
                 ) + prefix
             )
+            // A list-looking line can remain paragraph text, for example
+            // "Body\n2) text". It has no LI to receive the metadata. Remove
+            // only this render's unused markers so they cannot enter the
+            // editable DOM and block every subsequent Markdown conversion.
+            .replace(new RegExp(`${escapedIndentMarkerPrefix}\\d+M[0-9a-f]{2}END ?`, 'g'), '')
+            .replace(new RegExp(escapedWrapperMarker, 'g'), '')
             .replace(
                 /<li\b([^>]*)>((?:\s|<input\b[^>]*>\s*)*)<span\b[^>]*data-mdw-indent-wrapper-marker=(["'])true\2[^>]*>\s*<\/span>/gi,
                 (_match, attrs, prefix) => `<li${attrs} data-mdw-indent-wrapper="true" class="nested-list-only">${prefix}`
