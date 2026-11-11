@@ -190,6 +190,7 @@ function codeBlockClickFixture(t, {
         domUtils, codeBlockGapManager: gapManager,
         cursorManager: {
             clearInlineCodeBoundaryState() {},
+            resetCodeVerticalNavigation() {},
             getCodeBlockText: code => code.textContent,
             placeCursorAtLeadingImageLine: () => false,
         },

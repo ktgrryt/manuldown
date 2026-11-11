@@ -1878,12 +1878,13 @@ test('ArrowUp and Ctrl+P from the right table edge return to the Project board h
     }
 });
 
-test('ArrowUp from the right edge of a first table creates a preceding empty line', async () => {
+test('ArrowUp from the right edge of a first table opens a temporary preceding line', async () => {
     const fixture = await createFixture(NAVIGATION_TABLE);
     try {
         const manager = await createTableNavigationManager(fixture);
         const wrapper = fixture.editor.firstElementChild;
         const originalHTML = wrapper.outerHTML;
+        const originalCleanedHTML = fixture.domUtils.getCleanedHTML();
         const rightEdge = wrapper.querySelector('.md-table-edge-right');
         fixture.placeCaret(rightEdge.firstChild, rightEdge.firstChild.length);
 
@@ -1891,28 +1892,30 @@ test('ArrowUp from the right edge of a first table creates a preceding empty lin
 
         const paragraph = wrapper.previousSibling;
         assert.equal(paragraph.tagName, 'P');
-        assert.equal(paragraph.innerHTML, '<br>');
-        assert.equal(fixture.selection.getRangeAt(0).startContainer, paragraph);
-        assert.equal(fixture.selection.getRangeAt(0).startOffset, 0);
+        assert.equal(paragraph.getAttribute('data-mdw-code-gap'), 'true');
+        assert.ok(paragraph.contains(fixture.selection.getRangeAt(0).startContainer));
+        assert.equal(fixture.domUtils.getCleanedHTML(), originalCleanedHTML);
         assert.equal(wrapper.outerHTML, originalHTML);
     } finally {
         fixture.restoreGlobals();
     }
 });
 
-test('ArrowDown from the left edge of a final table creates a following empty line', async () => {
+test('ArrowDown from the left edge of a final table opens a temporary following line', async () => {
     const fixture = await createFixture(NAVIGATION_TABLE);
     try {
         const manager = await createTableNavigationManager(fixture);
         const wrapper = fixture.editor.firstElementChild;
+        const originalCleanedHTML = fixture.domUtils.getCleanedHTML();
         fixture.placeCaret(wrapper.querySelector('.md-table-edge-left').firstChild, 0);
 
         assert.equal(manager.handleArrowKeydown({ key: 'ArrowDown', preventDefault() {} }), true);
 
         const paragraph = wrapper.nextSibling;
         assert.equal(paragraph.tagName, 'P');
-        assert.equal(paragraph.innerHTML, '<br>');
-        assert.equal(fixture.selection.getRangeAt(0).startContainer === paragraph, true);
+        assert.equal(paragraph.getAttribute('data-mdw-code-gap'), 'true');
+        assert.ok(paragraph.contains(fixture.selection.getRangeAt(0).startContainer));
+        assert.equal(fixture.domUtils.getCleanedHTML(), originalCleanedHTML);
     } finally {
         fixture.restoreGlobals();
     }
@@ -2688,5 +2691,174 @@ test('ArrowUp from a selected block image reaches the text line in its paragraph
         assert.deepEqual(notifications, []);
     } finally {
         fixture.restoreGlobals();
+    }
+});
+
+function loadCodeVerticalNavigation(fixture) {
+    return loadEditorFunctions(fixture, [
+        'handleCodeBlockArrowUp', 'handleCodeBlockArrowDown',
+        'exitEmptyCodeBlockDownFromPre', 'exitCodeBlockDownByLogicalLine',
+        'getNextNavigableNodeAfter', 'getNextNavigableSibling',
+        'isNavigationExcludedElement', 'isEffectivelyEmptyBlock',
+        'placeCaretInEmptyParagraph', 'placeCollapsedCaret',
+        'getCodeBlockNavigationContext', 'getFollowingEmptyParagraphAfterCodeBlock',
+        'isCodeBlockDownExitPosition', 'getCodeBlockLastNavigableLineIndex',
+        'isCodeNavigationWhitespace', 'moveCodeBlockDownToFollowingEmptyParagraph',
+    ], {
+        getSelectedCodeBlockLanguageLabel: () => null,
+        getCodeBlockCursorOffset: (code, range) => fixture.cursorManager.getCodeBlockCursorOffset(code, range),
+        getPreferredFirstTextNodeForElement: element => fixture.domUtils.getFirstTextNode(element),
+        selectCodeBlockLanguageLabel: pre => fixture.cursorManager._selectCodeBlockLanguageLabel(pre, fixture.selection),
+        deferCaretPlacement: () => assert.fail('moving within code must not schedule an exit'),
+    });
+}
+
+function codeCaretPosition(fixture, code) {
+    const range = fixture.selection.getRangeAt(0);
+    assert.ok(code.contains(range.startContainer), 'the caret stays in the code');
+    const { currentLineIndex, column } = fixture.cursorManager.getCodeBlockLineInfo(
+        fixture.cursorManager.getCodeBlockText(code),
+        fixture.cursorManager.getCodeBlockCursorOffset(code, range)
+    );
+    return [currentLineIndex, column];
+}
+
+test('vertical code navigation visits whitespace-only lines without changing the document', async () => {
+    for (const text of ['\n\n\n', '  \n  \n  \n']) {
+        for (const route of ['editor', 'cursor manager']) {
+            for (const suffix of ['<p><br></p>', '']) {
+                const fixture = await createFixture('<p>before</p><pre>' +
+                    '<div class="code-block-toolbar"><span class="code-block-language">plaintext</span></div>' +
+                    `<code>${text}</code></pre>${suffix}`);
+                try {
+                    const code = fixture.editor.querySelector('code');
+                    const original = fixture.domUtils.getCleanedHTML();
+                    const navigation = loadCodeVerticalNavigation(fixture);
+                    fixture.placeCaret(code.firstChild, text.indexOf('\n') + 1);
+                    if (route === 'editor') navigation.handleCodeBlockArrowUp(fixture.selection);
+                    else fixture.cursorManager.moveCursorUp(() => assert.fail('navigation is not an edit'));
+                    assert.deepEqual(codeCaretPosition(fixture, code), [0, 0], `${JSON.stringify(text)}: ${route}`);
+                    for (const line of [1, 2]) {
+                        const range = fixture.selection.getRangeAt(0);
+                        assert.equal(navigation.moveCodeBlockDownToFollowingEmptyParagraph(range, fixture.selection), false);
+                        assert.equal(navigation.exitCodeBlockDownByLogicalLine(range, fixture.selection), false);
+                        if (route === 'editor') navigation.handleCodeBlockArrowDown(fixture.selection);
+                        else fixture.cursorManager.moveCursorDown(() => assert.fail('navigation is not an edit'));
+                        assert.deepEqual(codeCaretPosition(fixture, code), [line, 0], `${JSON.stringify(text)}: ${route}`);
+                    }
+                    assert.equal(fixture.domUtils.getCleanedHTML(), original);
+                    assert.ok(!fixture.editor.querySelector('[data-mdw-code-gap]'));
+                } finally {
+                    fixture.restoreGlobals();
+                }
+            }
+        }
+    }
+});
+
+test('code navigation keeps the preferred column across short lines and direction reversals', async () => {
+    for (const route of ['editor', 'cursor manager']) {
+        const fixture = await createFixture('<p>before</p><pre><code>abcdefghij\nx\nabcdefghij\n</code></pre><p>after</p>');
+        try {
+            const code = fixture.editor.querySelector('code');
+            const original = fixture.domUtils.getCleanedHTML();
+            const navigation = loadCodeVerticalNavigation(fixture);
+            fixture.placeCaret(code.firstChild, 10);
+            for (const [direction, expected] of [
+                ['down', [1, 1]], ['down', [2, 10]], ['up', [1, 1]], ['up', [0, 10]],
+            ]) {
+                if (route === 'editor') {
+                    navigation[direction === 'up' ? 'handleCodeBlockArrowUp' : 'handleCodeBlockArrowDown'](fixture.selection);
+                } else {
+                    fixture.cursorManager[direction === 'up' ? 'moveCursorUp' : 'moveCursorDown'](
+                        () => assert.fail('navigation is not an edit')
+                    );
+                }
+                assert.deepEqual(codeCaretPosition(fixture, code), expected, `${route}: ${direction}`);
+            }
+            assert.equal(fixture.domUtils.getCleanedHTML(), original);
+        } finally {
+            fixture.restoreGlobals();
+        }
+    }
+});
+
+test('code vertical goals reset after horizontal movement or a new caret position', async () => {
+    for (const reset of ['horizontal round trip', 'explicit reset', 'different caret']) {
+        const fixture = await createFixture('<p>before</p><pre><code>abcdefghij\nx\nabcdefghij\n</code></pre><p>after</p>');
+        try {
+            const code = fixture.editor.querySelector('code');
+            fixture.placeCaret(code.firstChild, 10);
+            fixture.cursorManager.moveCursorDown();
+            assert.deepEqual(codeCaretPosition(fixture, code), [1, 1]);
+            if (reset === 'horizontal round trip') {
+                fixture.cursorManager.moveCursorBackward();
+                fixture.cursorManager.moveCursorForward();
+            } else if (reset === 'explicit reset') {
+                fixture.cursorManager.resetCodeVerticalNavigation();
+            } else {
+                fixture.placeCaret(code.firstChild, 11);
+            }
+            fixture.cursorManager.moveCursorDown();
+            assert.deepEqual(codeCaretPosition(fixture, code), [2, reset === 'different caret' ? 0 : 1], reset);
+        } finally {
+            fixture.restoreGlobals();
+        }
+    }
+});
+
+test('leaving a code block ends its preferred-column navigation sequence', async () => {
+    const fixture = await createFixture('<pre><code>abcdefghij\nx\n</code></pre><p><br></p>');
+    try {
+        const code = fixture.editor.querySelector('code');
+        const navigation = loadCodeVerticalNavigation(fixture);
+        fixture.placeCaret(code.firstChild, 10);
+        navigation.handleCodeBlockArrowDown(fixture.selection);
+        assert.deepEqual(codeCaretPosition(fixture, code), [1, 1]);
+        assert.equal(navigation.moveCodeBlockDownToFollowingEmptyParagraph(
+            fixture.selection.getRangeAt(0), fixture.selection
+        ), true);
+        assert.ok(fixture.editor.lastElementChild.contains(fixture.selection.getRangeAt(0).startContainer));
+        // Vertical entry from the paragraph starts a new goal at this short line.
+        fixture.cursorManager.setCodeBlockCursorOffset(code, fixture.selection, 12);
+        navigation.handleCodeBlockArrowUp(fixture.selection);
+        assert.deepEqual(codeCaretPosition(fixture, code), [0, 1]);
+    } finally {
+        fixture.restoreGlobals();
+    }
+});
+
+test('code vertical targets stay on grapheme boundaries while retaining the preferred raw column', async () => {
+    const cases = [
+        ['ab\n😀z\n', 1, [['down', [1, 0]], ['up', [0, 1]]]],
+        ['ab\ne\u0301z\n', 1, [['down', [1, 0]], ['up', [0, 1]]]],
+        ['abcd\nx👩‍💻z\n', 3, [['down', [1, 1]], ['up', [0, 3]]]],
+        ['abcdefghij\nx\n👨‍👩‍👧‍👦z\nabcdefghij\n', 10, [
+            ['down', [1, 1]], ['down', [2, 0]], ['down', [3, 10]],
+            ['up', [2, 0]], ['up', [1, 1]], ['up', [0, 10]],
+        ]],
+    ];
+    for (const [text, initialColumn, steps] of cases) {
+        for (const route of ['editor', 'cursor manager']) {
+            const fixture = await createFixture('<p>before</p><pre><code></code></pre><p>after</p>');
+            try {
+                const code = fixture.editor.querySelector('code');
+                code.textContent = text;
+                const original = fixture.domUtils.getCleanedHTML();
+                const navigation = loadCodeVerticalNavigation(fixture);
+                fixture.placeCaret(code.firstChild, initialColumn);
+                for (const [direction, expected] of steps) {
+                    if (route === 'editor') {
+                        navigation[direction === 'up' ? 'handleCodeBlockArrowUp' : 'handleCodeBlockArrowDown'](fixture.selection);
+                    } else {
+                        fixture.cursorManager[direction === 'up' ? 'moveCursorUp' : 'moveCursorDown']();
+                    }
+                    assert.deepEqual(codeCaretPosition(fixture, code), expected, `${route}: ${direction}: ${text}`);
+                }
+                assert.equal(fixture.domUtils.getCleanedHTML(), original);
+            } finally {
+                fixture.restoreGlobals();
+            }
+        }
     }
 });

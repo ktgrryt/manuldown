@@ -33,6 +33,7 @@ const vscodeMock = {
         joinPath: (base, ...parts) => uri(path.posix.join(base.path, ...parts), base.scheme, base.authority),
     },
     workspace: {
+        getWorkspaceFolder: () => state.workspace ? ({ uri: fileUri(state.workspace) }) : null,
         getConfiguration: () => ({ get: (key, fallback) => state.settings[key] ?? fallback }),
         fs: {
             stat: async selected => {
@@ -56,9 +57,10 @@ const originalLoad = Module._load;
 Module._load = function (name, ...args) {
     return name === 'vscode' ? vscodeMock : originalLoad.call(this, name, ...args);
 };
-let MarkdownEditorProvider;
+let MarkdownEditorProvider, MarkdownDocument;
 try {
     ({ MarkdownEditorProvider } = require('../out/editor/MarkdownEditorProvider'));
+    ({ MarkdownDocument } = require('../out/editor/MarkdownDocument'));
 } finally {
     Module._load = originalLoad;
 }
@@ -73,9 +75,9 @@ async function fixture(t) {
     const outside = path.join(root, 'outside');
     await fs.mkdir(workspace);
     await fs.mkdir(outside);
-    state = { settings: {}, stats: [], reads: [], errors: [], selection: undefined };
+    state = { settings: {}, stats: [], reads: [], errors: [], selection: undefined, workspace };
     const messages = [];
-    const provider = new MarkdownEditorProvider({});
+    const provider = new MarkdownEditorProvider({ extensionUri: fileUri(path.join(root, 'extension')) });
     const document = { uri: fileUri(path.join(workspace, 'doc.md')) };
     const webview = {
         postMessage: async message => { messages.push(message); return true; },
@@ -149,12 +151,87 @@ test('data URL images still save and insert normally on the local filesystem', a
     assert.equal(f.provider.pendingImageSavePaths.size, 0);
 });
 
+test('percent-encoded image bytes and textual SVG data URLs decode without UTF-8 corruption', async t => {
+    for (const [url, mime, expected] of [
+        ['data:image/png,' + Array.from(imageBytes, byte => '%' + byte.toString(16).padStart(2, '0')).join(''), 'image/png', imageBytes],
+        ['data:image/svg+xml,%3Csvg%3E日本語+%2B%3C%2Fsvg%3E', 'image/svg+xml', Buffer.from('<svg>日本語++</svg>')],
+    ]) {
+        const f = await fixture(t);
+        assert.equal(await f.provider.saveImageFromDataUrl(url, mime, f.document, f.webview), true);
+        const files = await fs.readdir(f.imageDirectory);
+        assert.equal(files.length, 1);
+        assert.deepEqual(await fs.readFile(path.join(f.imageDirectory, files[0])), expected);
+    }
+});
+
+test('invalid or oversized percent-encoded images create no files', async t => {
+    const f = await fixture(t);
+    const originalLimit = MarkdownEditorProvider.maxImportedImageBytes;
+    const log = console.error;
+    console.error = () => {};
+    MarkdownEditorProvider.maxImportedImageBytes = 4;
+    try {
+        for (const content of ['%8', '%GG', '%89%50%4e%47%00', '日本語']) {
+            assert.equal(await f.provider.saveImageFromDataUrl('data:image/png,' + content, 'image/png', f.document, f.webview), false);
+        }
+        assert.deepEqual(await fs.readdir(f.workspace), []);
+    } finally { MarkdownEditorProvider.maxImportedImageBytes = originalLimit; console.error = log; }
+});
+
+test('image display verifies real paths and does not grant workspace resource roots', async t => {
+    const f = await fixture(t);
+    const inside = path.join(f.workspace, 'valid.png');
+    const outside = path.join(f.outside, 'private.png');
+    await fs.writeFile(inside, imageBytes);
+    await fs.writeFile(outside, imageBytes);
+    await fs.symlink(outside, path.join(f.workspace, 'leak.png'));
+    await fs.symlink(f.outside, path.join(f.workspace, 'outside-link'));
+    const document = { ...f.document, getText: () => '![pic](./leak.png)\n' };
+    const html = new MarkdownDocument(document, { asWebviewUri() { assert.fail('initial rendering must not grant a local URI'); } }).toHtml();
+    const image = require('@mixmark-io/domino').createWindow(html).document.querySelector('img');
+    assert.equal(image.getAttribute('src'), null);
+    assert.equal(image.getAttribute('data-md-path'), './leak.png');
+    assert.equal(f.provider.htmlToMarkdown(html, { ...document, getText: () => '' }), '![pic](./leak.png)\n', 'saving an unresolved or blocked image must retain its Markdown path');
+    for (const source of ['./leak.png', './outside-link/private.png', '../outside/private.png']) {
+        assert.equal(await f.provider.resolveImageSrcForWebview(source, document, f.webview), null, source);
+    }
+    assert.deepEqual(f.state.reads, [], 'blocked images must not be read');
+    const src = await f.provider.resolveImageSrcForWebview('./valid.png', document, f.webview);
+    assert.equal(src, dataUrl);
+    const roots = f.provider.getWebviewLocalResourceRoots();
+    assert.deepEqual(roots.map(root => root.fsPath), [path.join(f.root, 'extension')]);
+    assert.ok(!roots.some(root => root.fsPath === f.workspace));
+    const preserved = f.provider.htmlToMarkdown(`<p><img src="${src}" data-md-path="./valid.png" alt="pic"></p>`, { ...document, getText: () => '' });
+    assert.equal(preserved, '![pic](./valid.png)\n');
+    f.state.workspace = null;
+    assert.equal(await f.provider.resolveImageSrcForWebview('./valid.png', document, f.webview), dataUrl, 'standalone documents retain safe adjacent images');
+});
+
+test('remote image display rejects symbolic links and preserves valid remote images', async t => {
+    const f = await fixture(t);
+    const oldFolder = vscodeMock.workspace.getWorkspaceFolder;
+    const oldFs = vscodeMock.workspace.fs;
+    const remoteRoot = uri('/workspace', 'vscode-remote', 'server');
+    vscodeMock.workspace.getWorkspaceFolder = () => ({ uri: remoteRoot });
+    vscodeMock.workspace.fs = {
+        ...oldFs,
+        stat: async target => ({ size: imageBytes.length, type: target.path === '/workspace' ? 2 : target.path.includes('/link') ? 65 : 1 }),
+        readFile: async target => { assert.equal(target.path, '/workspace/valid.png'); return imageBytes; },
+    };
+    try {
+        const doc = { uri: uri('/workspace/doc.md', 'vscode-remote', 'server') };
+        assert.equal(await f.provider.resolveImageSrcForWebview('./valid.png', doc, f.webview), dataUrl);
+        assert.equal(await f.provider.resolveImageSrcForWebview('./link.png', doc, f.webview), null);
+        assert.equal(await f.provider.resolveImageSrcForWebview('./link/private.png', doc, f.webview), null);
+    } finally { vscodeMock.workspace.getWorkspaceFolder = oldFolder; vscodeMock.workspace.fs = oldFs; }
+});
+
 test('inserted images keep portable paths for document names with Markdown delimiters', async t => {
     const domino = require('@mixmark-io/domino');
     const editorSource = syncFs.readFileSync(path.join(__dirname, '..', 'media', 'editor.js'), 'utf8');
     const start = editorSource.indexOf("const markdown = typeof message.markdown === 'string'");
     const end = editorSource.indexOf('applyImageRenderSizeFromAlt(img);', start);
-    const createImage = new Function('message', 'document', 'applyImageSourcePolicy',
+    const createImage = new Function('message', 'document', 'applyImageSourcePolicy', 'pendingInsertion = null',
         `${editorSource.slice(start, end)}\nreturn img;`);
 
     for (const name of ['my notes', 'a(b)', 'a#b%20', '日本語']) {

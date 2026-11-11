@@ -261,13 +261,47 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 return src ? `![${alt}](${destination}${title ? ` "${title}"` : ''})` : '';
             }
         });
+        this.turndownService.addRule('inlineLink', {
+            filter: (node: any) => node.nodeName === 'A' && !!node.getAttribute('href'),
+            replacement: (content: string, node: any) => {
+                const href = String(node.getAttribute('href'))
+                    .replace(/[\s<>]/g, character => encodeURIComponent(character))
+                    .replace(/([()])/g, '\\$1');
+                const title = String(node.getAttribute('title') || '')
+                    .replace(/\s+/g, ' ').trim().replace(/"/g, '\\"');
+                return `[${content}](${href}${title ? ` "${title}"` : ''})`;
+            }
+        });
+        // External tables often have TDs in their first row, or no rows at
+        // all. GFM's default table filter assumes a first row exists and keeps
+        // headerless tables as raw HTML, which reopens as read-only source.
+        this.turndownService.addRule('table', {
+            filter: 'table',
+            replacement: (content: string) => content.trim() ? `\n\n${content.trim()}\n\n` : ''
+        });
+        this.turndownService.addRule('tableRow', {
+            filter: 'tr',
+            replacement: (content: string, node: any) => {
+                const cells = Array.from<any>(node.cells || []);
+                if (cells.length === 0) {
+                    return '';
+                }
+                const table = node.closest('table');
+                const firstRow = table?.rows[0] === node;
+                const alignment: Record<string, string> = { left: ':--', center: ':-:', right: '--:' };
+                const border = firstRow
+                    ? '\n| ' + cells.map(cell => alignment[cell.getAttribute('align')] || '---').join(' | ') + ' |'
+                    : '';
+                return '\n' + content.trim() + border;
+            }
+        });
         this.turndownService.addRule('tableCell', {
             filter: ['th', 'td'],
             replacement: function (content: string, node: any) {
                 if (['left', 'center', 'right'].includes(node.style.textAlign)) {
                     node.setAttribute('align', node.style.textAlign);
                 }
-                const index = Array.prototype.indexOf.call(node.parentNode.childNodes, node);
+                const index = Array.prototype.indexOf.call(node.parentNode.cells, node);
                 const prefix = index === 0 ? '| ' : ' ';
                 const cellContent = provider.serializeTableCellForMarkdown(node, content);
                 return prefix + cellContent + ' |';
@@ -742,7 +776,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         // Setup webview options
         webviewPanel.webview.options = {
             enableScripts: true,
-            localResourceRoots: this.getWebviewLocalResourceRoots(document),
+            localResourceRoots: this.getWebviewLocalResourceRoots(),
         };
 
         this.keepEditorTabOpenOnExplorerClick(wasExplicit);
@@ -1169,6 +1203,14 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             }
         };
 
+        const queueWebviewUpdate = (html: string, revision: number): void => {
+            // A save/close request can wait behind an earlier terminal action.
+            // Its old snapshot must not replace a newer ordinary update.
+            if (!pendingWebviewUpdate || revision >= pendingWebviewUpdate.revision) {
+                pendingWebviewUpdate = { html, revision };
+            }
+        };
+
         const flushPendingWebviewUpdate = (): Promise<boolean> => {
             if (webviewUpdateFlushPromise) {
                 return webviewUpdateFlushPromise;
@@ -1310,10 +1352,10 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                             postExternalDocumentUpdate();
                             break;
                         }
-                        pendingWebviewUpdate = {
-                            html: typeof message.content === 'string' ? message.content : '',
-                            revision: normalizeWebviewRevision(message.revision),
-                        };
+                        queueWebviewUpdate(
+                            typeof message.content === 'string' ? message.content : '',
+                            normalizeWebviewRevision(message.revision)
+                        );
                         void flushPendingWebviewUpdate();
                         break;
                     case 'saveDocument':
@@ -1329,10 +1371,10 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                                 reportSaveSyncFailure('an external edit conflict is unresolved', { manual: true });
                                 return;
                             }
-                            pendingWebviewUpdate = {
-                                html: typeof message.content === 'string' ? message.content : '',
-                                revision: normalizeWebviewRevision(message.revision),
-                            };
+                            queueWebviewUpdate(
+                                typeof message.content === 'string' ? message.content : '',
+                                normalizeWebviewRevision(message.revision)
+                            );
                             if (
                                 await flushAllPendingWebviewUpdates() &&
                                 !editorDisposed &&
@@ -1698,6 +1740,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                             {
                                 insert: message.insert !== false,
                                 showNotification: message.insert === false,
+                                altText: typeof message.altText === 'string' ? message.altText : undefined,
                                 requestId: typeof message.requestId === 'string'
                                     ? message.requestId
                                     : undefined
@@ -1846,10 +1889,10 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                                 postExternalDocumentUpdate();
                                 return;
                             }
-                            pendingWebviewUpdate = {
-                                html: typeof message.content === 'string' ? message.content : '',
-                                revision: normalizeWebviewRevision(message.revision),
-                            };
+                            queueWebviewUpdate(
+                                typeof message.content === 'string' ? message.content : '',
+                                normalizeWebviewRevision(message.revision)
+                            );
                             if (
                                 await flushAllPendingWebviewUpdates() &&
                                 !editorDisposed &&
@@ -2275,20 +2318,11 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         return vscode.Uri.file(rootPath);
     }
 
-    private getWebviewLocalResourceRoots(document: vscode.TextDocument): vscode.Uri[] {
-        const roots = new Map<string, vscode.Uri>();
-        const pushRoot = (uri: vscode.Uri | undefined) => {
-            if (!uri) {
-                return;
-            }
-            roots.set(uri.toString(), uri);
-        };
-
-        pushRoot(this.context.extensionUri);
-        pushRoot(vscode.workspace.getWorkspaceFolder(document.uri)?.uri);
-        pushRoot(this.getDocumentDirectoryUri(document));
-
-        return Array.from(roots.values());
+    private getWebviewLocalResourceRoots(): vscode.Uri[] {
+        // Workspace images are validated and transferred by the host. A broad
+        // resource root would let a forged URL/SVG bypass that validation via
+        // a workspace symlink, since VS Code checks these roots lexically.
+        return [this.context.extensionUri];
     }
 
     private normalizeSlashCommandIdFromFileName(fileName: string): string {
@@ -3195,6 +3229,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     }
 
     private htmlToMarkdown(html: string, document: vscode.TextDocument, footnoteContext: { depth: number; trustedBodySource?: string; preserveSource?: boolean } = { depth: 0 }): string {
+        html = this.normalizeTableGrid(html);
         // Use Turndown for reliable HTML to Markdown conversion
         const placeholderNamespace = this.createPlaceholderNamespace(html, 'CONVERSION');
         const emptyLineMarker = `${placeholderNamespace}EMPTYLINE`;
@@ -3891,7 +3926,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     requestId: options.requestId,
                     markdown: `![${this.escapeMarkdownImageAltText(altText)}](${markdownPath})`,
                     markdownPath,
-                    src: webview.asWebviewUri(imageUri).toString(),
+                    src: `data:${normalizedMimeType};base64,${Buffer.from(bytes).toString('base64')}`,
                     alt: altText
                 });
                 void webview.postMessage({ type: 'requestSync' });
@@ -4002,13 +4037,26 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 if (dataPart.length > MarkdownEditorProvider.maxImportedImageBytes * 3) {
                     throw new ImageImportError(this.getImageTooLargeMessage());
                 }
-                let decoded: string;
-                try {
-                    decoded = decodeURIComponent(dataPart);
-                } catch {
-                    throw new ImageImportError('Invalid image data URL.');
+                const decoded = Buffer.allocUnsafe(Math.min(dataPart.length * 3, MarkdownEditorProvider.maxImportedImageBytes));
+                let written = 0;
+                for (let index = 0; index < dataPart.length;) {
+                    if (dataPart[index] === '%') {
+                        const encoded = dataPart.slice(index + 1, index + 3);
+                        if (!/^[0-9a-f]{2}$/i.test(encoded)) {throw new ImageImportError('Invalid image data URL.');}
+                        if (written >= decoded.length) {throw new ImageImportError(this.getImageTooLargeMessage());}
+                        decoded[written++] = Number.parseInt(encoded, 16);
+                        index += 3;
+                    } else {
+                        const end = dataPart.indexOf('%', index);
+                        const literal = dataPart.slice(index, end < 0 ? dataPart.length : end);
+                        const length = Buffer.byteLength(literal, 'utf8');
+                        this.assertImportedImageSize(written + length);
+                        decoded.write(literal, written, length, 'utf8');
+                        written += length;
+                        index += literal.length;
+                    }
                 }
-                buffer = Buffer.from(decoded, 'utf8');
+                buffer = decoded.subarray(0, written);
             }
 
             this.assertImportedImageSize(buffer.byteLength);
@@ -4441,10 +4489,64 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         }
     }
 
+    private normalizeTableGrid(html: string): string {
+        if (!/<table\b/i.test(html)) {return html;}
+        const root = createWindow(`<div id="table-grid-root">${html}</div>`).document.getElementById('table-grid-root');
+        let changed = false;
+        for (const table of Array.from<any>(root.querySelectorAll('table'))) {
+            const rows = Array.from<any>(table.rows);
+            const width = rows.reduce((max, row) => Math.max(max, row.cells.length), 0);
+            if (!rows.length || rows.every(row => row.cells.length === width &&
+                Array.from<any>(row.cells).every(cell => cell.colSpan === 1 && cell.rowSpan === 1))) {continue;}
+            const layout = (expand: boolean): (any | null)[][] | null => {
+                const grid: (any | null)[][] = rows.map(() => []);
+                let occupied = 0;
+                for (let r = 0; r < rows.length; r++) {
+                    let column = 0;
+                    for (const cell of Array.from<any>(rows[r].cells)) {
+                        const columns = expand ? Math.max(1, Math.min(1000, cell.colSpan || 1)) : 1;
+                        let groupEnd = r + 1;
+                        while (groupEnd < rows.length && rows[groupEnd].parentNode === rows[r].parentNode) {groupEnd++;}
+                        const rowCount = expand ? Math.min(cell.rowSpan === 0 ? groupEnd - r : Math.max(1, cell.rowSpan), groupEnd - r) : 1;
+                        while (Array.from({ length: columns }, (_, c) => grid[r][column + c]).some(value => value !== undefined)) {column++;}
+                        occupied += columns * rowCount;
+                        // Extreme spans must not multiply a small clipboard into
+                        // millions of cells. Flatten those spans, retaining every
+                        // original cell, rather than dropping content.
+                        if (expand && occupied > 100_000) {return null;}
+                        for (let y = r; y < r + rowCount; y++) {
+                            for (let x = column; x < column + columns; x++) {grid[y][x] = null;}
+                        }
+                        grid[r][column] = cell;
+                        column += columns;
+                    }
+                }
+                return grid;
+            };
+            const grid = layout(true) || layout(false)!;
+            const columns = grid.reduce((max, row) => Math.max(max, row.length), 0);
+            rows.forEach((row, index) => {
+                const cells = grid[index];
+                const count = index === 0 ? columns : Math.max(cells.length, columns > 0 ? 1 : 0);
+                const replacement = root.ownerDocument.createDocumentFragment();
+                for (let column = 0; column < count; column++) {
+                    const cell = cells[column] || root.ownerDocument.createElement(index === 0 ? 'th' : 'td');
+                    cell.removeAttribute('colspan');
+                    cell.removeAttribute('rowspan');
+                    replacement.appendChild(cell);
+                }
+                while (row.firstChild) {row.removeChild(row.firstChild);}
+                row.appendChild(replacement);
+            });
+            changed = true;
+        }
+        return changed ? root.innerHTML : html;
+    }
+
     private async resolveImageSrcForWebview(
         imageSrc: string,
         document: vscode.TextDocument,
-        webview: vscode.Webview
+        _webview: vscode.Webview
     ): Promise<string | null> {
         try {
             if (!imageSrc || typeof imageSrc !== 'string') {
@@ -4465,22 +4567,27 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             if (
                 decodedSrc.startsWith('data:') ||
                 decodedSrc.startsWith('http://') ||
-                decodedSrc.startsWith('https://') ||
-                decodedSrc.includes('vscode-resource') ||
-                decodedSrc.includes('vscode-webview-resource')
+                decodedSrc.startsWith('https://')
             ) {
                 return decodedSrc;
             }
 
-            const sourceUri = this.resolveImageSourceUri(decodedSrc, document);
-
-            try {
-                await vscode.workspace.fs.stat(sourceUri);
-            } catch {
-                return null;
+            let sourceUri = this.resolveImageSourceUri(decodedSrc, document);
+            let root = vscode.workspace.getWorkspaceFolder(document.uri)?.uri || this.getDocumentDirectoryUri(document);
+            if (!isUriLexicallyWithinDirectory(sourceUri, root)) {return null;}
+            if (sourceUri.scheme === 'file') {
+                const [sourcePath, rootPath] = await Promise.all([fs.realpath(sourceUri.fsPath), fs.realpath(root.fsPath)]);
+                sourceUri = vscode.Uri.file(sourcePath);
+                root = vscode.Uri.file(rootPath);
             }
-
-            return webview.asWebviewUri(sourceUri).toString();
+            if (!await isUriSecurelyWithinDirectory(sourceUri, root, uri => vscode.workspace.fs.stat(uri))) {return null;}
+            const stat = await vscode.workspace.fs.stat(sourceUri);
+            if ((stat.type & vscode.FileType.Directory) !== 0) {return null;}
+            this.assertImportedImageSize(stat.size);
+            const bytes = await vscode.workspace.fs.readFile(sourceUri);
+            this.assertImportedImageSize(bytes.byteLength);
+            const mime = this.getImageMimeTypeFromPath(sourceUri.path);
+            return `data:${mime};base64,${Buffer.from(bytes).toString('base64')}`;
         } catch (error) {
             console.error('[resolveImageSrcForWebview] Error resolving image src:', error);
             return null;
@@ -4488,66 +4595,29 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     }
 
     private convertWebviewUrisToRelativePaths(html: string, document: vscode.TextDocument): string {
-        // Convert webview URIs and absolute paths back to relative paths for images
-        return html.replace(/<img([^>]*?)src="([^"]+)"([^>]*?)>/g, (match, before, src, after) => {
-            const removeMdPathAttribute = (value: string): string => value.replace(/\sdata-md-path="[^"]*"/gi, '');
-            const sanitizedBefore = removeMdPathAttribute(before);
-            const sanitizedAfter = removeMdPathAttribute(after);
-
-            // Prefer the original markdown path when present.
-            const markdownPathMatch = `${before}${after}`.match(/\sdata-md-path="([^"]+)"/i);
-            if (markdownPathMatch && markdownPathMatch[1].trim() !== '') {
-                const markdownPath = markdownPathMatch[1].trim();
-                return `<img${sanitizedBefore}src="${markdownPath}"${sanitizedAfter}>`;
+        if (!/<img\b/i.test(html)) { return html; }
+        const root = createWindow(`<div id="image-path-root">${html}</div>`).document.getElementById('image-path-root');
+        let changed = false;
+        for (const image of Array.from<any>(root.querySelectorAll('img'))) {
+            const markdownPath = (image.getAttribute('data-md-path') || '').trim();
+            if (markdownPath) {
+                // Keep unresolved/blocked images in Markdown even when they do
+                // not have a display src yet. Decode/escape attributes via DOM.
+                image.setAttribute('src', markdownPath);
+                image.removeAttribute('data-md-path');
+                changed = true;
+                continue;
             }
-
-            // Decode URL-encoded src
-            let decodedSrc = src;
-            try {
-                decodedSrc = decodeURIComponent(src);
-            } catch (e) {
-                // If decoding fails, use original
-            }
-
-            // Skip data URIs
-            if (decodedSrc.startsWith('data:')) {
-                return match;
-            }
-
-            // Skip external URLs (but not vscode-resource URLs)
-            if ((decodedSrc.startsWith('http://') || decodedSrc.startsWith('https://')) &&
-                !decodedSrc.includes('vscode-resource') && !decodedSrc.includes('vscode-webview-resource')) {
-                return match;
-            }
-
-            try {
-                let fsPath: string;
-
-                // A trusted Webview resource should always carry data-md-path. If it
-                // does not, keep the URL untouched instead of guessing a local path
-                // from attacker-controlled URL text.
-                if (decodedSrc.includes('vscode-resource') || decodedSrc.includes('vscode-webview-resource')) {
-                    return match;
-                } else if (decodedSrc.startsWith('/')) {
-                    // Absolute path
-                    fsPath = decodedSrc;
-                } else {
-                    // Already a relative path
-                    return match;
-                }
-
-                const documentDir = this.getDocumentDirectoryUri(document).fsPath;
-                let relativePath = path.relative(documentDir, fsPath).replace(/\\/g, '/');
-                if (!relativePath || relativePath.startsWith('..')) {
-                    relativePath = fsPath.replace(/\\/g, '/');
-                }
-
-                return `<img${sanitizedBefore}src="${relativePath}"${sanitizedAfter}>`;
-            } catch (error) {
-                console.error('[convertWebviewUrisToRelativePaths] Error converting path to relative:', error);
-                return match;
-            }
-        });
+            let src = image.getAttribute('src') || '';
+            try { src = decodeURIComponent(src); } catch { /* Keep the original path. */ }
+            if (!src.startsWith('/')) { continue; }
+            const directory = this.getDocumentDirectoryUri(document).fsPath;
+            let relative = path.relative(directory, src).replace(/\\/g, '/');
+            if (!relative || relative.startsWith('..')) { relative = src.replace(/\\/g, '/'); }
+            image.setAttribute('src', relative);
+            changed = true;
+        }
+        return changed ? root.innerHTML : html;
     }
 
     // config.get<boolean> does not check the stored type. A non-boolean value

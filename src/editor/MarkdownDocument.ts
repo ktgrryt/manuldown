@@ -1,6 +1,5 @@
 import * as vscode from 'vscode';
 import { marked, Tokens, Links } from 'marked';
-import * as path from 'path';
 import { getNonce } from '../utils/getNonce';
 import { MAX_EDITABLE_FOOTNOTE_DEPTH, numberFootnotes, parseFootnoteDefinition } from './Footnotes';
 import { MarkdownSourceBlock } from './MarkdownSource';
@@ -1761,7 +1760,6 @@ export class MarkdownDocument {
             return html;
         }
 
-        const documentDir = path.dirname(this.document.uri.fsPath);
         const { createWindow } = require('@mixmark-io/domino');
         const attributeContainer = createWindow('<div></div>').document.querySelector('div');
         // data-md-path is an internal trust marker added below. Raw Markdown HTML
@@ -1797,24 +1795,11 @@ export class MarkdownDocument {
                 return cleanedImageTag;
             }
 
-            // Convert relative path to absolute path
-            const absolutePath = path.isAbsolute(decodedSrc) ? decodedSrc : path.join(documentDir, decodedSrc);
-
-            try {
-                // Convert to webview URI
-                const webviewUri = this.webview!.asWebviewUri(vscode.Uri.file(absolutePath));
-                // Keep URL escapes in the Markdown destination; only the file
-                // lookup above uses a decoded filesystem path.
-                const markdownPath = src
-                    .replace(/&/g, '&amp;')
-                    .replace(/"/g, '&quot;')
-                    .replace(/</g, '&lt;')
-                    .replace(/>/g, '&gt;');
-                return `<img${before}src="${webviewUri}" data-md-path="${markdownPath}"${after}>`;
-            } catch (error) {
-                console.error('Error converting image path:', error);
-                return cleanedImageTag;
-            }
+            // Never grant a local resource URI during synchronous rendering.
+            // The Webview requests this original path; the host verifies its
+            // canonical location before returning bounded image bytes.
+            const markdownPath = escapeAttribute(src);
+            return `<img${before} data-md-path="${markdownPath}"${after}>`;
         });
     }
 }

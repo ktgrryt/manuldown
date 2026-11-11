@@ -87,6 +87,9 @@ async function fixture(t, textHtml = 'あああああ') {
         '<div class="md-table-insert-line horizontal" data-exclude-from-markdown="true" contenteditable="false" aria-hidden="true" style="display:none"></div></div>');
     const document = window.document;
     const editor = document.getElementById('editor');
+    const nodeListPrototype = Object.getPrototypeOf(editor.querySelectorAll('a'));
+    const originalForEach = nodeListPrototype.forEach;
+    nodeListPrototype.forEach = Array.prototype.forEach;
     let range = null;
     const selection = {
         get rangeCount() { return range ? 1 : 0; },
@@ -102,6 +105,8 @@ async function fixture(t, textHtml = 'あああああ') {
     const originals = Object.fromEntries(Object.keys(globals).map(key => [key, global[key]]));
     Object.assign(global, globals);
     t.after(() => {
+        if (originalForEach === undefined) delete nodeListPrototype.forEach;
+        else nodeListPrototype.forEach = originalForEach;
         for (const [key, value] of Object.entries(originals)) {
             if (value === undefined) delete global[key];
             else global[key] = value;
@@ -149,6 +154,89 @@ function hostNavigation(f) {
         return handleEmacsNavKeydown;`
     )(...Object.values(dependencies));
 }
+
+test('ordinary text arrows move over whole emoji and combining sequences in both directions', async t => {
+    const text = 'a😀e\u0301👨‍👩‍👧‍👦🇯🇵👍🏽z';
+    const f = await fixture(t, `<p>above</p><p>${text}</p>`);
+    const node = f.editor.querySelectorAll('p')[1].firstChild;
+    const original = f.cursorManager.domUtils.getCleanedHTML();
+    const boundaries = [0, ...Array.from(new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+        .segment(text), ({ index, segment }) => index + segment.length)];
+    f.placeCaret(node, 0);
+    for (const offset of boundaries.slice(1)) {
+        assert.equal(f.cursorManager.moveCursorForward(), true);
+        assert.equal(f.selection.getRangeAt(0).startContainer, node);
+        assert.equal(f.selection.getRangeAt(0).startOffset, offset);
+    }
+    for (const offset of boundaries.slice(0, -1).reverse()) {
+        assert.equal(f.cursorManager.moveCursorBackward(), true);
+        assert.equal(f.selection.getRangeAt(0).startContainer, node);
+        assert.equal(f.selection.getRangeAt(0).startOffset, offset);
+    }
+    assert.equal(f.cursorManager.domUtils.getCleanedHTML(), original);
+});
+
+test('crossing formatting boundaries does not enter the middle of a visible character', async t => {
+    const f = await fixture(t, '<p>above</p><p>a<strong>😀</strong><em>e\u0301</em>z</p>');
+    const paragraph = f.editor.querySelectorAll('p')[1];
+    const emoji = paragraph.querySelector('strong').firstChild;
+    const accented = paragraph.querySelector('em').firstChild;
+    f.placeCaret(paragraph.firstChild, 1);
+    f.cursorManager.moveCursorForward();
+    assert.equal(f.selection.getRangeAt(0).startContainer, emoji);
+    assert.equal(f.selection.getRangeAt(0).startOffset, 2);
+    f.cursorManager.moveCursorForward();
+    assert.equal(f.selection.getRangeAt(0).startContainer, accented);
+    assert.equal(f.selection.getRangeAt(0).startOffset, 2);
+    f.placeCaret(paragraph.lastChild, 0);
+    f.cursorManager.moveCursorBackward();
+    assert.equal(f.selection.getRangeAt(0).startContainer, accented);
+    assert.equal(f.selection.getRangeAt(0).startOffset, 0);
+});
+
+test('quote end detection compares the caret with remaining text and atomic content', async t => {
+    const f = await fixture(t, '<p>above</p><blockquote><p><span data-mdw-math="inline" contenteditable="false">x</span><strong>tail</strong><img src="image.png"></p></blockquote><p>after</p>');
+    const isAtEnd = new Function('domUtils', `${extractEditorFunction('isAtBlockquoteEnd')}\nreturn isAtBlockquoteEnd;`)(f.cursorManager.domUtils);
+    const paragraph = f.editor.querySelector('blockquote p');
+    for (const offset of [0, 1, 2]) {
+        f.placeCaret(paragraph, offset);
+        assert.equal(isAtEnd(), false, `child boundary ${offset} has content after it`);
+    }
+    f.placeCaret(paragraph.querySelector('strong').firstChild, 4);
+    assert.equal(isAtEnd(), false, 'the trailing image still belongs to the quote');
+    f.placeCaret(paragraph, 3);
+    assert.equal(isAtEnd(), true);
+});
+
+test('quote end detection retains a stop before formatted text and ignores editor controls', async t => {
+    const f = await fixture(t, '<blockquote><p><strong>abc</strong><em>def</em> \u200b</p><span data-exclude-from-markdown="true">toolbar</span></blockquote>');
+    const isAtEnd = new Function('domUtils', `${extractEditorFunction('isAtBlockquoteEnd')}\nreturn isAtBlockquoteEnd;`)(f.cursorManager.domUtils);
+    const paragraph = f.editor.querySelector('blockquote p');
+    f.placeCaret(paragraph, 1);
+    assert.equal(isAtEnd(), false);
+    const last = paragraph.querySelector('em').firstChild;
+    f.placeCaret(last, 2);
+    assert.equal(isAtEnd(), false);
+    f.placeCaret(last, 3);
+    assert.equal(isAtEnd(), true);
+});
+
+test('quote navigation retains authored blank lines and can leave the final empty line', async t => {
+    const f = await fixture(t, '<blockquote><p>abc<br><br></p><p><br></p></blockquote>');
+    const isAtEnd = new Function('domUtils', `${extractEditorFunction('isAtBlockquoteEnd')}\nreturn isAtBlockquoteEnd;`)(f.cursorManager.domUtils);
+    const first = f.editor.querySelector('blockquote p');
+    f.placeCaret(first.firstChild, 3);
+    assert.equal(isAtEnd(), false, 'the hard break and next blank paragraph remain');
+    f.placeCaret(first, 2);
+    assert.equal(isAtEnd(), false, 'the last empty paragraph has not been visited');
+    f.placeCaret(first.nextSibling, 0);
+    assert.equal(isAtEnd(), true, 'a placeholder BR must not trap the caret inside an empty line');
+    first.nextSibling.remove();
+    f.placeCaret(first.firstChild, 3);
+    assert.equal(isAtEnd(), false, 'a repeated BR represents an authored empty line');
+    f.placeCaret(first, 2);
+    assert.equal(isAtEnd(), true);
+});
 
 test('IME at the editor boundary starts inside the same paragraph, past hidden UI', async (t) => {
     const f = await fixture(t, '<p>通常の本文です。</p>');

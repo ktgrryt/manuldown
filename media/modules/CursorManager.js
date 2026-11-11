@@ -184,8 +184,8 @@ export class CursorManager {
             const raw = nextSibling.textContent || '';
             const compact = raw.replace(/[\u00A0\s]/g, '');
             const hasPlaceholderSignal =
-                /&ZeroWidthSpace;/i.test(compact) ||
-                /[\u200B\u2060\uFEFF]/.test(compact);
+                /&ZeroWidthSpace;/i.test(raw) ||
+                /[\u200B\u2060\uFEFF]/.test(raw);
             const normalized = compact
                 .replace(/&ZeroWidthSpace;/gi, '')
                 .replace(/[\u200B\u2060\uFEFF]/g, '');
@@ -193,7 +193,10 @@ export class CursorManager {
                 normalized === '' ||
                 (hasPlaceholderSignal && normalized.replace(/["']/g, '') === '');
             if (boundaryOnly) {
-                if (raw !== preferredAnchorText) {
+                // Keep authored spaces, including NBSP. Only the legacy caret
+                // placeholder should be emptied: adding it back would create a
+                // phantom text line below a display:block image.
+                if (hasPlaceholderSignal && raw !== preferredAnchorText) {
                     nextSibling.textContent = preferredAnchorText;
                 }
                 return nextSibling;
@@ -2136,7 +2139,27 @@ export class CursorManager {
         return true;
     }
 
+    _snapRangeToTextGraphemeBoundary(range, direction) {
+        // All horizontal routes (including crossing formatting wrappers) must
+        // land on a whole visible character, never inside a surrogate pair or
+        // a sequence joined by combining marks/ZWJ.
+        if (range?.collapsed && range.startContainer.nodeType === Node.TEXT_NODE) {
+            const node = range.startContainer;
+            const text = node.textContent || '';
+            const offset = range.startOffset;
+            if (offset > 0 && offset < text.length) {
+                const segment = inlineCodeGraphemeSegmenter.segment(text).containing(offset);
+                if (segment && segment.index < offset) {
+                    range.setStart(node, direction === 'forward'
+                        ? segment.index + segment.segment.length : segment.index);
+                    range.collapse(true);
+                }
+            }
+        }
+    }
+
     _adjustIntoInlineCodeBoundary(range, direction) {
+        this._snapRangeToTextGraphemeBoundary(range, direction);
         if (!range) {
             return false;
         }
@@ -3728,6 +3751,35 @@ export class CursorManager {
         return { lines, lineStartOffsets, currentLineIndex, column };
     }
 
+    resetCodeVerticalNavigation() {
+        this._codeVerticalGoal = null;
+    }
+
+    getCodeVerticalTargetOffset(codeBlock, text, cursorOffset, targetLineIndex) {
+        const { lines, lineStartOffsets, column } = this.getCodeBlockLineInfo(text, cursorOffset);
+        const previous = this._codeVerticalGoal;
+        const preferredColumn = previous && previous.codeBlock === codeBlock &&
+            previous.text === text && previous.expectedOffset === cursorOffset
+            ? previous.column : column;
+        const safeLineIndex = Math.max(0, Math.min(targetLineIndex, lines.length - 1));
+        const targetLine = lines[safeLineIndex];
+        let targetColumn = Math.min(preferredColumn, targetLine.length);
+        // Keep the raw column goal for later lines, but never place a caret
+        // inside an emoji or combining-character sequence on this line.
+        for (const { index, segment } of inlineCodeGraphemeSegmenter.segment(targetLine)) {
+            if (index >= targetColumn) break;
+            if (index + segment.length > targetColumn) {
+                targetColumn = index;
+                break;
+            }
+        }
+        const targetOffset = lineStartOffsets[safeLineIndex] + targetColumn;
+        this._codeVerticalGoal = {
+            codeBlock, text, column: preferredColumn, expectedOffset: targetOffset
+        };
+        return targetOffset;
+    }
+
     setCodeBlockCursorOffset(codeBlock, selection, offset) {
         const pre = codeBlock?.parentElement;
         if (pre?.getAttribute('data-mermaid-view') === 'diagram' || pre?.getAttribute('data-math-view') === 'preview') {
@@ -4000,9 +4052,6 @@ export class CursorManager {
         const cursorOffset = this.getCodeBlockCursorOffset(codeBlock, range);
         if (cursorOffset !== null) {
             const { lines, currentLineIndex } = this.getCodeBlockLineInfo(text, cursorOffset);
-            if (this._isCodeNavigationWhitespace(text)) {
-                return true;
-            }
             return currentLineIndex >= this._getCodeBlockLastNavigableLineIndex(lines, text);
         }
 
@@ -4442,6 +4491,10 @@ export class CursorManager {
     moveCursorUp(notifyCallback) {
         const selection = window.getSelection();
         if (!selection || !selection.rangeCount) return;
+        const verticalCode = this.domUtils.getParentElement(selection.getRangeAt(0).startContainer, 'CODE');
+        if (!verticalCode || !this.domUtils.getParentElement(verticalCode, 'PRE')) {
+            this.resetCodeVerticalNavigation();
+        }
         this._clearForwardImageStep();
         if (this._moveVerticallyAcrossInlineMath(selection, 'up')) return;
         if (this._normalizeSelectionForNavigation(selection, 'up')) return;
@@ -4528,10 +4581,11 @@ export class CursorManager {
             const text = this.getCodeBlockText(codeBlock);
             const cursorOffset = this.getCodeBlockCursorOffset(codeBlock, range);
             if (cursorOffset !== null) {
-                const { lines, lineStartOffsets, currentLineIndex, column } =
+                const { currentLineIndex } =
                     this.getCodeBlockLineInfo(text, cursorOffset);
 
                 if (currentLineIndex === 0) {
+                    this.resetCodeVerticalNavigation();
                     if (this.moveToCodeBlockGap?.(preBlock, 'up', selection)) return;
                     const prevElement = this._getAdjacentNavigableNodeInDocument(preBlock, 'up');
                     if (prevElement && prevElement.nodeType === Node.TEXT_NODE) {
@@ -4561,8 +4615,9 @@ export class CursorManager {
                 }
 
                 const targetLineIndex = currentLineIndex - 1;
-                const targetOffset = lineStartOffsets[targetLineIndex] +
-                    Math.min(column, lines[targetLineIndex].length);
+                const targetOffset = this.getCodeVerticalTargetOffset(
+                    codeBlock, text, cursorOffset, targetLineIndex
+                );
                 if (this.setCodeBlockCursorOffset(codeBlock, selection, targetOffset)) {
                     return;
                 }
@@ -5706,6 +5761,10 @@ export class CursorManager {
     moveCursorDown(notifyCallback) {
         const selection = window.getSelection();
         if (!selection || !selection.rangeCount) return;
+        const verticalCode = this.domUtils.getParentElement(selection.getRangeAt(0).startContainer, 'CODE');
+        if (!verticalCode || !this.domUtils.getParentElement(verticalCode, 'PRE')) {
+            this.resetCodeVerticalNavigation();
+        }
         this._clearForwardImageStep();
         if (this._moveVerticallyAcrossInlineMath(selection, 'down')) return;
         if (this._moveVerticallyAcrossBlockImages(selection, 'down')) return;
@@ -6028,6 +6087,7 @@ export class CursorManager {
 
         const exitCodeBlockDown = () => {
             if (!preBlock) return false;
+            this.resetCodeVerticalNavigation();
             if (this.moveToCodeBlockGap?.(preBlock, 'down', selection)) return true;
             const nextElement = this._getAdjacentNavigableNodeInDocument(preBlock, 'down');
             if (nextElement && nextElement.nodeType === Node.TEXT_NODE) {
@@ -6080,17 +6140,19 @@ export class CursorManager {
         if (preBlock && codeBlock) {
             if (this._isCodeBlockDownExitPosition(codeBlock, preBlock, range) &&
                 this.moveToCodeBlockGap?.(preBlock, 'down', selection)) {
+                this.resetCodeVerticalNavigation();
                 return;
             }
             const followingEmptyParagraph = this._getFollowingEmptyParagraphAfterCodeBlock(preBlock);
             if (followingEmptyParagraph &&
                 this._isCodeBlockDownExitPosition(codeBlock, preBlock, range) &&
                 this._placeCursorInEmptyParagraph(followingEmptyParagraph, selection)) {
+                this.resetCodeVerticalNavigation();
                 return;
             }
 
             const nextElementAfterCode = this._getNextNavigableElementInDocument(preBlock);
-            if (!nextElementAfterCode) {
+            if (!nextElementAfterCode && this.getCodeBlockCursorOffset(codeBlock, range) === null) {
                 const caretRect = this._getCaretRect(range);
                 const preRect = preBlock.getBoundingClientRect ? preBlock.getBoundingClientRect() : null;
                 if (caretRect && preRect) {
@@ -6101,23 +6163,6 @@ export class CursorManager {
                 }
             }
 
-            const isCodeBlockEffectivelyEmpty = () => {
-                const text = this.getCodeBlockText(codeBlock);
-                return text.replace(/[\u200B\u2060\uFEFF\u00A0\s]/g, '') === '';
-            };
-
-            // Empty code block: always exit down on ArrowDown
-            if (isCodeBlockEffectivelyEmpty()) {
-                exitCodeBlockDown();
-                return;
-            }
-
-            if (isCodeBlockEffectivelyEmpty() &&
-                (codeBlock.contains(range.startContainer) || range.startContainer === codeBlock || preBlock.contains(range.startContainer))) {
-                exitCodeBlockDown();
-                return;
-            }
-
             if (this._isRangeAtCodeBlockEnd(codeBlock, range)) {
                 exitCodeBlockDown();
                 return;
@@ -6125,11 +6170,6 @@ export class CursorManager {
 
             const text = this.getCodeBlockText(codeBlock);
             const cursorOffset = this.getCodeBlockCursorOffset(codeBlock, range);
-            const normalizedText = text.replace(/[\u200B\u2060\uFEFF\u00A0]/g, '').replace(/\n/g, '');
-            if (cursorOffset !== null && normalizedText === '') {
-                exitCodeBlockDown();
-                return;
-            }
             if (cursorOffset === null) {
                 if (preBlock.contains(range.startContainer) || preBlock === range.startContainer) {
                     exitCodeBlockDown();
@@ -6137,18 +6177,18 @@ export class CursorManager {
                 }
             }
             if (cursorOffset !== null) {
-                const { lines, lineStartOffsets, currentLineIndex, column } =
+                const { lines, currentLineIndex } =
                     this.getCodeBlockLineInfo(text, cursorOffset);
                 const lastLineIndex = this._getCodeBlockLastNavigableLineIndex(lines, text);
-                if (this._isCodeNavigationWhitespace(text) ||
-                    currentLineIndex >= lastLineIndex) {
+                if (currentLineIndex >= lastLineIndex) {
                     exitCodeBlockDown();
                     return;
                 }
 
                 const targetLineIndex = Math.min(currentLineIndex + 1, lastLineIndex);
-                const targetOffset = lineStartOffsets[targetLineIndex] +
-                    Math.min(column, lines[targetLineIndex].length);
+                const targetOffset = this.getCodeVerticalTargetOffset(
+                    codeBlock, text, cursorOffset, targetLineIndex
+                );
                 if (this.setCodeBlockCursorOffset(codeBlock, selection, targetOffset)) {
                     return;
                 }
@@ -7670,6 +7710,7 @@ export class CursorManager {
      * @returns {boolean} 移動が処理された場合はtrue、それ以外はfalse
      */
     moveCursorForward(notifyCallback) {
+        this.resetCodeVerticalNavigation?.();
         const selection = window.getSelection();
         if (!selection) return false;
         if (this.moveAcrossFootnoteReference?.(selection, 'forward')) {
@@ -8528,8 +8569,8 @@ export class CursorManager {
                 return true;
             }
         }
-
-
+        // This route edits the live Range directly instead of calling applyRange.
+        this._snapRangeToTextGraphemeBoundary(range, 'forward');
         return true;
     }
 
@@ -8539,6 +8580,7 @@ export class CursorManager {
      * @returns {boolean} 移動が処理された場合はtrue、それ以外はfalse
      */
     moveCursorBackward(notifyCallback) {
+        this.resetCodeVerticalNavigation?.();
         const selection = window.getSelection();
         if (!selection) return false;
         if (this.moveAcrossFootnoteReference?.(selection, 'backward')) {
@@ -9330,6 +9372,7 @@ export class CursorManager {
      * カーソルを行頭に移動
      */
     moveCursorToLineStart() {
+        this.resetCodeVerticalNavigation?.();
         const selection = window.getSelection();
         if (!selection || !selection.rangeCount) return;
         if (this._moveToMathLineBoundary(selection, true)) return;
@@ -9527,6 +9570,7 @@ export class CursorManager {
      * カーソルを行末に移動
      */
     moveCursorToLineEnd() {
+        this.resetCodeVerticalNavigation?.();
         const selection = window.getSelection();
         if (!selection || !selection.rangeCount) return;
         if (this._moveToMathLineBoundary(selection, false)) return;

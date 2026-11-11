@@ -3,7 +3,7 @@
   "displayName": "ManulDown",
   "description": "WYSIWYG editor for Markdown files in VSCode",
   "icon": "images/icon.png",
-  "version": "2.2.2",
+  "version": "2.2.4",
   "publisher": "ktgrryt",
   "license": "MIT",
   "repository": {
@@ -383,7 +383,8 @@
     "typescript": "^5.3.3"
   },
   "overrides": {
-    "katex": "$katex"
+    "katex": "$katex",
+    "minimatch@^10.0.0": "11.0.4"
   },
   "dependencies": {
     "@mixmark-io/domino": "^2.2.0",

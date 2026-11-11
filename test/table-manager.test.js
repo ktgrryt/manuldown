@@ -28,6 +28,59 @@ function createClassList() {
     };
 }
 
+test('spreadsheet paste parses quoted tabs, line breaks, escaped quotes and empty cells', async () => {
+    const { TableManager } = await tableManagerModulePromise;
+    const manager = Object.create(TableManager.prototype);
+    assert.deepEqual(manager._parseClipboard(''), []);
+    assert.deepEqual(manager._parseClipboard('"first\r\nsecond"\tB\r\nC\tD\r\n'),
+        [['first\nsecond', 'B'], ['C', 'D']]);
+    assert.deepEqual(manager._parseClipboard('"a\tb"\t"say ""hello"""\n\t\n'),
+        [['a\tb', 'say "hello"'], ['', '']]);
+    assert.deepEqual(manager._parseClipboard('literal"quote\t"unterminated\nnext\tvalue'),
+        [['literal"quote', '"unterminated'], ['next', 'value']]);
+});
+
+test('copying and pasting selected cells retains literal quotes and multiline contents', async () => {
+    const { TableManager } = await tableManagerModulePromise;
+    const manager = Object.create(TableManager.prototype);
+    const matrix = [['first\nsecond', '"quoted"'], ['a\tb', 'last']];
+    manager.hasCellSelection = () => true;
+    manager._getSelectedMatrix = () => matrix;
+    let copied;
+    manager._handleCopy({
+        clipboardData: { setData: (_type, value) => { copied = value; } },
+        preventDefault() {},
+    });
+    assert.deepEqual(manager._parseClipboard(copied), matrix);
+});
+
+test('pasting a quoted multiline cell into a selected 2x2 table preserves the last row', async () => {
+    const { TableManager } = await tableManagerModulePromise;
+    const window = domino.createWindow('<div><table><tr><td>old1</td><td>old2</td></tr><tr><td>old3</td><td>old4</td></tr></table></div>');
+    const table = window.document.querySelector('table');
+    const original = { window: global.window, document: global.document, Node: global.Node };
+    Object.assign(global, { window, document: window.document, Node: window.Node });
+    window.getSelection = () => ({ rangeCount: 1 });
+    try {
+        const manager = Object.create(TableManager.prototype);
+        manager.selectedCells = [table.rows[0].cells[0]];
+        manager.selectionRange = { table, minRow: 0, minCol: 0 };
+        manager.stateManager = { saveState() {} };
+        manager._getCellInfo = () => ({ table, rowIndex: 0, colIndex: 0 });
+        manager.clearCellSelection = () => {};
+        manager._setCursorToCellEnd = () => {};
+        manager._ensureCellNotEmpty = () => {};
+        assert.equal(manager.handlePaste({
+            clipboardData: { getData: () => '"first\nsecond"\tB\nC\tD\n' },
+            preventDefault() {},
+        }), true);
+        assert.deepEqual(Array.from(table.rows, row => Array.from(row.cells, cell => cell.textContent)),
+            [['first\nsecond', 'B'], ['C', 'D']]);
+    } finally {
+        Object.assign(global, original);
+    }
+});
+
 function createHandleCell({ rowHandle = null, colHandle = null } = {}) {
     return {
         querySelector: selector => selector.includes('row-handle') ? rowHandle : colHandle,
@@ -726,4 +779,166 @@ test('dragging from a normally clicked cell across cells still selects a cell ra
     } finally {
         f.restoreGlobals();
     }
+});
+
+async function createTableBoundaryHarness(before = '', after = '') {
+    const importModule = name => import(`data:text/javascript;base64,${Buffer.from(
+        fs.readFileSync(path.join(__dirname, '..', 'media', 'modules', name), 'utf8')
+    ).toString('base64')}`);
+    const [{ TableManager }, { DOMUtils }, { CodeBlockGapManager }, { StateManager }] = await Promise.all([
+        tableManagerModulePromise, domUtilsModulePromise,
+        importModule('CodeBlockGapManager.js'), importModule('StateManager.js'),
+    ]);
+    const window = domino.createWindow(`<div id="editor">${before}<div class="md-table-wrapper">` +
+        '<span class="md-table-edge md-table-edge-left" data-table-edge="left" data-exclude-from-markdown="true">&nbsp;</span>' +
+        '<table><tbody><tr><th>A</th></tr><tr><td>B</td></tr></tbody></table>' +
+        '<span class="md-table-edge md-table-edge-right" data-table-edge="right" data-exclude-from-markdown="true">&nbsp;</span>' +
+        `</div>${after}</div>`);
+    const document = window.document;
+    const editor = document.querySelector('#editor');
+    const nodeListPrototype = Object.getPrototypeOf(editor.querySelectorAll('p'));
+    const previousForEach = nodeListPrototype.forEach;
+    nodeListPrototype.forEach = Array.prototype.forEach;
+    let range = null;
+    const selection = {
+        get rangeCount() { return range ? 1 : 0; },
+        get isCollapsed() { return !!range?.collapsed; },
+        getRangeAt: () => range,
+        removeAllRanges() { range = null; },
+        addRange(next) { range = next; },
+    };
+    class BoundaryRange extends CellTestRange {
+        get commonAncestorContainer() { return this.startContainer; }
+        setStart(node, offset) {
+            super.setStart(node, offset);
+            if (this.collapsed || !this.endContainer) super.setEnd(node, offset);
+        }
+        collapse(toStart = true) {
+            if (toStart) super.setEnd(this.startContainer, this.startOffset);
+            else super.setStart(this.endContainer, this.endOffset);
+            this.collapsed = true;
+        }
+        cloneRange() { return Object.assign(new BoundaryRange(), this); }
+    }
+    document.createRange = () => new BoundaryRange();
+    window.getSelection = () => selection;
+    for (const edge of editor.querySelectorAll('.md-table-edge')) {
+        edge.dataset = { tableEdge: edge.getAttribute('data-table-edge') };
+    }
+    const previous = { window: global.window, document: global.document, Node: global.Node, NodeFilter: global.NodeFilter };
+    Object.assign(global, { window, document, Node: window.Node, NodeFilter: window.NodeFilter });
+    const domUtils = new DOMUtils(editor);
+    const history = new StateManager(editor, {}, {
+        getComparableHtml: () => domUtils.getCleanedHTML({ historyComparable: true }),
+    });
+    history.finishHistoryRestore = () => {};
+    const manager = new TableManager(editor, domUtils, history);
+    manager._revealCurrentSelection = () => {};
+    const gaps = new CodeBlockGapManager(editor);
+    const place = (node, offset = 0) => {
+        range = new BoundaryRange();
+        range.setStart(node, offset);
+        range.collapse(true);
+    };
+    return {
+        editor, domUtils, history, manager, gaps, selection, place,
+        navigate(key) {
+            const side = key === 'ArrowUp' || key === 'ArrowLeft' ? 'left' : 'right';
+            place(editor.querySelector(`.md-table-edge-${side}`).firstChild);
+            assert.equal(manager.handleArrowKeydown({ key, preventDefault() {} }), true);
+            gaps.reconcile(selection);
+        },
+        restore() {
+            history.clearHistory();
+            if (previousForEach === undefined) delete nodeListPrototype.forEach;
+            else nodeListPrototype.forEach = previousForEach;
+            Object.assign(global, previous);
+        },
+    };
+}
+
+test('arrows beyond a document-boundary table open only a temporary input line', async () => {
+    for (const key of ['ArrowUp', 'ArrowLeft', 'ArrowDown', 'ArrowRight']) {
+        const f = await createTableBoundaryHarness();
+        try {
+            const original = f.domUtils.getCleanedHTML();
+            f.history.saveState();
+            f.navigate(key);
+            const gap = f.editor.querySelector('[data-mdw-code-gap="true"]');
+            assert.ok(gap, key);
+            assert.ok(gap.contains(f.selection.getRangeAt(0).startContainer));
+            assert.equal(f.domUtils.getCleanedHTML(), original, 'navigation must not insert a Markdown blank line');
+            f.history.saveState();
+            assert.equal(f.history.undoStack.length, 1, 'navigation must not add an Undo step');
+            f.place(f.editor.querySelector('td').firstChild);
+            f.gaps.reconcile(f.selection);
+            assert.equal(gap.parentNode, null, 'leaving the untouched line removes it');
+            assert.equal(f.domUtils.getCleanedHTML(), original);
+        } finally { f.restore(); }
+    }
+});
+
+test('typing text or a space beside a table creates lasting authored content', async () => {
+    for (const text of ['written', ' ']) {
+        const f = await createTableBoundaryHarness();
+        try {
+            f.navigate('ArrowUp');
+            const gap = f.editor.querySelector('[data-mdw-code-gap]');
+            gap.firstChild.textContent += text;
+            assert.ok(f.domUtils.getCleanedHTML().includes(`<p>${text}</p>`), 'input is serialized before callbacks finish');
+            f.gaps.reconcile(f.selection);
+            assert.equal(gap.hasAttribute('data-mdw-code-gap'), false);
+            f.place(f.editor.querySelector('td').firstChild);
+            f.gaps.reconcile(f.selection);
+            assert.equal(gap.parentNode, f.editor);
+            assert.ok(f.domUtils.getCleanedHTML().includes(`<p>${text}</p>`));
+        } finally { f.restore(); }
+    }
+});
+
+test('intentional Enter beside a table preserves the resulting empty paragraph', async () => {
+    const f = await createTableBoundaryHarness();
+    try {
+        f.navigate('ArrowUp');
+        const gap = f.editor.querySelector('[data-mdw-code-gap]');
+        f.gaps.commitAtSelection(f.selection, () => f.history.saveState());
+        assert.equal(gap.hasAttribute('data-mdw-code-gap'), false);
+        f.place(f.editor.querySelector('td').firstChild);
+        f.gaps.reconcile(f.selection);
+        assert.equal(gap.parentNode, f.editor);
+        assert.ok(f.domUtils.getCleanedHTML().startsWith('<p></p>'));
+    } finally { f.restore(); }
+});
+
+test('existing authored empty paragraphs around a table survive navigation', async () => {
+    const f = await createTableBoundaryHarness('<p><br></p>', '<p><br></p>');
+    try {
+        const paragraphs = Array.from(f.editor.querySelectorAll('p'));
+        const original = f.domUtils.getCleanedHTML();
+        for (const key of ['ArrowUp', 'ArrowDown']) {
+            f.navigate(key);
+            f.place(f.editor.querySelector('td').firstChild);
+            f.gaps.reconcile(f.selection);
+        }
+        assert.deepEqual(Array.from(f.editor.querySelectorAll('p')), paragraphs);
+        assert.equal(f.domUtils.getCleanedHTML(), original);
+    } finally { f.restore(); }
+});
+
+test('typing into a temporary table line is undoable and redoable', async () => {
+    const f = await createTableBoundaryHarness();
+    try {
+        const original = f.domUtils.getCleanedHTML();
+        f.history.saveState();
+        f.navigate('ArrowUp');
+        f.history.saveState();
+        f.editor.querySelector('[data-mdw-code-gap]').firstChild.textContent += 'written';
+        f.gaps.reconcile(f.selection);
+        f.history.commitStateAfterChange({ preferLiveSelection: true });
+        assert.equal(f.history.undoStack.length, 2);
+        assert.equal(f.history.performUndo(), true);
+        assert.equal(f.domUtils.getCleanedHTML(), original);
+        assert.equal(f.history.performRedo(), true);
+        assert.ok(f.domUtils.getCleanedHTML().includes('<p>written</p>'));
+    } finally { f.restore(); }
 });

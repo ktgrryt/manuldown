@@ -9,6 +9,8 @@ const moduleUrl = source => `data:text/javascript;base64,${Buffer.from(source).t
 const clipboardModule = import(moduleUrl(moduleSource('MarkdownClipboard.js')
     .replace("'./DOMUtils.js'", JSON.stringify(moduleUrl(moduleSource('DOMUtils.js'))))));
 const footnoteModule = import(moduleUrl(moduleSource('FootnoteManager.js')));
+const historyModule = import(moduleUrl(moduleSource('StateManager.js')));
+const domUtilsModule = import(moduleUrl(moduleSource('DOMUtils.js')));
 const editorSource = fs.readFileSync(path.join(__dirname, '..', 'media', 'editor.js'), 'utf8');
 
 function extractEditorFunction(name) {
@@ -70,6 +72,33 @@ class FixtureRange {
     setEnd(node, offset) { this.endContainer = node; this.endOffset = offset; }
     get collapsed() { return this.startContainer === this.endContainer && this.startOffset === this.endOffset; }
     get commonAncestorContainer() { return this.startContainer; }
+    setStartBefore(node) { this.setStart(node.parentNode, Array.from(node.parentNode.childNodes).indexOf(node)); }
+    setEndAfter(node) { this.setEnd(node.parentNode, Array.from(node.parentNode.childNodes).indexOf(node) + 1); }
+    cloneRange() { return Object.assign(new FixtureRange(), this); }
+    collapse(toStart) {
+        if (toStart) this.setEnd(this.startContainer, this.startOffset);
+        else this.setStart(this.endContainer, this.endOffset);
+    }
+    deleteContents() {
+        assert.equal(this.startContainer, this.endContainer);
+        if (this.startContainer.nodeType === 3) {
+            const text = this.startContainer;
+            text.data = text.data.slice(0, this.startOffset) + text.data.slice(this.endOffset);
+        } else {
+            Array.from(this.startContainer.childNodes).slice(this.startOffset, this.endOffset)
+                .forEach(node => node.remove());
+        }
+        this.collapse(true);
+    }
+    insertNode(node) {
+        const container = this.startContainer;
+        if (container.nodeType === 3) {
+            const after = container.splitText(this.startOffset);
+            after.parentNode.insertBefore(node, after);
+        } else {
+            container.insertBefore(node, container.childNodes[this.startOffset] || null);
+        }
+    }
     toString() { return this.cloneContents().textContent; }
     cloneContents() {
         assert.equal(this.startContainer, this.endContainer);
@@ -84,7 +113,7 @@ class FixtureRange {
     }
 }
 
-function clipboardPasteFixture({ editor, document, window, range }) {
+function clipboardPasteFixture({ editor, document, window, range, copy }, options = {}) {
     const slice = (startMarker, endMarker) => {
         const start = editorSource.indexOf(startMarker);
         const end = editorSource.indexOf(endMarker, start);
@@ -97,22 +126,36 @@ function clipboardPasteFixture({ editor, document, window, range }) {
         get isCollapsed() { return currentRange.collapsed; },
         getRangeAt: () => currentRange,
         toString: () => currentRange.toString(),
+        removeAllRanges() {},
+        addRange(nextRange) { currentRange = nextRange; },
     };
     window.getSelection = () => selection;
     const imagePolicyCalls = [];
     const messages = [];
+    const nativeImages = [];
+    let flushDataImages = () => {};
     const env = {
         editor, document, window, Node: window.Node, NodeFilter: window.NodeFilter,
+        createMarkdownClipboardHtml: (_editor, selection) => copy(selection),
+        createImageClipboardSnapshot: () => null,
         isUpdating: false,
+        isComposing: false, compositionUpdateGate: { composing: false },
+        codeBlockGapManager: { reconcile() {} },
+        normalizeListRenderingAfterStructureChange() {}, scheduleEditorOverflowStateUpdate() {},
         domUtils: {
             getParentElement(node, tag) {
                 const element = node.nodeType === 3 ? node.parentElement : node;
                 return element.closest(tag);
             },
             ensureInlineCodeSpaces() {}, cleanupGhostStyles() {},
+            isBlockElement: element => /^(P|LI|BLOCKQUOTE|DIV)$/.test(element.tagName),
         },
-        stateManager: { saveState() {}, saveStateDebounced() {} },
+        stateManager: options.stateManager || {
+            saveState() {}, saveStateDebounced() {}, saveRange: value => value,
+            beginChangeAtSelection() {}, commitStateAfterChange() {},
+        },
         footnoteManager: {
+            reconcileReferenceDeletion() {}, refresh() {},
             appendClipboardDefinitions() {},
             prepareClipboardImport: html => ({ html }),
             restoreClipboardImport: () => [],
@@ -131,18 +174,38 @@ function clipboardPasteFixture({ editor, document, window, range }) {
             .find(node => node.tagName === 'INPUT' && node.type === 'checkbox'),
         classifyImageSourceForEditor: src => /^https?:|^data:/i.test(src)
             ? { kind: 'direct' } : { kind: 'resolve-local' },
-        applyImageSourcePolicy: (_image, src) => imagePolicyCalls.push(src),
+        applyImageSourcePolicy(image, src) { image.src = src; imagePolicyCalls.push(src); },
         applyImageRenderSizeFromAlt() {},
         applyImageRenderSizes() {}, normalizeCheckboxListItems() {}, updateListItemClasses() {},
-        setCaretToEndOfInsertedNode() {}, notifyChange() {}, finalizePendingPastedPathLinks() {},
+        setCaretToEndOfInsertedNode() {},
+        notifyChange() { flushDataImages(); }, notifyChangeImmediate() { flushDataImages(); },
+        finalizePendingPastedPathLinks() {}, removeEmptyLinePlaceholderAtRange() {},
+        isImageOnlyBlockElement: () => false, setCaretToImageRightEdge: () => true,
         getPastedAbsolutePathCandidate: () => null,
-        pastedTextLooksLikeList: text => /^[-*] /.test(text),
-        internalHtmlIsListlessPlainText: html => !/<(?:ul|ol|li|strong|a|code)\b/i.test(html),
-        insertTextWithPasteBehavior(text, { allowPlainTextFallback }) {
-            if (!allowPlainTextFallback) return false;
-            editor.textContent = text;
-            return true;
+        isRangeInTableCell: () => false,
+        getFirstDirectTextNode: element => Array.from(element.childNodes).find(node => node.nodeType === 3),
+        getFirstDirectTextNodeAfterCheckbox: element => Array.from(element.childNodes).find(node => node.nodeType === 3),
+        ensureCheckboxLeadingSpace() {},
+        placeCollapsedCaret(selection, node, offset) {
+            const next = range(node, offset, offset);
+            selection.addRange(next);
         },
+        placeCollapsedCaretAfter() {}, setCaretAfterNode() {},
+        replaceListBoundarySelectionWithInlineFragment: () => false,
+        insertInlineFragmentAtCollapsedListBoundary: () => false,
+        normalizeLineBreakMode: () => 'hard', createLineBreakNode: () => document.createElement('br'),
+        cleanupEmptyStrikeAtSelection() {}, cleanupEmptyStrikes() {}, unwrapStrikeAtSelection() {},
+        saveImageFileToWorkspace(file, targetRange, alt) {
+            nativeImages.push({ file, range: targetRange?.cloneRange(), alt });
+        },
+        isImportableImageUri: value => /^data:image\//i.test(value),
+        applyTextInsertionWithPasteRules: null,
+        ...Object.fromEntries([
+            'tryInsertHorizontalRuleFromPastedText', 'tryInsertFencedCodeBlockFromPastedText',
+            'tryInsertMarkdownTableFromPastedText', 'tryInsertMarkdownBlockquoteFromPastedText',
+            'tryInsertMarkdownHeadingsFromPastedText', 'tryInsertMixedMarkdownFromPastedText',
+            'tryInsertAutoLinkedTextFromPastedText',
+        ].map(name => [name, () => false])),
         vscode: { postMessage: message => messages.push(message) },
     };
     const rootFunctions = [
@@ -150,22 +213,42 @@ function clipboardPasteFixture({ editor, document, window, range }) {
         'createSanitizedContainerFromHtml', 'isBlockElement',
         'selectionContainsImage', 'selectionContainsListStructure', 'fragmentToClipboardPlainText',
         'createClipboardPayloadFromRange', 'createClipboardPayloadFromSelection',
+        'createMarkdownImageSyntaxFromElement',
+        'isEditorRange', 'prunePendingImageInsertionRanges', 'beginImageInsertionRequest',
+        'takePendingImageInsertion', 'discardPendingImageInsertion', 'markPastedDataImage',
+        'importPastedDataImages', 'prepareEditorForNotify', 'rangesHaveSameBoundaries',
     ].map(extractEditorFunction).join('\n');
     const declarations = [
+        'const pendingImageInsertionRanges = new Map(); const pendingPastedDataImages = new Set();',
+        'let imageInsertionRequestSeq = 0; const PENDING_IMAGE_INSERTION_MAX_AGE_MS = 300000; const MAX_PENDING_IMAGE_INSERTIONS = 64;',
+        'let localUpdateRevision = 0; let pendingCtrlKDeleteSync = false;',
         slice('const INTERNAL_EDITOR_PLAIN_TEXT_CLIPBOARD_TYPE =', 'const SOFT_LINE_BREAK_ATTRIBUTE ='),
         slice('const SAFE_EDITOR_TAGS =', 'function isLikelyAbsoluteFsPath('),
         rootFunctions,
         slice('function normalizeClipboardPlainText(', 'function focusEditorWithoutScroll('),
         slice('const absoluteUrlPattern =', 'const isImageFile ='),
         slice('const getSelectionRangeForPaste =', 'const hasVisibleLinkText ='),
-        slice('const tryInsertInternalHtmlFromClipboard =', 'const tryInsertInlineMarkdownFromPastedText ='),
+        slice('const clipboardVariationSelectorPattern =', 'const tryInsertMixedMarkdownFromPastedText ='),
+        slice('const insertPlainTextPreservingLineBreaks =', '// Footnote numbers and formulas'),
+        slice('const insertTextWithPasteBehavior =', 'applyTextInsertionWithPasteRules ='),
+        slice('const tryInsertInternalHtmlFromClipboard =', 'const appendTextTokenWithLineBreaks ='),
         slice('const handleEditorCopy =', '// カットを補助:'),
         slice("editor.addEventListener('paste', (e) => {", '// Snapshot the selection before the native context menu'),
     ].join('\n');
-    new Function(...Object.keys(env), `let trustedClipboardPayload = null; let clipboardCopySequence = 0;\n${declarations}\n//# sourceURL=clipboard-paste-fixture.js`)(...Object.values(env));
+    const imageMessages = slice("            case 'insertImage':", "            case 'requestSync':");
+    const imageImports = new Function(...Object.keys(env), `
+        let trustedClipboardPayload = null; let clipboardCopySequence = 0;
+        ${declarations}
+        return {
+            prepareEditorForNotify,
+            receive(message) { switch (message.type) { ${imageMessages} } }
+        };
+        //# sourceURL=clipboard-paste-fixture.js
+    `)(...Object.values(env));
+    flushDataImages = imageImports.prepareEditorForNotify;
     const data = new Map();
     const clipboardData = {
-        items: [], getData: type => data.get(type) || '', setData: (type, value) => data.set(type, value),
+        items: options.items || [], getData: type => data.get(type) || '', setData: (type, value) => data.set(type, value),
     };
     const dispatch = type => {
         const event = document.createEvent('Event');
@@ -175,9 +258,9 @@ function clipboardPasteFixture({ editor, document, window, range }) {
         return event;
     };
     return {
-        data, imagePolicyCalls, messages,
+        data, imagePolicyCalls, messages, nativeImages, receive: imageImports.receive,
         copy() { currentRange = range(editor); return dispatch('copy'); },
-        paste() { currentRange = range(editor, 0, 0); return dispatch('paste'); },
+        paste(target = editor, start = 0, end = start) { currentRange = range(target, start, end); return dispatch('paste'); },
         forgetCustomTypes() {
             data.delete('application/x-manuldown-editor-html');
             data.delete('application/x-manuldown-editor-plain-text');
@@ -497,4 +580,376 @@ test('forged internal image HTML cannot gain provenance from the literal-preserv
         assert.deepEqual(clipboard.imagePolicyCalls, []);
         assert.deepEqual(clipboard.messages, []);
     });
+});
+
+test('external list HTML keeps its images and formatting ahead of plain-text list parsing', async () => {
+    await withFixture('<p><br></p>', f => {
+        const clipboard = clipboardPasteFixture(f);
+        const first = 'data:image/png;base64,b25l';
+        const second = 'data:image/png;base64,dHdv';
+        clipboard.data.set('text/html', `<ul><li><strong>first</strong><img src="${first}"></li><li>second<img src="${second}"></li></ul>`);
+        clipboard.data.set('text/plain', '- first\n- second');
+        assert.equal(clipboard.paste().defaultPrevented, true);
+        assert.equal(f.editor.querySelectorAll('li').length, 2);
+        assert.equal(f.editor.querySelector('strong').textContent, 'first');
+        assert.deepEqual(clipboard.messages.map(message => message.dataUrl), [first, second]);
+        assert.equal(f.editor.querySelectorAll('img').length, 2, 'images remain intact until their files exist');
+        for (const [index, message] of [...clipboard.messages].entries()) {
+            clipboard.receive({ type: 'insertImage', requestId: message.requestId,
+                markdownPath: `images/doc/picture-${index + 1}.png`, alt: message.altText });
+        }
+        assert.deepEqual(Array.from(f.editor.querySelectorAll('img'), image => image.getAttribute('data-md-path')),
+            ['images/doc/picture-1.png', 'images/doc/picture-2.png']);
+        assert.ok(!f.editor.innerHTML.includes('base64'));
+    });
+});
+
+test('embedded rich-text images become relative file paths without changing their order or metadata', async () => {
+    await withFixture('<p><br></p>', f => {
+        const clipboard = clipboardPasteFixture(f);
+        clipboard.data.set('text/html', '<p>before<img src="data:image/png;base64,b25l" alt="first" title="Caption" width="240" height="120">between<img src="data:image/png;base64,dHdv" alt="second">after</p>');
+        clipboard.data.set('text/plain', 'beforebetweenafter');
+        clipboard.paste();
+        const requests = [...clipboard.messages];
+        assert.deepEqual(requests.map(message => [message.type, message.mimeType, message.altText]),
+            [['saveImage', 'image/png', 'first'], ['saveImage', 'image/png', 'second']]);
+        assert.equal(f.editor.textContent, 'beforebetweenafter');
+        assert.equal(f.editor.querySelectorAll('img').length, 2);
+        for (const message of requests.reverse()) {
+            clipboard.receive({ type: 'insertImage', requestId: message.requestId,
+                markdownPath: `images/doc/${message.altText}.png`, alt: message.altText });
+        }
+        const images = Array.from(f.editor.querySelectorAll('img'));
+        assert.deepEqual(images.map(image => image.getAttribute('data-md-path')),
+            ['images/doc/first.png', 'images/doc/second.png']);
+        assert.deepEqual(['title', 'width', 'height'].map(name => images[0].getAttribute(name)),
+            ['Caption', '240', '120']);
+        assert.equal(f.editor.textContent, 'beforebetweenafter');
+        assert.ok(!f.editor.innerHTML.includes('base64'));
+    });
+});
+
+test('embedded images in pasted Markdown are also saved as files', async () => {
+    await withFixture('<p><br></p>', f => {
+        const clipboard = clipboardPasteFixture(f);
+        clipboard.data.set('text/plain', 'before ![picture](data:image/png;base64,cG5n) after');
+        clipboard.paste();
+        assert.equal(clipboard.messages.length, 1);
+        assert.equal(clipboard.messages[0].type, 'saveImage');
+        assert.equal(clipboard.messages[0].altText, 'picture');
+        assert.equal(f.editor.querySelectorAll('img').length, 1);
+        clipboard.receive({ type: 'insertImage', requestId: clipboard.messages[0].requestId,
+            markdownPath: 'images/doc/doc.png', alt: 'picture' });
+        assert.equal(f.editor.querySelector('img').getAttribute('data-md-path'), 'images/doc/doc.png');
+        assert.equal(f.editor.textContent, 'before  after');
+        assert.ok(!f.editor.innerHTML.includes('base64'));
+    });
+});
+
+test('failed image file writes retain the original pasted image without retrying', async () => {
+    await withFixture('<p><br></p>', f => {
+        const clipboard = clipboardPasteFixture(f);
+        const original = '<p>before<img src="data:image/png;base64,cG5n" alt="picture">after</p>';
+        clipboard.data.set('text/html', original);
+        clipboard.data.set('text/plain', 'beforeafter');
+        clipboard.paste();
+        clipboard.receive({ type: 'imageInsertFailed', requestId: clipboard.messages[0].requestId });
+        const copy = f.editor.cloneNode(true);
+        copy.querySelector('img').removeAttribute('data-mdw-image-import-id');
+        assert.equal(copy.innerHTML, original);
+        assert.equal(clipboard.messages.length, 1);
+    });
+});
+
+for (const timing of ['before undo', 'after undo', 'after another edit']) {
+    test(`embedded image normalization is part of the paste history: response ${timing}`, async () => {
+        const [{ StateManager }, { DOMUtils }] = await Promise.all([historyModule, domUtilsModule]);
+        await withFixture('<p><br></p>', f => {
+            f.editor.focus = () => {};
+            const domUtils = new DOMUtils(f.editor);
+            const history = new StateManager(f.editor, {}, {
+                getComparableHtml: () => domUtils.getCleanedHTML({ historyComparable: true }),
+            });
+            history.seedState();
+            const clipboard = clipboardPasteFixture(f, { stateManager: history });
+            clipboard.data.set('text/html', '<p>new text<img src="data:image/png;base64,cG5n" alt="picture"></p>');
+            clipboard.data.set('text/plain', 'new text');
+            clipboard.paste();
+            assert.ok(!domUtils.getCleanedHTML().includes('data-mdw-image-import-id'));
+            const request = clipboard.messages.find(message => message.type === 'saveImage');
+            if (timing === 'after undo') {
+                history.performUndo(() => {});
+                history.flushPendingHistoryRestore();
+            }
+            if (timing === 'after another edit') {
+                history.saveState();
+                f.editor.querySelector('p').appendChild(f.document.createTextNode(' typed'));
+                history.commitStateAfterChange();
+            }
+            clipboard.receive({ type: 'insertImage', requestId: request.requestId, markdownPath: 'images/doc/doc.png', src: 'data:image/png;base64,cG5n', alt: 'picture' });
+            if (timing === 'after undo') {
+                assert.ok(!f.editor.querySelector('img'), 'a late response must not resurrect an undone paste');
+                history.performRedo(() => {});
+                history.flushPendingHistoryRestore();
+            }
+            if (timing === 'after another edit') {
+                history.performUndo(() => {});
+                history.flushPendingHistoryRestore();
+                assert.equal(f.editor.textContent, 'new text');
+            }
+            assert.equal(f.editor.querySelector('img').getAttribute('data-md-path'), 'images/doc/doc.png');
+            history.performUndo(() => {});
+            history.flushPendingHistoryRestore();
+            assert.equal(f.editor.innerHTML, '<p><br></p>', 'one Undo removes the paste, with no intermediate Base64 state');
+            history.performRedo(() => {});
+            history.flushPendingHistoryRestore();
+            assert.equal(f.editor.querySelector('img').getAttribute('data-md-path'), 'images/doc/doc.png');
+            assert.ok(!f.editor.innerHTML.includes('data-mdw-image-import-id'));
+            assert.equal(history.undoHistoryBytes, history.undoStack.reduce((sum, state) => sum + history.getStateByteSize(state), 0));
+            assert.equal(history.redoHistoryBytes, history.redoStack.reduce((sum, state) => sum + history.getStateByteSize(state), 0));
+        });
+    });
+}
+
+test('multiple image responses in reverse order remain one paste Undo step', async () => {
+    const [{ StateManager }, { DOMUtils }] = await Promise.all([historyModule, domUtilsModule]);
+    await withFixture('<p><br></p>', f => {
+        f.editor.focus = () => {};
+        const domUtils = new DOMUtils(f.editor);
+        const history = new StateManager(f.editor, {}, { getComparableHtml: () => domUtils.getCleanedHTML({ historyComparable: true }) });
+        history.seedState();
+        const clipboard = clipboardPasteFixture(f, { stateManager: history });
+        clipboard.data.set('text/html', '<p>text<img src="data:image/png;base64,b25l" alt="one"><img src="data:image/png;base64,dHdv" alt="two"></p>');
+        clipboard.data.set('text/plain', 'text');
+        clipboard.paste();
+        for (const request of [...clipboard.messages].reverse()) {
+            clipboard.receive({ type: 'insertImage', requestId: request.requestId,
+                markdownPath: `images/doc/${request.altText}.png`, alt: request.altText });
+        }
+        const snapshot = domUtils.getCleanedHTML({ canonicalImages: true });
+        assert.ok(!snapshot.includes('base64') && !snapshot.includes('data-mdw-image-import-id'));
+        history.performUndo(() => {});
+        history.flushPendingHistoryRestore();
+        assert.equal(f.editor.innerHTML, '<p><br></p>');
+        history.performRedo(() => {});
+        history.flushPendingHistoryRestore();
+        assert.deepEqual(Array.from(f.editor.querySelectorAll('img'), image => image.getAttribute('data-md-path')),
+            ['images/doc/one.png', 'images/doc/two.png']);
+    });
+});
+
+test('copying a file-backed image with an embedded display source reuses its Markdown path', async () => {
+    await withFixture('<p>before<img src="data:image/png;base64,cG5n" data-md-path="images/doc/existing.png" alt="picture">after</p>', f => {
+        const clipboard = clipboardPasteFixture(f);
+        clipboard.copy();
+        f.editor.innerHTML = '<p><br></p>';
+        clipboard.paste();
+        assert.equal(f.editor.querySelector('img').getAttribute('data-md-path'), 'images/doc/existing.png');
+        assert.deepEqual(clipboard.messages, [], 'existing files must not be duplicated');
+    });
+});
+
+test('an image removed before its file write finishes is not inserted again', async () => {
+    await withFixture('<p><br></p>', f => {
+        const clipboard = clipboardPasteFixture(f);
+        clipboard.data.set('text/html', '<p>before<img src="data:image/png;base64,cG5n">after</p>');
+        clipboard.data.set('text/plain', 'beforeafter');
+        clipboard.paste();
+        f.editor.innerHTML = '<p>undone</p>';
+        clipboard.receive({ type: 'insertImage', requestId: clipboard.messages[0].requestId,
+            markdownPath: 'images/doc/doc.png', alt: 'image' });
+        assert.equal(f.editor.innerHTML, '<p>undone</p>');
+    });
+});
+
+test('moving or resizing a pasted image during its file write preserves the latest edits', async () => {
+    await withFixture('<p><br></p>', f => {
+        const clipboard = clipboardPasteFixture(f);
+        clipboard.data.set('text/html', '<p>before<img src="data:image/png;base64,cG5n" alt="picture">after</p>');
+        clipboard.data.set('text/plain', 'beforeafter');
+        clipboard.paste();
+        const original = f.editor.querySelector('img');
+        const destination = f.document.createElement('p');
+        destination.appendChild(original);
+        f.editor.firstChild.remove();
+        f.editor.appendChild(destination);
+        original.setAttribute('width', '320');
+        original.setAttribute('alt', 'updated');
+        clipboard.receive({ type: 'insertImage', requestId: clipboard.messages[0].requestId,
+            markdownPath: 'images/doc/doc.png', alt: 'picture' });
+        const saved = destination.querySelector('img');
+        assert.equal(saved.getAttribute('data-md-path'), 'images/doc/doc.png');
+        assert.equal(saved.getAttribute('width'), '320');
+        assert.equal(saved.getAttribute('alt'), 'updated');
+        assert.equal(f.editor.querySelectorAll('img').length, 1);
+    });
+});
+
+test('large image pastes finish in bounded batches without leaving embedded images behind', async () => {
+    await withFixture('<p><br></p>', f => {
+        const clipboard = clipboardPasteFixture(f);
+        const count = 70;
+        clipboard.data.set('text/html', '<p>images' + Array.from({ length: count }, (_, i) =>
+            `<img src="data:image/png;base64,cG5n" alt="${i}">`).join('') + '</p>');
+        clipboard.data.set('text/plain', 'images');
+        clipboard.paste();
+        assert.equal(clipboard.messages.length, 64);
+        // Completing one request frees a slot for the next queued image.
+        for (let i = 0; i < count; i++) {
+            const request = clipboard.messages[i];
+            assert.ok(request, `image ${i} was queued`);
+            clipboard.receive({ type: 'insertImage', requestId: request.requestId,
+                markdownPath: `images/doc/${request.altText}.png`, alt: request.altText });
+        }
+        assert.equal(clipboard.messages.length, count);
+        assert.deepEqual(Array.from(f.editor.querySelectorAll('img'), image => image.getAttribute('data-md-path')),
+            Array.from({ length: count }, (_, i) => `images/doc/${i}.png`));
+        assert.ok(!f.editor.innerHTML.includes('base64'));
+    });
+});
+
+test('Office list formatting survives even when the HTML uses paragraph bullets', async () => {
+    await withFixture('<p><br></p>', f => {
+        const clipboard = clipboardPasteFixture(f);
+        clipboard.data.set('text/html', '<p class="MsoNormal"><strong>• first</strong></p><p>• second</p>');
+        clipboard.data.set('text/plain', '• first\n• second');
+        assert.equal(clipboard.paste().defaultPrevented, true);
+        assert.equal(f.editor.querySelector('strong').textContent, '• first');
+    });
+});
+
+for (const html of ['<strong>replacement</strong>', '<span>replacement</span>']) {
+    test(`HTML-only paste replaces selected text with its content: ${html}`, async () => {
+        await withFixture('<p>text PLACEHOLDER</p>', f => {
+            const clipboard = clipboardPasteFixture(f);
+            clipboard.data.set('text/html', html);
+            const text = f.editor.querySelector('p').firstChild;
+            assert.equal(clipboard.paste(text, 5, text.length).defaultPrevented, true);
+            assert.equal(f.editor.textContent, 'text replacement');
+            if (html.includes('strong')) assert.equal(f.editor.querySelector('strong').textContent, 'replacement');
+        });
+    });
+}
+
+test('HTML-only paste into code uses literal text without inserting formatting', async () => {
+    await withFixture('<pre><code>text PLACEHOLDER</code></pre>', f => {
+        const clipboard = clipboardPasteFixture(f);
+        clipboard.data.set('text/html', '<strong>replacement</strong>');
+        const text = f.editor.querySelector('code').firstChild;
+        assert.equal(clipboard.paste(text, 5, text.length).defaultPrevented, true);
+        assert.equal(f.editor.querySelector('code').textContent, 'text replacement');
+        assert.equal(f.editor.querySelectorAll('strong').length, 0);
+    });
+});
+
+for (const html of ['', '<span></span>', '<script>discarded()</script>']) {
+    test(`empty or filtered clipboard HTML preserves the selection: ${JSON.stringify(html)}`, async () => {
+        await withFixture('<p>text PLACEHOLDER</p>', f => {
+            const clipboard = clipboardPasteFixture(f);
+            clipboard.data.set('text/html', html);
+            const text = f.editor.querySelector('p').firstChild;
+            assert.equal(clipboard.paste(text, 5, text.length).defaultPrevented, true);
+            assert.equal(f.editor.textContent, 'text PLACEHOLDER');
+        });
+    });
+}
+
+test('native clipboard PNGs replace local HTML image references in their original positions', async () => {
+    await withFixture('<p><br></p>', f => {
+        const files = [new File(['one'], 'one.png', { type: 'image/png' }),
+            new File(['two'], 'two.png', { type: 'image/png' })];
+        const clipboard = clipboardPasteFixture(f, {
+            items: files.map(file => ({ type: file.type, getAsFile: () => file })),
+        });
+        clipboard.data.set('text/html', '<p class="MsoNormal">before<img src="file:///tmp/one.png" alt="first">between<img src="file:///tmp/two.png" alt="second">after</p>');
+        clipboard.data.set('text/plain', 'beforebetweenafter');
+        assert.equal(clipboard.paste().defaultPrevented, true);
+        assert.deepEqual(clipboard.nativeImages.map(image => image.file), files);
+        assert.deepEqual(clipboard.nativeImages.map(image => image.alt), ['first', 'second']);
+        assert.deepEqual(clipboard.imagePolicyCalls, [], 'local image URLs must never be resolved');
+        // Simulate imports completing in reverse order using the captured ranges.
+        for (const pending of [...clipboard.nativeImages].reverse()) {
+            assert.equal(pending.range.cloneContents().firstChild.nodeType, f.window.Node.COMMENT_NODE);
+            const image = f.document.createElement('img');
+            image.alt = pending.alt;
+            image.src = `images/${pending.file.name}`;
+            pending.range.deleteContents();
+            pending.range.insertNode(image);
+        }
+        assert.equal(f.editor.innerHTML, '<p>before<img alt="first" src="images/one.png">between<img alt="second" src="images/two.png">after</p>');
+    });
+});
+
+test('a native image is retained even when Office HTML has no text', async () => {
+    await withFixture('<p><br></p>', f => {
+        const file = new File(['png'], 'image.png', { type: 'image/png' });
+        const clipboard = clipboardPasteFixture(f, { items: [{ type: file.type, getAsFile: () => file }] });
+        clipboard.data.set('text/html', '<p class="MsoNormal"><img src="file:///tmp/image.png"></p>');
+        assert.equal(clipboard.paste().defaultPrevented, true);
+        assert.equal(clipboard.nativeImages.length, 1);
+        assert.equal(clipboard.nativeImages[0].file, file);
+        assert.ok(f.editor.contains(clipboard.nativeImages[0].range.startContainer));
+    });
+});
+
+test('a composite native PNG is imported once when local HTML image counts differ', async () => {
+    await withFixture('<p><br></p>', f => {
+        const file = new File(['png'], 'composite.png', { type: 'image/png' });
+        const clipboard = clipboardPasteFixture(f, { items: [{ type: file.type, getAsFile: () => file }] });
+        clipboard.data.set('text/html', '<p class="MsoNormal">before<img src="file:///tmp/one.png">between<img src="file:///tmp/two.png">after</p>');
+        clipboard.data.set('text/plain', 'beforebetweenafter');
+        assert.equal(clipboard.paste().defaultPrevented, true);
+        assert.equal(f.editor.textContent, 'beforebetweenafter');
+        assert.equal(clipboard.nativeImages.length, 1);
+        assert.equal(clipboard.nativeImages[0].file, file);
+        assert.equal(clipboard.nativeImages[0].range.startContainer, f.editor.lastChild);
+    });
+});
+
+test('image imports remember an explicit paste location instead of the current caret', async () => {
+    await withFixture('<p>original</p><p>current caret</p>', f => {
+        const original = f.range(f.editor.firstChild.firstChild, 2, 5);
+        const current = f.range(f.editor.lastChild.firstChild, 3, 3);
+        f.window.getSelection = () => ({ rangeCount: 1, getRangeAt: () => current });
+        const pending = new Map();
+        const begin = new Function('window', 'document', 'isEditorRange', 'pendingImageInsertionRanges', `
+            let imageInsertionRequestSeq = 0;
+            const prunePendingImageInsertionRanges = () => {};
+            ${extractEditorFunction('beginImageInsertionRequest')}
+            return beginImageInsertionRequest;
+        `)(f.window, f.document, value => !!value && f.editor.contains(value.startContainer), pending);
+        const id = begin(original);
+        assert.notEqual(pending.get(id).range, original);
+        assert.equal(pending.get(id).range.startContainer, original.startContainer);
+        assert.equal(pending.get(id).range.startOffset, 2);
+        assert.equal(pending.get(id).range.endOffset, 5);
+        assert.equal(pending.get(begin()).range.startContainer, current.startContainer);
+    });
+});
+
+test('native PNG file imports carry their target range and original image description', () => {
+    const start = editorSource.indexOf('        const saveImageFileToWorkspace =');
+    const end = editorSource.indexOf('        const getSelectionRangeForPaste =', start);
+    const file = new File(['png'], 'image.png', { type: 'image/png' });
+    const target = {};
+    const messages = [];
+    const save = new Function('FileReader', 'beginImageInsertionRequest', 'vscode', `
+        const MAX_IMPORTED_IMAGE_BYTES = 20 * 1024 * 1024;
+        const discardPendingImageInsertion = () => {};
+        ${editorSource.slice(start, end)}
+        return saveImageFileToWorkspace;
+    `)(class {
+        readAsDataURL(value) {
+            assert.equal(value, file);
+            this.onload({ target: { result: 'data:image/png;base64,cG5n' } });
+        }
+    }, range => {
+        assert.equal(range, target);
+        return 'image-insert-123-1';
+    }, { postMessage: message => messages.push(message) });
+    save(file, target, 'Original description');
+    assert.deepEqual(messages, [{
+        type: 'saveImage', requestId: 'image-insert-123-1',
+        dataUrl: 'data:image/png;base64,cG5n', mimeType: 'image/png', altText: 'Original description',
+    }]);
 });

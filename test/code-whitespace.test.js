@@ -2169,7 +2169,7 @@ test('async image insertion stays bound to its request-scoped editor range', () 
 
     assert.match(
         editorSource,
-        /beginImageInsertionRequest\(\)[\s\S]*?pendingImageInsertionRanges\.set\(requestId,[\s\S]*?range/
+        /function beginImageInsertionRequest\([^)]*\)[\s\S]*?pendingImageInsertionRanges\.set\(requestId,[\s\S]*?range/
     );
     assert.match(
         editorSource,
@@ -2539,9 +2539,48 @@ test('local images retain their original Markdown path in Webview HTML', () => {
         webview
     ).toHtml();
 
-    assert.match(html, /src="webview-resource:\/workspace\/images\/diagram\.png"/);
+    assert.doesNotMatch(html, /\bsrc=/);
     assert.match(html, /data-md-path="images\/diagram\.png"/);
 });
+
+for (const terminalType of ['saveDocument', 'closeEditorTab']) {
+    test(`a queued ${terminalType} preserves newer edits awaiting application`, async () => {
+        const { provider, document, webview } = await createEditorSyncHarness();
+        const gate = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
+        const saveStarted = gate(), saveMayFinish = gate(), updateStarted = gate(), updateMayFinish = gate();
+        const originalSave = document.save;
+        let saves = 0;
+        document.save = async () => {
+            if (++saves === 1) { saveStarted.resolve(); await saveMayFinish.promise; }
+            return originalSave();
+        };
+        let closedText = null;
+        provider.closeResidualCustomTabs = async () => { closedText = document.getText(); };
+        provider.updateTextDocument = async (_document, markdown) => {
+            if (markdown === 'third') { updateStarted.resolve(); await updateMayFinish.promise; }
+            document.setText(markdown);
+            fireDocumentChange(document);
+            return true;
+        };
+        try {
+            const first = webview.sendMessage({ type: 'saveDocument', revision: 1, content: 'first' });
+            await saveStarted.promise;
+            const second = webview.sendMessage({ type: terminalType, revision: 2, content: 'second' });
+            await webview.sendMessage({ type: 'update', revision: 3, content: 'third' });
+            await updateStarted.promise;
+            await webview.sendMessage({ type: 'update', revision: 4, content: 'fourth' });
+            saveMayFinish.resolve();
+            await first;
+            await new Promise(resolve => setImmediate(resolve));
+            updateMayFinish.resolve();
+            await second;
+            assert.equal(document.getText(), 'fourth');
+            if (terminalType === 'saveDocument') assert.equal(document.savedTexts.at(-1), 'fourth');
+            else assert.equal(closedText, 'fourth');
+            assert.ok(webview.postedMessages.some(message => message.type === 'updateApplied' && message.revision === 4));
+        } finally { saveMayFinish.resolve(); updateMayFinish.resolve(); webview.dispose(); }
+    });
+}
 
 test('raw Markdown HTML cannot spoof the internal image path marker', () => {
     const webview = {

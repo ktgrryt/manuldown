@@ -960,3 +960,35 @@ test('ArrowDown tries the trailing image line before the generic downward naviga
     assert.notEqual(trailingImageRoute, -1);
     assert.ok(trailingImageRoute < genericMove);
 });
+
+test('image right-edge navigation preserves authored spaces before formatted captions', async () => {
+    for (const space of [' ', '&nbsp;', '  ']) {
+        const fixture = await createFixture(`<p><img src="image.png">${space}<strong>caption</strong></p><p>after</p>`);
+        try {
+            const image = fixture.editor.querySelector('img');
+            const original = fixture.domUtils.getCleanedHTML();
+            const selectionRange = fixture.placeCaret(image.parentNode, 0);
+            selectionRange.setEnd(image.parentNode, 1);
+            assert.equal(fixture.cursorManager.moveCursorForward(), true);
+            assert.equal(fixture.domUtils.getCleanedHTML(), original, space);
+            assert.equal(image.nextSibling.textContent, space === '&nbsp;' ? '\u00a0' : space);
+            assert.equal(fixture.selection.getRangeAt(0).startOffset, 0);
+        } finally { fixture.restoreGlobals(); }
+    }
+});
+
+test('image caret anchors stay empty and legacy placeholders cannot create a phantom line', async () => {
+    for (const placeholder of ['', '\u200b', '\u2060', '\ufeff', '&amp;ZeroWidthSpace;']) {
+        const fixture = await createFixture(`<p><img src="image.png">${placeholder}</p><p>after</p>`);
+        try {
+            const image = fixture.editor.querySelector('img');
+            const caret = fixture.editor.ownerDocument.createRange();
+            assert.equal(fixture.cursorManager._collapseRangeAfterNode(caret, image), true);
+            fixture.selection.addRange(caret);
+            assert.equal(image.nextSibling.textContent, '', placeholder);
+            assert.equal(image.parentNode.querySelectorAll('br').length, 0);
+            assert.equal(fixture.cursorManager.moveCursorForward(), true);
+            assert.equal(fixture.selection.getRangeAt(0).startContainer.textContent, 'after');
+        } finally { fixture.restoreGlobals(); }
+    }
+});

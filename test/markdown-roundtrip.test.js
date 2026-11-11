@@ -81,6 +81,46 @@ function visibleText(html) {
     return html.replace(/<[^>]*>/g, '');
 }
 
+test('empty external tables cannot block saving the rest of the document', () => {
+    const provider = new MarkdownEditorProvider({});
+    for (const table of ['<table></table>', '<table><colgroup><col></colgroup></table>']) {
+        const saved = provider.htmlToMarkdown(`<p>Before</p>${table}<p>After</p>`, createTextDocument(''));
+        assert.equal(saved, 'Before\n\nAfter\n');
+        const html = new MarkdownDocument(createTextDocument(saved)).toHtml().replace('After', 'Changed');
+        assert.equal(provider.htmlToMarkdown(html, createTextDocument(saved)), 'Before\n\nChanged\n');
+    }
+});
+
+test('external TD-only tables remain editable tables after saving and reopening', () => {
+    const provider = new MarkdownEditorProvider({});
+    const input = '<table><tbody><tr> <td align="right">Heading</td> <td>Other</td> </tr><tr><td>one</td><td>two</td></tr></tbody></table><p>After</p>';
+    const saved = provider.htmlToMarkdown(input, createTextDocument(''));
+    assert.match(saved, /^\| Heading \| Other \|\n\| --: \| --- \|/);
+    const domino = require('@mixmark-io/domino');
+    const root = domino.createWindow(new MarkdownDocument(createTextDocument(saved)).toHtml()).document;
+    assert.equal(root.querySelectorAll('table').length, 1);
+    assert.equal(root.querySelectorAll('.mdw-opaque-source').length, 0);
+    root.querySelector('td').textContent = 'Changed';
+    const changed = provider.htmlToMarkdown(root.body.innerHTML, createTextDocument(saved));
+    assert.match(changed, /\| Changed \| two \|/);
+});
+
+test('new links encode whitespace and retain their labels and titles after reopening', () => {
+    const provider = new MarkdownEditorProvider({});
+    const domino = require('@mixmark-io/domino');
+    for (const href of ['./Meeting notes.md', 'https://example.com/a b', './日本 語.md', './a%20b.md']) {
+        const html = `<p><a href="${href}" title="A &quot;title&quot;">Meeting notes</a></p>`;
+        const saved = provider.htmlToMarkdown(html, createTextDocument(''));
+        const root = domino.createWindow(new MarkdownDocument(createTextDocument(saved)).toHtml()).document;
+        const link = root.querySelector('a');
+        assert.ok(link, saved);
+        assert.equal(link.textContent, 'Meeting notes');
+        assert.equal(decodeURI(link.getAttribute('href')), decodeURI(href));
+        assert.equal(link.getAttribute('title'), 'A "title"');
+        assert.equal(provider.htmlToMarkdown(root.body.innerHTML, createTextDocument(saved)), saved);
+    }
+});
+
 test('editing text beside a local image preserves ampersands and encoded filename characters', () => {
     const domino = require('@mixmark-io/domino');
     for (const destination of ['foo&bar.png', 'foo%26bar.png', 'foo%22bar.png', 'foo%2520bar.png']) {
@@ -93,12 +133,43 @@ test('editing text beside a local image preserves ampersands and encoded filenam
         } };
         const html = new MarkdownDocument(document, webview).toHtml();
         const window = domino.createWindow(html);
-        assert.deepEqual(resolved, [`/workspace/${decodeURIComponent(destination)}`]);
+        assert.deepEqual(resolved, [], 'local paths must await host validation');
+        assert.equal(window.document.querySelector('img').getAttribute('src'), null);
         assert.equal(window.document.querySelector('img').getAttribute('data-md-path'), destination);
         window.document.querySelector('p').lastChild.nodeValue = ' changed';
         const output = new MarkdownEditorProvider({}).htmlToMarkdown(window.document.body.innerHTML, document);
         assert.equal(output, `![pic](${destination}) changed\n`);
     }
+});
+
+test('merged and ragged external tables retain every cell after reopening and editing', () => {
+    const provider = new MarkdownEditorProvider({});
+    const domino = require('@mixmark-io/domino');
+    for (const [html, expected] of [
+        ['<table><tr><th colspan="2">Group</th></tr><tr><td>first</td><td>SECOND</td></tr></table>', [['Group', ''], ['first', 'SECOND']]],
+        ['<table><tr><td>Group</td></tr><tr><td>first</td><td>SECOND</td></tr></table>', [['Group', ''], ['first', 'SECOND']]],
+        ['<table><tr><th>A</th><th>B</th></tr><tr><td rowspan="2">Group</td><td>first</td></tr><tr><td>SECOND</td></tr></table>', [['A', 'B'], ['Group', 'first'], ['', 'SECOND']]],
+        ['<table><tr><th>A</th><th>B</th></tr><tr><td rowspan="0">Group</td><td>first</td></tr><tr><td>SECOND</td></tr></table>', [['A', 'B'], ['Group', 'first'], ['', 'SECOND']]],
+    ]) {
+        const saved = provider.htmlToMarkdown(html, createTextDocument(''));
+        const doc = domino.createWindow(new MarkdownDocument(createTextDocument(saved)).toHtml()).document;
+        assert.deepEqual(Array.from(doc.querySelectorAll('tr'), row => Array.from(row.cells, cell => cell.textContent)), expected, saved);
+        doc.querySelector('td').textContent += ' edited';
+        const resaved = provider.htmlToMarkdown(doc.body.innerHTML, createTextDocument(saved));
+        assert.ok(resaved.includes('SECOND'), resaved);
+        assert.equal(provider.htmlToMarkdown(new MarkdownDocument(createTextDocument(resaved)).toHtml(), createTextDocument(resaved)), resaved);
+    }
+});
+
+test('extreme table spans are flattened without multiplying content or losing cells', () => {
+    const provider = new MarkdownEditorProvider({});
+    const html = '<table><tr><th colspan="1000" rowspan="200">Group</th></tr>' +
+        Array.from({ length: 199 }, (_, i) => `<tr><td>cell-${i}</td></tr>`).join('') + '</table>';
+    const saved = provider.htmlToMarkdown(html, createTextDocument(''));
+    assert.ok(saved.length < 10_000);
+    for (let i = 0; i < 199; i++) assert.ok(saved.includes(`cell-${i}`));
+    const loaded = new MarkdownDocument(createTextDocument(saved)).toHtml();
+    assert.equal(provider.htmlToMarkdown(loaded, createTextDocument(saved)), saved);
 });
 
 test('Markdown clipboard output includes formatting, structure, code and math without a document-ending newline', () => {

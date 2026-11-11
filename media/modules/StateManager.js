@@ -136,6 +136,41 @@ export class StateManager {
             this.estimateSelectionBytes(state.selection) + this.estimateSelectionBytes(state.caretAnchors);
     }
 
+    resolvePastedImage(requestId, markdownPath, src) {
+        if (!requestId || !markdownPath) return;
+        const rewrite = (html, comparable) => {
+            if (!html.includes(requestId)) return html;
+            const template = document.createElement('template');
+            template.innerHTML = html;
+            let changed = false;
+            template.content.querySelectorAll('img[data-mdw-image-import-id]').forEach(image => {
+                if (image.getAttribute('data-mdw-image-import-id') !== requestId) return;
+                image.setAttribute('src', comparable ? markdownPath : src);
+                image.setAttribute('data-md-path', markdownPath);
+                image.removeAttribute('data-mdw-image-import-id');
+                changed = true;
+            });
+            return changed ? template.innerHTML : html;
+        };
+        // File creation is an asynchronous normalization of the paste, not a
+        // second user edit. Update snapshots on both sides of Undo/Redo so a
+        // late response also works after the pasted image has been undone.
+        for (const [stack, byteCounter] of [[this.undoStack, 'undoHistoryBytes'], [this.redoStack, 'redoHistoryBytes']]) {
+            for (const state of stack) {
+                const previousBytes = this.getStateByteSize(state);
+                const originalHtml = state.html;
+                const comparable = rewrite(state.comparableHtml ?? originalHtml, !!this.getComparableHtml);
+                state.html = rewrite(originalHtml, false);
+                state.comparableHtml = comparable === state.html ? null : comparable;
+                state.byteSize = state.html.length * 2 +
+                    (typeof state.comparableHtml === 'string' ? state.comparableHtml.length * 2 : 0) +
+                    this.estimateSelectionBytes(state.selection) + this.estimateSelectionBytes(state.caretAnchors);
+                this[byteCounter] += state.byteSize - previousBytes;
+            }
+        }
+        this.trimHistory();
+    }
+
     clearRedoHistory() {
         this.redoStack = [];
         this.redoHistoryBytes = 0;

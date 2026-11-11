@@ -11,6 +11,7 @@ function importModule(name) {
 }
 const modules = Promise.all([
     importModule('MathManager.js'), importModule('CodeBlockManager.js'), importModule('DOMUtils.js'),
+    importModule('CursorManager.js'),
 ]);
 const editorSource = fs.readFileSync(path.join(__dirname, '..', 'media', 'editor.js'), 'utf8');
 
@@ -110,6 +111,7 @@ async function fixture(html, options = {}) {
     let range = null;
     window.getSelection = () => ({
         get rangeCount() { return range ? 1 : 0; },
+        get isCollapsed() { return !range || range.collapsed; },
         getRangeAt: () => range,
         removeAllRanges: () => { range = null; },
         addRange: (next) => { range = next; },
@@ -150,6 +152,83 @@ const key = (name, modifiers = {}) => ({
     shiftKey: false, ctrlKey: false, metaKey: false, altKey: false, ...modifiers,
     preventDefault() { this.defaultPrevented = true; },
     stopPropagation() {},
+});
+
+function extractEditorFunction(name) {
+    const start = editorSource.indexOf(`    function ${name}(`);
+    const end = editorSource.indexOf('\n    }\n', start);
+    assert.ok(start >= 0 && end > start, `${name} exists`);
+    return editorSource.slice(start, end + 6);
+}
+
+test('one Mac Ctrl navigation step selects a formula for both host and DOM delivery orders', async () => {
+    const [, , { DOMUtils }, { CursorManager }] = await modules;
+    for (const [pressedKey, direction, side] of [['f', 'right', 'before'], ['b', 'left', 'after']]) {
+        for (const order of ['keydown-first', 'command-first']) {
+            const f = await fixture(`<p>a${formulaHtml('x^2')}b</p>`);
+            const [before, formula, after] = Array.from(f.editor.querySelector('p').childNodes);
+            const original = f.editor.innerHTML;
+            f.select(side === 'before' ? before : after, side === 'before' ? 1 : 0);
+            const cursor = new CursorManager(f.editor, new DOMUtils(f.editor), {
+                moveAcrossFootnoteReference: (selection, moveDirection) =>
+                    f.manager.moveAcrossFormula(selection, moveDirection),
+            });
+            const env = {
+                mathManager: f.manager, footnoteManager: { handleKeydown: () => false },
+                cursorManager: cursor, window: f.window, document: f.document,
+                tableManager: { handleCtrlNavKeydown: () => false },
+                getSelectedCodeBlockLanguageLabel: () => null, isHRSelected: () => null,
+                // The production arrow path delegates these atomic boundaries to
+                // CursorManager, with the same MathManager callback used here.
+                handleArrowKeydown: event => event.key === 'ArrowRight'
+                    ? cursor.moveCursorForward() : cursor.moveCursorBackward(),
+            };
+            const helpers = [
+                'handleKeydown', 'handleEmacsNavKeydown', 'recordCtrlNavHandled',
+                'shouldSuppressKeydownNav', 'shouldSuppressCommandNav', 'applySelectionRange',
+                'createCommandNavEvent', 'createArrowNavEventFromDirection',
+            ];
+            const navigation = new Function(...Object.keys(env), `
+                const isMac = true, isComposing = false;
+                const compositionUpdateGate = { composing: false };
+                const settingsState = { useVsCodeCtrlP: false };
+                const shouldRouteHorizontalArrowAfterComposition = () => false;
+                const isTextInputKeydown = () => false, isImeInteractionKeydown = () => false;
+                const handleTableStructureSelectKeydown = () => false, handleUndoRedoKeydown = () => false;
+                const ctrlNavSuppressWindowMs = 200;
+                let lastCtrlNavDirection = null, lastCtrlNavCommandTs = 0, lastCtrlNavKeydownTs = 0;
+                let lastCaretIntentSource = null;
+                ${helpers.map(extractEditorFunction).join('\n')}
+                return {
+                    keydown: handleKeydown,
+                    command(direction) {
+                        if (!shouldSuppressCommandNav(direction)) {
+                            handleEmacsNavKeydown(createCommandNavEvent(direction));
+                        }
+                    }
+                };
+            `)(...Object.values(env));
+            const previousWindow = global.window;
+            global.window = f.window;
+            try {
+                const event = key(pressedKey, { ctrlKey: true });
+                if (order === 'keydown-first') {
+                    navigation.keydown(event);
+                    navigation.command(direction);
+                } else {
+                    navigation.command(direction);
+                    navigation.keydown(event);
+                }
+                assert.equal(event.defaultPrevented, true);
+                assert.ok(f.manager.getSelectedFormula(f.range) === formula, `${pressedKey}: ${order}`);
+                assert.equal(f.editor.innerHTML, original);
+                assert.deepEqual(f.history, []);
+                assert.equal(f.changes, 0);
+            } finally {
+                global.window = previousWindow;
+            }
+        }
+    }
 });
 
 test('formulas render in shadow roots, so the document keeps only their TeX', async () => {

@@ -2521,7 +2521,9 @@ export class TableManager {
         const matrix = this._getSelectedMatrix();
         if (!matrix) return;
 
-        const text = matrix.map(row => row.join('\t')).join('\n');
+        const text = matrix.map(row => row.map(value => /["\t\r\n]/.test(value)
+            ? '"' + value.replace(/"/g, '""') + '"'
+            : value).join('\t')).join('\n');
         if (e.clipboardData) {
             e.clipboardData.setData('text/plain', text);
             e.preventDefault();
@@ -2554,11 +2556,50 @@ export class TableManager {
     }
 
     _parseClipboard(text) {
-        const lines = text.replace(/\r\n/g, '\n').split('\n');
-        if (lines.length && lines[lines.length - 1] === '') {
-            lines.pop();
+        const source = text.replace(/\r\n?/g, '\n');
+        if (!source) return [];
+        const rows = [];
+        let row = [];
+        let cell = '';
+        let quoted = false;
+        for (let index = 0; index < source.length; index++) {
+            const character = source[index];
+            if (quoted) {
+                if (character === '"' && source[index + 1] === '"') {
+                    cell += '"';
+                    index++;
+                } else if (character === '"' &&
+                    (index + 1 === source.length || /[\t\n]/.test(source[index + 1]))) {
+                    quoted = false;
+                } else {
+                    cell += character;
+                }
+            } else if (character === '"' && cell === '') {
+                quoted = true;
+            } else if (character === '\t') {
+                row.push(cell);
+                cell = '';
+            } else if (character === '\n') {
+                row.push(cell);
+                rows.push(row);
+                row = [];
+                cell = '';
+            } else {
+                cell += character;
+            }
         }
-        return lines.map(line => line.split('\t'));
+        if (quoted) {
+            // An unmatched quote is ordinary pasted text, not a reason to
+            // consume the remaining rows or drop the quote character.
+            const lines = source.split('\n');
+            if (lines[lines.length - 1] === '') lines.pop();
+            return lines.map(line => line.split('\t'));
+        }
+        if (row.length || cell !== '' || !source.endsWith('\n')) {
+            row.push(cell);
+            rows.push(row);
+        }
+        return rows;
     }
 
     _resolveDirectLinkTarget(text) {
@@ -3426,6 +3467,16 @@ export class TableManager {
         return afterText.length === 0;
     }
 
+    _createTemporaryBoundaryParagraph() {
+        const paragraph = document.createElement('p');
+        // Share CodeBlockGapManager's transient boundary lifecycle despite the
+        // legacy marker name: navigation alone must not add content or history.
+        paragraph.setAttribute('data-mdw-code-gap', 'true');
+        paragraph.textContent = '\u200B';
+        paragraph.firstChild.mdwCaretAnchor = { character: '\u200B', text: '\u200B', offset: 0 };
+        return paragraph;
+    }
+
     _moveCursorBeforeWrapper(wrapper, placeAtStart = false) {
         const prev = this._getPrevNavigableSiblingNode(wrapper);
         const selection = window.getSelection();
@@ -3460,10 +3511,9 @@ export class TableManager {
                 }
             }
         } else {
-            const p = document.createElement('p');
-            p.appendChild(document.createElement('br'));
+            const p = this._createTemporaryBoundaryParagraph();
             wrapper.parentElement.insertBefore(p, wrapper);
-            range.setStart(p, 0);
+            range.setStart(p.firstChild, 1);
         }
 
         range.collapse(true);
@@ -3526,14 +3576,13 @@ export class TableManager {
                 }
             }
         } else {
-            const p = document.createElement('p');
-            p.appendChild(document.createElement('br'));
+            const p = this._createTemporaryBoundaryParagraph();
             if (wrapper.nextSibling) {
                 wrapper.parentElement.insertBefore(p, wrapper.nextSibling);
             } else {
                 wrapper.parentElement.appendChild(p);
             }
-            range.setStart(p, 0);
+            range.setStart(p.firstChild, 1);
         }
 
         range.collapse(true);

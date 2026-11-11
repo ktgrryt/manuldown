@@ -98,6 +98,26 @@ test('opening Mermaid blocks defaults to diagrams and exposes the toggle beside 
     assert.equal(actions.querySelectorAll('.code-block-export-btn').length, 2);
 });
 
+test('returning to a cached diagram invalidates an older pending render', async t => {
+    const f = await fixture(t);
+    const code = f.pre.querySelector('code');
+    const original = code.textContent;
+    const originalSvg = f.pre.querySelector('.mermaid-preview').innerHTML;
+    let finish;
+    window.mermaid.render = () => new Promise(resolve => { finish = resolve; });
+    f.clickView(f.pre, 'code');
+    code.textContent = 'graph TD\nA-->C';
+    f.clickView(f.pre, 'diagram');
+    f.clickView(f.pre, 'code');
+    code.textContent = original;
+    f.clickView(f.pre, 'diagram');
+    finish({ svg: '<svg xmlns="http://www.w3.org/2000/svg"><text>stale C</text></svg>' });
+    await Promise.resolve();
+    assert.equal(f.pre.querySelector('.mermaid-preview').innerHTML, originalSvg);
+    assert.equal(f.manager.mermaidCache.get(f.pre).code, original);
+    assert.equal(f.manager.mermaidCache.get(f.pre).svg, originalSvg);
+});
+
 test('Download offers PNG and SVG, exports the chosen format and closes the menu', async t => {
     const f = await fixture(t);
     const toggle = f.pre.querySelector('.code-block-download-btn');

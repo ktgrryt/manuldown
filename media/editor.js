@@ -165,6 +165,7 @@ const {
     let imageResolveRequestSeq = 0;
     let imageInsertionRequestSeq = 0;
     const pendingImageInsertionRanges = new Map();
+    const pendingPastedDataImages = new Set();
     const PENDING_IMAGE_INSERTION_MAX_AGE_MS = 5 * 60 * 1000;
     const MAX_PENDING_IMAGE_INSERTIONS = 64;
     let workspaceLinkRequestSeq = 0;
@@ -197,26 +198,31 @@ const {
         );
     }
 
-    function prunePendingImageInsertionRanges() {
+    function prunePendingImageInsertionRanges(reserveSlot = true) {
         const oldestAllowed = Date.now() - PENDING_IMAGE_INSERTION_MAX_AGE_MS;
         for (const [requestId, pending] of pendingImageInsertionRanges) {
-            if (!pending || pending.createdAt < oldestAllowed || !isEditorRange(pending.range)) {
+            if (!pending || pending.createdAt < oldestAllowed ||
+                (!pending.imageElement && !isEditorRange(pending.range))) {
                 pendingImageInsertionRanges.delete(requestId);
             }
         }
-        while (pendingImageInsertionRanges.size >= MAX_PENDING_IMAGE_INSERTIONS) {
+        while (reserveSlot && pendingImageInsertionRanges.size >= MAX_PENDING_IMAGE_INSERTIONS) {
             const oldestRequestId = pendingImageInsertionRanges.keys().next().value;
             if (!oldestRequestId) break;
+            const pending = pendingImageInsertionRanges.get(oldestRequestId);
+            if (pending?.imageElement && editor.contains(pending.imageElement)) {
+                pendingPastedDataImages.add(pending.imageElement);
+            }
             pendingImageInsertionRanges.delete(oldestRequestId);
         }
     }
 
-    function beginImageInsertionRequest() {
+    function beginImageInsertionRequest(targetRange = null) {
         prunePendingImageInsertionRanges();
 
         const selection = window.getSelection();
-        let range = null;
-        if (selection && selection.rangeCount > 0) {
+        let range = targetRange && isEditorRange(targetRange) ? targetRange.cloneRange() : null;
+        if (!range && selection && selection.rangeCount > 0) {
             const selectedRange = selection.getRangeAt(0);
             if (isEditorRange(selectedRange)) {
                 range = selectedRange.cloneRange();
@@ -248,11 +254,51 @@ const {
         if (
             !pending ||
             Date.now() - pending.createdAt > PENDING_IMAGE_INSERTION_MAX_AGE_MS ||
-            !isEditorRange(pending.range)
+            (!pending.imageElement && !isEditorRange(pending.range))
         ) {
             return null;
         }
+        if (pending.imageElement && editor.contains(pending.imageElement)) {
+            pending.range.setStartBefore(pending.imageElement);
+            pending.range.setEndAfter(pending.imageElement);
+        }
         return pending;
+    }
+
+    function markPastedDataImage(image) {
+        const source = image.getAttribute('data-md-path') || image.getAttribute('src') || '';
+        if (/^data:image\//i.test(source)) {
+            pendingPastedDataImages.add(image);
+        }
+    }
+
+    function importPastedDataImages() {
+        prunePendingImageInsertionRanges(false);
+        for (const image of pendingPastedDataImages) {
+            pendingPastedDataImages.delete(image);
+            if (!editor.contains(image)) continue;
+            const dataUrl = image.getAttribute('data-md-path') || image.getAttribute('src') || '';
+            if (!/^data:image\//i.test(dataUrl)) continue;
+            if (pendingImageInsertionRanges.size >= MAX_PENDING_IMAGE_INSERTIONS) {
+                pendingPastedDataImages.add(image);
+                break;
+            }
+
+            // Keep the original image visible and serializable until its file
+            // exists. A failed write or a closed editor must not lose its bytes.
+            const range = document.createRange();
+            range.setStartBefore(image);
+            range.setEndAfter(image);
+            const requestId = beginImageInsertionRequest(range);
+            const pending = pendingImageInsertionRanges.get(requestId);
+            pending.imageElement = image;
+            image.setAttribute('data-mdw-image-import-id', requestId);
+            vscode.postMessage({
+                type: 'saveImage', requestId, dataUrl,
+                mimeType: dataUrl.match(/^data:([^;,]+)/i)?.[1] || '',
+                altText: image.getAttribute('alt') || 'image'
+            });
+        }
     }
 
     function prunePendingWorkspaceLinkInsertions() {
@@ -972,7 +1018,9 @@ const {
                 const originalSrc = element.getAttribute('src') || element.getAttribute('data-md-path') || '';
                 const classification = classifyImageSourceForEditor(originalSrc);
                 if (classification.kind === 'resolve-local' && !allowLocalImageResolution) {
-                    element.remove();
+                    const replacement = options.onRemovedLocalImage?.(element);
+                    if (replacement) element.replaceWith(replacement);
+                    else element.remove();
                     return;
                 }
                 applyImageSourcePolicy(
@@ -3059,15 +3107,22 @@ const {
 
     function normalizeClipboardPlainText(text) {
         return String(text || '')
-            .replace(/\r\n?/g, '\n')
-            .replace(/[\u200B\u2060\uFEFF]/g, '');
+            .replace(/\r\n?/g, '\n');
     }
 
     function normalizeExternalClipboardPlainText(text) {
         return normalizeClipboardPlainText(text)
-            .replace(/\u00A0/g, ' ')
-            .replace(/[\u000B\u000C\u2028\u2029]/g, '\n')
-            .replace(/[\u200C\u200D\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, '');
+            .replace(/[\u000B\u000C\u2028\u2029]/g, '\n');
+    }
+
+    function parsePastedFenceOpening(line) {
+        const match = String(line || '').match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+        if (!match || (match[1][0] === '`' && match[2].includes('`'))) return null;
+        return { marker: match[1][0], length: match[1].length, language: match[2].trim() };
+    }
+
+    function isPastedFenceClosing(line, fence) {
+        return new RegExp(`^ {0,3}${fence.marker}{${fence.length},}[ \\t]*$`).test(line);
     }
 
     function isOfficeClipboardHtml(rawHtml) {
@@ -6908,6 +6963,7 @@ const {
 
     function createSyncSnapshot(options = {}) {
         codeBlockGapManager.reconcile(window.getSelection(), isComposing || compositionUpdateGate.composing);
+        importPastedDataImages();
         const preservePendingUpdate = options.preservePendingUpdate === true;
         if (!preservePendingUpdate) {
             clearNotifyTimeout();
@@ -6924,7 +6980,7 @@ const {
         }
 
         return {
-            content: domUtils.getCleanedHTML(),
+            content: domUtils.getCleanedHTML({ canonicalImages: true }),
             revision: localUpdateRevision
         };
     }
@@ -7034,6 +7090,7 @@ const {
         footnoteManager.reconcileReferenceDeletion();
         footnoteManager.refresh();
         codeBlockGapManager.reconcile(window.getSelection(), isComposing || compositionUpdateGate.composing);
+        importPastedDataImages();
         if (options.preservePendingPastedPathLinks !== true) {
             finalizePendingPastedPathLinks();
         }
@@ -7184,6 +7241,15 @@ const {
             flushingCaretPlacements = false;
         }
         return flushed;
+    }
+
+    function handlePointerCaretIntent() {
+        cursorManager?.resetCodeVerticalNavigation?.();
+        if (isComposing || compositionUpdateGate.composing) return;
+        // Complete the previous edit before the pointer's default selection or
+        // focus change. A later animation frame must not override the new click,
+        // including clicks on an input outside the contenteditable body.
+        flushPendingCaretPlacement();
     }
 
     function getCodeBlockCursorOffset(codeBlock, range) {
@@ -7606,45 +7672,54 @@ const {
         const blockquote = domUtils.getParentElement(container, 'BLOCKQUOTE');
         if (!blockquote) return false;
 
-        // 引用ブロック内のテキストノードを取得
-        const allTextNodes = domUtils.getTextNodes(blockquote);
+        const isEditorChrome = node => {
+            const element = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+            return !!element?.closest('[data-exclude-from-markdown="true"], [aria-hidden="true"], .code-block-toolbar');
+        };
+        const lastText = domUtils.getTextNodes(blockquote).filter(node =>
+            !isEditorChrome(node) && /[^\u200B\u2060\uFEFF\s]/u.test(node.textContent || '')
+        ).pop();
+        const atoms = Array.from(blockquote.querySelectorAll(
+            'img, hr, table, pre, input, [data-mdw-math], [data-mdw-footnote-ref]'
+        )).filter(node => !isEditorChrome(node));
 
-        // 空白のみではない「意味のある」テキストノードを取得
-        const meaningfulTextNodes = allTextNodes.filter(tn => tn.textContent.trim() !== '');
-
-        // 意味のあるテキストノードがない場合は末尾とみなす
-        if (meaningfulTextNodes.length === 0) return true;
-
-        const lastMeaningfulTextNode = meaningfulTextNodes[meaningfulTextNodes.length - 1];
-        const offset = range.startOffset;
-
-        // 現在のカーソル位置が意味のある最後のテキストノード内にある場合
-        if (container === lastMeaningfulTextNode) {
-            // 末尾または末尾付近（残りがZWSPや空白のみ）にいるかチェック
-            const remainingText = lastMeaningfulTextNode.textContent.slice(offset);
-            const cleanRemaining = remainingText.replace(/[\u200B\u2060\s]/g, '');
-            if (cleanRemaining === '') {
-                return true;
+        // Element offsets count children, not characters. Compare actual DOM
+        // boundaries so a caret after a formula or formatting wrapper cannot
+        // skip the rest of the quote. Atomic content counts even without text.
+        try {
+            const end = document.createRange();
+            if (lastText) {
+                const offset = (lastText.textContent || '').replace(/[\u200B\u2060\uFEFF\s]+$/u, '').length;
+                end.setStart(lastText, offset);
+                end.collapse(true);
+                if (range.compareBoundaryPoints(Range.START_TO_START, end) < 0) return false;
             }
-        }
-
-        // コンテナが要素の場合（例：<p>内にカーソルがある場合）
-        if (container.nodeType === Node.ELEMENT_NODE) {
-            // カーソルが要素の最後にある場合
-            if (offset === container.childNodes.length || offset > 0) {
-                // その要素がblockquote内の最後の意味のあるテキストを含むかチェック
-                if (container.contains(lastMeaningfulTextNode)) {
-                    // 最後の意味のあるテキストノードの後にカーソルがあるか確認
-                    const containerTextNodes = domUtils.getTextNodes(container);
-                    const lastContainerTextNode = containerTextNodes.filter(tn => tn.textContent.trim() !== '').pop();
-                    if (lastContainerTextNode === lastMeaningfulTextNode) {
-                        return true;
-                    }
+            const lastAtom = atoms.pop();
+            if (lastAtom) {
+                end.setStartAfter(lastAtom);
+                end.collapse(true);
+                if (range.compareBoundaryPoints(Range.START_TO_START, end) < 0) return false;
+            }
+            // Keep intentional empty quote lines reachable. A lone trailing BR
+            // is a browser placeholder; a BR before another BR starts a real
+            // empty line, as does an empty paragraph after the current one.
+            for (const line of blockquote.querySelectorAll('p, br')) {
+                if (isEditorChrome(line)) continue;
+                if (line.tagName === 'BR') {
+                    if (line.nextElementSibling?.tagName !== 'BR') continue;
+                    end.setStartAfter(line);
+                } else {
+                    if (/[^\u200B\u2060\uFEFF\s]/u.test(line.textContent || '') ||
+                        line.querySelector('img, hr, table, pre, input, code, [data-mdw-math], [data-mdw-footnote-ref]')) continue;
+                    end.setStart(line, 0);
                 }
+                end.collapse(true);
+                if (range.compareBoundaryPoints(Range.START_TO_START, end) < 0) return false;
             }
+            return true;
+        } catch (_error) {
+            return false;
         }
-
-        return false;
     }
 
     function shouldExitBlockquoteDownByVisualPosition() {
@@ -12544,8 +12619,8 @@ const {
             const raw = nextSibling.textContent || '';
             const compact = raw.replace(/[\u00A0\s]/g, '');
             const hasPlaceholderSignal =
-                /&ZeroWidthSpace;/i.test(compact) ||
-                /[\u200B\u2060\uFEFF]/.test(compact);
+                /&ZeroWidthSpace;/i.test(raw) ||
+                /[\u200B\u2060\uFEFF]/.test(raw);
             const normalized = compact
                 .replace(/&ZeroWidthSpace;/gi, '')
                 .replace(/[\u200B\u2060\uFEFF]/g, '');
@@ -13268,6 +13343,13 @@ const {
         if (!codeBlock) return false;
 
         const text = cursorManager.getCodeBlockText(codeBlock);
+        if (!force && selection.rangeCount) {
+            const cursorOffset = getCodeBlockCursorOffset(codeBlock, selection.getRangeAt(0));
+            if (cursorOffset !== null) {
+                const { lines, currentLineIndex } = cursorManager.getCodeBlockLineInfo(text, cursorOffset);
+                if (currentLineIndex < getCodeBlockLastNavigableLineIndex(lines, text)) return false;
+            }
+        }
         const normalized = text.replace(/[\u200B\u2060\u00A0\s]/g, '');
         if (normalized !== '') {
             if (!allowNonEmpty && !force) return false;
@@ -13282,6 +13364,7 @@ const {
             }
         }
 
+        cursorManager.resetCodeVerticalNavigation();
         if (codeBlockGapManager.moveToGap(preBlock, 'down', selection)) return true;
 
         const nextNode = getNextNavigableNodeAfter(preBlock);
@@ -13415,7 +13498,6 @@ const {
         const cursorOffset = getCodeBlockCursorOffset(codeBlock, range);
         if (cursorOffset !== null) {
             const { lines, currentLineIndex } = cursorManager.getCodeBlockLineInfo(text, cursorOffset);
-            if (isCodeNavigationWhitespace(text)) return true;
             return currentLineIndex >= getCodeBlockLastNavigableLineIndex(lines, text);
         }
 
@@ -13442,6 +13524,7 @@ const {
         const { preBlock, codeBlock } = context;
         if (isCodeBlockDownExitPosition(range, preBlock, codeBlock) &&
             codeBlockGapManager.moveToGap(preBlock, 'down', selection)) {
+            cursorManager.resetCodeVerticalNavigation();
             return true;
         }
         const targetParagraph = getFollowingEmptyParagraphAfterCodeBlock(preBlock);
@@ -13451,6 +13534,7 @@ const {
         if (!placeCaretInEmptyParagraph(targetParagraph, selection)) {
             return false;
         }
+        cursorManager.resetCodeVerticalNavigation();
         editor.focus();
         return true;
     }
@@ -13468,8 +13552,7 @@ const {
             cursorOffset !== null ? cursorOffset : text.length
         );
 
-        if (isCodeNavigationWhitespace(text) ||
-            currentLineIndex >= getCodeBlockLastNavigableLineIndex(lines, text)) {
+        if (currentLineIndex >= getCodeBlockLastNavigableLineIndex(lines, text)) {
             return exitEmptyCodeBlockDownFromPre(preBlock, selection, true, true);
         }
         return false;
@@ -13518,8 +13601,7 @@ const {
             }
             if (cursorOffset !== null) {
                 const { lines, currentLineIndex } = cursorManager.getCodeBlockLineInfo(text, cursorOffset);
-                if (isCodeNavigationWhitespace(text) ||
-                    currentLineIndex >= getCodeBlockLastNavigableLineIndex(lines, text) ||
+                if (currentLineIndex >= getCodeBlockLastNavigableLineIndex(lines, text) ||
                     (trailingText !== null &&
                         trailingText.replace(/[\u200B\u2060\u00A0\s]/g, '') === '' &&
                         isCaretOnLastVisualLine(range, preBlock)) ||
@@ -13574,7 +13656,7 @@ const {
 
         const text = cursorManager.getCodeBlockText(codeBlock);
         const cursorOffset = getCodeBlockCursorOffset(codeBlock, range);
-        if (cursorOffset !== null && !isCodeNavigationWhitespace(text)) {
+        if (cursorOffset !== null) {
             const { lines, currentLineIndex } = cursorManager.getCodeBlockLineInfo(text, cursorOffset);
             if (currentLineIndex < getCodeBlockLastNavigableLineIndex(lines, text)) {
                 return false;
@@ -13658,25 +13740,22 @@ const {
         const text = cursorManager.getCodeBlockText(codeBlock);
         const cursorOffset = getCodeBlockCursorOffset(codeBlock, range);
         if (cursorOffset !== null) {
-            const { lines, lineStartOffsets, currentLineIndex, column } =
+            const { lines, currentLineIndex } =
                 cursorManager.getCodeBlockLineInfo(text, cursorOffset);
             const lastLineIndex = getCodeBlockLastNavigableLineIndex(lines, text);
 
-            if (isCodeNavigationWhitespace(text) ||
-                currentLineIndex >= lastLineIndex) {
+            if (currentLineIndex >= lastLineIndex) {
                 const exited = exitEmptyCodeBlockDownFromPre(preBlock, selection, true, true);
                 if (exited) scheduleEnsureExitFromPre(preBlock);
                 return exited ? { handled: true, exited: true } : null;
             }
 
             const targetLineIndex = Math.min(currentLineIndex + 1, lastLineIndex);
-            const targetLineStart = lineStartOffsets[targetLineIndex];
-            if (typeof targetLineStart === 'number') {
-                const targetOffset = targetLineStart +
-                    Math.min(column, (lines[targetLineIndex] || '').length);
-                if (cursorManager.setCodeBlockCursorOffset(codeBlock, selection, targetOffset)) {
-                    return { handled: true, exited: false };
-                }
+            const targetOffset = cursorManager.getCodeVerticalTargetOffset(
+                codeBlock, text, cursorOffset, targetLineIndex
+            );
+            if (cursorManager.setCodeBlockCursorOffset(codeBlock, selection, targetOffset)) {
+                return { handled: true, exited: false };
             }
         }
 
@@ -13727,25 +13806,19 @@ const {
         if (!inCode) return null;
 
         const text = cursorManager.getCodeBlockText(codeBlock);
-        const normalizedText = text.replace(/[\u200B\u2060\u00A0\s]/g, '');
-        if (normalizedText === '') {
-            if (selectCodeBlockLanguageLabel(preBlock)) {
-                return { handled: true, moved: true };
-            }
-            cursorManager.setCodeBlockCursorOffset(codeBlock, selection, 0);
-            return { handled: true, moved: false };
-        }
         const cursorOffset = getCodeBlockCursorOffset(codeBlock, range);
         if (cursorOffset === null) {
+            cursorManager.resetCodeVerticalNavigation();
             if (cursorManager.setCodeBlockCursorOffset(codeBlock, selection, 0)) {
                 return { handled: true, moved: false };
             }
             return { handled: true, moved: false };
         }
 
-        const { lines, lineStartOffsets, currentLineIndex, column } =
+        const { currentLineIndex } =
             cursorManager.getCodeBlockLineInfo(text, cursorOffset);
         if (currentLineIndex <= 0) {
+            cursorManager.resetCodeVerticalNavigation();
             if (selectCodeBlockLanguageLabel(preBlock)) {
                 return { handled: true, moved: true };
             }
@@ -13754,13 +13827,11 @@ const {
         }
 
         const targetLineIndex = Math.max(0, currentLineIndex - 1);
-        const targetLineStart = lineStartOffsets[targetLineIndex];
-        if (typeof targetLineStart === 'number') {
-            const targetOffset = targetLineStart +
-                Math.min(column, (lines[targetLineIndex] || '').length);
-            if (cursorManager.setCodeBlockCursorOffset(codeBlock, selection, targetOffset)) {
-                return { handled: true, moved: true };
-            }
+        const targetOffset = cursorManager.getCodeVerticalTargetOffset(
+            codeBlock, text, cursorOffset, targetLineIndex
+        );
+        if (cursorManager.setCodeBlockCursorOffset(codeBlock, selection, targetOffset)) {
+            return { handled: true, moved: true };
         }
         return { handled: true, moved: false };
     }
@@ -14781,8 +14852,7 @@ const {
                                     shouldExit = isCaretNearBlockBottom(range, preBlock);
                                 } else {
                                     const { lines, currentLineIndex } = cursorManager.getCodeBlockLineInfo(text, cursorOffset);
-                                    shouldExit = isCodeNavigationWhitespace(text) ||
-                                        currentLineIndex >= getCodeBlockLastNavigableLineIndex(lines, text);
+                                    shouldExit = currentLineIndex >= getCodeBlockLastNavigableLineIndex(lines, text);
                                 }
                                 if (!shouldExit &&
                                     trailingText !== null &&
@@ -14893,8 +14963,7 @@ const {
                             shouldExit = true;
                         } else {
                             const { lines, currentLineIndex } = cursorManager.getCodeBlockLineInfo(text, cursorOffset);
-                            shouldExit = isCodeNavigationWhitespace(text) ||
-                                currentLineIndex >= getCodeBlockLastNavigableLineIndex(lines, text);
+                            shouldExit = currentLineIndex >= getCodeBlockLastNavigableLineIndex(lines, text);
                         }
                         if (!shouldExit && isCaretOnLastVisualLine(rangeAfter, preBlock)) {
                             shouldExit = true;
@@ -18012,6 +18081,9 @@ const {
         }
 
         if (mathManager.handleKeydown(e, isMac)) {
+            if (ctrlNavDirection) {
+                recordCtrlNavHandled(ctrlNavDirection, false);
+            }
             return;
         }
 
@@ -18895,6 +18967,8 @@ const {
                 flushPendingCaretPlacement();
             }
         }, true);
+        document.addEventListener('pointerdown', handlePointerCaretIntent, true);
+        document.addEventListener('mousedown', handlePointerCaretIntent, true);
 
         // Caret moves, shortcuts, clicks and IME input end the current typing
         // run, so the next keystroke starts its own undo step.
@@ -19159,6 +19233,7 @@ const {
 
         editor.addEventListener('input', (e) => {
             if (!isUpdating) {
+                cursorManager?.resetCodeVerticalNavigation?.();
                 updateEditorPlaceholderState();
                 domUtils.commitCaretAnchorInput();
                 if (tableManager._compositionBlockedEdge) {
@@ -19684,14 +19759,14 @@ const {
             return true;
         };
 
-        const saveImageFileToWorkspace = (file) => {
+        const saveImageFileToWorkspace = (file, targetRange = null, altText = undefined) => {
             if (!file) return;
             if (Number.isFinite(file.size) && file.size > MAX_IMPORTED_IMAGE_BYTES) {
                 vscode.postMessage({ type: 'imageImportTooLarge' });
                 return;
             }
 
-            const requestId = beginImageInsertionRequest();
+            const requestId = beginImageInsertionRequest(targetRange);
             const reader = new FileReader();
             reader.onload = (event) => {
                 const dataUrl = event && event.target ? event.target.result : null;
@@ -19711,6 +19786,7 @@ const {
                 vscode.postMessage({
                     type: 'saveImage',
                     requestId,
+                    ...(typeof altText === 'string' ? { altText } : {}),
                     dataUrl: dataUrl,
                     mimeType: mimeType || 'image/png'
                 });
@@ -19823,6 +19899,7 @@ const {
             image.setAttribute('data-md-path', src);
             if (options.applySourcePolicy !== false) {
                 applyImageSourcePolicy(image, src, { markdownPath: src });
+                markPastedDataImage(image);
             }
             applyImageRenderSizeFromAlt(image);
             return image;
@@ -20370,7 +20447,8 @@ const {
             rawHtml,
             trustedImages = null,
             requireTrustedImagePaths = false,
-            trustedInternalContent = false
+            trustedInternalContent = false,
+            nativeImageFiles = []
         ) => {
             if (typeof rawHtml !== 'string' || rawHtml.trim() === '') {
                 return false;
@@ -20394,9 +20472,34 @@ const {
 
             const preparedFootnotes = footnoteManager.prepareClipboardImport(rawHtml);
             const preparedMath = mathManager.prepareClipboardImport(preparedFootnotes.html);
+            const nativeImageSlots = [];
             const container = createSanitizedContainerFromHtml(preparedMath.html, {
-                allowLocalImageResolution: false
+                allowLocalImageResolution: false,
+                onRemovedLocalImage: nativeImageFiles.length ? (image) => {
+                    const placeholder = document.createComment('clipboard-image');
+                    nativeImageSlots.push({ placeholder, alt: image.getAttribute('alt') || 'image' });
+                    return placeholder;
+                } : undefined
             });
+            const nativeImageInsertions = [];
+            if (nativeImageSlots.length) {
+                if (nativeImageSlots.length === nativeImageFiles.length) {
+                    nativeImageSlots.forEach((slot, index) =>
+                        nativeImageInsertions.push({ ...slot, file: nativeImageFiles[index] }));
+                } else {
+                    // Some applications offer one composite PNG for several
+                    // local references. Retain each available PNG once rather
+                    // than guessing which reference it belongs to.
+                    nativeImageSlots.forEach(slot => slot.placeholder.remove());
+                    nativeImageFiles.forEach(file => {
+                        const paragraph = document.createElement('p');
+                        const placeholder = document.createComment('clipboard-image');
+                        paragraph.appendChild(placeholder);
+                        container.appendChild(paragraph);
+                        nativeImageInsertions.push({ placeholder, file, alt: 'image' });
+                    });
+                }
+            }
             container.querySelectorAll('[data-exclude-from-markdown="true"]').forEach((node) => node.remove());
             if (!restoreInternalClipboardImagePaths(
                 container,
@@ -20536,6 +20639,10 @@ const {
             }
             const importedFootnotes = footnoteManager.restoreClipboardImport(container, preparedFootnotes, trustedInternalContent);
             mathManager.restoreClipboardImport(container, preparedMath);
+            container.querySelectorAll('img').forEach(markPastedDataImage);
+            importedFootnotes.forEach(note => note.querySelectorAll('img').forEach(markPastedDataImage));
+            if (!container.textContent && !container.querySelector('img,br,table,hr,ul,ol,input,pre') &&
+                !nativeImageInsertions.length && !importedFootnotes.length) return false;
             const nodes = Array.from(container.childNodes || []);
             if (nodes.length === 0) {
                 if (importedFootnotes.length) {
@@ -20557,6 +20664,16 @@ const {
                 lastInsertedNode = node;
             });
 
+            const importNativeImages = () => {
+                nativeImageInsertions.forEach(({ placeholder, file, alt }) => {
+                    if (!editor.contains(placeholder)) return;
+                    const imageRange = document.createRange();
+                    imageRange.setStartBefore(placeholder);
+                    imageRange.setEndAfter(placeholder);
+                    saveImageFileToWorkspace(file, imageRange, alt);
+                });
+            };
+
             stateManager.saveState();
             const hasTopLevelBlock = nodes.some((node) => node.nodeType === Node.ELEMENT_NODE && isBlockElement(node));
             if (!hasTopLevelBlock &&
@@ -20565,6 +20682,7 @@ const {
                     insertInlineFragmentAtCollapsedListBoundary(range, selection, fragment)
                 )) {
                 importedFootnotes.forEach(note => editor.appendChild(note));
+                importNativeImages();
                 normalizeCheckboxListItems();
                 domUtils.ensureInlineCodeSpaces();
                 domUtils.cleanupGhostStyles();
@@ -20591,6 +20709,7 @@ const {
             }
 
             importedFootnotes.forEach(note => editor.appendChild(note));
+            importNativeImages();
             normalizeCheckboxListItems();
             domUtils.ensureInlineCodeSpaces();
             domUtils.cleanupGhostStyles();
@@ -20818,8 +20937,11 @@ const {
         const tryInsertFencedCodeBlockFromPastedText = (rawText) => {
             if (typeof rawText !== 'string') return false;
             const normalized = rawText.replace(/\r\n?/g, '\n').replace(/^\n+|\n+$/g, '');
-            const match = normalized.match(/^```([^\n`]*)\n([\s\S]*?)\n?```$/);
-            if (!match) return false;
+            const lines = normalized.split('\n');
+            const fence = parsePastedFenceOpening(lines[0]);
+            if (!fence) return false;
+            const closing = lines.findIndex((line, index) => index > 0 && isPastedFenceClosing(line, fence));
+            if (closing !== lines.length - 1) return false;
 
             const ctx = getSelectionRangeForPaste();
             if (!ctx) return false;
@@ -20828,8 +20950,8 @@ const {
                 return false;
             }
 
-            const language = (match[1] || '').trim();
-            const codeContent = match[2] === '' ? '\n' : match[2];
+            const language = fence.language;
+            const codeContent = lines.slice(1, closing).join('\n') || '\n';
             const pre = document.createElement('pre');
             const code = document.createElement('code');
             if (language) {
@@ -21262,7 +21384,7 @@ const {
                 'blockquote',
                 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
                 'img', 'hr',
-                'input', 'a'
+                'input', 'a', 'strong', 'b', 'em', 'i', 'del', 's', 'strike'
             ].join(', ');
             return !container.querySelector(semanticSelector);
         };
@@ -21425,7 +21547,7 @@ const {
             if (lines.length === 0) return false;
             const hasExplicitBlankLine = lines.some((line) => isPastedBlankLine(line));
 
-            const isFenceStart = (line) => /^\s*```/.test(line || '');
+            const isFenceStart = (line) => !!parsePastedFenceOpening(line);
             const parseHeadingLine = (line) => {
                 const match = (line || '').match(/^\s*(#{1,6})\s+(.+?)\s*$/);
                 if (!match) return null;
@@ -21483,33 +21605,32 @@ const {
                     continue;
                 }
 
-                if (isFenceStart(line)) {
-                    const open = line.match(/^\s*```([^\n`]*)\s*$/);
-                    if (open) {
-                        let closeIndex = -1;
-                        for (let j = i + 1; j < lines.length; j++) {
-                            if (/^\s*```/.test(lines[j] || '')) {
-                                closeIndex = j;
-                                break;
-                            }
-                        }
-                        if (closeIndex !== -1) {
-                            const language = (open[1] || '').trim();
-                            const codeContent = lines.slice(i + 1, closeIndex).join('\n');
-                            const pre = document.createElement('pre');
-                            const code = document.createElement('code');
-                            if (language) {
-                                code.className = `language-${language.toLowerCase()}`;
-                            }
-                            code.textContent = codeContent === '' ? '\n' : codeContent;
-                            pre.appendChild(code);
-                            codeBlockManager.addCodeBlockControls(pre, language);
-                            blocks.push(pre);
-                            hasMarkdownSyntax = true;
-                            i = closeIndex + 1;
-                            continue;
+                const fence = parsePastedFenceOpening(line);
+                if (fence) {
+                    let closeIndex = -1;
+                    for (let j = i + 1; j < lines.length; j++) {
+                        if (isPastedFenceClosing(lines[j], fence)) {
+                            closeIndex = j;
+                            break;
                         }
                     }
+                    const unclosed = closeIndex === -1;
+                    if (unclosed) closeIndex = lines.length;
+                    const language = fence.language;
+                    const body = lines.slice(i + 1, closeIndex).join('\n');
+                    const codeContent = unclosed ? body.replace(/\n$/, '') : body;
+                    const pre = document.createElement('pre');
+                    const code = document.createElement('code');
+                    if (language) {
+                        code.className = `language-${language.toLowerCase()}`;
+                    }
+                    code.textContent = codeContent === '' ? '\n' : codeContent;
+                    pre.appendChild(code);
+                    codeBlockManager.addCodeBlockControls(pre, language);
+                    blocks.push(pre);
+                    hasMarkdownSyntax = true;
+                    i = closeIndex + 1;
+                    continue;
                 }
 
                 if (isTableStartAt(i)) {
@@ -21832,7 +21953,7 @@ const {
                 return true;
             }
 
-            if (!allowPlainTextFallback || typeof rawText !== 'string') {
+            if (!allowPlainTextFallback || typeof rawText !== 'string' || rawText === '') {
                 return false;
             }
 
@@ -21878,7 +21999,13 @@ const {
                 const pastedHtmlContainsImage = typeof pastedHtml === 'string' && /<img\b/i.test(pastedHtml);
                 const internalPastedText = clipboardData.getData(INTERNAL_EDITOR_PLAIN_TEXT_CLIPBOARD_TYPE);
                 const rawExternalPastedText = clipboardData.getData('text/plain');
-                const externalPastedText = normalizeExternalClipboardPlainText(rawExternalPastedText);
+                const externalPastedText = rawExternalPastedText
+                    ? normalizeExternalClipboardPlainText(rawExternalPastedText)
+                    : (pastedHtml && !internalPastedHtml
+                        ? fragmentToClipboardPlainText(createSanitizedContainerFromHtml(
+                            extractHtmlClipboardFragment(pastedHtml), { allowLocalImageResolution: false }
+                        ))
+                        : '');
                 const pastedText = internalPastedText || externalPastedText;
 
                 // Inline code holds literal text: paste only the plain text there,
@@ -21902,16 +22029,24 @@ const {
                 const directLinkTarget = resolveDirectLinkTarget(pastedText);
                 const pastedAbsolutePath = getPastedAbsolutePathCandidate(rawExternalPastedText);
                 const hasListLikeText = !!(pastedText && pastedTextLooksLikeList(pastedText));
-                // A copy made in this editor keeps its formatting in the HTML
-                // payload. The plain-text list path below would drop bold, links
-                // and inline code, so leave structured internal HTML to the
-                // internal HTML path.
-                const internalHtmlHasStructure = !!internalPastedHtml &&
-                    !internalHtmlIsListlessPlainText(internalPastedHtml);
+                const nativeImageFiles = !internalPastedHtml && pastedHtmlContainsImage &&
+                    !isRangeInsideCodeBlock(pasteRange)
+                    ? Array.from(items || []).filter(item => /^image\//i.test(item.type))
+                        .map(item => item.getAsFile()).filter(Boolean)
+                    : [];
+                const officePastedHtml = internalPastedHtml || nativeImageFiles.length
+                    ? '' : createOfficeClipboardHtml(pastedHtml);
+                // Leave native-image references intact until the single import
+                // pass can replace them with request-scoped image placeholders.
+                const richPastedHtml = internalPastedHtml ||
+                    (nativeImageFiles.length ? extractHtmlClipboardFragment(pastedHtml) : officePastedHtml) ||
+                    ((pastedHtmlContainsImage || !rawExternalPastedText) ? extractHtmlClipboardFragment(pastedHtml) : '');
+                const richHtmlHasStructure = nativeImageFiles.length > 0 ||
+                    (!!richPastedHtml && !internalHtmlIsListlessPlainText(richPastedHtml));
 
                 if (
                     hasListLikeText &&
-                    !internalHtmlHasStructure &&
+                    !richHtmlHasStructure &&
                     selection &&
                     insertTextWithPasteBehavior(pastedText, { allowPlainTextFallback: false })
                 ) {
@@ -21919,16 +22054,13 @@ const {
                     return;
                 }
 
-                const officePastedHtml = internalPastedHtml ? '' : createOfficeClipboardHtml(pastedHtml);
-                const richPastedHtml = internalPastedHtml || officePastedHtml || (pastedHtmlContainsImage ? pastedHtml : '');
-
                 if (
                     selection &&
                     richPastedHtml &&
                     !trustedInternalPayload &&
                     !(
                         hasListLikeText &&
-                        internalHtmlIsListlessPlainText(richPastedHtml)
+                        !richHtmlHasStructure
                     )
                 ) {
                     const copiedImage = extractSingleImageFromClipboardHtml(
@@ -21954,13 +22086,14 @@ const {
                     richPastedHtml &&
                     !(
                         hasListLikeText &&
-                        internalHtmlIsListlessPlainText(richPastedHtml)
+                        !richHtmlHasStructure
                     ) &&
                     tryInsertInternalHtmlFromClipboard(
                         richPastedHtml,
                         trustedInternalImages,
                         !!internalPastedHtml,
-                        !!trustedInternalPayload
+                        !!trustedInternalPayload,
+                        nativeImageFiles
                     )
                 ) {
                     e.preventDefault();
@@ -22056,6 +22189,12 @@ const {
                 }
 
                 if (!hasImageFile) {
+                    if (!pastedText) {
+                        // Empty or entirely filtered HTML must not delete a
+                        // selection through an empty-text/native paste fallback.
+                        e.preventDefault();
+                        return;
+                    }
                     if (
                         typeof pastedText === 'string' &&
                         insertTextWithPasteBehavior(pastedText, { allowPlainTextFallback: true })
@@ -24966,6 +25105,7 @@ const {
                     // A request-scoped insertion must never fall through to the
                     // user's current caret if its original live Range was lost.
                     if (requestId && !pendingInsertion) {
+                        importPastedDataImages();
                         break;
                     }
 
@@ -25019,7 +25159,35 @@ const {
                     if (imageSrc) {
                         applyImageSourcePolicy(img, imageSrc, { markdownPath });
                     }
+                    if (pendingInsertion?.imageElement) {
+                        const original = pendingInsertion.imageElement;
+                        img.alt = original.getAttribute('alt') || 'image';
+                        for (const name of ['title', 'width', 'height']) {
+                            if (original.hasAttribute(name)) {
+                                img.setAttribute(name, original.getAttribute(name));
+                            }
+                        }
+                    }
                     applyImageRenderSizeFromAlt(img);
+
+                    if (pendingInsertion?.imageElement) {
+                        stateManager.resolvePastedImage?.(requestId, markdownPath, imageSrc);
+                        const original = pendingInsertion.imageElement;
+                        if (editor.contains(original)) {
+                            // Keep the same DOM node and attribute ordering as
+                            // the rewritten snapshots. Normalization must not
+                            // look like a new edit to the history comparator.
+                            original.setAttribute('src', imageSrc);
+                            original.setAttribute('data-md-path', markdownPath);
+                            original.removeAttribute('data-mdw-image-import-id');
+                            applyImageSourcePolicy(original, imageSrc, { markdownPath });
+                            applyImageRenderSizeFromAlt(original);
+                            notifyChangeImmediate();
+                        } else {
+                            importPastedDataImages();
+                        }
+                        break;
+                    }
 
                     // The picker response can arrive after the user moved elsewhere.
                     // Serialize the request-scoped Range without stealing the live
@@ -25133,9 +25301,8 @@ const {
                 }
                 break;
             case 'imageInsertFailed':
-                discardPendingImageInsertion(
-                    typeof message.requestId === 'string' ? message.requestId : ''
-                );
+                discardPendingImageInsertion(message.requestId);
+                importPastedDataImages();
                 break;
             case 'requestSync':
                 notifyChangeImmediate();

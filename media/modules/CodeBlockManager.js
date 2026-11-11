@@ -564,15 +564,15 @@ export class CodeBlockManager {
             return;
         }
 
+        // Even a cache hit supersedes every older asynchronous render.
+        const token = Symbol('mermaid-render');
+        this.mermaidRenderTokens.set(pre, token);
         const cached = this.mermaidCache.get(pre);
         if (cached && cached.code === code && cached.svg) {
             const preview = this._ensureMermaidPreview(pre);
             this._applyMermaidSvg(preview, cached.svg, null);
             return;
         }
-
-        const token = Symbol('mermaid-render');
-        this.mermaidRenderTokens.set(pre, token);
 
         const renderId = `mermaid-${++this.mermaidIdCounter}`;
         let result;

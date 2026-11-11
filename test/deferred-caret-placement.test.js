@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
+const domino = require('@mixmark-io/domino');
 
 const editorSource = fs.readFileSync(path.join(__dirname, '..', 'media', 'editor.js'), 'utf8');
 
@@ -13,7 +14,7 @@ function sliceEditorSource(startMarker, endMarker) {
 }
 
 // The editor.js helpers with a frame queue the test advances by hand.
-function createDeferredCaretPlacement() {
+function createDeferredCaretPlacement(options = {}) {
     const frames = new Map();
     let nextFrame = 1;
     const requestAnimationFrame = (callback) => {
@@ -22,10 +23,18 @@ function createDeferredCaretPlacement() {
     };
     const cancelAnimationFrame = (id) => frames.delete(id);
     const source = sliceEditorSource('const pendingCaretPlacements = new Set();', 'function getCodeBlockCursorOffset(');
+    const pointerListeners = sliceEditorSource(
+        "document.addEventListener('pointerdown', handlePointerCaretIntent, true);",
+        '// Caret moves, shortcuts, clicks and IME input end the current typing'
+    );
     const helpers = new Function(
-        'requestAnimationFrame', 'cancelAnimationFrame', 'stateManager',
-        `${source}\nreturn { deferCaretPlacement, flushPendingCaretPlacement };`
-    )(requestAnimationFrame, cancelAnimationFrame, { flushPendingHistoryRestore: () => false });
+        'requestAnimationFrame', 'cancelAnimationFrame', 'stateManager', 'document',
+        'cursorManager', 'isComposing', 'compositionUpdateGate',
+        `${source}\n${pointerListeners}\nreturn { deferCaretPlacement, flushPendingCaretPlacement };`
+    )(requestAnimationFrame, cancelAnimationFrame,
+        options.stateManager || { flushPendingHistoryRestore: () => false },
+        options.document || { addEventListener() {} }, options.cursorManager || {},
+        options.isComposing || false, options.compositionUpdateGate || { composing: false });
     const takeFrame = () => {
         const callbacks = [...frames.values()];
         frames.clear();
@@ -33,6 +42,129 @@ function createDeferredCaretPlacement() {
     };
     return { ...helpers, runFrame: () => takeFrame()(), takeFrame };
 }
+
+function pointerFixture(html) {
+    const window = domino.createWindow(`<div id="editor">${html}</div><input id="outside">`);
+    const document = window.document;
+    const editor = document.getElementById('editor');
+    Object.defineProperty(document, 'activeElement', { configurable: true, value: editor, writable: true });
+    editor.focus = () => { document.activeElement = editor; };
+    document.createRange = () => ({
+        startContainer: null, startOffset: 0, endContainer: null, endOffset: 0,
+        get collapsed() { return this.startContainer === this.endContainer && this.startOffset === this.endOffset; },
+        setStart(node, offset) {
+            this.startContainer = node;
+            this.startOffset = offset;
+            if (!this.endContainer) this.setEnd(node, offset);
+        },
+        setEnd(node, offset) { this.endContainer = node; this.endOffset = offset; },
+        collapse(toStart) {
+            if (toStart) this.setEnd(this.startContainer, this.startOffset);
+            else this.setStart(this.endContainer, this.endOffset);
+        },
+    });
+    let range = null;
+    const selection = {
+        get rangeCount() { return range ? 1 : 0; },
+        getRangeAt: () => range,
+        removeAllRanges() { range = null; },
+        addRange(next) { range = next; },
+    };
+    window.getSelection = () => selection;
+    const select = (node, offset = 0) => {
+        range = document.createRange();
+        range.setStart(node, offset);
+        range.collapse(true);
+    };
+    const dispatchPointer = (type, target) => {
+        const event = document.createEvent('Event');
+        event.initEvent(type, true, true);
+        target.dispatchEvent(event);
+        // Domino does not implement native pointer selection/focus defaults.
+        // They run after the real capture handlers installed by the helper.
+        if (target.tagName === 'INPUT') {
+            document.activeElement = target;
+        } else {
+            select(target.firstChild, 2);
+            document.activeElement = editor;
+        }
+    };
+    return { window, document, editor, selection, select, dispatchPointer, get range() { return range; } };
+}
+
+test('a pointer click after code-fence conversion keeps its new caret and focus after the queued frame', () => {
+    for (const [type, targetName] of [['pointerdown', 'paragraph'], ['mousedown', 'paragraph'], ['pointerdown', 'input']]) {
+        const f = pointerFixture('<p>```</p><p>click here</p>');
+        let resets = 0;
+        const deferred = createDeferredCaretPlacement({
+            document: f.document, cursorManager: { resetCodeVerticalNavigation() { resets++; } },
+        });
+        const codeHandler = sliceEditorSource('function handleCodeBlockFenceEnterKeydown(', 'function handleCodeBlockEnterKeydown(');
+        const env = {
+            editor: f.editor, document: f.document, isComposing: false,
+            domUtils: { getParentElement: (node, tag) => (node.nodeType === 3 ? node.parentElement : node).closest(tag) },
+            stateManager: { saveState() {} },
+            codeBlockManager: { addCodeBlockControls() {}, _isMathLanguage: () => false },
+            deferCaretPlacement: deferred.deferCaretPlacement, notifyChange() {},
+        };
+        const convert = new Function(...Object.keys(env), `${codeHandler}\nreturn handleCodeBlockFenceEnterKeydown;`)(...Object.values(env));
+        f.select(f.editor.firstChild.firstChild, 3);
+        assert.equal(convert({ key: 'Enter', preventDefault() {} }, {
+            selection: f.selection, range: f.range, container: f.range.startContainer,
+        }), true);
+        const target = targetName === 'input' ? f.document.getElementById('outside') : f.editor.lastChild;
+        f.dispatchPointer(type, target);
+        const clickedRange = f.range;
+        deferred.runFrame();
+        assert.equal(f.range, clickedRange, `${type}: ${targetName} caret`);
+        assert.equal(f.document.activeElement, targetName === 'input' ? target : f.editor);
+        assert.equal(resets, 1, 'a new pointer intent resets the preferred code column');
+        assert.equal(deferred.flushPendingCaretPlacement(), false);
+    }
+});
+
+test('a pointer click after Undo finishes the pending history restore before choosing the new location', async () => {
+    const source = fs.readFileSync(path.join(__dirname, '..', 'media', 'modules', 'StateManager.js'), 'utf8');
+    const { StateManager } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+    const f = pointerFixture('<p>A</p><p>click here</p>');
+    const previous = { window: global.window, document: global.document };
+    Object.assign(global, { window: f.window, document: f.document });
+    const history = new StateManager(f.editor, {});
+    try {
+        const deferred = createDeferredCaretPlacement({ document: f.document, stateManager: history });
+        f.select(f.editor.firstChild.firstChild);
+        history.seedState();
+        history.saveState();
+        f.editor.firstChild.textContent = 'B';
+        f.select(f.editor.firstChild.firstChild, 1);
+        history.commitStateAfterChange();
+        assert.equal(history.performUndo(), true);
+        assert.ok(history.pendingHistoryRestore);
+        f.dispatchPointer('pointerdown', f.editor.lastChild);
+        const clickedRange = f.range;
+        assert.equal(history.pendingHistoryRestore, null);
+        await new Promise(resolve => setTimeout(resolve, 5));
+        assert.equal(f.range, clickedRange);
+        assert.equal(f.range.startContainer.textContent, 'click here');
+        assert.equal(f.range.startOffset, 2);
+        deferred.runFrame();
+        assert.equal(f.range, clickedRange);
+    } finally {
+        history.clearHistory();
+        Object.assign(global, previous);
+    }
+});
+
+test('pointer capture leaves pending placement untouched while IME owns the caret', () => {
+    for (const state of [{ isComposing: true }, { compositionUpdateGate: { composing: true } }]) {
+        const f = pointerFixture('<p>typing</p>');
+        const deferred = createDeferredCaretPlacement({ document: f.document, ...state });
+        let placements = 0;
+        deferred.deferCaretPlacement(() => { placements++; });
+        f.dispatchPointer('pointerdown', f.editor.firstChild);
+        assert.equal(placements, 0);
+    }
+});
 
 test('a deferred caret placement runs on the next frame', () => {
     const { deferCaretPlacement, flushPendingCaretPlacement, runFrame } = createDeferredCaretPlacement();

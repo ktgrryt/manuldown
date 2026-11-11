@@ -509,6 +509,16 @@ export class DOMUtils {
                 removeCaretAnchors(child, copied.childNodes[index]));
         };
         removeCaretAnchors(this.editor, clone);
+        if (options.canonicalImages === true) {
+            clone.querySelectorAll('img[data-md-path]').forEach(image => {
+                const path = image.getAttribute('data-md-path');
+                if (path) image.setAttribute('src', path);
+            });
+        }
+        if (!historyComparable) {
+            clone.querySelectorAll('img[data-mdw-image-import-id]').forEach(image =>
+                image.removeAttribute('data-mdw-image-import-id'));
+        }
 
         // Code-block gaps are temporary caret positions. Saving or comparing
         // history must not turn an untouched gap into a Markdown blank line.

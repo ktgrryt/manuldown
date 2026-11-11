@@ -6,6 +6,8 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 
 ## [Unreleased]
 
+## [2.2.4] - 2026-11-11
+
 ### Added
 - Mermaid diagrams have a Code/Preview switch and copy, download, and expand icons. Download offers PNG or SVG. The expanded preview supports wheel zoom, drag and keyboard panning, fit-to-view, and actual-size controls.
 - Copy selected content as Markdown from the editor's right-click menu or with `Cmd+Shift+C` on macOS / `Ctrl+Shift+C` on Windows/Linux while the editor body has focus.
@@ -23,6 +25,18 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 - Load Prism as one script, and load Mermaid only when a document has a Mermaid code block.
 
 ### Fixed
+- Preserve all cells when converting merged or uneven external tables, and keep newer edits queued behind delayed save/close requests.
+- Treat pasted-image file creation as part of the original Undo/Redo step, including responses that arrive after Undo or another edit.
+- Invalidate pending Mermaid renders when returning to a cached diagram, and decode percent-encoded binary image URLs as bytes.
+- Keep temporary table-boundary input lines out of saved Markdown and Undo history until edited.
+- Preserve authored spaces after images while keeping image caret anchors empty so navigation does not add phantom lines.
+- Navigate complete Unicode characters and keep quoted text, formulas and intentional blank lines reachable.
+- Retain the desired code column across short lines, navigate whitespace-only code lines, and keep vertical positions outside emoji sequences.
+- Finish deferred caret placement before a new pointer action and prevent duplicate macOS Ctrl navigation across formulas.
+- Save images embedded in pasted rich text or Markdown as image files with relative paths, avoiding long Base64 strings in Markdown while preserving image order and labels.
+- Preserve external clipboard images and rich lists, recover native PNGs for local image references, and handle HTML-only or empty clipboard contents without deleting the selection.
+- Keep meaningful Unicode characters, fenced-code boundaries and quoted multiline spreadsheet cells intact when pasting.
+- Save empty and headerless external tables without conversion failures or read-only reloads, and encode whitespace in pasted link destinations.
 - Keep Markdown editable after pasting Word text with numbered lines inside a paragraph, including after reopening the file.
 - Resolve `~/` file links against the local home directory before checking workspace access, so blocked home paths show the appropriate explanation.
 - Disable Open for blocked or unavailable file links and show the reason, including the user setting that permits local file links outside the workspace.
@@ -38,6 +52,7 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 - Preserve lazy blockquote continuations, loose and empty nested list structure, raw-source whitespace, math expressions, alert markers, table alignment, and code-fence info strings.
 
 ### Security
+- Validate canonical local image paths before transferring bounded image data; restrict Webview resource roots to extension assets so workspace symlinks cannot bypass image checks.
 - Keep workspace discovery inside the extension host with bounded file scans.
 - Resolve inline file suggestions through short-lived host-held candidate IDs and revalidate the target before insertion.
 - Serialize link resolution and stop remote path validation between component reads after cancellation.

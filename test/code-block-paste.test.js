@@ -42,9 +42,10 @@ function pasteIntoSelection(html, pastedText) {
         INTERNAL_EDITOR_PLAIN_TEXT_CLIPBOARD_TYPE: 'application/x-manuldown-editor-plain-text',
         finalizePendingPastedPathLinks() {},
         tableManager: { handleEdgePaste: () => false, handlePaste: () => false, wrapTables() {} },
-        extractInternalHtmlFromMarkedClipboardHtml: () => '', normalizeExternalClipboardPlainText: text => text,
+        extractInternalHtmlFromMarkedClipboardHtml: () => '',
         getPastedAbsolutePathCandidate: () => null, pastedTextLooksLikeList: () => false,
         createOfficeClipboardHtml: () => '', replaceListBoundarySelectionWithDirectLink: () => false,
+        extractHtmlClipboardFragment: value => value,
         placeCollapsedCaretAfter() {}, setCaretAfterNode() {},
         stateManager: { saveState() {}, saveStateDebounced() {} }, notifyChange() {},
         cleanupEmptyStrikeAtSelection() {}, cleanupEmptyStrikes() {}, unwrapStrikeAtSelection() {},
@@ -62,6 +63,7 @@ function pasteIntoSelection(html, pastedText) {
     let handler;
     editor.addEventListener = (_type, callback) => { handler = callback; };
     const declarations = [
+        slice('function normalizeClipboardPlainText(', 'function parsePastedFenceOpening('),
         slice('const absoluteUrlPattern =', 'const hasLinkLikeText ='),
         slice('const isRangeInsideCodeBlock =', 'const findMarkdownClosingBracket ='),
         slice('const hasVisibleLinkText =', 'const getSingleListItemSelectedAtListBoundary ='),
@@ -90,4 +92,20 @@ test('pasting a URL over prose still keeps the selected text as its link label',
     const { container } = pasteIntoSelection('<p>text LABEL</p>', 'https://example.com');
     assert.equal(container.querySelector('a').textContent, 'LABEL');
     assert.equal(container.querySelector('a').getAttribute('href'), 'https://example.com');
+});
+
+test('external plain text preserves emoji joiners, language joiners and user zero-width characters', () => {
+    for (const value of ['👨‍👩‍👧‍👦', 'می\u200cروم', 'a\u200bb\u2060c\ufeffd', 'a\u00a0b']) {
+        for (const html of ['<p>text PLACEHOLDER</p>', '<pre><code>text PLACEHOLDER</code></pre>']) {
+            const { container, prevented } = pasteIntoSelection(html, value);
+            assert.equal(prevented, true);
+            assert.equal(container.textContent, 'text ' + value);
+        }
+    }
+});
+
+test('empty clipboard text leaves the current selection intact', () => {
+    const { container, prevented } = pasteIntoSelection('<p>text PLACEHOLDER</p>', '');
+    assert.equal(container.textContent, 'text PLACEHOLDER');
+    assert.equal(prevented, true);
 });
