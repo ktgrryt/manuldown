@@ -33,6 +33,10 @@ jobs:
 
       - run: npm ci
 
+      # Mermaid and KaTeX are devDependencies but ship in the extension bundle.
+      - name: Audit dependency vulnerabilities
+        run: npm audit --include=dev --audit-level=info
+
       - run: npm run lint
 
       - run: npm test
