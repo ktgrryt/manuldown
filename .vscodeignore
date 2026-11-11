@@ -1,4 +1,5 @@
 # Development files
+.github/**
 .claude/**
 .vscode/**
 .vscode-test/**

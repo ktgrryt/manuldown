@@ -366,8 +366,8 @@
     "pretest": "npm run compile",
     "test": "node --test test/*.test.js",
     "lint": "eslint src media",
-    "package:vsix": "npx --yes @vscode/vsce package --githubBranch main",
-    "publish:vsce": "npx --yes @vscode/vsce publish --githubBranch main"
+    "package:vsix": "vsce package --githubBranch main",
+    "publish:vsce": "vsce publish --githubBranch main"
   },
   "devDependencies": {
     "@types/node": "20.x",
@@ -375,6 +375,7 @@
     "@types/vscode": "^1.85.0",
     "@typescript-eslint/eslint-plugin": "^8.56.0",
     "@typescript-eslint/parser": "^8.56.0",
+    "@vscode/vsce": "4.1.0",
     "esbuild": "^0.28.1",
     "eslint": "^10.0.0",
     "katex": "^0.18.2",

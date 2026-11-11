@@ -1,0 +1,50 @@
+name: Publish VS Code extension
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: marketplace-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run lint
+
+      - run: npm test
+
+      - name: Package VSIX
+        run: npm run package:vsix -- --out manuldown.vsix
+
+      # Keep publish.yml in sync with the Marketplace Trusted Publishing policy.
+      # Only a new version in package.json is published.
+      - name: Publish to Marketplace
+        run: >
+          npm run publish:vsce --
+          --oidc
+          --packagePath manuldown.vsix
+          --skip-duplicate
