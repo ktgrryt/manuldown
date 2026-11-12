@@ -130,6 +130,7 @@ function clipboardPasteFixture({ editor, document, window, range, copy }, option
         addRange(nextRange) { currentRange = nextRange; },
     };
     window.getSelection = () => selection;
+    document.execCommand = (...args) => options.execCommand?.(...args) ?? false;
     const imagePolicyCalls = [];
     const messages = [];
     const nativeImages = [];
@@ -154,6 +155,9 @@ function clipboardPasteFixture({ editor, document, window, range, copy }, option
             saveState() {}, saveStateDebounced() {}, saveRange: value => value,
             beginChangeAtSelection() {}, commitStateAfterChange() {},
         },
+        typingUndoGroup: { break() {} },
+        hideImageResizeOverlay() {},
+        getSelectedImageNodeFromRange: () => null,
         footnoteManager: {
             reconcileReferenceDeletion() {}, refresh() {},
             appendClipboardDefinitions() {},
@@ -233,6 +237,7 @@ function clipboardPasteFixture({ editor, document, window, range, copy }, option
         slice('const insertTextWithPasteBehavior =', 'applyTextInsertionWithPasteRules ='),
         slice('const tryInsertInternalHtmlFromClipboard =', 'const appendTextTokenWithLineBreaks ='),
         slice('const handleEditorCopy =', '// カットを補助:'),
+        slice('// カットを補助:', '// キーボードイベント'),
         slice("editor.addEventListener('paste', (e) => {", '// Snapshot the selection before the native context menu'),
     ].join('\n');
     const imageMessages = slice("            case 'insertImage':", "            case 'requestSync':");
@@ -250,16 +255,20 @@ function clipboardPasteFixture({ editor, document, window, range, copy }, option
     const clipboardData = {
         items: options.items || [], getData: type => data.get(type) || '', setData: (type, value) => data.set(type, value),
     };
-    const dispatch = type => {
+    const dispatch = (type, target = editor) => {
         const event = document.createEvent('Event');
         event.initEvent(type, true, true);
         event.clipboardData = clipboardData;
-        editor.dispatchEvent(event);
+        target.dispatchEvent(event);
         return event;
     };
     return {
         data, imagePolicyCalls, messages, nativeImages, receive: imageImports.receive,
         copy() { currentRange = range(editor); return dispatch('copy'); },
+        cut(target, start, end, eventTarget = editor) {
+            currentRange = range(target, start, end);
+            return dispatch('cut', eventTarget);
+        },
         paste(target = editor, start = 0, end = start) { currentRange = range(target, start, end); return dispatch('paste'); },
         forgetCustomTypes() {
             data.delete('application/x-manuldown-editor-html');
@@ -533,6 +542,125 @@ for (const markersOnly of [false, true]) {
         });
     });
 }
+
+for (const nativeDelete of ['returns false', 'throws', 'returns true without deleting']) {
+    test(`cut removes selected list text when native delete ${nativeDelete}`, async () => {
+        await withFixture('<ul><li>before selected after</li><li>keep</li></ul>', f => {
+            let deleteCalls = 0;
+            const clipboard = clipboardPasteFixture(f, {
+                execCommand(command) {
+                    assert.equal(command, 'delete');
+                    deleteCalls++;
+                    if (nativeDelete === 'throws') throw new Error('nested command unavailable');
+                    return nativeDelete === 'returns true without deleting';
+                },
+            });
+            const text = f.editor.querySelector('li').firstChild;
+            const event = clipboard.cut(text, 7, 15);
+            assert.equal(event.defaultPrevented, true);
+            assert.equal(deleteCalls, 1);
+            assert.equal(clipboard.data.get('text/plain'), 'selected');
+            assert.equal(f.editor.innerHTML, '<ul><li>before  after</li><li>keep</li></ul>');
+            const caret = f.window.getSelection().getRangeAt(0);
+            assert.equal(caret.collapsed, true);
+            assert.equal(caret.startContainer, text);
+            assert.equal(caret.startOffset, 7);
+        });
+    });
+}
+
+test('cut falls back for selected paragraphs and multiline code without deleting adjacent content', async () => {
+    for (const code of [false, true]) {
+        await withFixture(code
+            ? '<pre><code>before\nselected\nlines\nafter</code></pre>'
+            : '<p>before</p><p>selected</p><p>lines</p><p>after</p>', f => {
+            const clipboard = clipboardPasteFixture(f);
+            const target = code ? f.editor.querySelector('code').firstChild : f.editor;
+            clipboard.cut(target, code ? 7 : 1, code ? 22 : 3);
+            assert.equal(clipboard.data.get('text/plain'), 'selected\nlines');
+            assert.equal(f.editor.innerHTML, code
+                ? '<pre><code>before\nafter</code></pre>'
+                : '<p>before</p><p>after</p>');
+        });
+    }
+});
+
+test('cut never repeats a native deletion even if the command reports failure', async () => {
+    await withFixture('<ul><li>before selected after</li></ul>', f => {
+        const text = f.editor.querySelector('li').firstChild;
+        const clipboard = clipboardPasteFixture(f, {
+            execCommand() {
+                text.deleteData(7, 8);
+                return false;
+            },
+        });
+        clipboard.cut(text, 7, 15);
+        assert.equal(f.editor.innerHTML, '<ul><li>before  after</li></ul>');
+        assert.equal(clipboard.data.get('text/plain'), 'selected');
+    });
+});
+
+test('cut keeps ordinary inline text on the native clipboard path', async () => {
+    await withFixture('<p>before selected after</p>', f => {
+        const clipboard = clipboardPasteFixture(f, { execCommand() { assert.fail('native cut owns deletion'); } });
+        assert.equal(clipboard.cut(f.editor.firstChild.firstChild, 7, 15).defaultPrevented, false);
+        assert.equal(clipboard.data.size, 0);
+        assert.equal(f.editor.textContent, 'before selected after');
+    });
+});
+
+test('cut ignores a collapsed caret next to an image and selections outside the editor', async () => {
+    await withFixture('<p><img src="one.png" alt="picture"></p>', f => {
+        const clipboard = clipboardPasteFixture(f);
+        const original = f.editor.innerHTML;
+        assert.equal(clipboard.cut(f.editor.firstChild, 0, 0).defaultPrevented, false);
+        const outside = f.document.getElementById('outside');
+        outside.textContent = 'outside\nselected';
+        assert.equal(clipboard.cut(outside.firstChild, 0, outside.textContent.length).defaultPrevented, false);
+        assert.equal(clipboard.data.size, 0);
+        assert.equal(f.editor.innerHTML, original);
+    });
+});
+
+test('cut in a nested input leaves the editor selection and clipboard to the input', async () => {
+    await withFixture('<ul><li>selected</li></ul><textarea>input text</textarea>', f => {
+        const clipboard = clipboardPasteFixture(f);
+        const original = f.editor.innerHTML;
+        const text = f.editor.querySelector('li').firstChild;
+        assert.equal(clipboard.cut(text, 0, text.length, f.editor.querySelector('textarea')).defaultPrevented, false);
+        assert.equal(clipboard.data.size, 0);
+        assert.equal(f.editor.innerHTML, original);
+    });
+});
+
+test('image cut keeps the original image path and deletes only the selected image', async () => {
+    await withFixture('<p>before<img src="resolved.png" data-md-path="images/one.png" alt="picture">after</p>', f => {
+        const clipboard = clipboardPasteFixture(f, { execCommand() { assert.fail('image cut deletes the range directly'); } });
+        assert.equal(clipboard.cut(f.editor.firstChild, 1, 2).defaultPrevented, true);
+        assert.match(clipboard.data.get('text/html'), /data-md-path="images\/one.png"/);
+        assert.equal(f.editor.innerHTML, '<p>beforeafter</p>');
+    });
+});
+
+test('a fallback cut can be undone and redone as one edit', async () => {
+    const { StateManager } = await historyModule;
+    await withFixture('<ul><li>before selected after</li></ul>', f => {
+        f.editor.focus = () => {};
+        const original = f.editor.innerHTML;
+        const history = new StateManager(f.editor, {});
+        history.seedState();
+        const clipboard = clipboardPasteFixture(f, { stateManager: history });
+        clipboard.cut(f.editor.querySelector('li').firstChild, 7, 15);
+        const afterCut = '<ul><li>before  after</li></ul>';
+        assert.equal(f.editor.innerHTML, afterCut);
+        history.performUndo(() => {});
+        history.flushPendingHistoryRestore();
+        assert.equal(f.editor.innerHTML, original);
+        history.performRedo(() => {});
+        history.flushPendingHistoryRestore();
+        assert.equal(f.editor.innerHTML, afterCut);
+    });
+});
 
 test('an altered internal clipboard payload still follows untrusted Markdown conversion', async () => {
     await withFixture('<ul><li><strong>bold</strong> [x](u) `hello`</li></ul>', f => {

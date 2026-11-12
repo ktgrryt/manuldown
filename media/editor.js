@@ -22315,10 +22315,12 @@ const {
         // クリップボードへ書く（右クリックカット・範囲選択カット対応）
         editor.addEventListener('cut', (e) => {
             if (isUpdating || e.defaultPrevented) return;
+            if (e.target?.closest?.('input, textarea, select, button, [data-exclude-from-markdown="true"]')) return;
             const selection = window.getSelection();
-            if (!selection || !selection.rangeCount) return;
+            if (!selection || !selection.rangeCount || !e.clipboardData) return;
+            const selectedRange = selection.getRangeAt(0);
+            if (selectedRange.collapsed || !isEditorRange(selectedRange)) return;
             if (!selectionContainsImage(selection)) {
-                if (selection.isCollapsed || !e.clipboardData) return;
                 const structuredPayload = createClipboardPayloadFromSelection(selection);
                 if (!structuredPayload) return;
                 const structuredFallbackText = normalizeClipboardPlainText(selection.toString());
@@ -22332,14 +22334,30 @@ const {
                 typingUndoGroup.break();
                 // Delete the way a native cut would, so list items and blocks
                 // around the selection merge as they do for Backspace.
-                document.execCommand('delete', false, null);
+                const fallbackRange = selectedRange.cloneRange();
+                const beforeDeleteHtml = editor.innerHTML;
+                try {
+                    document.execCommand('delete', false, null);
+                } catch (_error) {
+                    // A Webview cut can already be inside an editing command.
+                }
+                // Native delete can fail (or report success without changing
+                // the DOM) during cut. The default cut is already cancelled,
+                // so remove the saved range ourselves only if nothing changed.
+                if (editor.innerHTML === beforeDeleteHtml &&
+                    !fallbackRange.collapsed && isEditorRange(fallbackRange)) {
+                    fallbackRange.deleteContents();
+                    fallbackRange.collapse(true);
+                    selection.removeAllRanges();
+                    selection.addRange(fallbackRange);
+                    stateManager.saveStateDebounced();
+                }
                 notifyChange();
                 return;
             }
 
             const payload = createClipboardPayloadFromSelection(selection);
             if (!payload || !e.clipboardData) return;
-            const selectedRange = selection.getRangeAt(0);
             const selectedImageOnly = !!getSelectedImageNodeFromRange(selectedRange);
             const fallbackText = selectedImageOnly ? '' : selection.toString();
             const plainText = payload.text || selection.toString();
