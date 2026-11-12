@@ -5,6 +5,8 @@ const test = require('node:test');
 const domino = require('@mixmark-io/domino');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'media', 'editor.js'), 'utf8');
+const dragScrollSource = fs.readFileSync(path.join(__dirname, '..', 'media', 'modules', 'DragSelectionScroll.js'), 'utf8');
+const dragScrollModule = import(`data:text/javascript;base64,${Buffer.from(dragScrollSource).toString('base64')}`);
 
 function extract(name) {
     const start = source.indexOf(`    function ${name}(`);
@@ -143,6 +145,7 @@ for (const boundary of ['start', 'end']) {
 function codeBlockClickFixture(t, {
     selectedLabel = false, precedingText = false, followingHtml = '', mermaid = true,
     precedingHtml = precedingText ? '<p>above</p>' : '',
+    marginSide = 'left',
 } = {}) {
     const f = fixture(`${precedingHtml}<pre${mermaid ? ' data-mermaid-view="diagram"' : ''}><div class="code-block-toolbar" data-exclude-from-markdown="true" contenteditable="false"><span class="code-block-language">${mermaid ? 'mermaid' : 'javascript'}</span><button>Copy</button></div><code>${mermaid ? 'graph TD\nA--&gt;B' : 'const answer = 42;'}</code>${mermaid ? '<div class="mermaid-preview" data-exclude-from-markdown="true" contenteditable="false"><svg><text>A</text></svg></div>' : ''}</pre>${followingHtml}`);
     const pre = f.editor.querySelector('pre');
@@ -183,6 +186,7 @@ function codeBlockClickFixture(t, {
     const gapManager = new (loadClass('CodeBlockGapManager'))(f.editor);
     const domUtils = new (loadClass('DOMUtils'))(f.editor);
     let hit = f.editor;
+    let pointerRange;
     f.document.elementFromPoint = () => hit;
     let sideCorrections = 0;
     const dependencies = {
@@ -196,39 +200,59 @@ function codeBlockClickFixture(t, {
         },
         tableManager: { handleMouseDown: () => false },
         getImageCaretRangeFromHorizontalClick: () => null,
-        getCaretRangeFromPoint: () => range,
+        getCaretRangeFromPoint: () => pointerRange === undefined ? range : pointerRange,
         getLooseLeftSideTextClickRange: () => {
             sideCorrections++;
-            if (!precedingText) return null;
+            if (!precedingText || marginSide !== 'left') return null;
             const sideRange = f.document.createRange();
             sideRange.setStart(f.editor.firstChild.firstChild, 0);
             sideRange.collapse(true);
             return sideRange;
         },
-        getLooseRightSideTextClickRange: () => null,
+        getLooseRightSideTextClickRange: () => {
+            if (!precedingText || marginSide !== 'right') return null;
+            const text = f.editor.firstChild.firstChild;
+            const sideRange = f.document.createRange();
+            sideRange.setStart(text, text.length);
+            sideRange.collapse(true);
+            return sideRange;
+        },
         getStableGapClickRange: () => null,
         getNextNavigableNodeAfter: node => gapManager.adjacentNode(node, 'down'),
         getPreferredFirstTextNodeForElement: node => domUtils.getFirstTextNode(node),
         placeCaretInEmptyParagraph: () => false,
         focusEditorWithoutScroll() {}, syncImageCaretEdgeIndicatorsNow() {},
+        Range: { START_TO_START: 0 },
     };
     const start = source.indexOf("        editor.addEventListener('mousedown', (e) => {", source.indexOf('// mousedownイベント'));
     const end = source.indexOf("        document.addEventListener('mousemove',", start);
     assert.ok(start >= 0 && end > start);
-    new Function(...Object.keys(dependencies), `
+    const mouseupStart = source.indexOf("        document.addEventListener('mouseup',", end);
+    const pointerSelection = new Function(...Object.keys(dependencies), `
         let isUpdating = false;
         let pendingListMouseAdjustment, pendingInlineCodeSideClick, pendingMouseDriftCorrection;
         let manualPointerSelection, lastPointerCaretIntentTs, lastCaretIntentSource, caretScrollForcePending;
+        let dragSelectionScroll = null;
+        ${extract('stopManualPointerSelection')}
         ${extract('isEditorLevelWhitespaceTextNode')}
         ${extract('isEditorRootTextRange')}
         ${extract('getCodeBlockForAboveGapClick')}
         ${extract('getCodeBlockForBelowGapClick')}
         ${extract('exitEmptyCodeBlockDownFromPre')}
+        ${extract('createDirectionalSelectionRange')}
+        ${extract('getManualDragFocusRangeFromPoint')}
         ${extract('beginManualPointerSelection')}
-        ${source.slice(start, end)}
+        ${extract('updateManualPointerSelection')}
+        ${source.slice(start, mouseupStart)}
+        return {
+            getManualSelection: () => manualPointerSelection,
+            resolveFocusRange: getManualDragFocusRangeFromPoint,
+            setScrollController(value) { dragSelectionScroll = value; },
+        };
     `)(...Object.values(dependencies));
     return {
-        ...f, pre, selection, gapManager, domUtils,
+        ...f, pre, selection, gapManager, domUtils, ...pointerSelection,
+        setPointRange(value) { pointerRange = value; },
         get sideCorrections() { return sideCorrections; },
         click({ y = 270, target = f.editor, shiftKey = false, button = 0 } = {}) {
             hit = target;
@@ -239,6 +263,190 @@ function codeBlockClickFixture(t, {
             return event;
         },
     };
+}
+
+async function attachManualDragScroll(f) {
+    const { DragSelectionScroll } = await dragScrollModule;
+    const createRange = f.document.createRange;
+    f.document.createRange = () => Object.assign(createRange(), {
+        setStart(node, offset) { this.startContainer = node; this.startOffset = offset; },
+        setEnd(node, offset) {
+            this.endContainer = node;
+            this.endOffset = offset;
+            this.collapsed = this.startContainer === node && this.startOffset === offset;
+        },
+        collapse(toStart = true) {
+            if (toStart) this.setEnd(this.startContainer, this.startOffset);
+            else this.setStart(this.endContainer, this.endOffset);
+            this.collapsed = true;
+        },
+        compareBoundaryPoints(_how, other) {
+            if (this.startContainer === other.startContainer) return this.startOffset - other.startOffset;
+            return this.startContainer.compareDocumentPosition(other.startContainer) & 4 ? -1 : 1;
+        },
+    });
+    let scrollTop = 1000;
+    let scrollWrites = 0;
+    Object.defineProperties(f.editor, {
+        clientHeight: { value: 300 }, clientWidth: { value: 500 },
+        clientTop: { value: 0 }, clientLeft: { value: 0 }, scrollHeight: { value: 4000 },
+        scrollTop: {
+            get: () => scrollTop,
+            set(value) { scrollTop = value; scrollWrites++; },
+        },
+    });
+    f.editor.getBoundingClientRect = () => ({ top: 0, bottom: 300, left: 0, right: 500 });
+    f.window.innerHeight = 600;
+    f.window.innerWidth = 800;
+    const frames = new Map();
+    let sequence = 0;
+    let timestamp = 0;
+    f.window.requestAnimationFrame = callback => { frames.set(++sequence, callback); return sequence; };
+    f.window.cancelAnimationFrame = id => frames.delete(id);
+    const rangeAt = (node, offset = 0) => {
+        const range = f.document.createRange();
+        range.setStart(node, offset);
+        range.collapse(true);
+        return range;
+    };
+    f.selection.setBaseAndExtent = (anchorNode, anchorOffset, focusNode, focusOffset) => {
+        const anchor = rangeAt(anchorNode, anchorOffset);
+        const focus = rangeAt(focusNode, focusOffset);
+        const range = f.document.createRange();
+        if (anchor.compareBoundaryPoints(0, focus) <= 0) {
+            range.setStart(anchorNode, anchorOffset);
+            range.setEnd(focusNode, focusOffset);
+        } else {
+            range.setStart(focusNode, focusOffset);
+            range.setEnd(anchorNode, anchorOffset);
+        }
+        f.selection.removeAllRanges();
+        f.selection.addRange(range);
+        Object.assign(f.selection, { anchorNode, anchorOffset, focusNode, focusOffset });
+    };
+    const controller = new DragSelectionScroll(f.editor, {
+        getAnchorRange: () => f.getManualSelection()?.anchorRange,
+        resolveFocusRange: f.resolveFocusRange,
+        isEnabled: () => true,
+    });
+    f.setScrollController(controller);
+    const dispatch = (type, properties, target = f.document) => {
+        const event = f.document.createEvent('Event');
+        event.initEvent(type, true, true);
+        Object.assign(event, properties);
+        target.dispatchEvent(event);
+        return event;
+    };
+    return {
+        controller, rangeAt,
+        get scrollWrites() { return scrollWrites; },
+        get frameCount() { return frames.size; },
+        move(x, y) { dispatch('mousemove', { clientX: x, clientY: y, buttons: 1 }); },
+        wheel() { return dispatch('wheel', { deltaY: 30 }, f.editor); },
+        advance() {
+            for (let i = 0; i < 20; i++) {
+                timestamp += 1000 / 60;
+                const callbacks = [...frames.values()];
+                frames.clear();
+                callbacks.forEach(callback => callback(timestamp));
+                f.gapManager.reconcile(f.selection);
+            }
+        },
+    };
+}
+
+for (const marginSide of ['left', 'right']) {
+    test(`dragging from a paragraph's ${marginSide} margin scrolls with its original text anchor`, async t => {
+        const f = codeBlockClickFixture(t, { precedingText: true, marginSide });
+        const drag = await attachManualDragScroll(f);
+        assert.equal(f.click({ y: 20 }).defaultPrevented, true);
+        const anchor = f.getManualSelection().anchorRange;
+        assert.equal(anchor.startContainer, f.editor.firstChild.firstChild);
+        assert.equal(anchor.startOffset, marginSide === 'left' ? 0 : 'above'.length);
+        f.setPointRange(drag.rangeAt(f.pre.querySelector('code').firstChild, 2));
+        drag.move(100, 350);
+        drag.advance();
+        assert.ok(f.editor.scrollTop > 1000);
+        assert.equal(f.selection.anchorNode, anchor.startContainer);
+        assert.equal(f.selection.anchorOffset, anchor.startOffset);
+        assert.equal(f.selection.focusNode, f.pre.querySelector('code').firstChild);
+    });
+}
+
+for (const direction of ['above', 'below']) {
+    test(`dragging from the input gap ${direction} a code block scrolls while retaining the temporary input line`, async t => {
+        const f = codeBlockClickFixture(t, { mermaid: false });
+        const drag = await attachManualDragScroll(f);
+        assert.equal(f.click({ y: direction === 'above' ? 20 : 270 }).defaultPrevented, true);
+        const gap = f.editor.querySelector('[data-mdw-code-gap="true"]');
+        assert.ok(gap);
+        const anchor = f.getManualSelection().anchorRange;
+        assert.equal(anchor.startContainer, gap.firstChild);
+        f.setPointRange(drag.rangeAt(f.pre.querySelector('code').firstChild, 2));
+        drag.move(100, direction === 'above' ? 350 : -20);
+        drag.advance();
+        assert.ok(direction === 'above' ? f.editor.scrollTop > 1000 : f.editor.scrollTop < 1000);
+        assert.equal(f.selection.anchorNode, gap.firstChild);
+        assert.equal(f.selection.anchorOffset, anchor.startOffset);
+        assert.ok(gap.isConnected, 'the input gap remains a live endpoint of the expanded selection');
+    });
+}
+
+test('native paragraph text drags never start the manual scroll helper', async t => {
+    const f = codeBlockClickFixture(t, { precedingText: true });
+    const drag = await attachManualDragScroll(f);
+    const paragraph = f.editor.firstChild;
+    f.setPointRange(drag.rangeAt(paragraph.firstChild, 2));
+    assert.equal(f.click({ y: 20, target: paragraph }).defaultPrevented, false);
+    assert.equal(f.getManualSelection(), null);
+    drag.move(100, -20);
+    drag.advance();
+    assert.equal(drag.scrollWrites, 0);
+    assert.equal(drag.frameCount, 0);
+});
+
+for (const origin of ['paragraph margin', 'code gap']) {
+    test(`a ${origin} drag can resume edge scrolling after a wheel adjustment`, async t => {
+        const f = codeBlockClickFixture(t, { precedingText: origin === 'paragraph margin', mermaid: false });
+        const drag = await attachManualDragScroll(f);
+        assert.equal(f.click({ y: origin === 'paragraph margin' ? 20 : 270 }).defaultPrevented, true);
+        const anchorNode = f.getManualSelection().anchorRange.startContainer;
+        f.setPointRange(drag.rangeAt(f.pre.querySelector('code').firstChild, 2));
+        drag.move(100, -20);
+        drag.advance();
+        assert.ok(f.editor.scrollTop < 1000);
+        assert.equal(drag.wheel().defaultPrevented, false);
+        f.editor.scrollTop += 30;
+        const afterWheel = f.editor.scrollTop;
+        drag.advance();
+        assert.equal(f.editor.scrollTop, afterWheel, 'momentum remains browser-owned until pointer movement');
+        drag.move(100, 150);
+        drag.move(100, -20);
+        drag.advance();
+        assert.ok(f.editor.scrollTop < afterWheel);
+        assert.equal(f.selection.anchorNode, anchorNode);
+    });
+
+    test(`replacing content during a ${origin} drag cancels scrolling and its stale pointer selection`, async t => {
+        const f = codeBlockClickFixture(t, { precedingText: origin === 'paragraph margin', mermaid: false });
+        const drag = await attachManualDragScroll(f);
+        f.click({ y: origin === 'paragraph margin' ? 20 : 270 });
+        const anchorNode = f.getManualSelection().anchorNode;
+        f.setPointRange(drag.rangeAt(f.pre.querySelector('code').firstChild, 2));
+        drag.move(100, -20);
+        drag.advance();
+        f.editor.innerHTML = '<p>replacement content</p>';
+        const before = f.editor.scrollTop;
+        drag.advance();
+        assert.equal(anchorNode.isConnected, false);
+        assert.equal(drag.frameCount, 0);
+        assert.equal(drag.controller.drag, null);
+        assert.equal(f.editor.scrollTop, before);
+        drag.move(100, -20);
+        assert.equal(f.getManualSelection(), null, 'later pointer moves cannot reuse the removed text anchor');
+        assert.equal(f.editor.textContent, 'replacement content');
+        assert.equal(f.editor.scrollTop, before);
+    });
 }
 
 for (const selectedLabel of [false, true]) {

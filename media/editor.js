@@ -17,6 +17,7 @@ import { InsertCommandMenu, isInsertMenuShortcut } from './modules/InsertCommand
 import { MathManager } from './modules/MathManager.js';
 import { CompositionUpdateGate } from './modules/CompositionUpdateGate.js';
 import { TypingUndoGroup } from './modules/TypingUndoGroup.js';
+import { DragSelectionScroll } from './modules/DragSelectionScroll.js';
 import {
     fitTocBodyMinWidth,
     fitTocPanelWidth,
@@ -81,6 +82,7 @@ const {
     let pendingInlineCodeSideClick = null;
     let pendingMouseDriftCorrection = null;
     let manualPointerSelection = null;
+    let dragSelectionScroll = null;
     let lastPointerCaretIntentTs = 0;
     let lastCaretIntentSource = null;
     let lastCtrlNavKeydownTs = 0;
@@ -1215,6 +1217,7 @@ const {
 
     function replaceEditorContentFromHtml(rawHtml) {
         if (!editor) return;
+        stopManualPointerSelection();
         if (cursorManager && typeof cursorManager.clearInlineCodeBoundaryState === 'function') {
             cursorManager.clearInlineCodeBoundaryState();
         }
@@ -8921,6 +8924,7 @@ const {
         if (performAuxiliaryHistoryCommand(direction)) {
             return true;
         }
+        stopManualPointerSelection();
         typingUndoGroup.break();
         const hadPendingViewportAnchor = Number.isFinite(historyCaretViewportOffsetPending);
         if (!hadPendingViewportAnchor) {
@@ -13043,6 +13047,14 @@ const {
         return getNearestBlockBoundaryRangeByY(y);
     }
 
+    function stopManualPointerSelection() {
+        manualPointerSelection = null;
+        pendingListMouseAdjustment = null;
+        pendingInlineCodeSideClick = null;
+        pendingMouseDriftCorrection = null;
+        dragSelectionScroll?.stop();
+    }
+
     function beginManualPointerSelection(e, anchorRange) {
         if (!anchorRange || e.button !== 0 || e.shiftKey) {
             manualPointerSelection = null;
@@ -13051,6 +13063,7 @@ const {
 
         manualPointerSelection = {
             anchorRange: anchorRange.cloneRange(),
+            anchorNode: anchorRange.startContainer,
             startX: e.clientX,
             startY: e.clientY,
             moved: false
@@ -13059,6 +13072,14 @@ const {
 
     function updateManualPointerSelection(clientX, clientY) {
         if (!manualPointerSelection) {
+            return;
+        }
+        // A live Range can silently move to #editor when its text is replaced.
+        // Keep the original node separately so the old drag cannot select the
+        // replacement document from its beginning.
+        if (!editor.contains(manualPointerSelection.anchorNode) ||
+            manualPointerSelection.anchorRange.startContainer !== manualPointerSelection.anchorNode) {
+            stopManualPointerSelection();
             return;
         }
 
@@ -22637,6 +22658,7 @@ const {
                     focusEditorWithoutScroll();
                     selection.removeAllRanges();
                     selection.addRange(newRange);
+                    beginManualPointerSelection(e, newRange);
                     return;
                 }
             }
@@ -24783,6 +24805,15 @@ const {
             scheduleEnsureCaretVisible();
         });
 
+        dragSelectionScroll = new DragSelectionScroll(editor, {
+            resolveFocusRange: getManualDragFocusRangeFromPoint,
+            getAnchorRange: () => manualPointerSelection?.anchorRange,
+            isEnabled: () => !isUpdating && !isComposing && !compositionUpdateGate.composing &&
+                !compositionUpdateGate.finalizing &&
+                !imageResizeState && !scrollbarDragState && !tocResizeState &&
+                !tableManager.structureDrag && !tableManager.hasActiveTableSelection()
+        });
+
         scheduleEditorOverflowStateUpdate();
     }
 
@@ -24888,6 +24919,7 @@ const {
                 break;
             case 'loadError':
                 clearNotifyTimeout();
+                stopManualPointerSelection();
                 temporarilySuppressImageRemovalSync();
                 isUpdating = true;
                 try {
