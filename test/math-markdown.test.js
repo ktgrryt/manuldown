@@ -64,6 +64,71 @@ test('a "$$" block becomes a math code block that keeps its delimiters', () => {
     assert.ok(toHtml('$$ x + y $$\n').includes(mathBlock('x + y\n')));
 });
 
+test('non-breaking space after a standalone formula keeps the math block UI', () => {
+    const tex = String.raw`\\sum\_{i=1}^{n} i = \\frac{n(n+1)}{2}`;
+    for (const trailing of ['\u00a0', ' \u00a0', '\t\u00a0 \t']) {
+        const source = `### 総和\n\n$$${tex}$$${trailing}\n`;
+        const html = toHtml(source);
+        assert.ok(html.includes(mathBlock(`${tex}\n`)), JSON.stringify(trailing));
+        assert.doesNotMatch(html, /data-mdw-math="display"/);
+        assert.equal(toMarkdown(html, source), source);
+    }
+});
+
+test('a multiline math block allows non-breaking space after its closing delimiter', () => {
+    const source = '$$\nx = \\frac{a}{b}\n$$ \u00a0\n';
+    const html = toHtml(source);
+    assert.ok(html.includes(mathBlock('x = \\frac{a}{b}\n')));
+    assert.equal(toMarkdown(html, source), source);
+});
+
+test('a math block with trailing non-breaking space interrupts a paragraph without losing source', () => {
+    const source = 'Intro\n$$x + y$$ \u00a0\nAfter\n';
+    const html = toHtml(source);
+    assert.match(html, /<p>Intro<\/p>\s*<pre>/);
+    assert.match(html, /<\/pre>\s*<p>After<\/p>/);
+    const blocks = new MarkdownDocument(createTextDocument(source)).getSourceBlocks().filter(block => !block.inline);
+    assert.equal(blocks.map(block => block.source).join(''), source);
+    assert.equal(toMarkdown(html, source), source);
+});
+
+test('prose after a non-breaking space keeps a display formula in its paragraph', () => {
+    const source = 'Intro\n$$x$$ \u00a0 more\n';
+    const html = toHtml(source);
+    assert.ok(html.includes(formula('x', 'display')));
+    assert.doesNotMatch(html, /language-math/);
+    assert.equal(toMarkdown(html, source), source);
+});
+
+test('non-breaking space between adjacent display formulas never combines them', () => {
+    const domino = require('@mixmark-io/domino');
+    const source = '$$x$$\u00a0$$y$$ \u00a0\n';
+    const html = toHtml(source);
+    const root = domino.createWindow(html).document;
+    assert.deepEqual(Array.from(root.querySelectorAll('[data-mdw-math],code.language-math'), node => node.textContent.trim()), ['x', 'y']);
+    assert.equal(toMarkdown(html, source), source);
+});
+
+test('non-breaking-space closures keep quoted and listed TeX lines inside their math blocks', () => {
+    const domino = require('@mixmark-io/domino');
+    for (const source of [
+        '> $$\n> a = b\n> + c\n> - d\n> $$ \u00a0\n\nAfter\n',
+        '- Item\n\n  $$\n  a = b\n  + c\n  - d\n  $$ \u00a0\n- Next\n',
+    ]) {
+        const html = toHtml(source);
+        const root = domino.createWindow(html).document;
+        assert.equal(root.querySelector('code.language-math')?.textContent, 'a = b\n+ c\n- d\n');
+        assert.equal(root.querySelectorAll('pre').length, 1);
+        assert.equal(toMarkdown(html, source), source);
+    }
+    const source = '- $$x$$ \u00a0\n- Next\n\n$$\nz\n$$\n';
+    const html = toHtml(source);
+    const root = domino.createWindow(html).document;
+    assert.deepEqual(Array.from(root.querySelectorAll('[data-mdw-math], code.language-math'), node => node.textContent.trim()), ['x', 'z']);
+    assert.equal(root.querySelectorAll('ul > li').length, 2);
+    assert.equal(toMarkdown(html, source), source);
+});
+
 test('"$$" that does not end its line stays a display formula in the paragraph', () => {
     const source = 'Intro\n$$x$$ more\n';
     const html = toHtml(source);

@@ -32,6 +32,7 @@ export class CursorManager {
         this.editor = editor;
         this.domUtils = domUtils;
         this.moveToCodeBlockGap = options.moveToCodeBlockGap || null;
+        this.revealMathSource = options.revealMathSource || null;
         this.moveAcrossFootnoteReference = options.moveAcrossFootnoteReference || null;
         this._forwardImageStep = null;
         this._inlineCodeLeftBoundaryState = null;
@@ -2948,6 +2949,10 @@ export class CursorManager {
             selection.addRange(hrRange);
             return true;
         }
+        if (block.tagName === 'PRE' && block.getAttribute('data-math-view') === 'preview' &&
+            this.revealMathSource?.(block)) {
+            return this._placeCursorAtCodeBlockLastContentLineEnd(block, selection);
+        }
         if (block.tagName === 'UL' || block.tagName === 'OL') {
             const listItems = block.querySelectorAll('li');
             const targetLi = listItems.length > 0 ? listItems[listItems.length - 1] : null;
@@ -3782,8 +3787,12 @@ export class CursorManager {
 
     setCodeBlockCursorOffset(codeBlock, selection, offset) {
         const pre = codeBlock?.parentElement;
-        if (pre?.getAttribute('data-mermaid-view') === 'diagram' || pre?.getAttribute('data-math-view') === 'preview') {
+        if (pre?.getAttribute('data-mermaid-view') === 'diagram' ||
+            (pre?.getAttribute('data-math-view') === 'preview' && !this.revealMathSource?.(pre))) {
             return this._selectCodeBlockLanguageLabel(pre, selection);
+        }
+        if (pre?.getAttribute('data-math-view') === 'code') {
+            pre.querySelector('.code-block-language.nav-selected')?.classList.remove('nav-selected');
         }
         const safeOffset = Math.max(0, offset);
         let currentOffset = 0;

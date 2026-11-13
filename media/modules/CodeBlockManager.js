@@ -58,6 +58,8 @@ export class CodeBlockManager {
         this.mermaidControlIdCounter = 0;
         this.mathRenderer = null;
         this.mathRenderHandles = new WeakMap();
+        this.transientMathSources = new Set();
+        this.mathSourceCompositionActive = false;
         this.editorThemeMode = this._normalizeThemeMode(themeMode);
         this.clipboardWriteRequestSeq = 0;
         this.copyButtonStateReconcilerHandle = null;
@@ -76,6 +78,10 @@ export class CodeBlockManager {
         }
         if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
             document.addEventListener('visibilitychange', this._reconcilePendingCopyButtons);
+            document.addEventListener('selectionchange', () => this.syncTransientMathViews());
+            document.addEventListener('focusin', (event) => {
+                if (!this.editor?.contains?.(event.target)) this.syncTransientMathViews(true);
+            });
             const dismissExportMenu = (event) => {
                 if (this.mermaidExportMenu && !this.mermaidExportMenu.container.contains(event.target)) {
                     this._closeMermaidExportMenu();
@@ -92,6 +98,11 @@ export class CodeBlockManager {
             Prism.languages.math = Prism.languages.latex;
         }
         if (this.editor && typeof this.editor.addEventListener === 'function') {
+            this.editor.addEventListener('compositionstart', () => { this.mathSourceCompositionActive = true; });
+            this.editor.addEventListener('compositionend', () => {
+                this.mathSourceCompositionActive = false;
+                this.syncTransientMathViews(!this.editor.contains(this.editor.ownerDocument.activeElement));
+            });
             // Clicking a rendered formula opens its source.
             this.editor.addEventListener('mousedown', (e) => {
                 if (e.button === 0 && e.target?.closest?.('.math-preview')) {
@@ -351,12 +362,50 @@ export class CodeBlockManager {
         });
     }
 
+    /** Reveal source for caret navigation without changing content or history. */
+    revealMathSource(pre) {
+        if (!pre || pre.tagName !== 'PRE' || !this.editor.contains(pre) ||
+            this.editor.getAttribute('contenteditable') === 'false' ||
+            pre.getAttribute('data-math-view') !== 'preview' || !pre.querySelector('code')) {
+            return false;
+        }
+        this._setMathView(pre, 'code');
+        this.transientMathSources.add(pre);
+        return true;
+    }
+
+    /** Restore only source views opened by caret navigation, once selection leaves. */
+    syncTransientMathViews(force = false) {
+        if (!this.transientMathSources.size || this.mathSourceCompositionActive) return;
+        const document = this.editor.ownerDocument;
+        const selection = document.defaultView?.getSelection?.();
+        for (const pre of this.transientMathSources) {
+            const code = pre.querySelector('code');
+            if (!this.editor.contains(pre) || pre.getAttribute('data-math-view') !== 'code' || !code) {
+                this.transientMathSources.delete(pre);
+                continue;
+            }
+            let active = !force && pre.contains(document.activeElement);
+            for (let index = 0; !force && !active && index < (selection?.rangeCount || 0); index++) {
+                const range = selection.getRangeAt(index);
+                // Keep extended selections visible while they still include source.
+                active = pre.contains(range.startContainer) || pre.contains(range.endContainer) ||
+                    (!range.collapsed && !!range.intersectsNode?.(pre));
+            }
+            if (active) continue;
+            this.transientMathSources.delete(pre);
+            this._setMathView(pre, 'preview');
+            this._scheduleMathRender(pre, code, true);
+        }
+    }
+
     /** Show a math block's source and put the caret at its end. */
     _editMathSource(pre) {
         const code = pre && pre.querySelector('code');
         if (!code) {
             return;
         }
+        this.transientMathSources.delete(pre);
         this._setMathView(pre, 'code');
         const selection = window.getSelection();
         if (!selection) {
@@ -929,6 +978,7 @@ export class CodeBlockManager {
             this.editor.querySelectorAll('pre').forEach((pre) => {
                 this._ensureCodeBlockControlsForPre(pre);
             });
+            this.syncTransientMathViews();
         } finally {
             this.isReconcilingCodeBlockControls = false;
         }
@@ -1404,6 +1454,7 @@ export class CodeBlockManager {
             this._clearMermaidPreview(pre);
         }
         if (!isMath) {
+            this.transientMathSources.delete(pre);
             pre.removeAttribute('data-math-view');
             this._clearMathPreview(pre);
         }
@@ -1831,6 +1882,7 @@ export class CodeBlockManager {
                         this._editMathSource(pre);
                         return;
                     }
+                    this.transientMathSources.delete(pre);
                     const selection = window.getSelection();
                     // A hidden source must not retain an editable caret.
                     if (code && selection && selection.rangeCount > 0 &&

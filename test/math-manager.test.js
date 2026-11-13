@@ -912,6 +912,276 @@ test('opening a math block source shows the TeX with the caret at its end', asyn
     assert.equal(f.range, null, 'a hidden source keeps no caret');
 });
 
+test('revealing math source for navigation changes the view without moving the caret or editing content', async t => {
+    const f = await codeBlockFixture(t, '<p>before</p><pre><code class="language-math">x^2\n</code></pre><p>after</p>');
+    const document = f.editor.ownerDocument;
+    const range = document.createRange();
+    range.selectNodeContents(f.editor.firstElementChild);
+    range.collapse(true);
+    document.defaultView.getSelection().addRange(range);
+    const original = f.domUtils.getCleanedHTML({ historyComparable: true });
+    const source = f.pre.querySelector('code').innerHTML;
+    const renders = f.renders.length;
+    let edits = 0;
+    f.editor.addEventListener('input', () => edits++);
+    f.editor.addEventListener('change', () => edits++);
+
+    assert.equal(f.manager.revealMathSource(f.pre), true);
+
+    assert.equal(f.pre.getAttribute('data-math-view'), 'code');
+    assert.equal(f.pre.querySelector('[data-math-view="code"]').getAttribute('aria-pressed'), 'true');
+    assert.equal(f.pre.querySelector('[data-math-view="preview"]').getAttribute('aria-pressed'), 'false');
+    assert.ok(f.range === range, 'the caller places the caret after switching the view');
+    assert.equal(f.pre.querySelector('code').innerHTML, source);
+    assert.equal(f.domUtils.getCleanedHTML({ historyComparable: true }), original);
+    assert.equal(f.renders.length, renders);
+    assert.equal(edits, 0);
+    assert.equal(f.manager.revealMathSource(f.pre), false, 'already-visible source needs no switch');
+});
+
+test('keyboard source reveal applies only to editable math previews in this editor', async t => {
+    const f = await codeBlockFixture(t, '<pre><code class="language-math">x\n</code></pre>');
+    const document = f.editor.ownerDocument;
+    const foreign = document.createElement('pre');
+    foreign.setAttribute('data-math-view', 'preview');
+    foreign.innerHTML = '<code class="language-math">foreign\n</code>';
+    document.body.appendChild(foreign);
+    const ordinary = document.createElement('pre');
+    ordinary.innerHTML = '<code class="language-javascript">ordinary\n</code>';
+    f.editor.appendChild(ordinary);
+    const missingSource = document.createElement('pre');
+    missingSource.setAttribute('data-math-view', 'preview');
+    f.editor.appendChild(missingSource);
+    const mermaid = document.createElement('pre');
+    mermaid.setAttribute('data-mermaid-view', 'diagram');
+    mermaid.innerHTML = '<code class="language-mermaid">A --&gt; B\n</code>';
+    f.editor.appendChild(mermaid);
+    for (const node of [null, foreign, ordinary, missingSource, mermaid]) {
+        const original = node?.outerHTML;
+        assert.equal(f.manager.revealMathSource(node), false);
+        assert.equal(node?.outerHTML, original);
+    }
+    f.editor.setAttribute('contenteditable', 'false');
+    assert.equal(f.manager.revealMathSource(f.pre), false);
+    assert.equal(f.pre.getAttribute('data-math-view'), 'preview');
+});
+
+async function transientMathFixture(t, blocks = '<pre><code class="language-math">x^2 + y\n</code></pre>') {
+    const f = await codeBlockFixture(t, `<p id="before">before</p>${blocks}<p id="after">after</p>`);
+    const document = f.editor.ownerDocument;
+    const window = document.defaultView;
+    const selection = window.getSelection();
+    let activeElement = f.editor;
+    Object.defineProperty(document, 'activeElement', { configurable: true, get: () => activeElement });
+    f.editor.focus = () => { activeElement = f.editor; };
+    const dispatch = (type, target = document) => {
+        const event = document.createEvent('Event');
+        event.initEvent(type, true, false);
+        target.dispatchEvent(event);
+    };
+    const select = (start, startOffset, end = start, endOffset = startOffset) => {
+        const range = document.createRange();
+        range.setStart(start, startOffset);
+        range.setEnd(end, endOffset);
+        // The fixture's ranges otherwise only need text-local operations. This
+        // crossing range includes the PRE when its endpoints straddle the block.
+        range.intersectsNode = node => node.contains(start) || node.contains(end) ||
+            !!((node.compareDocumentPosition(start) & window.Node.DOCUMENT_POSITION_PRECEDING) &&
+                (node.compareDocumentPosition(end) & window.Node.DOCUMENT_POSITION_FOLLOWING));
+        selection.removeAllRanges();
+        selection.addRange(range);
+        dispatch('selectionchange');
+        return range;
+    };
+    return {
+        ...f, document, window, selection, select, dispatch,
+        get range() { return f.range; },
+        before: f.editor.querySelector('#before').firstChild,
+        after: f.editor.querySelector('#after').firstChild,
+        enter(pre = f.pre) {
+            assert.equal(f.manager.revealMathSource(pre), true);
+            return select(pre.querySelector('code').firstChild, 0);
+        },
+        focus(element) {
+            activeElement = element;
+            dispatch('focusin', element);
+        },
+    };
+}
+
+test('keyboard-revealed TeX returns to preview after the caret leaves and can be entered again', async t => {
+    const f = await transientMathFixture(t);
+    const original = f.domUtils.getCleanedHTML({ historyComparable: true });
+    const code = f.pre.querySelector('code');
+    let edits = 0;
+    f.editor.addEventListener('input', () => edits++);
+    f.editor.addEventListener('change', () => edits++);
+    for (const target of [f.before, f.after]) {
+        f.enter();
+        assert.equal(f.pre.getAttribute('data-math-view'), 'code');
+        f.select(code.firstChild, 3);
+        assert.equal(f.pre.getAttribute('data-math-view'), 'code');
+        const range = f.select(target, 2);
+        assert.equal(f.pre.getAttribute('data-math-view'), 'preview');
+        assert.equal(f.pre.querySelector('[data-math-view="preview"]').getAttribute('aria-pressed'), 'true');
+        assert.equal(f.pre.querySelector('[data-math-view="code"]').getAttribute('aria-pressed'), 'false');
+        assert.ok(f.range === range, 'returning to preview must not move the outside caret');
+        assert.equal(f.manager.transientMathSources.size, 0);
+    }
+    assert.equal(f.domUtils.getCleanedHTML({ historyComparable: true }), original);
+    assert.equal(edits, 0);
+});
+
+test('moving directly between two transient math sources closes only the block left behind', async t => {
+    const f = await transientMathFixture(t,
+        '<pre><code class="language-math">first\n</code></pre><pre><code class="language-math">second\n</code></pre>');
+    const [first, second] = Array.from(f.editor.querySelectorAll('pre'));
+    f.enter(first);
+    f.enter(second);
+    assert.equal(first.getAttribute('data-math-view'), 'preview');
+    assert.equal(second.getAttribute('data-math-view'), 'code');
+    assert.deepEqual(Array.from(f.manager.transientMathSources), [second]);
+    f.select(f.after, 1);
+    assert.equal(second.getAttribute('data-math-view'), 'preview');
+    assert.equal(f.manager.transientMathSources.size, 0);
+});
+
+test('source selections and drag ranges crossing a transient math block keep its source visible', async t => {
+    const f = await transientMathFixture(t);
+    const code = f.pre.querySelector('code');
+    f.enter();
+    for (const endpoints of [
+        [code.firstChild, 1, code.firstChild, 4],
+        [code.firstChild, 1, f.after, 2],
+        [f.before, 2, f.after, 2],
+    ]) {
+        const range = f.select(...endpoints);
+        assert.equal(f.pre.getAttribute('data-math-view'), 'code');
+        assert.ok(f.range === range, 'a live drag range must not be replaced');
+    }
+    f.select(f.after, 0, f.after, 2);
+    assert.equal(f.pre.getAttribute('data-math-view'), 'preview');
+});
+
+test('manual TeX choices pin the source while an existing source view is never made transient', async t => {
+    for (const choice of ['already visible', 'TeX button', 'formula click']) {
+        await t.test(choice, async t => {
+            const f = await transientMathFixture(t);
+            if (choice === 'already visible') {
+                f.manager._setMathView(f.pre, 'code');
+                assert.equal(f.manager.revealMathSource(f.pre), false);
+            } else {
+                f.enter();
+                f.click(f.pre.querySelector(choice === 'TeX button'
+                    ? '[data-math-view="code"]' : '.math-preview'));
+            }
+            f.select(f.after, 2);
+            assert.equal(f.pre.getAttribute('data-math-view'), 'code');
+            assert.equal(f.manager.transientMathSources.size, 0);
+        });
+    }
+});
+
+test('an explicit Preview choice ends a transient reveal and the next keyboard entry starts a new one', async t => {
+    const f = await transientMathFixture(t);
+    f.enter();
+    f.click(f.pre.querySelector('[data-math-view="preview"]'));
+    assert.equal(f.pre.getAttribute('data-math-view'), 'preview');
+    assert.equal(f.range, null);
+    assert.equal(f.manager.transientMathSources.size, 0);
+    f.enter();
+    f.select(f.after, 1);
+    assert.equal(f.pre.getAttribute('data-math-view'), 'preview');
+});
+
+test('control rebuilding keeps a reveal transient and leaving immediately renders the latest TeX', async t => {
+    const f = await transientMathFixture(t);
+    f.enter();
+    f.manager.addCodeBlockControls(f.pre, 'math');
+    assert.equal(f.pre.getAttribute('data-math-view'), 'code');
+    assert.equal(f.manager.transientMathSources.has(f.pre), true);
+    const code = f.pre.querySelector('code');
+    code.textContent = 'changed^3\n';
+    const beforeLeave = f.domUtils.getCleanedHTML({ historyComparable: true });
+    f.manager._scheduleMathRender(f.pre, code);
+    const renderCount = f.renders.length;
+    const range = f.select(f.after, 2);
+    assert.equal(f.pre.getAttribute('data-math-view'), 'preview');
+    assert.equal(f.renders.length, renderCount + 1);
+    assert.equal(f.renders.at(-1).tex, 'changed^3\n');
+    assert.equal(f.domUtils.getCleanedHTML({ historyComparable: true }), beforeLeave);
+    assert.ok(f.range === range);
+    assert.equal(f.manager.mathRenderHandles.has(f.pre), false, 'the pending render is consumed immediately');
+});
+
+test('cleared selection or focus outside the editor ends a transient reveal without changing the selection', async t => {
+    const f = await transientMathFixture(t);
+    f.enter();
+    f.selection.removeAllRanges();
+    f.dispatch('selectionchange');
+    assert.equal(f.pre.getAttribute('data-math-view'), 'preview');
+    assert.equal(f.range, null);
+    const range = f.enter();
+    const input = f.document.createElement('input');
+    f.document.body.appendChild(input);
+    f.focus(input);
+    assert.equal(f.pre.getAttribute('data-math-view'), 'preview');
+    assert.ok(f.range === range, 'focus handling must not rewrite the saved range');
+});
+
+test('focus on controls within the math block keeps its temporary source open', async t => {
+    const f = await transientMathFixture(t);
+    f.enter();
+    const label = f.pre.querySelector('.code-block-language');
+    f.select(label.firstChild, 0, label.firstChild, label.textContent.length);
+    assert.equal(f.pre.getAttribute('data-math-view'), 'code', 'the language-label stop is still inside this block');
+    const button = f.pre.querySelector('.code-block-copy-btn');
+    f.focus(button);
+    f.selection.removeAllRanges();
+    f.dispatch('selectionchange');
+    assert.equal(f.pre.getAttribute('data-math-view'), 'code');
+    assert.equal(f.manager.transientMathSources.has(f.pre), true);
+    f.focus(f.document.body);
+    assert.equal(f.pre.getAttribute('data-math-view'), 'preview');
+});
+
+test('IME composition delays a transient preview return until composition ends', async t => {
+    const f = await transientMathFixture(t);
+    f.enter();
+    f.dispatch('compositionstart', f.editor);
+    const range = f.select(f.after, 1);
+    assert.equal(f.pre.getAttribute('data-math-view'), 'code');
+    f.dispatch('compositionend', f.editor);
+    assert.equal(f.pre.getAttribute('data-math-view'), 'preview');
+    assert.ok(f.range === range);
+
+    f.enter();
+    f.dispatch('compositionstart', f.editor);
+    const input = f.document.createElement('input');
+    f.document.body.appendChild(input);
+    f.focus(input);
+    assert.equal(f.pre.getAttribute('data-math-view'), 'code', 'external focus must not hide active composition');
+    f.dispatch('compositionend', f.editor);
+    assert.equal(f.pre.getAttribute('data-math-view'), 'preview');
+});
+
+test('removed math blocks and blocks whose language changed are removed from transient tracking', async t => {
+    for (const action of ['remove', 'language change']) {
+        await t.test(action, async t => {
+            const f = await transientMathFixture(t);
+            f.enter();
+            if (action === 'remove') f.pre.remove();
+            else f.manager.updateCodeBlockLanguage(f.pre, 'javascript');
+            f.manager._reconcileCodeBlockControls();
+            assert.equal(f.manager.transientMathSources.size, 0);
+            if (action === 'language change') {
+                assert.equal(f.pre.hasAttribute('data-math-view'), false);
+                assert.equal(f.pre.querySelector('code').className, 'language-javascript');
+            }
+        });
+    }
+});
+
 test('changing the language to and from math updates the preview', async t => {
     const f = await codeBlockFixture(t, '<pre><code>x</code></pre>');
     assert.ok(!f.pre.querySelector('.math-preview'));

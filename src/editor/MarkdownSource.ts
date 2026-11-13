@@ -17,9 +17,20 @@ function fingerprint(node: any): string {
             /^(DIV|UL|OL|BLOCKQUOTE|TABLE|THEAD|TBODY|TR|PRE)$/.test(node.parentNode?.nodeName)) {
             return '';
         }
-        if (node.parentNode?.nodeName === 'LI' && /^[^\S\uFEFF]*$/.test(node.nodeValue) &&
-            !(node.previousSibling?.nodeType === 1 && node.nextSibling?.nodeType === 1)) {
-            return '';
+        if (node.parentNode?.nodeName === 'LI' && /^[^\S\uFEFF]*$/.test(node.nodeValue)) {
+            const previous = node.previousSibling;
+            const next = node.nextSibling;
+            if (!(previous?.nodeType === 1 && next?.nodeType === 1)) {
+                return '';
+            }
+            // Loading removes Marked's formatting line feeds between block
+            // children of a loose item. Compare those snapshots equally, while
+            // keeping real spaces between inline elements or a literal NBSP.
+            const blockChild = /^(P|DIV|UL|OL|BLOCKQUOTE|PRE|TABLE|HR|H[1-6])$/;
+            if (/^[\r\n\t ]*$/.test(node.nodeValue) &&
+                blockChild.test(previous.nodeName) && blockChild.test(next.nodeName)) {
+                return '';
+            }
         }
         return JSON.stringify(node.nodeValue);
     }

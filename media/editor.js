@@ -3,7 +3,6 @@ import { CodeBlockGapManager } from './modules/CodeBlockGapManager.js';
 import { StateManager } from './modules/StateManager.js';
 import { ListManager } from './modules/ListManager.js';
 import { MarkdownConverter } from './modules/MarkdownConverter.js';
-import { CodeBlockManager } from './modules/CodeBlockManager.js';
 import { MermaidViewer } from './modules/MermaidViewer.js';
 import { ToolbarManager } from './modules/ToolbarManager.js';
 import { SearchManager } from './modules/SearchManager.js';
@@ -58,6 +57,7 @@ const { DragSelectionScroll } = await import(`./modules/DragSelectionScroll.js${
 const { TableOfContentsManager } = await import(`./modules/TableOfContentsManager.js${new URL(import.meta.url).search}`);
 const { DOMUtils } = await import(`./modules/DOMUtils.js${new URL(import.meta.url).search}`);
 const { TableManager } = await import(`./modules/TableManager.js${new URL(import.meta.url).search}`);
+const { CodeBlockManager } = await import(`./modules/CodeBlockManager.js${new URL(import.meta.url).search}`);
 const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js${new URL(import.meta.url).search}`);
 
 (function () {
@@ -1703,6 +1703,7 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
     const cursorManager = new CursorManager(editor, domUtils, {
         moveToCodeBlockGap: (pre, direction, selection) =>
             codeBlockGapManager.moveToGap(pre, direction, selection),
+        revealMathSource: (pre) => codeBlockManager.revealMathSource(pre),
         moveAcrossFootnoteReference: (selection, direction) =>
             footnoteManager.moveAcrossBackref(selection, direction) ||
             footnoteManager.moveAcrossReference(selection, direction) ||
@@ -11264,19 +11265,31 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
         return true;
     }
 
-    // A math block in preview and a Mermaid diagram hide their source. Native
-    // movement (ArrowRight on the first line uses it) or a click can still leave
-    // a caret in such a block, e.g. after the rendered formula. Select the label
-    // instead, as keyboard entry from any other line does.
+    // Native movement or a click can still leave a caret in hidden source.
+    // Keyboard entry reveals TeX; pointer interactions retain the preview.
     function normalizeCaretInHiddenSourceCodeBlock() {
         const selection = window.getSelection();
         if (!selection || !selection.rangeCount || !selection.isCollapsed) return false;
+        if (!editor.contains(document.activeElement)) return false;
         const node = selection.getRangeAt(0).startContainer;
         const element = node && (node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement);
         const pre = element && element.closest('pre');
         if (!pre || !editor.contains(pre) || element.closest('.code-block-toolbar')) return false;
         if (pre.getAttribute('data-math-view') !== 'preview' && pre.getAttribute('data-mermaid-view') !== 'diagram') {
             return false;
+        }
+        if (pre.getAttribute('data-math-view') === 'preview' && lastCaretIntentSource === 'keyboard' &&
+            codeBlockManager.revealMathSource(pre)) {
+            const code = pre.querySelector('code');
+            if (!code.contains(node)) {
+                const text = cursorManager.getCodeBlockText(code);
+                const afterSource = node === pre && selection.getRangeAt(0).startOffset >
+                    Array.prototype.indexOf.call(pre.childNodes, code);
+                cursorManager.setCodeBlockCursorOffset(code, selection,
+                    afterSource ? text.length - (text.endsWith('\n') ? 1 : 0) : 0);
+            }
+            setCodeBlockLanguageNavSelection(null);
+            return true;
         }
         return selectCodeBlockLanguageLabel(pre);
     }
@@ -11288,6 +11301,9 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
         if (!pre || !code) return false;
         const selection = window.getSelection();
         if (!selection) return false;
+        if (pre.getAttribute('data-math-view') === 'preview') {
+            cursorManager.revealMathSource?.(pre);
+        }
         if (pre.getAttribute('data-mermaid-view') === 'diagram' || pre.getAttribute('data-math-view') === 'preview') {
             if (codeBlockGapManager.moveToGap(pre, 'down', selection, true)) {
                 setCodeBlockLanguageNavSelection(null);
@@ -18139,7 +18155,7 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
         const isMacVerticalCtrlNav = isMac &&
             e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey &&
             (key === 'p' || key === 'n');
-        if (isPlainVerticalArrow || isMacVerticalCtrlNav) {
+        if (isPlainVerticalArrow || isPlainHorizontalArrow || isMacVerticalCtrlNav || isMacHorizontalCtrlNav) {
             lastCaretIntentSource = 'keyboard';
         }
 

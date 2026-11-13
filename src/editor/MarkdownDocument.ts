@@ -60,8 +60,9 @@ function imageAltAttribute(raw: string, fallback: string): string {
 // "$$" on a line of its own (up to three spaces of indentation) opens a display
 // formula whose first closing "$$" ends its line. Never combine neighboring
 // inline display formulas into one block. Like a paragraph, it cannot span a
-// blank line.
-const mathBlockPattern = / {0,3}\$\$((?:(?!\$\$|\n[ \t]*\n)[\s\S])*?)\$\$[ \t]*(?=\n|$)/y;
+// blank line. A copied non-breaking space after the closing delimiter is also
+// trailing whitespace, not prose that changes the formula into an inline node.
+const mathBlockPattern = / {0,3}\$\$((?:(?!\$\$|\n[ \t]*\n)[\s\S])*?)\$\$[ \t\u00A0]*(?=\n|$)/y;
 
 function matchMathBlock(source: string, index: number): RegExpExecArray | null {
     mathBlockPattern.lastIndex = index;
@@ -837,7 +838,7 @@ export class MarkdownDocument {
         const contentOf = (segment: string): string =>
             segment.replace(/\r?\n$/, '').replace(/^(?:[ \t]*>[ \t]?)*/, '');
         const opening = contentOf(segments[index]).replace(/^[ \t]*(?:(?:[*+-]|\d+[.)])[ \t]+(?:\[[ xX]\][ \t]+)?)?/, '');
-        if (!opening.startsWith('$$') || /\$\$[ \t]*$/.test(opening.slice(2))) {
+        if (!opening.startsWith('$$') || /\$\$[ \t\u00A0]*$/.test(opening.slice(2))) {
             return -1;
         }
         for (let end = index + 1; end < segments.length; end++) {
@@ -845,7 +846,7 @@ export class MarkdownDocument {
             if (line.trim() === '') {
                 return -1;
             }
-            if (/\$\$[ \t]*$/.test(line)) {
+            if (/\$\$[ \t\u00A0]*$/.test(line)) {
                 return end;
             }
         }

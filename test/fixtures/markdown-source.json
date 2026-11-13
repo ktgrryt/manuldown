@@ -376,6 +376,30 @@
     "source": "$$ x + y $$\n"
   },
   {
+    "name": "single-line math block trailing NBSP",
+    "source": "$$\\sum_{i=1}^{n} i = \\frac{n(n+1)}{2}$$ \u00a0\n"
+  },
+  {
+    "name": "multiline math block trailing NBSP",
+    "source": "$$\n\\frac{a}{b}\n$$ \u00a0\n"
+  },
+  {
+    "name": "math block trailing NBSP interrupts paragraph",
+    "source": "Intro\n$$x + y$$ \u00a0\nAfter\n"
+  },
+  {
+    "name": "quoted math block trailing NBSP",
+    "source": "> $$\n> a = b\n> + c\n> - d\n> $$ \u00a0\n"
+  },
+  {
+    "name": "listed math block trailing NBSP",
+    "source": "- Item\n\n  $$\n  a = b\n  + c\n  - d\n  $$ \u00a0\n- Next\n"
+  },
+  {
+    "name": "math block trailing NBSP with neighboring blocks",
+    "source": "### Quadratic equation\n\n$$\nx = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}\n$$\n\n### Sum\n\n$$\\sum_{i=1}^{n} i = \\frac{n(n+1)}{2}$$ \u00a0\n\n```mermaid width=480\nflowchart LR\n    A --> B\n```\n\n/workspace/docs/guide.pdf\n\n```\n\n```\n"
+  },
+  {
     "name": "math fence",
     "source": "```math\nx^2\n```\n"
   },

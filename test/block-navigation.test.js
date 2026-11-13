@@ -14,6 +14,7 @@ const cursorManagerModulePromise = importModule('media/modules/CursorManager.js'
 const tableManagerModulePromise = importModule('media/modules/TableManager.js');
 const codeBlockGapManagerModulePromise = importModule('media/modules/CodeBlockGapManager.js');
 const footnoteManagerModulePromise = importModule('media/modules/FootnoteManager.js');
+const codeBlockManagerModulePromise = importModule('media/modules/CodeBlockManager.js');
 const editorSource = fs.readFileSync(
     path.join(__dirname, '..', 'media', 'editor.js'),
     'utf8'
@@ -195,7 +196,15 @@ async function createFixture(editorHtml) {
     const { DOMUtils } = await domUtilsModulePromise;
     const { CursorManager } = await cursorManagerModulePromise;
     const domUtils = new DOMUtils(editor);
-    const cursorManager = new CursorManager(editor, domUtils);
+    const { CodeBlockManager } = await codeBlockManagerModulePromise;
+    // Use the real view-switching API without starting rendering observers in
+    // this navigation-only fixture.
+    const codeBlockManager = Object.assign(Object.create(CodeBlockManager.prototype), {
+        editor, transientMathSources: new Set(),
+    });
+    const cursorManager = new CursorManager(editor, domUtils, {
+        revealMathSource: pre => codeBlockManager.revealMathSource(pre),
+    });
     const { CodeBlockGapManager } = await codeBlockGapManagerModulePromise;
     const codeBlockGapManager = new CodeBlockGapManager(editor);
     const { FootnoteManager } = await footnoteManagerModulePromise;
@@ -210,6 +219,7 @@ async function createFixture(editorHtml) {
         editor,
         domUtils,
         cursorManager,
+        codeBlockManager,
         codeBlockGapManager,
         footnoteManager,
         selection,
@@ -245,7 +255,8 @@ function extractEditorFunction(name) {
 // tested paths do not reach.
 function loadEditorFunctions(fixture, names, stubs = {}) {
     const sources = names.map(extractEditorFunction);
-    const stubNames = Object.keys(stubs);
+    const values = { codeBlockManager: fixture.codeBlockManager, lastCaretIntentSource: 'pointer', ...stubs };
+    const stubNames = Object.keys(values);
     const factory = new Function(
         'editor',
         'domUtils',
@@ -261,7 +272,7 @@ function loadEditorFunctions(fixture, names, stubs = {}) {
         fixture.cursorManager,
         () => {},
         fixture.codeBlockGapManager,
-        ...stubNames.map(name => stubs[name])
+        ...stubNames.map(name => values[name])
     );
 }
 
@@ -1313,6 +1324,224 @@ function selectedNode(fixture) {
 const CODE_BLOCK =
     '<pre><div class="code-block-toolbar"><span class="code-block-language">plaintext</span></div>' +
     '<code>mvn liberty:dev\n</code></pre>';
+
+const MATH_PREVIEW = '<pre data-math-view="preview">' +
+    '<div class="code-block-toolbar" data-exclude-from-markdown="true">' +
+    '<span class="code-block-language">math</span>' +
+    '<button class="code-block-view-btn" data-math-view="code" aria-pressed="false">TeX</button>' +
+    '<button class="code-block-view-btn" data-math-view="preview" aria-pressed="true">Preview</button></div>' +
+    '<code class="language-math">first line\nlast line\n</code>' +
+    '<div class="math-preview" contenteditable="false" data-exclude-from-markdown="true">Formula</div></pre>';
+
+function assertVisibleMathCaret(fixture, expectedOffset) {
+    const pre = fixture.editor.querySelector('pre');
+    const code = pre.querySelector('code');
+    const range = fixture.selection.getRangeAt(0);
+    assert.equal(pre.getAttribute('data-math-view'), 'code');
+    assert.equal(pre.querySelector('button[data-math-view="code"]').getAttribute('aria-pressed'), 'true');
+    assert.equal(pre.querySelector('button[data-math-view="preview"]').getAttribute('aria-pressed'), 'false');
+    assert.equal(range.collapsed, true);
+    assert.ok(code.contains(range.startContainer));
+    assert.equal(fixture.cursorManager.getCodeBlockCursorOffset(code, range), expectedOffset);
+}
+
+test('keyboard code-offset entry reveals a math preview and retains its requested source position', async () => {
+    for (const offset of [0, 4, 20]) {
+        const fixture = await createFixture('<p>before</p>' + MATH_PREVIEW + '<p>after</p>');
+        try {
+            const code = fixture.editor.querySelector('code');
+            const original = fixture.domUtils.getCleanedHTML({ historyComparable: true });
+            assert.equal(fixture.cursorManager.setCodeBlockCursorOffset(code, fixture.selection, offset), true);
+            assertVisibleMathCaret(fixture, offset);
+            assert.equal(code.textContent, 'first line\nlast line\n');
+            assert.equal(fixture.domUtils.getCleanedHTML({ historyComparable: true }), original);
+        } finally {
+            fixture.restoreGlobals();
+        }
+    }
+});
+
+test('keyboard entry stops on the math language label before opening source', async () => {
+    for (const route of ['cursor manager', 'editor']) {
+        const fixture = await createFixture('<p>before</p>' + MATH_PREVIEW + '<p>after</p>');
+        try {
+            const pre = fixture.editor.querySelector('pre');
+            const label = pre.querySelector('.code-block-language');
+            const original = fixture.domUtils.getCleanedHTML({ historyComparable: true });
+            const navigation = loadEditorFunctions(fixture, [
+                'moveCursorIntoCodeBlockFromLabel', 'normalizeCaretInHiddenSourceCodeBlock', ...CODE_BLOCK_NAVIGATION,
+            ], { lastCaretIntentSource: 'keyboard' });
+            fixture.placeCaret(fixture.editor.firstElementChild.firstChild, 6);
+            if (route === 'cursor manager') {
+                assert.equal(fixture.cursorManager._selectCodeBlockLanguageLabel(pre, fixture.selection), true);
+            } else {
+                assert.equal(navigation.selectCodeBlockLanguageLabel(pre), true);
+            }
+            assert.equal(selectedNode(fixture), 'SPAN.code-block-language', route);
+            assert.equal(pre.getAttribute('data-math-view'), 'preview');
+            assert.equal(fixture.codeBlockManager.transientMathSources.has(pre), false);
+            assert.equal(navigation.normalizeCaretInHiddenSourceCodeBlock(), false,
+                'queued selectionchange must not skip the selected language label');
+            assert.equal(pre.getAttribute('data-math-view'), 'preview');
+
+            assert.equal(navigation.moveCursorIntoCodeBlockFromLabel(label), true);
+            assertVisibleMathCaret(fixture, 0);
+            assert.equal(fixture.codeBlockManager.transientMathSources.has(pre), true);
+            assert.equal(!!fixture.editor.querySelector('.code-block-language.nav-selected'), false);
+            assert.equal(fixture.domUtils.getCleanedHTML({ historyComparable: true }), original);
+        } finally {
+            fixture.restoreGlobals();
+        }
+    }
+});
+
+test('an explicitly previewed empty math block also stops on its label before entering source', async () => {
+    for (const source of ['', '\n']) {
+        const fixture = await createFixture(MATH_PREVIEW.replace('first line\nlast line\n', source));
+        try {
+            const pre = fixture.editor.querySelector('pre');
+            const code = pre.querySelector('code');
+            assert.equal(fixture.cursorManager._selectCodeBlockLanguageLabel(pre, fixture.selection), true);
+            assert.equal(selectedNode(fixture), 'SPAN.code-block-language');
+            assert.equal(pre.getAttribute('data-math-view'), 'preview');
+            const navigation = loadEditorFunctions(fixture, ['moveCursorIntoCodeBlockFromLabel', ...CODE_BLOCK_NAVIGATION]);
+            assert.equal(navigation.moveCursorIntoCodeBlockFromLabel(pre.querySelector('.code-block-language')), true);
+            assertVisibleMathCaret(fixture, 0);
+            assert.equal(code.textContent, source);
+        } finally {
+            fixture.restoreGlobals();
+        }
+    }
+});
+
+test('directional math entry preserves the language stop above and source position below', async () => {
+    for (const [method, fromBelow, expectedOffset] of [
+        ['moveCursorDown', false, 0],
+        ['moveCursorForward', false, 0],
+        ['moveCursorBackward', true, 20],
+    ]) {
+        const fixture = await createFixture('<p>before</p>' + MATH_PREVIEW + '<p>after</p>');
+        try {
+            const paragraph = fromBelow ? fixture.editor.lastElementChild : fixture.editor.firstElementChild;
+            fixture.placeCaret(paragraph.firstChild, fromBelow ? 0 : paragraph.textContent.length);
+            const original = fixture.domUtils.getCleanedHTML({ historyComparable: true });
+            fixture.cursorManager[method]();
+            if (fromBelow) {
+                assertVisibleMathCaret(fixture, expectedOffset);
+            } else {
+                assert.equal(selectedNode(fixture), 'SPAN.code-block-language', method);
+                assert.equal(fixture.editor.querySelector('pre').getAttribute('data-math-view'), 'preview', method);
+            }
+            assert.equal(fixture.domUtils.getCleanedHTML({ historyComparable: true }), original, method);
+        } finally {
+            fixture.restoreGlobals();
+        }
+    }
+});
+
+test('Down visits the math label then temporary source, and Up exits through the label', async () => {
+    const fixture = await createFixture('<p>before</p>' + MATH_PREVIEW + '<p>after</p>');
+    try {
+        const pre = fixture.editor.querySelector('pre');
+        const label = pre.querySelector('.code-block-language');
+        const navigation = loadEditorFunctions(fixture, [
+            'maybeSelectCodeBlockLabelBelow', 'isEffectivelyEmptyBlock',
+            'moveCursorIntoCodeBlockFromLabel', 'handleCodeBlockArrowUp',
+            'moveCursorAboveCodeBlockFromLabel', 'normalizeCaretInHiddenSourceCodeBlock',
+            ...CODE_BLOCK_NAVIGATION,
+        ], {
+            lastCaretIntentSource: 'keyboard',
+            isCaretOnBlockEdgeLine: () => true,
+            getCodeBlockCursorOffset: (code, range) => fixture.cursorManager.getCodeBlockCursorOffset(code, range),
+        });
+        const before = fixture.editor.firstElementChild;
+        const original = fixture.domUtils.getCleanedHTML({ historyComparable: true });
+        fixture.placeCaret(before.firstChild, before.textContent.length);
+
+        assert.equal(navigation.maybeSelectCodeBlockLabelBelow(fixture.selection.getRangeAt(0)), true);
+        assert.equal(selectedNode(fixture), 'SPAN.code-block-language');
+        assert.equal(pre.getAttribute('data-math-view'), 'preview');
+        assert.equal(navigation.normalizeCaretInHiddenSourceCodeBlock(), false);
+
+        assert.equal(navigation.moveCursorIntoCodeBlockFromLabel(label), true);
+        assertVisibleMathCaret(fixture, 0);
+        assert.equal(fixture.codeBlockManager.transientMathSources.has(pre), true);
+
+        assert.deepEqual(navigation.handleCodeBlockArrowUp(fixture.selection), { handled: true, moved: true });
+        assert.equal(selectedNode(fixture), 'SPAN.code-block-language');
+        fixture.codeBlockManager.syncTransientMathViews();
+        assert.equal(pre.getAttribute('data-math-view'), 'code', 'the language label is still inside the block');
+
+        assert.equal(navigation.moveCursorAboveCodeBlockFromLabel(label), true);
+        assert.ok(before.contains(fixture.selection.getRangeAt(0).startContainer));
+        const range = fixture.selection.getRangeAt(0);
+        // Rendering is covered by MathManager tests; this fixture has no renderer.
+        fixture.codeBlockManager._scheduleMathRender = () => {};
+        fixture.codeBlockManager.syncTransientMathViews();
+        assert.equal(pre.getAttribute('data-math-view'), 'preview');
+        assert.equal(fixture.selection.getRangeAt(0), range);
+        assert.equal(fixture.codeBlockManager.transientMathSources.has(pre), false);
+        assert.equal(fixture.domUtils.getCleanedHTML({ historyComparable: true }), original);
+    } finally {
+        fixture.restoreGlobals();
+    }
+});
+
+test('upward and backward math entry from below reveal the source at the requested last-line position', async () => {
+    for (const [name, expectedOffset] of [
+        ['moveCursorIntoCodeBlockFromTextBlockBelow', 11],
+        ['moveCursorIntoCodeBlockFromBlockStartBelow', 20],
+    ]) {
+        const fixture = await createFixture('<p>before</p>' + MATH_PREVIEW + '<p>after</p>');
+        try {
+            const range = fixture.placeCaret(fixture.editor.lastElementChild.firstChild, 0);
+            const navigation = loadEditorFunctions(fixture, [name, 'isAtBlockStartForRange',
+                'isEffectivelyEmptyBlock', ...CODE_BLOCK_NAVIGATION], { isCaretOnBlockEdgeLine: () => true });
+            assert.equal(navigation[name](range, fixture.selection), true);
+            assertVisibleMathCaret(fixture, expectedOffset);
+        } finally {
+            fixture.restoreGlobals();
+        }
+    }
+});
+
+test('keyboard normalization reveals a native landing inside hidden math source without moving its offset', async () => {
+    const fixture = await createFixture('<p>before</p>' + MATH_PREVIEW + '<p>after</p>');
+    try {
+        const code = fixture.editor.querySelector('code');
+        fixture.placeCaret(code.firstChild, 4);
+        const navigation = loadEditorFunctions(fixture, ['normalizeCaretInHiddenSourceCodeBlock', ...CODE_BLOCK_NAVIGATION],
+            { lastCaretIntentSource: 'keyboard' });
+        assert.equal(navigation.normalizeCaretInHiddenSourceCodeBlock(), true);
+        assertVisibleMathCaret(fixture, 4);
+    } finally {
+        fixture.restoreGlobals();
+    }
+});
+
+test('pointer landing and drag selections leave math in preview mode', async () => {
+    for (const selectionKind of ['pointer caret', 'drag range']) {
+        const fixture = await createFixture('<p>before</p>' + MATH_PREVIEW + '<p>after</p>');
+        try {
+            const pre = fixture.editor.querySelector('pre');
+            const navigation = loadEditorFunctions(fixture, ['normalizeCaretInHiddenSourceCodeBlock', ...CODE_BLOCK_NAVIGATION]);
+            if (selectionKind === 'pointer caret') fixture.placeCaret(pre, pre.childNodes.length);
+            else {
+                const range = new TestRange();
+                range.selectNode(pre);
+                fixture.selection.addRange(range);
+            }
+            const originalSource = pre.querySelector('code').textContent;
+            navigation.normalizeCaretInHiddenSourceCodeBlock();
+            assert.equal(pre.getAttribute('data-math-view'), 'preview');
+            assert.equal(pre.querySelector('code').textContent, originalSource);
+            if (selectionKind === 'pointer caret') assert.equal(selectedNode(fixture), 'SPAN.code-block-language');
+            else assert.equal(selectedNode(fixture), 'PRE');
+        } finally {
+            fixture.restoreGlobals();
+        }
+    }
+});
 
 test('Up beside display math rejects native jumps to the document start, including scrolled jumps', async () => {
     for (const nativeScroll of [false, true]) {
