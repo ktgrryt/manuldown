@@ -33,6 +33,7 @@ function fixture() {
         footnoteManager: { cancelPendingDelete() {}, refresh() {} },
         mathManager: { dismissEditor() {} },
         performAuxiliaryHistoryCommand: () => false,
+        flushPendingCaretPlacement: () => false,
         typingUndoGroup: { break() {} },
         captureHistoryCaretViewportOffset() {},
         stateManager: {

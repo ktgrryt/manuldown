@@ -4750,9 +4750,15 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
             return null;
         }
 
+        // The selection can also remove the next block. Keep the remaining
+        // siblings in order so a lost immediate neighbor never means document end.
+        const followingSiblings = [];
+        for (let sibling = topLevelBlock.nextSibling; sibling; sibling = sibling.nextSibling) {
+            followingSiblings.push(sibling);
+        }
         return {
             parent: topLevelBlock.parentElement,
-            nextSibling: topLevelBlock.nextSibling
+            followingSiblings
         };
     }
 
@@ -4776,10 +4782,18 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
             return false;
         }
 
-        const insertBeforeNode =
-            anchor.nextSibling && anchor.nextSibling.parentNode === anchor.parent
-                ? anchor.nextSibling
-                : null;
+        const range = selection.rangeCount ? selection.getRangeAt(0) : null;
+        if (range && editor.contains(range.commonAncestorContainer) &&
+            (!range.collapsed || range.startContainer !== editor)) {
+            // Native deletion may already have left a paragraph (including an
+            // empty one), or merged the surviving text at the deletion point.
+            // Keep that caret instead of adding a line and moving it elsewhere.
+            return false;
+        }
+
+        const insertBeforeNode = range?.collapsed && range.startContainer === anchor.parent
+            ? anchor.parent.childNodes[range.startOffset] || null
+            : anchor.followingSiblings.find(node => node.parentNode === anchor.parent) || null;
         const p = document.createElement('p');
         p.appendChild(document.createElement('br'));
         anchor.parent.insertBefore(p, insertBeforeNode);
@@ -8931,6 +8945,9 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
         if (performAuxiliaryHistoryCommand(direction)) {
             return true;
         }
+        // Structural deletion can queue a caret move until the next frame.
+        // Finish it before history replaces those nodes and saves a new anchor.
+        flushPendingCaretPlacement();
         stopManualPointerSelection();
         typingUndoGroup.break();
         const hadPendingViewportAnchor = Number.isFinite(historyCaretViewportOffsetPending);
