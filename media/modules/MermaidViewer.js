@@ -37,10 +37,10 @@ export class MermaidViewer {
             <div class="mermaid-viewer-toolbar">
                 <strong class="mermaid-viewer-title">Mermaid preview</strong>
                 <button type="button" class="mermaid-viewer-close" data-action="close" aria-label="Close preview" title="Close preview (Esc)">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="m6 6 12 12M18 6 6 18"/></svg>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="m6 6 12 12M18 6 6 18"/></svg>
                 </button>
             </div>
-            <div class="mermaid-viewer-viewport" tabindex="0" role="region" aria-label="Diagram. Scroll to zoom, drag or use arrow keys to pan.">
+            <div class="mermaid-viewer-viewport" tabindex="0" role="region" aria-label="Diagram. Scroll or press + and - to zoom. Drag or use arrow keys to pan. Press 0 for actual size, F to fit, and Esc to close.">
                 <div class="mermaid-viewer-stage"></div>
                 <p class="mermaid-viewer-status" role="status"></p>
             </div>
@@ -48,22 +48,18 @@ export class MermaidViewer {
                 <div class="mermaid-viewer-actions" role="group" aria-label="Diagram controls">
                     <div class="mermaid-viewer-zoom" role="group" aria-label="Zoom">
                         <button type="button" data-action="zoom-out" aria-label="Zoom out" title="Zoom out (−)">
-                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M5 12h14"/></svg>
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M5 12h14"/></svg>
                         </button>
                         <output class="mermaid-viewer-scale" aria-label="Zoom level" aria-live="polite"></output>
                         <button type="button" data-action="zoom-in" aria-label="Zoom in" title="Zoom in (+)">
-                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M5 12h14M12 5v14"/></svg>
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M5 12h14M12 5v14"/></svg>
                         </button>
                     </div>
-                    <button type="button" class="mermaid-viewer-actual" data-action="actual" aria-label="Actual size (100%)" title="Actual size (0)">
-                        <span>100%</span><span class="mermaid-viewer-button-caption">Actual size</span>
-                    </button>
-                    <button type="button" data-action="fit" title="Fit diagram to view (F)">
-                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M8 3H3v5m13-5h5v5M3 16v5h5m8 0h5v-5"/></svg>
-                        Fit to view
-                    </button>
+                    <span class="mermaid-viewer-divider" aria-hidden="true"></span>
+                    <button type="button" class="mermaid-viewer-actual" data-action="actual" aria-label="Actual size (100%)" title="Actual size (0)">100%</button>
+                    <span class="mermaid-viewer-divider" aria-hidden="true"></span>
+                    <button type="button" data-action="fit" aria-label="Fit diagram to view" title="Fit diagram to view (F)">Fit</button>
                 </div>
-                <p class="mermaid-viewer-hint">Scroll to zoom · Drag to pan · Esc to close</p>
             </div>`;
         this.dialog = dialog;
         this.viewport = dialog.querySelector('.mermaid-viewer-viewport');

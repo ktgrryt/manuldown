@@ -850,13 +850,17 @@ async function codeBlockFixture(t, html) {
     };
 }
 
-test('math blocks show the formula with a TeX and Preview toggle', async t => {
+test('math blocks show the formula with a checked Preview switch', async t => {
     const html = '<pre><code class="language-math" data-mdw-math-delimiter="$$">\\frac{a}{b}\n</code></pre>';
     const f = await codeBlockFixture(t, html);
     assert.equal(f.pre.getAttribute('data-math-view'), 'preview');
-    const buttons = Array.from(f.pre.querySelectorAll('.code-block-view-btn'));
-    assert.deepEqual(buttons.map(button => [button.textContent, button.getAttribute('aria-pressed')]),
-        [['TeX', 'false'], ['Preview', 'true']]);
+    const toggle = f.pre.querySelector('.code-block-preview-toggle');
+    assert.equal(toggle.tagName, 'BUTTON');
+    assert.equal(toggle.type, 'button');
+    assert.equal(toggle.getAttribute('role'), 'switch');
+    assert.equal(toggle.getAttribute('aria-checked'), 'true');
+    assert.equal(toggle.textContent, 'Preview');
+    assert.equal(f.pre.querySelectorAll('[role="switch"]').length, 1);
     const preview = f.pre.querySelector('.math-preview');
     assert.equal(preview.getAttribute('data-exclude-from-markdown'), 'true');
     const render = f.renders.at(-1);
@@ -872,14 +876,16 @@ test('empty math blocks load with the TeX input visible without changing their s
             const html = `<pre><code class="language-math" data-mdw-math-delimiter="$$">${tex}</code></pre>`;
             const f = await codeBlockFixture(t, html);
             assert.equal(f.pre.getAttribute('data-math-view'), 'code');
-            const buttons = Array.from(f.pre.querySelectorAll('.code-block-view-btn'));
-            assert.deepEqual(buttons.map(button => [button.textContent, button.getAttribute('aria-pressed')]),
-                [['TeX', 'true'], ['Preview', 'false']]);
+            const toggle = f.pre.querySelector('.code-block-preview-toggle');
+            assert.equal(toggle.getAttribute('aria-checked'), 'false');
             assert.equal(f.range, null, 'loading must not steal the caret');
             assert.equal(f.pre.querySelector('code').textContent, tex);
             assert.equal(f.domUtils.getCleanedHTML(), html);
 
-            f.click(buttons[0]);
+            f.click(toggle);
+            assert.equal(toggle.getAttribute('aria-checked'), 'true');
+            f.click(toggle);
+            assert.equal(toggle.getAttribute('aria-checked'), 'false');
             assert.ok(f.pre.querySelector('code').contains(f.range.startContainer));
             assert.equal(f.range.collapsed, true);
         });
@@ -894,10 +900,10 @@ test('math input stays open after typing and an explicit Preview choice survives
     assert.equal(f.pre.getAttribute('data-math-view'), 'code');
 
     f.pre.querySelector('code').textContent = '\n';
-    f.click(f.pre.querySelector('.code-block-view-btn[data-math-view="preview"]'));
+    f.click(f.pre.querySelector('.code-block-preview-toggle'));
     f.manager.highlightCodeBlocks();
     assert.equal(f.pre.getAttribute('data-math-view'), 'preview');
-    assert.equal(f.pre.querySelector('.code-block-view-btn[data-math-view="preview"]').getAttribute('aria-pressed'), 'true');
+    assert.equal(f.pre.querySelector('.code-block-preview-toggle').getAttribute('aria-checked'), 'true');
 });
 
 test('opening a math block source shows the TeX with the caret at its end', async t => {
@@ -907,7 +913,7 @@ test('opening a math block source shows the TeX with the caret at its end', asyn
     const code = f.pre.querySelector('code');
     assert.ok(code.contains(f.range.startContainer));
     assert.equal(f.range.collapsed, true);
-    f.click(f.pre.querySelector('.code-block-view-btn[data-math-view="preview"]'));
+    f.click(f.pre.querySelector('.code-block-preview-toggle'));
     assert.equal(f.pre.getAttribute('data-math-view'), 'preview');
     assert.equal(f.range, null, 'a hidden source keeps no caret');
 });
@@ -929,8 +935,7 @@ test('revealing math source for navigation changes the view without moving the c
     assert.equal(f.manager.revealMathSource(f.pre), true);
 
     assert.equal(f.pre.getAttribute('data-math-view'), 'code');
-    assert.equal(f.pre.querySelector('[data-math-view="code"]').getAttribute('aria-pressed'), 'true');
-    assert.equal(f.pre.querySelector('[data-math-view="preview"]').getAttribute('aria-pressed'), 'false');
+    assert.equal(f.pre.querySelector('.code-block-preview-toggle').getAttribute('aria-checked'), 'false');
     assert.ok(f.range === range, 'the caller places the caret after switching the view');
     assert.equal(f.pre.querySelector('code').innerHTML, source);
     assert.equal(f.domUtils.getCleanedHTML({ historyComparable: true }), original);
@@ -1023,8 +1028,7 @@ test('keyboard-revealed TeX returns to preview after the caret leaves and can be
         assert.equal(f.pre.getAttribute('data-math-view'), 'code');
         const range = f.select(target, 2);
         assert.equal(f.pre.getAttribute('data-math-view'), 'preview');
-        assert.equal(f.pre.querySelector('[data-math-view="preview"]').getAttribute('aria-pressed'), 'true');
-        assert.equal(f.pre.querySelector('[data-math-view="code"]').getAttribute('aria-pressed'), 'false');
+        assert.equal(f.pre.querySelector('.code-block-preview-toggle').getAttribute('aria-checked'), 'true');
         assert.ok(f.range === range, 'returning to preview must not move the outside caret');
         assert.equal(f.manager.transientMathSources.size, 0);
     }
@@ -1063,17 +1067,20 @@ test('source selections and drag ranges crossing a transient math block keep its
     assert.equal(f.pre.getAttribute('data-math-view'), 'preview');
 });
 
-test('manual TeX choices pin the source while an existing source view is never made transient', async t => {
-    for (const choice of ['already visible', 'TeX button', 'formula click']) {
+test('turning Preview off pins TeX while an existing source view is never made transient', async t => {
+    for (const choice of ['already visible', 'Preview switch', 'formula click']) {
         await t.test(choice, async t => {
             const f = await transientMathFixture(t);
             if (choice === 'already visible') {
                 f.manager._setMathView(f.pre, 'code');
                 assert.equal(f.manager.revealMathSource(f.pre), false);
+            } else if (choice === 'Preview switch') {
+                f.click(f.pre.querySelector('.code-block-preview-toggle'));
+                assert.equal(f.pre.querySelector('.code-block-preview-toggle').getAttribute('aria-checked'), 'false');
+                assert.ok(f.pre.querySelector('code').contains(f.range.startContainer));
             } else {
                 f.enter();
-                f.click(f.pre.querySelector(choice === 'TeX button'
-                    ? '[data-math-view="code"]' : '.math-preview'));
+                f.click(f.pre.querySelector('.math-preview'));
             }
             f.select(f.after, 2);
             assert.equal(f.pre.getAttribute('data-math-view'), 'code');
@@ -1085,7 +1092,7 @@ test('manual TeX choices pin the source while an existing source view is never m
 test('an explicit Preview choice ends a transient reveal and the next keyboard entry starts a new one', async t => {
     const f = await transientMathFixture(t);
     f.enter();
-    f.click(f.pre.querySelector('[data-math-view="preview"]'));
+    f.click(f.pre.querySelector('.code-block-preview-toggle'));
     assert.equal(f.pre.getAttribute('data-math-view'), 'preview');
     assert.equal(f.range, null);
     assert.equal(f.manager.transientMathSources.size, 0);

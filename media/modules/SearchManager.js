@@ -3,6 +3,10 @@
  * 検索管理モジュール
  * Cmd+F / Ctrl+F による文書内検索、置換、ハイライトを担当
  */
+function searchButtonIcon(path) {
+    return `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="${path}"/></svg>`;
+}
+
 export class SearchManager {
     /**
      * @param {HTMLElement} editor - The contenteditable editor element
@@ -294,6 +298,7 @@ export class SearchManager {
         this.caseSensitiveButton.className = 'search-bar-btn search-bar-toggle';
         this.caseSensitiveButton.textContent = 'Aa';
         this.caseSensitiveButton.title = 'Match Case';
+        this.caseSensitiveButton.setAttribute('aria-label', 'Match case');
         this.caseSensitiveButton.setAttribute('aria-pressed', 'false');
 
         inputContainer.appendChild(this.searchInput);
@@ -310,19 +315,22 @@ export class SearchManager {
         // Navigation buttons
         this.prevButton = document.createElement('button');
         this.prevButton.className = 'search-bar-btn';
-        this.prevButton.innerHTML = '&#x2191;';
+        this.prevButton.innerHTML = searchButtonIcon('M12 19V5m-5 5 5-5 5 5');
         this.prevButton.title = 'Previous Match (Shift+Enter)';
+        this.prevButton.setAttribute('aria-label', 'Previous match');
 
         this.nextButton = document.createElement('button');
         this.nextButton.className = 'search-bar-btn';
-        this.nextButton.innerHTML = '&#x2193;';
+        this.nextButton.innerHTML = searchButtonIcon('M12 5v14m-5-5 5 5 5-5');
         this.nextButton.title = 'Next Match (Enter)';
+        this.nextButton.setAttribute('aria-label', 'Next match');
 
         // Close button
         this.closeButton = document.createElement('button');
         this.closeButton.className = 'search-bar-btn search-bar-close';
-        this.closeButton.innerHTML = '&#x2715;';
+        this.closeButton.innerHTML = searchButtonIcon('m6 6 12 12M18 6 6 18');
         this.closeButton.title = 'Close (Escape)';
+        this.closeButton.setAttribute('aria-label', 'Close search');
 
         searchRow.appendChild(inputContainer);
         this.actionsContainer.appendChild(this.matchCountLabel);

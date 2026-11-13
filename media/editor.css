@@ -26,6 +26,20 @@ body {
     --search-bar-edge-gap: clamp(12px, 2.8vw, 20px);
     --search-bar-reserved-height: 0px;
     --editor-top-base-padding: 40px;
+    /* Shared chrome: every auxiliary control follows the editor's theme. */
+    --md-ui-font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
+    --md-ui-foreground: var(--vscode-editor-foreground);
+    --md-ui-muted: var(--vscode-descriptionForeground, var(--md-ui-foreground));
+    --md-ui-surface: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+    --md-ui-border: var(--vscode-editorWidget-border, var(--vscode-editorGroup-border));
+    --md-ui-hover: var(--vscode-list-hoverBackground);
+    --md-ui-selected: color-mix(in srgb, var(--md-ui-foreground) 12%, var(--md-ui-surface));
+    --md-ui-radius: 4px;
+    --md-ui-menu-radius: 6px;
+    --md-ui-control-size: 28px;
+    --md-ui-icon-size: 16px;
+    --md-ui-shadow: 0 4px 12px rgba(0, 0, 0, 0.18);
+    --md-block-background: color-mix(in srgb, var(--vscode-editor-foreground) 4%, var(--vscode-editor-background));
     --md-syntax-comment: #6a9955;
     --md-syntax-punctuation: #d4d4d4;
     --md-syntax-property: #b5cea8;
@@ -34,8 +48,8 @@ body {
     --md-syntax-keyword: #c586c0;
     --md-syntax-function: #dcdcaa;
     --md-syntax-variable: #d16969;
-    --md-mermaid-preview-background: #ffffff;
-    --md-mermaid-preview-foreground: #111111;
+    --md-mermaid-preview-background: var(--vscode-editor-background);
+    --md-mermaid-preview-foreground: var(--vscode-editor-foreground);
     --md-divider-color: var(--vscode-editorGroup-border, var(--vscode-editor-foreground));
     --md-divider-color: color-mix(
         in srgb,
@@ -54,8 +68,8 @@ body[data-theme-mode="light"] {
     --md-syntax-keyword: #0000ff;
     --md-syntax-function: #795e26;
     --md-syntax-variable: #811f3f;
-    --md-mermaid-preview-background: #ffffff;
-    --md-mermaid-preview-foreground: #24292f;
+    --md-mermaid-preview-background: var(--vscode-editor-background);
+    --md-mermaid-preview-foreground: var(--vscode-editor-foreground);
 }
 
 body[data-theme-mode="vscode"].vscode-dark,
@@ -69,13 +83,14 @@ body[data-theme-mode="dark"] {
     --md-syntax-keyword: #c586c0;
     --md-syntax-function: #dcdcaa;
     --md-syntax-variable: #d16969;
-    --md-mermaid-preview-background: #1f1f1f;
-    --md-mermaid-preview-foreground: #d4d4d4;
+    --md-mermaid-preview-background: var(--vscode-editor-background);
+    --md-mermaid-preview-foreground: var(--vscode-editor-foreground);
 }
 
 body[data-theme-mode="vscode"].vscode-high-contrast,
 body[data-theme-mode="vscode"].vscode-high-contrast-light {
     --md-divider-color: var(--vscode-contrastBorder, var(--vscode-editor-foreground));
+    --md-ui-border: var(--vscode-contrastBorder, var(--vscode-editor-foreground));
 }
 
 body[data-theme-mode="light"] {
@@ -185,6 +200,25 @@ body.toc-resizing {
     user-select: none;
 }
 
+/* Floating surfaces share one material; only their placement and width vary. */
+.toolbar-overflow-menu,
+.code-block-export-menu,
+.language-suggestions,
+.link-popover,
+.math-popover,
+.slash-command-menu,
+.search-bar,
+.md-table-dialog {
+    background: var(--md-ui-surface);
+    color: var(--md-ui-foreground);
+    border: 1px solid var(--md-ui-border);
+    border-radius: var(--md-ui-menu-radius);
+    box-shadow: var(--md-ui-shadow);
+    font-family: var(--md-ui-font-family);
+    font-size: 12px;
+    line-height: 1.5;
+}
+
 .toolbar {
     display: flex;
     align-items: center;
@@ -208,7 +242,7 @@ body.toc-resizing {
     background-color: transparent;
     color: var(--vscode-editor-foreground);
     border: 1px solid transparent;
-    border-radius: 3px;
+    border-radius: var(--md-ui-radius);
     cursor: pointer;
     font-size: 13px;
     font-weight: 500;
@@ -247,33 +281,29 @@ body.toc-resizing {
     max-width: calc(100vw - 16px);
     padding: 4px;
     overflow-y: auto;
-    border: 1px solid var(--vscode-menu-border, var(--vscode-editorGroup-border, #454545));
-    border-radius: 4px;
-    background: var(--vscode-menu-background, var(--vscode-editor-background, #1e1e1e));
-    color: var(--vscode-menu-foreground, var(--vscode-editor-foreground, #d4d4d4));
-    box-shadow: 0 4px 12px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.3));
 }
 
 .toolbar-overflow-item {
     display: block;
     position: relative;
     width: 100%;
-    padding: 7px 10px 7px 28px;
+    min-height: var(--md-ui-control-size);
+    padding: 5px 10px 5px 28px;
     border: 0;
-    border-radius: 3px;
+    border-radius: var(--md-ui-radius);
     background: transparent;
     color: inherit;
     text-align: left;
     font-family: inherit;
-    font-size: 13px;
+    font-size: 12px;
     cursor: pointer;
 }
 
 .toolbar-overflow-item:hover,
 .toolbar-overflow-item:focus-visible {
     outline: none;
-    background: var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground, #2a2d2e));
-    color: var(--vscode-menu-selectionForeground, inherit);
+    background: var(--md-ui-hover);
+    color: var(--md-ui-foreground);
 }
 
 .toolbar-overflow-item.is-active::before {
@@ -292,7 +322,7 @@ body.toc-resizing {
 .toolbar-overflow-separator {
     height: 1px;
     margin: 4px 6px;
-    background: var(--vscode-menu-separatorBackground, var(--vscode-editorGroup-border, #454545));
+    background: var(--md-ui-border);
 }
 
 .toolbar-btn:active {
@@ -867,13 +897,8 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
 }
 
 .md-table-dialog {
-    background: var(--vscode-editor-background);
-    color: var(--vscode-editor-foreground);
-    border: 1px solid var(--vscode-editorGroup-border);
-    border-radius: 6px;
     padding: 16px;
     min-width: 260px;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
 }
 
 .md-table-dialog-title {
@@ -893,7 +918,7 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
     background: var(--vscode-input-background);
     color: var(--vscode-input-foreground);
     border: 1px solid var(--vscode-input-border, var(--vscode-editorGroup-border));
-    border-radius: 3px;
+    border-radius: var(--md-ui-radius);
     padding: 4px 6px;
 }
 
@@ -905,7 +930,7 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
 
 .md-table-dialog-btn {
     border: none;
-    border-radius: 3px;
+    border-radius: var(--md-ui-radius);
     padding: 6px 12px;
     cursor: pointer;
     font-size: 12px;
@@ -948,11 +973,9 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
 }
 
 #editor pre {
-    background-color: rgba(128, 128, 128, 0.15);
+    background-color: var(--md-block-background);
     border: 1px solid var(--vscode-editorGroup-border);
     padding: 12px;
-    padding-top: 36px;
-    /* Make room for toolbar */
     border-radius: 3px;
     overflow: visible;
     margin: 0.5em 0;
@@ -971,101 +994,128 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
     cursor: default;
 }
 
-/* Code block toolbar */
+/* One header layout for code, formulas and diagrams, including narrow panes. */
 .code-block-toolbar {
-    position: absolute;
-    top: 0;
-    right: 0;
-    left: 0;
+    position: relative;
     display: flex;
+    flex-wrap: wrap;
     justify-content: space-between;
     align-items: center;
-    /* Prism may add a language class to PRE after a language change. Keep
-       control typography independent of that parent's syntax theme. */
-    font-family: var(--vscode-editor-font-family, Consolas, Monaco, 'Andale Mono', 'Ubuntu Mono', monospace);
-    font-size: 11px;
-    line-height: 1.5;
+    gap: 4px 8px;
+    margin: -12px -12px 12px;
     padding: 4px 8px;
-    background-color: rgba(128, 128, 128, 0.1);
     border-bottom: 1px solid var(--vscode-editorGroup-border);
+    font-family: var(--md-ui-font-family);
+    font-size: 12px;
+    line-height: 1.5;
     user-select: none;
     pointer-events: auto;
 }
 
 .code-block-actions {
     display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
     align-items: center;
-    gap: 6px;
+    gap: 4px;
+    margin-left: auto;
 }
 
 .code-block-view-toggle {
     display: flex;
     flex-shrink: 0;
-    align-items: stretch;
-    gap: 0;
-    border: 1px solid var(--vscode-input-border, var(--vscode-editorGroup-border));
-    border-radius: 4px;
-    background-color: var(--vscode-editor-background);
-    overflow: hidden;
 }
 
-.code-block-view-btn + .code-block-view-btn {
-    border-left: 1px solid var(--vscode-input-border, var(--vscode-editorGroup-border));
-}
-
-.code-block-view-btn {
-    padding: 2px 6px;
-    font-size: 11px;
-    font-weight: 500;
+.code-block-preview-toggle {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    gap: 8px;
+    min-height: var(--md-ui-control-size);
+    padding: 0 6px;
+    border: 1px solid transparent;
+    border-radius: var(--md-ui-radius);
     background: transparent;
-    color: var(--vscode-descriptionForeground);
-    border: none;
-    cursor: pointer;
-}
-
-.code-block-view-btn:hover {
-    background-color: var(--vscode-button-secondaryHoverBackground);
-    color: var(--vscode-button-secondaryForeground, var(--vscode-editor-foreground));
-}
-
-.code-block-view-btn[aria-pressed="true"] {
-    background-color: var(--vscode-inputOption-activeBackground, var(--vscode-list-activeSelectionBackground));
-    color: var(--vscode-inputOption-activeForeground, var(--vscode-editor-foreground));
-    font-weight: 600;
-}
-
-.code-block-view-btn:focus-visible,
-.code-block-export-btn:focus-visible {
-    outline: 1px solid var(--vscode-focusBorder);
-    outline-offset: -1px;
-}
-
-/* Language label */
-.code-block-language {
+    color: var(--md-ui-muted);
     font: inherit;
-    color: var(--vscode-descriptionForeground);
-    font-weight: 500;
-    text-transform: none;
-    letter-spacing: 0.5px;
     cursor: pointer;
-    padding: 2px 6px;
-    border-radius: 2px;
+}
+
+.code-block-preview-toggle:hover {
+    background: var(--md-ui-hover);
+    color: var(--md-ui-foreground);
+}
+
+.code-block-preview-toggle[aria-checked="true"] {
+    color: var(--md-ui-foreground);
+}
+
+.code-block-preview-track {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    width: 28px;
+    height: 16px;
+    padding: 1.5px;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    box-shadow: inset 0 0 0 0.75px var(--md-ui-muted);
+    transition: background-color 0.12s;
+}
+
+.code-block-preview-thumb {
+    width: 13px;
+    height: 13px;
+    border-radius: 50%;
+    background: var(--md-ui-muted);
+    transition: transform 0.12s, background-color 0.12s;
+}
+
+.code-block-preview-toggle[aria-checked="true"] .code-block-preview-track {
+    box-shadow: inset 0 0 0 0.75px var(--md-ui-foreground);
+    background: var(--md-ui-foreground);
+}
+
+.code-block-preview-toggle[aria-checked="true"] .code-block-preview-thumb {
+    transform: translateX(12px);
+    background: var(--vscode-editor-background);
+}
+
+@media (forced-colors: active) {
+    .code-block-preview-track {
+        box-shadow: none;
+        outline: 1px solid ButtonText;
+        outline-offset: -1px;
+    }
+}
+
+/* Only language names and editable source use a monospace face. */
+.code-block-language {
+    max-width: 100%;
+    min-height: var(--md-ui-control-size);
+    padding: 4px 6px;
+    border-radius: var(--md-ui-radius);
+    color: var(--md-ui-muted);
+    font-family: var(--vscode-editor-font-family, Consolas, Monaco, monospace);
+    font-size: 11px;
+    line-height: 20px;
+    cursor: pointer;
     transition: background-color 0.1s;
     user-select: text;
 }
 
 .code-block-language:hover {
-    background-color: var(--vscode-list-hoverBackground);
+    background: var(--md-ui-hover);
 }
 
 .code-block-language.editing {
-    background-color: var(--vscode-input-background);
+    background: var(--vscode-input-background);
     color: var(--vscode-input-foreground);
     border: 1px solid var(--vscode-focusBorder);
     outline: none;
-    text-transform: none;
     cursor: text;
-    padding: 1px 5px;
+    padding: 3px 5px;
 }
 
 .code-block-language-input {
@@ -1079,201 +1129,69 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
     background: transparent;
     color: inherit;
     font: inherit;
-    letter-spacing: inherit;
 }
 
 .code-block-language.nav-selected {
-    background-color: var(--vscode-list-focusBackground);
-    color: var(--vscode-list-focusForeground);
+    background: var(--md-ui-selected);
+    color: var(--md-ui-foreground);
     outline: 1px solid var(--vscode-focusBorder);
 }
 
-/* Copy button */
-.code-block-copy-btn {
-    padding: 2px 8px;
-    font-size: 11px;
-    background-color: var(--vscode-button-secondaryBackground);
-    color: var(--vscode-button-secondaryForeground);
-    border: none;
-    border-radius: 2px;
-    cursor: pointer;
-    transition: background-color 0.14s ease, color 0.14s ease, border-color 0.14s ease;
-    font-weight: 500;
+.code-block-icon-btn {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    width: var(--md-ui-control-size);
+    height: var(--md-ui-control-size);
+    padding: 0;
     border: 1px solid transparent;
+    border-radius: var(--md-ui-radius);
+    background: transparent;
+    color: var(--md-ui-muted);
+    cursor: pointer;
 }
 
-.code-block-copy-btn:hover {
-    background-color: var(--vscode-button-secondaryHoverBackground);
+.code-block-icon-btn:hover,
+.code-block-icon-btn[aria-expanded="true"] {
+    background: var(--md-ui-hover);
+    color: var(--md-ui-foreground);
 }
 
-.code-block-copy-btn:active {
-    background-color: var(--vscode-button-secondaryHoverBackground);
-    color: var(--vscode-button-secondaryForeground);
+.code-block-icon-btn:active {
+    background: var(--md-ui-selected);
 }
 
 .code-block-copy-btn[data-copy-state="busy"] {
-    background-color: var(--vscode-button-secondaryHoverBackground);
-    color: var(--vscode-button-secondaryForeground);
+    color: var(--md-ui-foreground);
 }
 
 .code-block-copy-btn[data-copy-state="success"] {
-    background-color: var(--vscode-inputOption-activeBackground, var(--vscode-button-secondaryHoverBackground));
-    color: var(--vscode-inputOption-activeForeground, var(--vscode-button-secondaryForeground));
-    border-color: var(--vscode-inputOption-activeBorder, transparent);
-}
-
-.code-block-copy-btn[data-copy-state="error"] {
-    background-color: var(--vscode-inputValidation-errorBackground, var(--vscode-button-secondaryHoverBackground));
-    color: var(--vscode-inputValidation-errorForeground, var(--vscode-button-secondaryForeground));
-    border-color: color-mix(
-        in srgb,
-        var(--vscode-inputValidation-errorForeground, currentColor) 35%,
-        transparent
-    );
-}
-
-.code-block-export-btn,
-.code-block-expand-btn {
-    padding: 2px 8px;
-    font-size: 11px;
-    background-color: var(--vscode-button-secondaryBackground);
-    color: var(--vscode-button-secondaryForeground);
-    border: none;
-    border-radius: 2px;
-    cursor: pointer;
-    transition: background-color 0.1s;
-    font-weight: 500;
-}
-
-.code-block-export-btn:hover,
-.code-block-expand-btn:hover {
-    background-color: var(--vscode-button-secondaryHoverBackground);
-}
-
-.code-block-export-btn:active,
-.code-block-expand-btn:active {
-    background-color: var(--vscode-button-background);
-    color: var(--vscode-button-foreground);
-}
-
-.code-block-expand-btn {
-    display: inline-flex;
-    flex-shrink: 0;
-    align-items: center;
-    justify-content: center;
-    width: 24px;
-    height: 22px;
-    padding: 0;
-    background: transparent;
-}
-
-.code-block-expand-btn svg {
-    pointer-events: none;
-}
-
-/* Mermaid uses a compact segmented switch and icon actions. Keep its header
-   in normal flow so wrapped controls never cover the source or diagram. */
-#editor pre[data-mermaid-view] {
-    padding-top: 12px;
-}
-
-.mermaid-toolbar {
-    position: relative;
-    inset: auto;
-    flex-wrap: wrap;
-    gap: 6px;
-    margin: -12px -12px 12px;
-}
-
-.mermaid-toolbar .code-block-actions {
-    flex-wrap: wrap;
-    justify-content: flex-end;
-    gap: 6px;
-    margin-left: auto;
-}
-
-.mermaid-toolbar > .language-suggestions {
-    top: calc(100% + 4px);
-    left: 8px;
-}
-
-.mermaid-view-toggle {
-    gap: 2px;
-    padding: 2px;
-    border: 0;
-    border-radius: 4px;
-    background: var(--vscode-button-secondaryBackground, var(--vscode-list-hoverBackground));
-}
-
-.mermaid-view-toggle > .code-block-view-btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 4px;
-    min-height: 18px;
-    padding: 1px 6px;
-    border: 0;
-    border-radius: 2px;
-    font-family: var(--vscode-font-family, sans-serif);
-    font-size: 11px;
-    line-height: 16px;
-}
-
-.mermaid-view-toggle > .code-block-view-btn[aria-pressed="true"] {
-    background: color-mix(in srgb, var(--vscode-focusBorder, #3676e8) 24%, var(--vscode-editor-background));
-    color: var(--vscode-editor-foreground);
-    font-weight: 600;
-}
-
-.mermaid-toolbar-divider {
-    flex-shrink: 0;
-    width: 1px;
-    height: 16px;
-    margin: 0 2px;
-    background: color-mix(in srgb, var(--vscode-editor-foreground) 18%, transparent);
-}
-
-.mermaid-toolbar .mermaid-icon-btn {
-    display: inline-flex;
-    flex-shrink: 0;
-    align-items: center;
-    justify-content: center;
-    width: 24px;
-    height: 22px;
-    padding: 0;
-    border: 1px solid transparent;
-    border-radius: 2px;
-    background: transparent;
-    color: var(--vscode-descriptionForeground, var(--vscode-editor-foreground));
-    cursor: pointer;
-}
-
-.mermaid-toolbar .mermaid-icon-btn:hover,
-.mermaid-toolbar .mermaid-icon-btn[aria-expanded="true"] {
-    background: var(--vscode-list-hoverBackground);
-    color: var(--vscode-editor-foreground);
-}
-
-.mermaid-toolbar .mermaid-icon-btn[data-copy-state="success"] {
     color: var(--vscode-terminal-ansiGreen, #27844a);
 }
 
-.mermaid-toolbar .mermaid-icon-btn[data-copy-state="error"] {
+.code-block-copy-btn[data-copy-state="error"] {
     color: var(--vscode-errorForeground);
 }
 
-.mermaid-toolbar-icon {
+.code-block-toolbar-icon {
     display: block;
     flex-shrink: 0;
-    width: 14px;
-    height: 14px;
+    width: var(--md-ui-icon-size);
+    height: var(--md-ui-icon-size);
     pointer-events: none;
 }
 
-.mermaid-icon-btn:focus-visible,
-.code-block-export-menu .code-block-export-btn:focus-visible {
-    outline: 2px solid var(--vscode-focusBorder);
-    outline-offset: -2px;
+.code-block-preview-toggle:focus-visible,
+.code-block-icon-btn:focus-visible {
+    outline: 1px solid var(--vscode-focusBorder);
+    outline-offset: -1px;
+}
+
+
+.code-block-toolbar > .language-suggestions {
+    top: calc(100% + 4px);
+    left: 8px;
 }
 
 .code-block-download {
@@ -1284,19 +1202,13 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
 
 .code-block-export-menu {
     position: absolute;
-    top: calc(100% + 6px);
+    top: calc(100% + 4px);
     right: 0;
     z-index: 1002;
     display: flex;
     flex-direction: column;
-    gap: 2px;
     min-width: 168px;
     padding: 4px;
-    border: 1px solid var(--vscode-dropdown-border, var(--vscode-editorGroup-border));
-    border-radius: 8px;
-    background: var(--vscode-dropdown-background, var(--vscode-editor-background));
-    color: var(--vscode-editor-foreground);
-    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.22);
     white-space: normal;
 }
 
@@ -1306,31 +1218,33 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
 
 .code-block-export-menu.opens-up {
     top: auto;
-    bottom: calc(100% + 6px);
+    bottom: calc(100% + 4px);
 }
 
-.code-block-export-menu .code-block-export-btn {
+.code-block-export-btn {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 24px;
-    padding: 8px 10px;
+    min-height: var(--md-ui-control-size);
+    padding: 5px 10px;
     border: 0;
-    border-radius: 4px;
+    border-radius: var(--md-ui-radius);
     background: transparent;
     color: inherit;
-    font-family: var(--vscode-font-family, sans-serif);
-    font-size: 13px;
+    font: inherit;
     text-align: left;
+    cursor: pointer;
 }
 
-.code-block-export-menu .code-block-export-btn:hover,
-.code-block-export-menu .code-block-export-btn:focus-visible {
-    background: var(--vscode-list-hoverBackground);
+.code-block-export-btn:hover,
+.code-block-export-btn:focus-visible {
+    outline: none;
+    background: var(--md-ui-hover);
 }
 
 .code-block-export-description {
-    color: var(--vscode-descriptionForeground);
+    color: var(--md-ui-muted);
     font-size: 11px;
     font-weight: 400;
 }
@@ -1338,18 +1252,14 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
 /* Language suggestions dropdown */
 .language-suggestions {
     position: absolute;
-    top: 28px;
+    top: calc(100% + 4px);
     left: 8px;
-    background-color: var(--vscode-dropdown-background);
-    border: 1px solid var(--vscode-dropdown-border);
-    border-radius: 6px;
     max-height: 200px;
     overflow-y: auto;
     z-index: 1000;
-    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
     min-width: 180px;
     max-width: 280px;
-    padding: 6px;
+    padding: 4px;
 }
 
 .language-suggestion-item {
@@ -1359,13 +1269,13 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
     cursor: pointer;
     transition: background-color 0.1s;
     white-space: nowrap;
-    border-radius: 4px;
+    border-radius: var(--md-ui-radius);
 }
 
 .language-suggestion-item:hover,
 .language-suggestion-item.selected {
-    background-color: var(--vscode-list-activeSelectionBackground);
-    color: var(--vscode-list-activeSelectionForeground);
+    background-color: var(--md-ui-selected);
+    color: var(--md-ui-foreground);
 }
 
 .language-suggestions:not(.pointer-hover-active) .language-suggestion-item:hover:not(.selected),
@@ -1411,7 +1321,7 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
 
 /* Prism.js syntax highlighting overrides for VSCode theme compatibility */
 #editor pre[class*="language-"] {
-    background-color: rgba(128, 128, 128, 0.15);
+    background-color: var(--md-block-background);
     border: 1px solid var(--vscode-editorGroup-border);
 }
 
@@ -1424,17 +1334,9 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
     outline: none;
 }
 
-#editor pre:focus-within {
-    outline: 2px solid var(--vscode-focusBorder);
-    background-color: rgba(128, 128, 128, 0.2);
-}
-
 #editor pre .mermaid-preview {
-    margin-top: 12px;
-    padding: 8px;
-    border: 1px solid var(--vscode-editorGroup-border);
-    border-radius: 3px;
-    background-color: var(--md-mermaid-preview-background);
+    padding: 8px 0;
+    background: transparent;
     overflow-x: auto;
     color: var(--md-mermaid-preview-foreground);
 }
@@ -1461,10 +1363,6 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
     white-space: pre-wrap;
 }
 
-.code-block-expand-btn:focus-visible {
-    outline: 2px solid var(--vscode-focusBorder);
-    outline-offset: -2px;
-}
 
 /* Native modal dialogs keep editor controls inert and contain keyboard focus. */
 .mermaid-viewer {
@@ -1496,14 +1394,14 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
     align-items: center;
     justify-content: space-between;
     gap: 8px;
-    padding: 8px 12px 8px 20px;
+    min-height: 40px;
+    padding: 4px 12px;
     border-bottom: 1px solid var(--vscode-editorGroup-border);
-    background: var(--vscode-editorGroupHeader-tabsBackground, var(--vscode-editor-background));
 }
 
 .mermaid-viewer-title {
-    font-size: 13px;
-    font-weight: 600;
+    font-size: 12px;
+    font-weight: 500;
 }
 
 .mermaid-viewer-actions {
@@ -1511,41 +1409,38 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
     flex-wrap: wrap;
     align-items: center;
     justify-content: center;
-    gap: 8px;
+    gap: 4px;
     width: fit-content;
     max-width: 100%;
     margin: 0 auto;
-    padding: 6px;
-    border: 1px solid transparent;
-    border-radius: 3px;
-    background: transparent;
 }
 
 .mermaid-viewer button {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    gap: 8px;
-    min-width: 44px;
-    min-height: 44px;
-    padding: 4px 12px;
+    gap: 4px;
+    min-width: var(--md-ui-control-size);
+    min-height: var(--md-ui-control-size);
+    padding: 0 8px;
     border: 1px solid transparent;
-    border-radius: 3px;
-    background: var(--vscode-button-secondaryBackground, var(--vscode-list-hoverBackground));
-    color: var(--vscode-button-secondaryForeground, var(--vscode-editor-foreground));
+    border-radius: var(--md-ui-radius);
+    background: transparent;
+    color: var(--md-ui-muted);
     font: inherit;
-    font-size: 13px;
-    font-weight: 500;
+    font-size: 12px;
+    font-weight: 400;
     cursor: pointer;
 }
 
-.mermaid-viewer button:hover {
-    background: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground));
-    border-color: var(--vscode-editorGroup-border);
+.mermaid-viewer button:hover,
+.mermaid-viewer button[aria-expanded="true"] {
+    background: var(--md-ui-hover);
+    color: var(--md-ui-foreground);
 }
 
 .mermaid-viewer button:active {
-    border-color: var(--vscode-focusBorder);
+    background: var(--md-ui-selected);
 }
 
 .mermaid-viewer button:focus-visible,
@@ -1555,34 +1450,28 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
 }
 
 .mermaid-viewer button svg {
+    width: var(--md-ui-icon-size);
+    height: var(--md-ui-icon-size);
     flex-shrink: 0;
     pointer-events: none;
 }
 
 .mermaid-viewer .mermaid-viewer-close {
-    min-width: 36px;
-    min-height: 36px;
+    width: var(--md-ui-control-size);
     padding: 0;
-    border-color: transparent;
-    background: transparent;
-    color: var(--vscode-editor-foreground);
-}
-
-.mermaid-viewer .mermaid-viewer-close:hover {
-    background: var(--vscode-list-hoverBackground);
 }
 
 .mermaid-viewer button:disabled {
     opacity: 0.45;
     cursor: default;
+    background: transparent;
 }
 
 .mermaid-viewer-scale {
-    min-width: 68px;
+    min-width: 48px;
     padding: 0 4px;
-    color: var(--vscode-input-foreground, var(--vscode-editor-foreground));
-    font-size: 14px;
-    font-weight: 600;
+    color: var(--md-ui-foreground);
+    font-size: 12px;
     text-align: center;
     font-variant-numeric: tabular-nums;
 }
@@ -1591,37 +1480,18 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
     display: flex;
     flex-shrink: 0;
     align-items: center;
-    border: 1px solid var(--vscode-input-border, var(--vscode-editorGroup-border));
-    border-radius: 3px;
-    background: var(--vscode-input-background, var(--vscode-editor-background));
-    overflow: hidden;
 }
 
 .mermaid-viewer-zoom button {
-    min-width: 42px;
-    min-height: 42px;
+    width: var(--md-ui-control-size);
     padding: 0;
-    border: 0;
-    border-radius: 0;
-    background: transparent;
-    color: var(--vscode-editor-foreground);
 }
 
-.mermaid-viewer-zoom button:hover {
-    background: var(--vscode-list-hoverBackground);
-}
-
-.mermaid-viewer .mermaid-viewer-actual {
-    flex-direction: column;
-    gap: 0;
-    min-width: 76px;
-    line-height: 1.25;
-}
-
-.mermaid-viewer-button-caption {
-    color: var(--vscode-descriptionForeground);
-    font-size: 11px;
-    font-weight: 400;
+.mermaid-viewer-divider {
+    width: 1px;
+    height: 16px;
+    margin: 0 4px;
+    background: var(--vscode-editorGroup-border);
 }
 
 .mermaid-viewer-viewport {
@@ -1670,17 +1540,10 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
 }
 
 .mermaid-viewer-footer {
+    position: relative;
     flex-shrink: 0;
-    padding: 16px 12px 10px;
+    padding: 8px 12px;
     border-top: 1px solid var(--vscode-editorGroup-border);
-    background: var(--vscode-editorGroupHeader-tabsBackground, var(--vscode-editor-background));
-}
-
-.mermaid-viewer-hint {
-    margin: 10px 0 0;
-    color: var(--vscode-descriptionForeground);
-    font-size: 11px;
-    text-align: center;
 }
 
 /* Mermaid diagram styling is handled by Mermaid theme variables. */
@@ -2106,10 +1969,6 @@ body.toc-resizing #toc-resizer::before {
 /* Link Popover */
 .link-popover {
     position: absolute;
-    background-color: var(--vscode-dropdown-background);
-    border: 1px solid var(--vscode-dropdown-border);
-    border-radius: 4px;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
     z-index: 1000;
     padding: 8px;
     display: flex;
@@ -2195,7 +2054,7 @@ body.image-resizing * {
     background-color: var(--vscode-input-background);
     color: var(--vscode-input-foreground);
     border: 1px solid var(--vscode-input-border, var(--vscode-editorGroup-border));
-    border-radius: 3px;
+    border-radius: var(--md-ui-radius);
     outline: none;
     font-family: inherit;
 }
@@ -2212,9 +2071,9 @@ body.image-resizing * {
 .link-popover-suggestions {
     max-height: 200px;
     overflow-y: auto;
-    border: 1px solid var(--vscode-dropdown-border);
-    border-radius: 3px;
-    background-color: var(--vscode-quickInput-background, var(--vscode-dropdown-background));
+    border: 1px solid var(--md-ui-border);
+    border-radius: var(--md-ui-radius);
+    background: var(--md-ui-surface);
     padding: 3px;
 }
 
@@ -2226,9 +2085,9 @@ body.image-resizing * {
     gap: 10px;
     padding: 5px 7px;
     border: none;
-    border-radius: 3px;
+    border-radius: var(--md-ui-radius);
     background: transparent;
-    color: var(--vscode-quickInput-foreground, var(--vscode-editor-foreground));
+    color: var(--md-ui-foreground);
     font: inherit;
     text-align: left;
     cursor: pointer;
@@ -2236,8 +2095,8 @@ body.image-resizing * {
 
 .link-popover-suggestion:hover,
 .link-popover-suggestion.active {
-    background-color: var(--vscode-list-activeSelectionBackground);
-    color: var(--vscode-list-activeSelectionForeground);
+    background-color: var(--md-ui-selected);
+    color: var(--md-ui-foreground);
 }
 
 .link-popover-suggestion-label {
@@ -2264,19 +2123,28 @@ body.image-resizing * {
 }
 
 .link-popover-btn {
+    min-height: var(--md-ui-control-size);
     padding: 4px 8px;
     font-size: 12px;
-    background-color: var(--vscode-button-secondaryBackground);
-    color: var(--vscode-button-secondaryForeground);
-    border: none;
-    border-radius: 3px;
+    background: transparent;
+    color: var(--md-ui-muted);
+    border: 1px solid transparent;
+    border-radius: var(--md-ui-radius);
     cursor: pointer;
     transition: background-color 0.1s;
     white-space: nowrap;
 }
 
 .link-popover-btn:hover {
-    background-color: var(--vscode-button-secondaryHoverBackground);
+    background: var(--md-ui-hover);
+    color: var(--md-ui-foreground);
+}
+
+.link-popover-btn:focus-visible,
+.search-bar-btn:focus-visible,
+.md-table-dialog-btn:focus-visible {
+    outline: 1px solid var(--vscode-focusBorder);
+    outline-offset: -1px;
 }
 
 .link-popover-btn:disabled,
@@ -2302,12 +2170,14 @@ body.image-resizing * {
 }
 
 .link-popover-btn.danger {
-    background-color: var(--vscode-inputValidation-errorBackground, #5a1d1d);
-    color: var(--vscode-inputValidation-errorForeground, #f48771);
+    background: transparent;
+    color: var(--md-ui-muted);
 }
 
-.link-popover-btn.danger:hover {
-    opacity: 0.9;
+.link-popover-btn.danger:hover,
+.link-popover-btn.danger:focus-visible {
+    background: var(--vscode-inputValidation-errorBackground);
+    color: var(--vscode-errorForeground);
 }
 
 /* Math. KaTeX draws each formula in its shadow root (MathManager). */
@@ -2361,10 +2231,6 @@ body.image-resizing * {
     width: min(420px, calc(100vw - 16px));
     box-sizing: border-box;
     padding: 8px;
-    background-color: var(--vscode-dropdown-background);
-    border: 1px solid var(--vscode-dropdown-border);
-    border-radius: 4px;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
 }
 
 .math-popover[hidden] {
@@ -2382,7 +2248,7 @@ body.image-resizing * {
     background-color: var(--vscode-input-background);
     color: var(--vscode-input-foreground);
     border: 1px solid var(--vscode-input-border, var(--vscode-editorGroup-border));
-    border-radius: 3px;
+    border-radius: var(--md-ui-radius);
     outline: none;
 }
 
@@ -2416,12 +2282,8 @@ body.image-resizing * {
 /* Slash Command Menu */
 .slash-command-menu {
     position: absolute;
-    background-color: var(--vscode-dropdown-background);
-    border: 1px solid var(--vscode-dropdown-border);
-    border-radius: 6px;
-    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
     z-index: 1000;
-    padding: 6px;
+    padding: 4px;
     min-width: 220px;
     max-width: 320px;
     max-height: min(200px, var(--slash-menu-available-height, 200px));
@@ -2442,7 +2304,7 @@ body.image-resizing * {
     padding: 6px 8px;
     margin-bottom: 6px;
     border: 1px solid var(--vscode-input-border, transparent);
-    border-radius: 3px;
+    border-radius: var(--md-ui-radius);
     background: var(--vscode-input-background);
     color: var(--vscode-input-foreground);
     font: inherit;
@@ -2491,7 +2353,7 @@ body.image-resizing * {
     justify-content: space-between;
     gap: 8px;
     padding: 6px 8px;
-    border-radius: 4px;
+    border-radius: var(--md-ui-radius);
     font-size: 12px;
     cursor: pointer;
     color: var(--vscode-editor-foreground);
@@ -2509,8 +2371,8 @@ body.image-resizing * {
 }
 
 .slash-command-item.selected {
-    background-color: var(--vscode-list-activeSelectionBackground);
-    color: var(--vscode-list-activeSelectionForeground);
+    background-color: var(--md-ui-selected);
+    color: var(--md-ui-foreground);
 }
 
 .slash-command-item.custom-command .slash-command-name {
@@ -2581,12 +2443,8 @@ body.image-resizing * {
     width: min(340px, calc(100% - (var(--search-bar-edge-gap) * 2) - var(--toc-content-offset)));
     max-width: calc(100% - (var(--search-bar-edge-gap) * 2) - var(--toc-content-offset));
     padding: clamp(4px, 0.75vw, 6px);
-    background-color: var(--vscode-editorWidget-background, var(--vscode-editor-background));
-    border: 1px solid var(--vscode-editorWidget-border, var(--vscode-editorGroup-border));
     border-top: none;
-    border-radius: 0 0 6px 6px;
-    box-shadow: 0 5px 14px rgba(0, 0, 0, 0.16);
-    font-size: 12px;
+    border-radius: 0 0 var(--md-ui-menu-radius) var(--md-ui-menu-radius);
     transition: none;
     container: search-bar / inline-size;
 }
@@ -2610,7 +2468,7 @@ body.image-resizing * {
     min-width: min(120px, 100%);
     background: var(--vscode-input-background);
     border: 1px solid var(--vscode-input-border, var(--vscode-editorGroup-border));
-    border-radius: 3px;
+    border-radius: var(--md-ui-radius);
     overflow: hidden;
 }
 
@@ -2653,16 +2511,23 @@ body.image-resizing * {
     display: flex;
     align-items: center;
     justify-content: center;
-    width: clamp(20px, 2.8vw, 22px);
-    height: clamp(20px, 2.8vw, 22px);
+    width: var(--md-ui-control-size);
+    height: var(--md-ui-control-size);
     padding: 0;
     font-size: 11px;
     background: transparent;
     color: var(--vscode-editor-foreground);
     border: 1px solid transparent;
-    border-radius: 3px;
+    border-radius: var(--md-ui-radius);
     cursor: pointer;
     flex-shrink: 0;
+}
+
+.search-bar-btn svg {
+    width: var(--md-ui-icon-size);
+    height: var(--md-ui-icon-size);
+    flex-shrink: 0;
+    pointer-events: none;
 }
 
 .search-bar-btn:hover {
@@ -2688,9 +2553,9 @@ body.image-resizing * {
 }
 
 .search-bar-toggle.active {
-    background-color: var(--vscode-inputOption-activeBackground, rgba(0, 100, 200, 0.4));
-    color: var(--vscode-inputOption-activeForeground, #ffffff);
-    border-color: var(--vscode-inputOption-activeBorder, var(--vscode-focusBorder));
+    background-color: var(--md-ui-selected);
+    color: var(--md-ui-foreground);
+    border-color: var(--md-ui-border);
 }
 
 .search-bar-close {
@@ -2826,4 +2691,20 @@ body.image-resizing * {
 
 .mdw-footnote-delete:hover {
     color: var(--vscode-errorForeground, #f44);
+}
+
+/* High-contrast themes retain an explicit boundary for keyboard selection. */
+:is(body[data-theme-mode="vscode"].vscode-high-contrast, body[data-theme-mode="vscode"].vscode-high-contrast-light)
+:is(.toolbar-overflow-item:focus-visible, .code-block-export-btn:focus-visible,
+    .language-suggestion-item.selected, .slash-command-item.selected,
+    .link-popover-suggestion.active, .search-bar-toggle.active) {
+    outline: 1px solid var(--vscode-contrastActiveBorder, var(--vscode-focusBorder));
+    outline-offset: -1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .code-block-preview-track,
+    .code-block-preview-thumb {
+        transition: none;
+    }
 }

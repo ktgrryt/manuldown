@@ -23,7 +23,7 @@ ManulDown is a VSCode extension that lets you edit Markdown files in a WYSIWYG e
 - **Links**: Insert HTTP, HTTPS, and email links, or safely encoded links to files in the current workspace folder.
 - **Footnotes**: Render and edit `[^label]` references and `[^label]: note` definitions. Numbers and notes follow reference order; click a number to edit its note and click ↩ to return to the text.
 - **Math**: Write TeX formulas as `$…$` (inline) or `$$…$$` (block), rendered with KaTeX. See [Math](#math).
-- **Mermaid diagrams**: Switch between **Code/Preview**, copy the source with the copy icon, or choose **PNG/SVG** from the download icon. Open a diagram across the editor with the **expand icon (diagonal arrows)** at the right end of its toolbar. Scroll to zoom, or drag or use arrow keys to pan. The bottom-center controls offer **Fit to view** and **100%** for actual size. Press `Esc` or the × at the top right to close.
+- **Mermaid diagrams**: Turn the **Preview** switch on to show the diagram, or off to edit the source. The **Copy icon**, shared by all code and math blocks, copies the source; choose **PNG/SVG** from the download icon to save the diagram. Open a diagram across the editor with the **expand icon (diagonal arrows)** at the right end of its toolbar. Scroll to zoom, or drag or use arrow keys to pan. The compact bottom controls show the current zoom and offer **− / +**, **100%** for actual size, and **Fit** for the whole diagram. Press `Esc` or the × at the top right to close.
 - **Table of contents**: Auto-generated from headings.
 - **Two-way sync**: Changes in the editor are reflected in the Markdown file immediately.
 - **Toolbar**: Quick access buttons for common formatting.
@@ -85,7 +85,7 @@ Normal copy (`Cmd+C` / `Ctrl+C`, or **Copy** in the context menu) copies a selec
 Formulas use TeX syntax and are rendered with [KaTeX](https://katex.org/supported.html). KaTeX is loaded only for documents that contain a formula.
 
 - **Inline formulas**: Type `$E = mc^2$`; the formula renders when you type the closing `$`. As when a file is opened, the TeX must not start or end with a space, so `$5 and $10` stays text. Click a formula (or select it and press Enter) to edit its TeX in a small field: the formula updates as you type, a TeX error is shown below the field, Enter finishes, and Escape restores the previous TeX. Press Right before a formula or Left after it to select the whole formula, then Enter to edit. Another arrow key moves to that side of the formula. Backspace or Delete removes it.
-- **Math blocks**: Type `$$` on an empty line and press Enter, use `/math`, or choose **Math Block**. A math block is edited like a code block: **TeX** shows the source with the formula below it, and **Preview** shows only the formula. Click a rendered formula to edit its TeX. A ```` ```math ```` fence is shown the same way, and choosing `math` as a code block's language turns it into one.
+- **Math blocks**: Type `$$` on an empty line and press Enter, use `/math`, or choose **Math Block**. A math block is edited like a code block: turn the **Preview** switch off to show the TeX source with the formula below it, or on to show only the formula. Click a rendered formula to edit its TeX. A ```` ```math ```` fence is shown the same way, and choosing `math` as a code block's language turns it into one.
 
 Formulas are saved as `$…$` and `$$` blocks. Unchanged formulas keep their original source. TeX that `$$` delimiters cannot hold, such as a blank line, is saved as a ```` ```math ```` fence instead.
 

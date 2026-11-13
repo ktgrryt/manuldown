@@ -1328,8 +1328,7 @@ const CODE_BLOCK =
 const MATH_PREVIEW = '<pre data-math-view="preview">' +
     '<div class="code-block-toolbar" data-exclude-from-markdown="true">' +
     '<span class="code-block-language">math</span>' +
-    '<button class="code-block-view-btn" data-math-view="code" aria-pressed="false">TeX</button>' +
-    '<button class="code-block-view-btn" data-math-view="preview" aria-pressed="true">Preview</button></div>' +
+    '<button type="button" class="code-block-preview-toggle" role="switch" aria-checked="true">Preview</button></div>' +
     '<code class="language-math">first line\nlast line\n</code>' +
     '<div class="math-preview" contenteditable="false" data-exclude-from-markdown="true">Formula</div></pre>';
 
@@ -1338,8 +1337,7 @@ function assertVisibleMathCaret(fixture, expectedOffset) {
     const code = pre.querySelector('code');
     const range = fixture.selection.getRangeAt(0);
     assert.equal(pre.getAttribute('data-math-view'), 'code');
-    assert.equal(pre.querySelector('button[data-math-view="code"]').getAttribute('aria-pressed'), 'true');
-    assert.equal(pre.querySelector('button[data-math-view="preview"]').getAttribute('aria-pressed'), 'false');
+    assert.equal(pre.querySelector('.code-block-preview-toggle').getAttribute('aria-checked'), 'false');
     assert.equal(range.collapsed, true);
     assert.ok(code.contains(range.startContainer));
     assert.equal(fixture.cursorManager.getCodeBlockCursorOffset(code, range), expectedOffset);

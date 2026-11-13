@@ -75,7 +75,10 @@ async function fixture(t, html = '<pre><code class="language-mermaid">graph TD\n
         target.dispatchEvent(event);
         return event;
     };
-    const clickView = (pre, view) => dispatch(pre.querySelector(`.code-block-view-btn[data-mermaid-view="${view}"]`), 'click');
+    const clickView = (pre, view) => {
+        assert.notEqual(pre.getAttribute('data-mermaid-view'), view, 'activate the switch to change its current state');
+        return dispatch(pre.querySelector('.code-block-preview-toggle'), 'click');
+    };
     const pre = editor.querySelector('pre');
     manager.highlightCodeBlocks();
     return {
@@ -92,10 +95,31 @@ test('opening Mermaid blocks defaults to diagrams and exposes the toggle beside 
     assert.ok(f.pre.querySelector('.mermaid-preview svg'));
     const actions = f.pre.querySelector('.code-block-actions');
     assert.ok(actions.firstElementChild.classList.contains('code-block-view-toggle'));
-    assert.equal(actions.querySelector('[data-mermaid-view="diagram"]').getAttribute('aria-pressed'), 'true');
-    assert.equal(actions.querySelector('[data-mermaid-view="code"]').getAttribute('aria-pressed'), 'false');
+    const toggle = actions.querySelector('.code-block-preview-toggle');
+    assert.equal(toggle.tagName, 'BUTTON');
+    assert.equal(toggle.type, 'button');
+    assert.equal(toggle.getAttribute('role'), 'switch');
+    assert.equal(toggle.getAttribute('aria-checked'), 'true');
+    assert.equal(toggle.textContent, 'Preview');
+    assert.equal(actions.querySelectorAll('[role="switch"]').length, 1);
     assert.ok(actions.querySelector('.code-block-copy-btn'));
     assert.equal(actions.querySelectorAll('.code-block-export-btn').length, 2);
+});
+
+test('the native Preview switch keeps Enter and Space activation away from editor shortcuts', async t => {
+    const f = await fixture(t);
+    const toggle = f.pre.querySelector('.code-block-preview-toggle');
+    let editorKeydowns = 0;
+    f.editor.addEventListener('keydown', () => editorKeydowns++);
+    for (const key of ['Enter', ' ']) {
+        const event = f.dispatch(toggle, 'keydown', { key });
+        assert.equal(event.defaultPrevented, false, 'native button activation must remain enabled');
+        assert.equal(editorKeydowns, 0, 'the editor must not process the activation key');
+        // Domino does not synthesize the native button click after key events.
+        f.dispatch(toggle, 'click');
+    }
+    assert.equal(f.pre.getAttribute('data-mermaid-view'), 'diagram');
+    assert.equal(toggle.getAttribute('aria-checked'), 'true');
 });
 
 test('returning to a cached diagram invalidates an older pending render', async t => {
@@ -194,9 +218,61 @@ test('the icon copy button copies source and restores its icon after feedback', 
     assert.equal(button.getAttribute('aria-label'), 'Copied!');
     assert.ok(button.querySelector('svg'));
     f.manager._resetCopyButtonState(button);
-    assert.equal(button.getAttribute('aria-label'), 'Copy Mermaid source');
+    assert.equal(button.getAttribute('aria-label'), 'Copy source');
     assert.ok(button.querySelector('svg'));
     assert.equal(button.textContent, '');
+});
+
+test('code, math and Mermaid use the same icon copy feedback and clipboard bridge', async t => {
+    for (const language of ['javascript', 'math', 'mermaid']) {
+        await t.test(language, async t => {
+            const source = language === 'mermaid' ? 'graph TD\nA-->B\n' : 'x + y\n';
+            const f = await fixture(t, `<pre><code class="language-${language}">${source.replace(/>/g, '&gt;')}</code></pre>`);
+            const button = f.pre.querySelector('.code-block-copy-btn');
+            assert.ok(button.classList.contains('code-block-icon-btn'));
+            assert.equal(button.textContent, '');
+            assert.ok(button.querySelector('.code-block-toolbar-icon'));
+            assert.equal(button.getAttribute('aria-label'), 'Copy source');
+            const messages = [];
+            f.manager.vscode = { postMessage: message => messages.push(message) };
+
+            f.dispatch(button, 'click');
+            assert.equal(button.getAttribute('data-copy-state'), 'busy');
+            assert.equal(button.getAttribute('aria-label'), 'Copying...');
+            assert.equal(messages.length, 1);
+            assert.equal(messages[0].type, 'writeClipboard');
+            assert.equal(messages[0].text, source);
+            f.manager._handleWindowMessage({ data: {
+                type: 'clipboardWriteResult', requestId: messages[0].requestId, success: true,
+            } });
+            await new Promise(resolve => setImmediate(resolve));
+            assert.equal(button.getAttribute('data-copy-state'), 'success');
+            assert.equal(button.getAttribute('aria-label'), 'Copied!');
+            assert.ok(button.querySelector('.code-block-toolbar-icon'));
+            assert.equal(button.textContent, '');
+
+            button.setAttribute('data-copy-reset-at', String(Date.now() - 1));
+            f.manager._reconcilePendingCopyButtons();
+            assert.equal(button.getAttribute('data-copy-state'), 'idle');
+            assert.equal(button.getAttribute('aria-label'), 'Copy source');
+        });
+    }
+});
+
+test('icon copy failures stay labeled and restore the idle icon', async t => {
+    const f = await fixture(t, '<pre><code class="language-javascript">x</code></pre>');
+    const button = f.pre.querySelector('.code-block-copy-btn');
+    t.mock.method(console, 'error', () => {});
+    f.manager._writeTextToClipboard = async () => { throw new Error('Clipboard denied'); };
+    f.dispatch(button, 'click');
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(button.getAttribute('data-copy-state'), 'error');
+    assert.equal(button.getAttribute('aria-label'), 'Copy failed');
+    assert.ok(button.querySelector('.code-block-toolbar-icon'));
+    assert.equal(button.textContent, '');
+    f.manager._resetCopyButtonState(button);
+    assert.equal(button.getAttribute('data-copy-state'), 'idle');
+    assert.equal(button.getAttribute('aria-label'), 'Copy source');
 });
 
 test('choosing Mermaid for an existing code block keeps the source visible', async t => {
@@ -204,7 +280,7 @@ test('choosing Mermaid for an existing code block keeps the source visible', asy
     f.manager.updateCodeBlockLanguage(f.pre, 'mermaid');
     assert.equal(f.pre.getAttribute('data-mermaid-view'), 'code');
     assert.equal(f.pre.querySelector('code').className, 'language-mermaid');
-    assert.equal(f.pre.querySelector('[data-mermaid-view="code"]').getAttribute('aria-pressed'), 'true');
+    assert.equal(f.pre.querySelector('.code-block-preview-toggle').getAttribute('aria-checked'), 'false');
     f.manager.highlightCodeBlocks();
     assert.equal(f.pre.getAttribute('data-mermaid-view'), 'code');
 });
@@ -248,7 +324,7 @@ test('the display toggle is independent for each block and renders the latest so
     f.clickView(f.pre, 'diagram');
     assert.equal(f.pre.getAttribute('data-mermaid-view'), 'diagram');
     assert.equal(f.renders.at(-1), 'graph TD\nA-->C');
-    assert.equal(f.pre.querySelector('[data-mermaid-view="diagram"]').getAttribute('aria-pressed'), 'true');
+    assert.equal(f.pre.querySelector('.code-block-preview-toggle').getAttribute('aria-checked'), 'true');
 });
 
 test('switching to the diagram clears a caret in the hidden source', async t => {
@@ -275,7 +351,7 @@ test('view changes preserve saved source and do not add Undo entries or clear Re
     f.manager.highlightCodeBlocks();
     const restored = f.editor.querySelector('pre');
     assert.equal(restored.getAttribute('data-mermaid-view'), 'code');
-    assert.equal(restored.querySelector('[data-mermaid-view="code"]').getAttribute('aria-pressed'), 'true');
+    assert.equal(restored.querySelector('.code-block-preview-toggle').getAttribute('aria-checked'), 'false');
 });
 
 test('switching away from Mermaid removes the toggle and cancels pending rendering', async t => {

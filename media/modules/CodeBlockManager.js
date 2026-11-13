@@ -4,9 +4,7 @@
  * コードブロックのシンタックスハイライト、言語選択、コピー機能を提供
  */
 
-const MERMAID_TOOLBAR_ICONS = {
-    code: '<path d="m8 8-4 4 4 4m8-8 4 4-4 4m-3-11-2 14"/>',
-    preview: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/>',
+const CODE_BLOCK_TOOLBAR_ICONS = {
     copy: '<rect x="4" y="7" width="13" height="14" rx="3"/><path d="M8 7V5a3 3 0 0 1 3-3h6a3 3 0 0 1 3 3v9a3 3 0 0 1-3 3"/>',
     download: '<path d="M12 3v12m-5-5 5 5 5-5M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/>',
     expand: '<path d="M15 3h6v6m0-6-7 7M9 21H3v-6m0 6 7-7"/>',
@@ -15,8 +13,8 @@ const MERMAID_TOOLBAR_ICONS = {
     busy: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>'
 };
 
-function mermaidToolbarIcon(name) {
-    return `<svg class="mermaid-toolbar-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${MERMAID_TOOLBAR_ICONS[name]}</svg>`;
+function codeBlockToolbarIcon(name) {
+    return `<svg class="code-block-toolbar-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${CODE_BLOCK_TOOLBAR_ICONS[name]}</svg>`;
 }
 
 export class CodeBlockManager {
@@ -329,9 +327,7 @@ export class CodeBlockManager {
 
     _setMermaidView(pre, view) {
         pre.setAttribute('data-mermaid-view', view);
-        pre.querySelectorAll('.code-block-view-btn').forEach((button) => {
-            button.setAttribute('aria-pressed', String(button.getAttribute('data-mermaid-view') === view));
-        });
+        pre.querySelector('.code-block-preview-toggle')?.setAttribute('aria-checked', String(view === 'diagram'));
     }
 
     _getMermaidCode(codeBlock) {
@@ -357,9 +353,7 @@ export class CodeBlockManager {
 
     _setMathView(pre, view) {
         pre.setAttribute('data-math-view', view);
-        pre.querySelectorAll('.code-block-view-btn').forEach((button) => {
-            button.setAttribute('aria-pressed', String(button.getAttribute('data-math-view') === view));
-        });
+        pre.querySelector('.code-block-preview-toggle')?.setAttribute('aria-checked', String(view === 'preview'));
     }
 
     /** Reveal source for caret navigation without changing content or history. */
@@ -746,13 +740,9 @@ export class CodeBlockManager {
     }
 
     _setCopyButtonLabel(button, label) {
-        if (!button.classList.contains('mermaid-icon-btn')) {
-            button.textContent = label;
-            return;
-        }
         const icon = label === 'Copied!' ? 'success' : label === 'Failed' ? 'error' : label === 'Copying...' ? 'busy' : 'copy';
-        const description = label === 'Copy' ? 'Copy Mermaid source' : label === 'Failed' ? 'Copy failed' : label;
-        button.innerHTML = mermaidToolbarIcon(icon);
+        const description = label === 'Copy' ? 'Copy source' : label === 'Failed' ? 'Copy failed' : label;
+        button.innerHTML = codeBlockToolbarIcon(icon);
         button.setAttribute('aria-label', description);
         button.title = description;
     }
@@ -838,21 +828,21 @@ export class CodeBlockManager {
         if (!toolbar.querySelector('.code-block-language')) {
             return false;
         }
-        if (!toolbar.querySelector('.code-block-copy-btn')) {
+        if (!toolbar.querySelector('.code-block-copy-btn.code-block-icon-btn .code-block-toolbar-icon')) {
+            return false;
+        }
+        if ((this._isMermaidLanguage(language) || this._isMathLanguage(language)) &&
+            (toolbar.querySelectorAll('.code-block-preview-toggle[role="switch"]').length !== 1 ||
+                !toolbar.querySelector('.code-block-preview-track > .code-block-preview-thumb'))) {
             return false;
         }
         if (this._isMermaidLanguage(language)) {
             if (toolbar.querySelectorAll('.code-block-export-btn').length < 2 ||
                 !toolbar.querySelector('.code-block-download-btn') ||
                 !toolbar.querySelector('.code-block-export-menu') ||
-                toolbar.querySelectorAll('.code-block-view-btn').length !== 2 ||
                 !toolbar.querySelector('.code-block-expand-btn')) {
                 return false;
             }
-        }
-        if (this._isMathLanguage(language) &&
-            toolbar.querySelectorAll('.code-block-view-btn[data-math-view]').length !== 2) {
-            return false;
         }
         return true;
     }
@@ -899,7 +889,9 @@ export class CodeBlockManager {
                 node.classList.contains('code-block-language') ||
                 node.classList.contains('code-block-actions') ||
                 node.classList.contains('code-block-view-toggle') ||
-                node.classList.contains('code-block-view-btn') ||
+                node.classList.contains('code-block-preview-toggle') ||
+                node.classList.contains('code-block-preview-track') ||
+                node.classList.contains('code-block-preview-thumb') ||
                 node.classList.contains('code-block-copy-btn') ||
                 node.classList.contains('code-block-export-btn')
             );
@@ -1813,97 +1805,60 @@ export class CodeBlockManager {
         const actionGroup = document.createElement('div');
         actionGroup.className = 'code-block-actions';
 
-        if (isMermaid) {
-            const viewToggle = document.createElement('div');
-            viewToggle.className = 'code-block-view-toggle mermaid-view-toggle';
-            viewToggle.setAttribute('role', 'group');
-            viewToggle.setAttribute('aria-label', 'Mermaid display');
-            ['code', 'diagram'].forEach((view) => {
-                const button = document.createElement('button');
-                button.type = 'button';
-                button.className = 'code-block-view-btn';
-                button.setAttribute('data-mermaid-view', view);
-                const label = view === 'code' ? 'Code' : 'Preview';
-                button.innerHTML = mermaidToolbarIcon(view === 'code' ? 'code' : 'preview');
-                const text = document.createElement('span');
-                text.textContent = label;
-                button.appendChild(text);
-                button.title = `Show Mermaid ${label.toLowerCase()}`;
-                button.addEventListener('mousedown', (e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                });
-                button.addEventListener('click', (e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    const code = pre.querySelector('code');
-                    const selection = window.getSelection();
-                    // A hidden source must not retain an editable caret.
-                    if (view === 'diagram' && code && selection && selection.rangeCount > 0 &&
-                        code.contains(selection.getRangeAt(0).startContainer)) {
-                        selection.removeAllRanges();
-                        button.focus({ preventScroll: true });
-                    }
-                    this._setMermaidView(pre, view);
-                    if (view === 'diagram' && code) {
-                        this._scheduleMermaidRender(pre, code, true);
-                    }
-                });
-                viewToggle.appendChild(button);
-            });
-            actionGroup.appendChild(viewToggle);
-            const divider = document.createElement('span');
-            divider.className = 'mermaid-toolbar-divider';
-            divider.setAttribute('aria-hidden', 'true');
-            actionGroup.appendChild(divider);
-        }
-
-        if (isMath) {
+        if (isMermaid || isMath) {
             const viewToggle = document.createElement('div');
             viewToggle.className = 'code-block-view-toggle';
-            viewToggle.setAttribute('role', 'group');
-            viewToggle.setAttribute('aria-label', 'Math display');
-            [['code', 'TeX', 'Edit the TeX source'], ['preview', 'Preview', 'Show only the formula']].forEach(([view, label, title]) => {
-                const button = document.createElement('button');
-                button.type = 'button';
-                button.className = 'code-block-view-btn';
-                button.setAttribute('data-math-view', view);
-                button.textContent = label;
-                button.title = title;
-                button.addEventListener('mousedown', (e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                });
-                button.addEventListener('click', (e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    const code = pre.querySelector('code');
-                    if (view === 'code') {
-                        this._editMathSource(pre);
-                        return;
-                    }
-                    this.transientMathSources.delete(pre);
-                    const selection = window.getSelection();
-                    // A hidden source must not retain an editable caret.
-                    if (code && selection && selection.rangeCount > 0 &&
-                        code.contains(selection.getRangeAt(0).startContainer)) {
-                        selection.removeAllRanges();
-                        button.focus({ preventScroll: true });
-                    }
-                    this._setMathView(pre, view);
-                    if (code) {
-                        this._scheduleMathRender(pre, code, true);
-                    }
-                });
-                viewToggle.appendChild(button);
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'code-block-preview-toggle';
+            button.setAttribute('role', 'switch');
+            button.setAttribute('aria-label', 'Preview');
+            button.title = 'Toggle preview';
+            button.innerHTML = '<span class="code-block-preview-label">Preview</span>' +
+                '<span class="code-block-preview-track" aria-hidden="true"><span class="code-block-preview-thumb"></span></span>';
+            button.addEventListener('mousedown', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
             });
+            button.addEventListener('keydown', (e) => {
+                // Let the native button activate without editing the selection behind it.
+                if (e.key === ' ' || e.key === 'Enter') e.stopPropagation();
+            });
+            button.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const code = pre.querySelector('code');
+                const showingPreview = isMermaid
+                    ? this._getMermaidView(pre) === 'diagram'
+                    : this._getMathView(pre) === 'preview';
+                if (isMath && showingPreview) {
+                    this._editMathSource(pre);
+                    return;
+                }
+                if (isMath) this.transientMathSources.delete(pre);
+                const selection = window.getSelection();
+                // A hidden source must not retain an editable caret.
+                if (!showingPreview && code && selection?.rangeCount > 0 &&
+                    code.contains(selection.getRangeAt(0).startContainer)) {
+                    selection.removeAllRanges();
+                    button.focus({ preventScroll: true });
+                }
+                if (isMermaid) {
+                    this._setMermaidView(pre, showingPreview ? 'code' : 'diagram');
+                    if (!showingPreview && code) this._scheduleMermaidRender(pre, code, true);
+                } else {
+                    this._setMathView(pre, 'preview');
+                    if (code) this._scheduleMathRender(pre, code, true);
+                }
+            });
+            viewToggle.appendChild(button);
             actionGroup.appendChild(viewToggle);
         }
 
         // コピーボタンを追加
         const copyBtn = document.createElement('button');
         copyBtn.type = 'button';
-        copyBtn.className = isMermaid ? 'code-block-copy-btn mermaid-icon-btn' : 'code-block-copy-btn';
+        copyBtn.className = 'code-block-copy-btn code-block-icon-btn';
         copyBtn.title = 'Copy code to clipboard';
         this._setCopyButtonLabel(copyBtn, 'Copy');
         let copyButtonResetTimer = null;
@@ -1961,8 +1916,8 @@ export class CodeBlockManager {
             download.className = 'code-block-download';
             const downloadBtn = document.createElement('button');
             downloadBtn.type = 'button';
-            downloadBtn.className = 'code-block-download-btn mermaid-icon-btn';
-            downloadBtn.innerHTML = mermaidToolbarIcon('download');
+            downloadBtn.className = 'code-block-download-btn code-block-icon-btn';
+            downloadBtn.innerHTML = codeBlockToolbarIcon('download');
             downloadBtn.title = 'Download diagram';
             downloadBtn.setAttribute('aria-label', 'Download diagram');
             downloadBtn.setAttribute('aria-haspopup', 'menu');
@@ -2035,8 +1990,8 @@ export class CodeBlockManager {
 
             const expandBtn = document.createElement('button');
             expandBtn.type = 'button';
-            expandBtn.className = 'code-block-expand-btn mermaid-icon-btn';
-            expandBtn.innerHTML = mermaidToolbarIcon('expand');
+            expandBtn.className = 'code-block-expand-btn code-block-icon-btn';
+            expandBtn.innerHTML = codeBlockToolbarIcon('expand');
             expandBtn.title = 'Expand diagram (zoom and pan)';
             expandBtn.setAttribute('aria-label', 'Expand diagram');
             expandBtn.setAttribute('aria-haspopup', 'dialog');
