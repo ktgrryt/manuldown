@@ -74,6 +74,7 @@ export class TableManager {
         document.addEventListener('mousemove', (e) => this._handleDragMove(e));
         document.addEventListener('mousemove', (e) => this._handleGlobalHoverCleanup(e));
         document.addEventListener('mouseup', (e) => this._handleMouseUp(e));
+        document.addEventListener('selectionchange', () => this.updateWholeTableSelection());
         document.addEventListener('pointercancel', () => this.cancelCellDrag(), true);
         window.addEventListener('resize', () => {
             this._syncStructureSelectionUI();
@@ -125,6 +126,7 @@ export class TableManager {
         });
         this._syncSelectionHandleContextFromSelection();
         this._syncStructureSelectionUI();
+        this.updateWholeTableSelection();
     }
 
     openTableDialog() {
@@ -1653,6 +1655,7 @@ export class TableManager {
         this.selectedCells = [];
         this.selectionRange = null;
         this._syncSelectionHandleContextFromSelection();
+        this.updateWholeTableSelection();
     }
 
     clearStructureSelection() {
@@ -1661,6 +1664,7 @@ export class TableManager {
         this.structureSelection = null;
         this._clearStructureSelectionVisuals();
         this._syncHandleVisibility();
+        this.updateWholeTableSelection();
     }
 
     selectCellRange(startCell, endCell) {
@@ -1694,6 +1698,80 @@ export class TableManager {
 
         this.selectedCells = cells;
         this.selectionRange = { table, minRow, maxRow, minCol, maxCol };
+        this.updateWholeTableSelection();
+    }
+
+    updateWholeTableSelection() {
+        const document = this.editor?.ownerDocument;
+        if (!document) return;
+        const selection = document.defaultView?.getSelection?.();
+        const ranges = [];
+        for (let index = 0; index < (selection?.rangeCount || 0); index++) {
+            const range = selection.getRangeAt(index);
+            if (!range.collapsed && typeof range.isPointInRange === 'function' &&
+                this.editor.contains(range.startContainer) && this.editor.contains(range.endContainer)) {
+                ranges.push(range);
+            }
+        }
+        for (const table of Array.from(this.editor.querySelectorAll('table'))) {
+            const cells = Array.from(table.querySelectorAll('td, th')).filter(cell => cell.closest('table') === table);
+            // This is derived presentation state, not a new editing/selection mode.
+            const cellClass = this.structureSelection ? 'md-table-structure-selected-cell' : 'md-table-cell-selected';
+            const allCells = cells.length > 0 && cells.every(cell => cell.classList.contains(cellClass));
+            const allContents = !this.structureSelection && ranges.length > 0 && cells.length > 0 &&
+                this._rangeCoversTableContents(table, cells, ranges);
+            const selected = allCells || allContents;
+            if (selected && !table.classList.contains('md-table-whole-selected')) {
+                table.classList.add('md-table-whole-selected');
+            } else if (!selected && table.classList.contains('md-table-whole-selected')) {
+                table.classList.remove('md-table-whole-selected');
+                if (table.getAttribute('class') === '') table.removeAttribute('class');
+            }
+        }
+    }
+
+    _rangeCoversTableContents(table, cells, ranges) {
+        let first = null;
+        let last = null;
+        for (const cell of cells) {
+            first = this._getTableSelectionContentBoundary(cell, false);
+            if (first) break;
+        }
+        for (let index = cells.length - 1; index >= 0; index--) {
+            last = this._getTableSelectionContentBoundary(cells[index], true);
+            if (last) break;
+        }
+        // An entirely empty table needs an explicit selection of its structure;
+        // selecting one empty placeholder must not select the whole table.
+        first ||= { node: table, offset: 0 };
+        last ||= { node: table, offset: table.childNodes.length };
+        return ranges.some(range => range.isPointInRange(first.node, first.offset) &&
+            range.isPointInRange(last.node, last.offset));
+    }
+
+    _getTableSelectionContentBoundary(node, atEnd) {
+        if (node.nodeType === 3) {
+            const text = node.textContent || '';
+            if (text.replace(/[\u200B\u2060\uFEFF]/g, '').trim() === '') return null;
+            const start = /^[\u200B\u2060\uFEFF]*/.exec(text)[0].length;
+            const end = text.length - /[\u200B\u2060\uFEFF]*$/.exec(text)[0].length;
+            return { node, offset: atEnd ? end : start };
+        }
+        if (node.nodeType !== 1 || node.getAttribute('data-exclude-from-markdown') === 'true' ||
+            node.getAttribute('aria-hidden') === 'true' || node.classList.contains('md-table-structure-handle') ||
+            node.tagName === 'BR') return null;
+        if (node.matches('img, input, textarea, select, button, hr, svg, canvas, video, audio, iframe, object, embed, ' +
+            '[data-mdw-math], pre[data-math-view="preview"], pre[data-mermaid-view="diagram"]')) {
+            return { node: node.parentNode,
+                offset: Array.prototype.indexOf.call(node.parentNode.childNodes, node) + (atEnd ? 1 : 0) };
+        }
+        const children = Array.from(node.childNodes);
+        if (atEnd) children.reverse();
+        for (const child of children) {
+            const boundary = this._getTableSelectionContentBoundary(child, atEnd);
+            if (boundary) return boundary;
+        }
+        return null;
     }
 
     updateEdgeActive() {
@@ -2119,6 +2197,7 @@ export class TableManager {
 
     _syncStructureSelectionUI() {
         this._clearStructureSelectionVisuals();
+        this.updateWholeTableSelection();
 
         const selection = this._normalizeStructureSelection();
         if (!selection) {
@@ -2166,6 +2245,7 @@ export class TableManager {
         outline.style.height = `${bounds.height}px`;
         outline.classList.add('active');
         this._syncHandleVisibility();
+        this.updateWholeTableSelection();
     }
 
     _clearStructureSelectionVisuals() {

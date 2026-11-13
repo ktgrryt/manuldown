@@ -77,7 +77,9 @@ test('editor cleanup excludes transient cursor and selection classes', async () 
         '<ul><li><input type="checkbox" class="cursor-on">task</li>' +
         '<li class="image-only-list-item"><img src="diagram.png"></li></ul>' +
         '<p><img src="image.png" class="photo image-caret-left-edge image-caret-right-edge"></p>' +
-        '<table class="md-table"><tbody><tr><td>cell</td></tr></tbody></table>'
+        '<table class="md-table md-table-whole-selected"><tbody><tr><td>cell</td></tr></tbody></table>' +
+        '<pre class="md-block-whole-selected"><code>const answer = 42;\n</code></pre>' +
+        '<p><span class="mdw-math md-block-whole-selected" data-mdw-math="display">x^2</span></p>'
     );
 
     assert.doesNotMatch(cleanedHTML, /\bselected\b/);
@@ -85,6 +87,8 @@ test('editor cleanup excludes transient cursor and selection classes', async () 
     assert.doesNotMatch(cleanedHTML, /\bimage-only-list-item\b/);
     assert.doesNotMatch(cleanedHTML, /\bimage-caret-(?:left|right)-edge\b/);
     assert.doesNotMatch(cleanedHTML, /\bmd-table\b/);
+    assert.doesNotMatch(cleanedHTML, /\bmd-table-whole-selected\b/);
+    assert.doesNotMatch(cleanedHTML, /\bmd-block-whole-selected\b/);
     assert.match(cleanedHTML, /class="photo"/);
 });
 

@@ -1,5 +1,4 @@
 // @ts-nocheck
-import { DOMUtils } from './modules/DOMUtils.js';
 import { CodeBlockGapManager } from './modules/CodeBlockGapManager.js';
 import { StateManager } from './modules/StateManager.js';
 import { ListManager } from './modules/ListManager.js';
@@ -7,7 +6,6 @@ import { MarkdownConverter } from './modules/MarkdownConverter.js';
 import { CodeBlockManager } from './modules/CodeBlockManager.js';
 import { MermaidViewer } from './modules/MermaidViewer.js';
 import { ToolbarManager } from './modules/ToolbarManager.js';
-import { TableManager } from './modules/TableManager.js';
 import { SearchManager } from './modules/SearchManager.js';
 import { FootnoteManager } from './modules/FootnoteManager.js';
 import { createMarkdownClipboardHtml } from './modules/MarkdownClipboard.js';
@@ -44,8 +42,8 @@ import {
 } from './modules/CaretScroll.js';
 
 // The entry module carries the Webview asset cache key. Propagate it to the
-// selection, cursor, heading, math and TOC modules so a development Webview cannot pair
-// new entry points with stale module implementations.
+// changed editor modules so a development Webview cannot pair new entry points
+// with stale module implementations.
 const {
     CursorManager,
     shouldRouteHorizontalArrowAfterComposition
@@ -58,6 +56,9 @@ const {
 const { MathManager } = await import(`./modules/MathManager.js${new URL(import.meta.url).search}`);
 const { DragSelectionScroll } = await import(`./modules/DragSelectionScroll.js${new URL(import.meta.url).search}`);
 const { TableOfContentsManager } = await import(`./modules/TableOfContentsManager.js${new URL(import.meta.url).search}`);
+const { DOMUtils } = await import(`./modules/DOMUtils.js${new URL(import.meta.url).search}`);
+const { TableManager } = await import(`./modules/TableManager.js${new URL(import.meta.url).search}`);
+const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js${new URL(import.meta.url).search}`);
 
 (function () {
     // @ts-ignore
@@ -1755,6 +1756,7 @@ const { TableOfContentsManager } = await import(`./modules/TableOfContentsManage
             cursorManager._moveVerticallyAcrossInlineMath(selection, direction)
     });
     codeBlockManager.setMathRenderer(mathManager);
+    const blockObjectSelection = new BlockObjectSelection(editor);
     const toolbarManager = new ToolbarManager(editor, stateManager, {
         isMac,
         onFormatSelectedCells: (command) => tableManager.formatSelectedCells(command),
@@ -24931,6 +24933,7 @@ const { TableOfContentsManager } = await import(`./modules/TableOfContentsManage
     function init() {
         footnoteManager.setup();
         mathManager.setup();
+        blockObjectSelection.setup();
         toolbarManager.setup();
         tableManager.setup({ notifyChange });
         setupEditor();

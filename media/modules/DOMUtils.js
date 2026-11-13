@@ -587,6 +587,8 @@ export class DOMUtils {
         removeTransientClass('img.image-caret-right-edge', 'image-caret-right-edge');
         removeTransientClass('li.image-only-list-item', 'image-only-list-item');
         removeTransientClass('table.md-table', 'md-table');
+        removeTransientClass('table.md-table-whole-selected', 'md-table-whole-selected');
+        removeTransientClass('.md-block-whole-selected', 'md-block-whole-selected');
 
         if (historyComparable) {
             // Footnote numbers and navigation targets are derived view state.

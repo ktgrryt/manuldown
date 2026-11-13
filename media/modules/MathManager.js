@@ -38,10 +38,22 @@ const SHADOW_STYLES = `
 .output.is-selected {
     background-color: var(--vscode-editor-selectionBackground, #add6ff);
 }
-/* The whole formula has its own selection background. Suppress the native
-   text selection inside KaTeX so each glyph is not highlighted again. */
+/* Display formulas and formulas in a selected table share the object indicator. */
+:host(.md-block-whole-selected) .output.is-selected:not(.is-active),
+:host-context(table.md-table-whole-selected) .output.is-selected:not(.is-active) {
+    outline: none;
+    background-color: transparent;
+}
+/* A selected formula or whole block already has its own selection indicator.
+   Suppress native highlights inside KaTeX, including preview shadow roots. */
 .output.is-selected::selection,
-.output.is-selected *::selection {
+.output.is-selected *::selection,
+:host(.md-block-whole-selected) .output::selection,
+:host(.md-block-whole-selected) .output *::selection,
+:host-context(pre.md-block-whole-selected) .output::selection,
+:host-context(pre.md-block-whole-selected) .output *::selection,
+:host-context(table.md-table-whole-selected) .output::selection,
+:host-context(table.md-table-whole-selected) .output *::selection {
     background-color: transparent;
     color: inherit;
 }

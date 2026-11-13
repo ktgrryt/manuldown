@@ -726,6 +726,31 @@ body[data-list-dash-style="true"] #editor ul ul ul {
     background-color: var(--vscode-editor-inactiveSelectionBackground, var(--vscode-editor-selectionBackground));
 }
 
+#editor pre.md-block-whole-selected,
+#editor span[data-mdw-math="display"].md-block-whole-selected {
+    outline: 2px solid var(--vscode-focusBorder, #007fd4);
+    outline-offset: 2px;
+}
+
+#editor table.md-table-whole-selected {
+    outline: 2px solid var(--vscode-focusBorder, #007fd4);
+    outline-offset: -2px;
+}
+
+#editor table.md-table-whole-selected > :is(thead, tbody, tfoot) > tr > :is(td, th) {
+    background-color: var(--vscode-editor-selectionBackground, #add6ff);
+}
+
+/* The outer frame represents a whole-block selection. Keep the native range
+   for copy/delete while hiding duplicate highlights on source and toolbar text. */
+#editor table.md-table-whole-selected::selection,
+#editor table.md-table-whole-selected *::selection,
+#editor pre.md-block-whole-selected::selection,
+#editor pre.md-block-whole-selected *::selection {
+    background-color: transparent;
+    color: inherit;
+}
+
 #editor .md-table-structure-handle {
     position: absolute;
     display: flex;
