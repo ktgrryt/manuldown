@@ -238,6 +238,24 @@ test('dragging below the viewport scrolls down and clamps hit-testing inside the
     assert.ok(f.hits.every(hit => hit.x === 498 && hit.y === 358));
 });
 
+test('a clipped editor uses its visible container edges for drag hit-testing in both directions', async () => {
+    const f = await fixture();
+    const container = f.document.createElement('div');
+    container.className = 'editor-container';
+    f.editor.parentNode.insertBefore(container, f.editor);
+    container.appendChild(f.editor);
+    container.getBoundingClientRect = () => ({ top: 100, bottom: 260, left: 30, right: 480 });
+    assert.deepEqual(f.controller.getViewport(), { top: 100, bottom: 260, left: 30, right: 480 });
+    f.down();
+    f.move(900, 900);
+    f.waitForFallback();
+    assert.ok(f.editor.scrollTop > 1000);
+    assert.ok(f.hits.every(hit => hit.x === 478 && hit.y === 258));
+    f.move(-100, -100);
+    f.waitForFallback();
+    assert.deepEqual({ x: f.hits.at(-1).x, y: f.hits.at(-1).y }, { x: 32, y: 102 });
+});
+
 test('a drag from a manually placed gap caret retains the original anchor', async () => {
     const f = await fixture();
     f.setManualAnchor(f.bookmark(f.lines[58], 6));
@@ -266,6 +284,40 @@ test('a normal paragraph selection keeps its browser-owned anchor and never star
     assert.equal(f.scrollWrites, 0);
     assert.equal(f.hits.length, 0);
 });
+
+test('a native drag remains observable without taking over its scrolling or selection', async () => {
+    const f = await fixture({ manual: false });
+    f.down();
+    assert.equal(f.controller.isSelectingWithPointer, false);
+    f.move(101, 201);
+    assert.equal(f.controller.isSelectingWithPointer, false, 'a click or pointer jitter is not a selection drag');
+    f.move(100, 360);
+    assert.equal(f.controller.drag, null, 'the scroll assistant still leaves native selections alone');
+    assert.equal(f.controller.isSelectingWithPointer, true);
+    f.move(100, 200);
+    assert.equal(f.controller.isSelectingWithPointer, true, 'returning inside the viewport keeps the held gesture');
+    f.waitForFallback();
+    assert.equal(f.frameCount, 0);
+    assert.equal(f.scrollWrites, 0);
+    assert.equal(f.hits.length, 0);
+});
+
+for (const end of ['mouseup', 'lost button', 'blur', 'dragstart', 'pointercancel', 'hidden']) {
+    test(`${end} ends observation of a native drag that never enabled scroll assistance`, async () => {
+        const f = await fixture({ manual: false });
+        f.down();
+        f.move(100, 360);
+        assert.equal(f.controller.isSelectingWithPointer, true);
+        if (end === 'lost button') f.move(100, 360, 0);
+        else if (end === 'hidden') {
+            Object.defineProperty(f.document, 'visibilityState', { value: 'hidden' });
+            f.dispatch('visibilitychange');
+        } else f.dispatch(end, {}, end === 'blur' ? f.window : f.document);
+        assert.equal(f.controller.isSelectingWithPointer, false);
+        assert.equal(f.scrollWrites, 0);
+        assert.equal(f.frameCount, 0);
+    });
+}
 
 test('the native selection scroll gets time to start before a fallback changes anything', async () => {
     const f = await fixture();

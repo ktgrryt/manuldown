@@ -11,6 +11,7 @@ export class DragSelectionScroll {
         this.getAnchorRange = getAnchorRange;
         this.isEnabled = isEnabled;
         this.drag = null;
+        this.pointerSelection = null;
         this.frame = null;
         this.lastTimestamp = null;
         this.observedScrollTop = null;
@@ -35,16 +36,20 @@ export class DragSelectionScroll {
         const target = event.target.nodeType === 1 ? event.target : event.target.parentElement;
         if (!target || target.isContentEditable === false ||
             target.closest('input, textarea, select, button, [data-exclude-from-markdown="true"]')) return;
+        this.pointerSelection = { x: event.clientX, y: event.clientY, moved: false };
         this.drag = { startX: event.clientX, startY: event.clientY,
             x: event.clientX, y: event.clientY, anchor: null };
     }
 
     move(event) {
-        if (!this.drag) return;
+        if (!this.pointerSelection) return;
         if ((event.buttons & 1) !== 1 || !this.isEnabled()) {
             this.stop();
             return;
         }
+        const pointer = this.pointerSelection;
+        if (Math.hypot(event.clientX - pointer.x, event.clientY - pointer.y) > 3) pointer.moved = true;
+        if (!this.drag) return;
         const drag = this.drag;
         drag.x = event.clientX;
         drag.y = event.clientY;
@@ -58,7 +63,10 @@ export class DragSelectionScroll {
             // its original anchor, even for an upward (backward) selection.
             const manualAnchor = this.getAnchorRange();
             if (!manualAnchor) {
-                this.stop();
+                // Observe the native gesture so caret reveal cannot compete
+                // with it, without taking over its selection or scrolling.
+                this.cancelFrame();
+                this.drag = null;
                 return;
             }
             drag.anchor = manualAnchor.cloneRange();
@@ -76,12 +84,21 @@ export class DragSelectionScroll {
         this.schedule();
     }
 
+    get isSelectingWithPointer() {
+        return this.pointerSelection?.moved === true;
+    }
+
     getViewport() {
         const rect = this.editor.getBoundingClientRect();
-        const top = Math.max(0, rect.top + this.editor.clientTop);
-        const bottom = Math.min(this.window.innerHeight, rect.top + this.editor.clientTop + this.editor.clientHeight);
-        const left = Math.max(0, rect.left + this.editor.clientLeft);
-        const right = Math.min(this.window.innerWidth, rect.left + this.editor.clientLeft + this.editor.clientWidth);
+        // Bottom padding can make the editor taller than a short pane. Its
+        // overflow-hidden container, rather than that padding box, is visible.
+        const clip = this.editor.closest('.editor-container')?.getBoundingClientRect?.();
+        const top = Math.max(0, rect.top + this.editor.clientTop, clip?.top ?? -Infinity);
+        const bottom = Math.min(this.window.innerHeight,
+            rect.top + this.editor.clientTop + this.editor.clientHeight, clip?.bottom ?? Infinity);
+        const left = Math.max(0, rect.left + this.editor.clientLeft, clip?.left ?? -Infinity);
+        const right = Math.min(this.window.innerWidth,
+            rect.left + this.editor.clientLeft + this.editor.clientWidth, clip?.right ?? Infinity);
         return bottom > top + 4 && right > left + 4 ? { top, bottom, left, right } : null;
     }
 
@@ -176,5 +193,6 @@ export class DragSelectionScroll {
     stop() {
         this.cancelFrame();
         this.drag = null;
+        this.pointerSelection = null;
     }
 }

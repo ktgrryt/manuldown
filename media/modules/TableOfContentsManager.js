@@ -268,7 +268,30 @@ export class TableOfContentsManager {
         if (!tocItem) return;
         tocItem.classList.add('active');
         if (scrollIntoView) {
-            tocItem.scrollIntoView({ block: 'nearest' });
+            this.revealTocItem(tocItem);
+        }
+    }
+
+    revealTocItem(item) {
+        const height = this.tocContent.clientHeight;
+        if (height <= 0) return;
+        const top = this.tocContent.getBoundingClientRect().top + this.tocContent.clientTop;
+        const bottom = top + height;
+        const rect = item.getBoundingClientRect();
+        let delta = 0;
+        if (rect.top < top) {
+            delta = rect.top - top;
+        } else if (rect.bottom > bottom) {
+            // An oversized item aligns at its start and stays there on later reveals.
+            delta = Math.min(rect.top - top, rect.bottom - bottom);
+        }
+        const current = this.tocContent.scrollTop;
+        const max = Math.max(0, this.tocContent.scrollHeight - height);
+        const next = Math.max(0, Math.min(max, current + delta));
+        if (next !== current) {
+            // Native scrollIntoView can also move the overflow-hidden editor
+            // container. Following the active heading must scroll only the TOC.
+            this.tocContent.scrollTop = next;
         }
     }
 

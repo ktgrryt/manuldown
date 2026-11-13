@@ -192,6 +192,7 @@ function codeBlockClickFixture(t, {
     const dependencies = {
         editor: f.editor, document: f.document, window: f.window, Node: f.window.Node,
         domUtils, codeBlockGapManager: gapManager,
+        mathManager: new (loadClass('MathManager'))(f.editor, {}),
         cursorManager: {
             clearInlineCodeBoundaryState() {},
             resetCodeVerticalNavigation() {},

@@ -193,6 +193,7 @@ async function searchCloseCaretFixture() {
     };
     const dependencies = {
         editor,
+        dragSelectionScroll: { isSelectingWithPointer: false },
         window: { getSelection: () => ({ rangeCount: 1, isCollapsed: true, getRangeAt: () => range }) },
         requestAnimationFrame: callback => frames.push(callback),
         calculateCaretAnchorScrollTop, calculateCaretRevealScrollTop,
@@ -227,6 +228,7 @@ async function searchCloseCaretFixture() {
     `)(...Object.values(dependencies));
     return {
         ...helpers, editor, range,
+        setPointerDrag(active) { dependencies.dragSelectionScroll.isSelectingWithPointer = active; },
         key(event) { keydownHandler(event); },
         runFrame() {
             const callbacks = frames.splice(0);
@@ -255,6 +257,31 @@ test('a new caret position resumes automatic reveal after closing search', async
     f.preserveViewportAfterSearchClose();
     f.range.startOffset = f.range.endOffset = 1;
     f.scheduleEnsureCaretVisible();
+    f.runFrame();
+    assert.equal(f.editor.scrollTop, 42);
+});
+
+test('a transient collapsed native selection cannot reveal the caret during a held-button drag', async () => {
+    const f = await searchCloseCaretFixture();
+    // This range lies above the viewport, as when native selection briefly
+    // returns to its anchor while crossing a display formula and trailing NBSP.
+    f.setPointerDrag(true);
+    for (let frame = 0; frame < 3; frame++) {
+        f.scheduleEnsureCaretVisible();
+        f.runFrame();
+        assert.equal(f.editor.scrollTop, 800);
+    }
+    f.setPointerDrag(false);
+    f.scheduleEnsureCaretVisible();
+    f.runFrame();
+    assert.equal(f.editor.scrollTop, 42, 'normal caret reveal resumes when the pointer gesture ends');
+});
+
+test('explicit keyboard navigation still reveals its caret during a pointer gesture', async () => {
+    const f = await searchCloseCaretFixture();
+    f.preserveViewportAfterSearchClose();
+    f.setPointerDrag(true);
+    f.key({ key: 'f', ctrlKey: true, metaKey: false, altKey: false, shiftKey: false });
     f.runFrame();
     assert.equal(f.editor.scrollTop, 42);
 });

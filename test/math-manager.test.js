@@ -243,6 +243,71 @@ test('formulas render in shadow roots, so the document keeps only their TeX', as
     assert.equal(f.manager.toMarkdown(display), '$$\\sum$$');
 });
 
+test('dragging across a math preview uses the block boundaries instead of hidden TeX or its controls', async () => {
+    const f = await fixture('<h3>Keep exploring</h3><pre data-math-view="preview">' +
+        '<div class="code-block-toolbar" contenteditable="false"><button>Preview</button></div>' +
+        '<code>x^2</code><div class="math-preview" contenteditable="false"></div></pre><p>after</p>');
+    const pre = f.editor.querySelector('pre');
+    pre.getBoundingClientRect = () => ({ left: 20, right: 420, top: 100, bottom: 200 });
+    const before = f.editor.innerHTML;
+    f.select(f.editor.firstChild.firstChild, 0);
+    const selectionBefore = f.range;
+    for (const element of [pre, pre.querySelector('code'), pre.querySelector('button'), pre.querySelector('.math-preview')]) {
+        f.document.elementFromPoint = () => element;
+        for (const [y, offset] of [[110, 1], [190, 2]]) {
+            const range = f.manager.getDragSelectionRangeFromPoint(200, y);
+            assert.equal(range.startContainer === f.editor, true);
+            assert.equal(range.startOffset, offset);
+            assert.equal(range.collapsed, true);
+        }
+    }
+    // Gap hit-testing can return the hidden source even when the pointer is
+    // over editor padding. Normalize that fallback as well as direct hits.
+    f.document.elementFromPoint = () => f.editor;
+    const hiddenSource = { startContainer: pre.querySelector('code').firstChild, startOffset: 1 };
+    const edge = f.manager.getDragSelectionRangeFromPoint(200, 210, hiddenSource);
+    assert.equal(edge.startContainer === f.editor, true);
+    assert.equal(edge.startOffset, 2);
+    assert.equal(f.range, selectionBefore, 'resolving an endpoint does not replace the drag anchor');
+    assert.equal(f.editor.innerHTML, before);
+    assert.deepEqual(f.history, []);
+    assert.equal(f.changes, 0);
+});
+
+for (const mode of ['inline', 'display']) {
+    test(`dragging across ${mode} math keeps the endpoint outside its rendered contents`, async () => {
+        const f = await fixture(`<p>before <strong>${formulaHtml('x^2', mode)}</strong> after</p>`);
+        const formula = f.formula();
+        formula.getBoundingClientRect = () => ({ left: 100, right: 300, top: 100, bottom: 200 });
+        f.document.elementFromPoint = () => formula;
+        for (const [x, y, offset] of [[110, 110, 0], [290, 190, 1]]) {
+            const range = f.manager.getDragSelectionRangeFromPoint(x, y);
+            assert.equal(range.startContainer === formula.parentNode, true);
+            assert.equal(range.startOffset, offset);
+            assert.equal(range.collapsed, true);
+        }
+        // Inline formulas follow horizontal position; display formulas follow height.
+        assert.equal(f.manager.getDragSelectionRangeFromPoint(290, 110).startOffset, mode === 'inline' ? 1 : 0);
+    });
+}
+
+test('visible TeX and ordinary text keep their native drag offsets', async () => {
+    const f = await fixture('<p>text</p><pre data-math-view="code"><code>x^2</code>' +
+        '<div class="math-preview"></div></pre><pre data-mermaid-view="diagram"><code>A</code></pre>');
+    for (const element of [null, f.editor.firstChild, f.editor.querySelector('code'),
+        f.editor.querySelector('pre[data-mermaid-view]'), f.document.body]) {
+        f.document.elementFromPoint = () => element;
+        assert.equal(f.manager.getDragSelectionRangeFromPoint(100, 150), null);
+    }
+    const preview = f.editor.querySelector('.math-preview');
+    f.document.elementFromPoint = () => preview;
+    const pre = preview.parentNode;
+    pre.getBoundingClientRect = () => ({ left: 20, right: 420, top: 100, bottom: 200 });
+    const range = f.manager.getDragSelectionRangeFromPoint(100, 190);
+    assert.equal(range.startContainer === f.editor, true);
+    assert.equal(range.startOffset, 2);
+});
+
 test('KaTeX loads once with the page nonce, and pending formulas render when it arrives', async () => {
     const f = await fixture(`<p>${formulaHtml('a')}${formulaHtml('b')}</p>`, {
         katex: null,

@@ -98,6 +98,32 @@ export class MathManager {
         return formula && this.editor.contains(formula) ? formula : null;
     }
 
+    /** Drag selections stay outside rendered math and its hidden source. */
+    getDragSelectionRangeFromPoint(x, y, pointRange = null) {
+        const element = this.document.elementFromPoint(x, y);
+        const preview = element?.closest('.math-preview');
+        const formula = this.getFormula(element);
+        const node = pointRange?.startContainer;
+        const pointElement = node?.nodeType === 1 ? node : node?.parentElement;
+        const block = preview?.closest('pre') || element?.closest('pre[data-math-view="preview"]') ||
+            pointElement?.closest('pre[data-math-view="preview"]');
+        const target = block || formula;
+        if (!target || !this.editor.contains(target)) return null;
+
+        // A native caret probe over KaTeX can resolve to hidden TeX, or to the
+        // text before the preview. Reusing that point can collapse a growing
+        // selection and let caret reveal pull the viewport backwards.
+        const rect = target.getBoundingClientRect();
+        const inline = !block && formula.getAttribute('data-mdw-math') === 'inline';
+        const before = inline
+            ? x < (rect.left + rect.right) / 2
+            : y < (rect.top + rect.bottom) / 2;
+        const range = this.document.createRange();
+        range.selectNode(target);
+        range.collapse(before);
+        return range;
+    }
+
     createFormula(tex, mode = 'inline') {
         const formula = this.document.createElement('span');
         formula.className = 'mdw-math';

@@ -21,6 +21,7 @@ function fixture() {
     const dependencies = {
         editor,
         cursorManager: { clearInlineCodeBoundaryState() {} },
+        tableManager: { cancelCellDrag() {} },
         createSanitizedContainerFromHtml(html) {
             assert.equal(originalNode.isConnected, true, 'the old document still exists during cancellation');
             events.push('sanitize');
@@ -97,4 +98,75 @@ test('manual mousemove rejects a live range that retargeted after its original t
     assert.deepEqual(f.events, ['stop']);
     assert.equal(f.state().manualPointerSelection, null);
     assert.equal(f.editor.innerHTML, '<p>replacement</p>');
+});
+
+function dragFocusFixture() {
+    const window = domino.createWindow('<div id="editor">' +
+        ['start', 'visible top', 'visible middle', 'visible bottom', 'end']
+            .map(text => `<p>${text}</p>`).join('') + '</div>');
+    const document = window.document;
+    const editor = document.getElementById('editor');
+    const blocks = Array.from(editor.children);
+    [-500, 70, 140, 340, 1000].forEach((top, index) => {
+        blocks[index].getBoundingClientRect = () => ({ top, bottom: top + 20, height: 20 });
+    });
+    const hits = [];
+    let nativeRange = null;
+    let mathRange = null;
+    document.elementFromPoint = (x, y) => { hits.push({ type: 'element', x, y }); return editor; };
+    const dependencies = {
+        editor, document, Node: window.Node,
+        dragSelectionScroll: { getViewport: () => ({ top: 60, bottom: 360, left: 0, right: 500 }) },
+        mathManager: { getDragSelectionRangeFromPoint: () => mathRange },
+        getCaretRangeFromPoint(x, y) { hits.push({ type: 'caret', x, y }); return nativeRange; },
+        getLooseLeftSideTextClickRange: () => null, getLooseRightSideTextClickRange: () => null,
+        getImageCaretRangeFromHorizontalClick: () => null, getStableGapClickRange: () => null,
+        createCollapsedRangeAtElementBoundary: (block, boundary) => ({ block, boundary }),
+    };
+    const resolve = new Function(...Object.keys(dependencies), `
+        ${extract('getNearestBlockBoundaryRangeByY')}
+        ${extract('getManualDragFocusRangeFromPoint')}
+        return getManualDragFocusRangeFromPoint;
+    `)(...Object.values(dependencies));
+    return { resolve, hits, blocks,
+        setNativeRange(value) { nativeRange = value; },
+        setMathRange(value) { mathRange = value; } };
+}
+
+test('manual mousemoves above and below the editor select the visible edge rather than the document boundary', () => {
+    const f = dragFocusFixture();
+    assert.deepEqual(f.resolve(100, 900), { block: f.blocks[3], boundary: 'end' });
+    assert.deepEqual(f.resolve(100, -100), { block: f.blocks[1], boundary: 'start' });
+    assert.deepEqual(f.hits.filter(hit => hit.type === 'caret'), [
+        { type: 'caret', x: 100, y: 358 }, { type: 'caret', x: 100, y: 62 },
+    ]);
+});
+
+test('manual drag hit-testing stays inside both horizontal editor edges', () => {
+    const f = dragFocusFixture();
+    f.resolve(-100, 150);
+    f.resolve(900, 150);
+    assert.deepEqual(f.hits.filter(hit => hit.type === 'caret'), [
+        { type: 'caret', x: 2, y: 150 }, { type: 'caret', x: 498, y: 150 },
+    ]);
+});
+
+test('manual drag hit-testing preserves the native text offset inside the viewport', () => {
+    const f = dragFocusFixture();
+    const range = { startContainer: f.blocks[2].firstChild, startOffset: 4 };
+    f.setNativeRange(range);
+    assert.equal(f.resolve(130, 150), range);
+    assert.deepEqual(f.hits, [{ type: 'caret', x: 130, y: 150 }]);
+});
+
+test('math boundaries take precedence over a native caret probe returning the original drag anchor', () => {
+    const f = dragFocusFixture();
+    const anchor = { startContainer: f.blocks[1].firstChild, startOffset: 0 };
+    const afterMath = { startContainer: f.blocks[3], startOffset: 0 };
+    f.setNativeRange(anchor);
+    f.setMathRange(afterMath);
+    assert.equal(f.resolve(130, 350), afterMath,
+        'the selection must not collapse back to its anchor while crossing a preview');
+    assert.deepEqual(f.hits, [{ type: 'caret', x: 130, y: 350 }],
+        'math overrides the unstable native caret probe');
 });

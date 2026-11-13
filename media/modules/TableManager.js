@@ -31,6 +31,9 @@ export class TableManager {
         this.selectCodeBlockLanguageLabel = options.selectCodeBlockLanguageLabel || null;
         // (block, selection) => boolean. The left edge of an image on the block's first line.
         this.placeCaretAtLeadingImageLine = options.placeCaretAtLeadingImageLine || null;
+        // (event, { anchorCell, direction, wholeCell, startX, startY }) => boolean.
+        // Hand a cell drag to the editor when it reaches text outside the table.
+        this.extendSelectionOutsideTable = options.extendSelectionOutsideTable || null;
 
         this.selectedCells = [];
         this.selectionRange = null;
@@ -42,6 +45,7 @@ export class TableManager {
         this.isDragging = false;
         this.anchorCell = null;
         this.focusCell = null;
+        this.cellDragStart = null;
 
         this.clipboardMatrix = null;
 
@@ -70,11 +74,13 @@ export class TableManager {
         document.addEventListener('mousemove', (e) => this._handleDragMove(e));
         document.addEventListener('mousemove', (e) => this._handleGlobalHoverCleanup(e));
         document.addEventListener('mouseup', (e) => this._handleMouseUp(e));
+        document.addEventListener('pointercancel', () => this.cancelCellDrag(), true);
         window.addEventListener('resize', () => {
             this._syncStructureSelectionUI();
             this._syncHandleVisibility();
         });
         window.addEventListener('blur', () => {
+            this.cancelCellDrag();
             this.hoverHandleContext = null;
             this._syncHandleVisibility();
             this._clearInsertHover();
@@ -301,6 +307,7 @@ export class TableManager {
 
     handleMouseDown(e) {
         if (e.button !== 0) return false;
+        this.cancelCellDrag();
 
         const structureHandleInfo = this._getStructureHandleInfoFromTarget(e.target);
         if (structureHandleInfo) {
@@ -443,6 +450,7 @@ export class TableManager {
         this.isDragging = false;
         this.anchorCell = cell;
         this.focusCell = cell;
+        this.cellDragStart = { x: e.clientX, y: e.clientY };
         if (e.shiftKey) {
             // Shift-click explicitly selects the cell; an ordinary click leaves
             // native text placement and selection to the browser.
@@ -1743,14 +1751,43 @@ export class TableManager {
         this._createInsertLines();
     }
 
+    cancelCellDrag() {
+        this.isMouseDown = false;
+        this.isDragging = false;
+        this.cellDragStart = null;
+    }
+
     _handleDragMove(e) {
         if (this.structureDrag) {
             this._handleStructureDragMove(e);
             return;
         }
         if (!this.isMouseDown) return;
+        if ((typeof e.buttons === 'number' && (e.buttons & 1) !== 1) ||
+            !this.anchorCell || !this.editor.contains(this.anchorCell)) {
+            this.cancelCellDrag();
+            return;
+        }
         const cell = this._getCellFromPoint(e.clientX, e.clientY);
-        if (!cell) return;
+        const table = this.anchorCell.closest('table');
+        if (!table) {
+            this.cancelCellDrag();
+            return;
+        }
+        if (!cell || cell.closest('table') !== table) {
+            const rect = table.getBoundingClientRect();
+            const direction = e.clientY < rect.top ? 'up' : e.clientY > rect.bottom ? 'down' : null;
+            if (direction && this.extendSelectionOutsideTable?.(e, {
+                anchorCell: this.anchorCell,
+                direction,
+                wholeCell: this.hasCellSelection(),
+                startX: this.cellDragStart?.x,
+                startY: this.cellDragStart?.y
+            })) {
+                this.cancelCellDrag();
+            }
+            return;
+        }
 
         if (cell !== this.focusCell) {
             this.isDragging = true;
@@ -1768,10 +1805,7 @@ export class TableManager {
         }
 
         const wasDragging = this.isDragging;
-        if (this.isMouseDown) {
-            this.isMouseDown = false;
-            this.isDragging = false;
-        }
+        this.cancelCellDrag();
         if (this.hasCellSelection()) {
             const selectedCells = this.selectedCells && this.selectedCells.length
                 ? this.selectedCells

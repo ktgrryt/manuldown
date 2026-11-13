@@ -2297,9 +2297,8 @@ body.image-resizing * {
 
 /* "$$…$$" inside a paragraph is a display formula on its own line. */
 #editor span.mdw-math[data-mdw-math="display"] {
-    display: inline-block;
+    display: block;
     width: 100%;
-    vertical-align: middle;
 }
 
 #editor pre .math-preview {

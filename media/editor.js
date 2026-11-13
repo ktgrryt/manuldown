@@ -6,7 +6,6 @@ import { ListManager } from './modules/ListManager.js';
 import { MarkdownConverter } from './modules/MarkdownConverter.js';
 import { CodeBlockManager } from './modules/CodeBlockManager.js';
 import { MermaidViewer } from './modules/MermaidViewer.js';
-import { TableOfContentsManager } from './modules/TableOfContentsManager.js';
 import { ToolbarManager } from './modules/ToolbarManager.js';
 import { TableManager } from './modules/TableManager.js';
 import { SearchManager } from './modules/SearchManager.js';
@@ -14,10 +13,8 @@ import { FootnoteManager } from './modules/FootnoteManager.js';
 import { createMarkdownClipboardHtml } from './modules/MarkdownClipboard.js';
 import { createImageClipboardSnapshot, writeImageClipboard } from './modules/ImageClipboard.js';
 import { InsertCommandMenu, isInsertMenuShortcut } from './modules/InsertCommandMenu.js';
-import { MathManager } from './modules/MathManager.js';
 import { CompositionUpdateGate } from './modules/CompositionUpdateGate.js';
 import { TypingUndoGroup } from './modules/TypingUndoGroup.js';
-import { DragSelectionScroll } from './modules/DragSelectionScroll.js';
 import {
     fitTocBodyMinWidth,
     fitTocPanelWidth,
@@ -47,7 +44,7 @@ import {
 } from './modules/CaretScroll.js';
 
 // The entry module carries the Webview asset cache key. Propagate it to the
-// cursor and heading modules so reopening a development Webview cannot pair
+// selection, cursor, heading, math and TOC modules so a development Webview cannot pair
 // new entry points with stale module implementations.
 const {
     CursorManager,
@@ -58,6 +55,9 @@ const {
     getMarkdownHeadingLinkSuggestions,
     createMarkdownTableOfContents
 } = await import(`./modules/MarkdownHeadingSlug.js${new URL(import.meta.url).search}`);
+const { MathManager } = await import(`./modules/MathManager.js${new URL(import.meta.url).search}`);
+const { DragSelectionScroll } = await import(`./modules/DragSelectionScroll.js${new URL(import.meta.url).search}`);
+const { TableOfContentsManager } = await import(`./modules/TableOfContentsManager.js${new URL(import.meta.url).search}`);
 
 (function () {
     // @ts-ignore
@@ -1731,7 +1731,8 @@ const {
             moveCursorToCodeBlockLastContentLineEnd(pre, selection),
         selectCodeBlockLanguageLabel: (pre) => selectCodeBlockLanguageLabel(pre),
         placeCaretAtLeadingImageLine: (block, selection) =>
-            cursorManager.placeCursorAtLeadingImageLine(block, selection)
+            cursorManager.placeCursorAtLeadingImageLine(block, selection),
+        extendSelectionOutsideTable: extendTableSelectionToText
     });
     const searchManager = new SearchManager(editor, {
         onDidClose: preserveViewportAfterSearchClose,
@@ -3587,6 +3588,9 @@ const {
 
     function ensureCaretVisible(force = false) {
         if (isUpdating) return;
+        // Native selections can briefly collapse beside readonly display math.
+        // A held-button selection owns the viewport until that gesture ends.
+        if (!force && dragSelectionScroll?.isSelectingWithPointer) return;
         // Mouse click placement should not trigger additional auto-scroll corrections.
         // Browsers already scroll naturally for pointer caret placement.
         // Once a navigation key is pressed, however, its selection changes must reveal
@@ -13016,7 +13020,17 @@ const {
     }
 
     function getManualDragFocusRangeFromPoint(x, y) {
+        // Mousemove can report points over the toolbar or outside the editor.
+        // Use the same visible edge as the scroll animation; otherwise those
+        // moves select the document boundary between animation frames.
+        const viewport = dragSelectionScroll?.getViewport();
+        if (viewport) {
+            x = Math.max(viewport.left + 2, Math.min(viewport.right - 2, x));
+            y = Math.max(viewport.top + 2, Math.min(viewport.bottom - 2, y));
+        }
         const pointRange = getCaretRangeFromPoint(x, y);
+        const mathRange = mathManager.getDragSelectionRangeFromPoint(x, y, pointRange);
+        if (mathRange) return mathRange;
         if (pointRange && editor.contains(pointRange.startContainer)) {
             return pointRange;
         }
@@ -13044,7 +13058,8 @@ const {
             }
         }
 
-        return getNearestBlockBoundaryRangeByY(y);
+        const nearestRange = getNearestBlockBoundaryRangeByY(y);
+        return mathManager.getDragSelectionRangeFromPoint(x, y, nearestRange) || nearestRange;
     }
 
     function stopManualPointerSelection() {
@@ -13053,6 +13068,53 @@ const {
         pendingInlineCodeSideClick = null;
         pendingMouseDriftCorrection = null;
         dragSelectionScroll?.stop();
+        tableManager.cancelCellDrag?.();
+    }
+
+    function extendTableSelectionToText(event, { anchorCell, direction, wholeCell, startX, startY }) {
+        if (isUpdating || isComposing || !editor.contains(anchorCell)) return false;
+        const selection = window.getSelection();
+        if (!selection) return false;
+        const focusRange = getManualDragFocusRangeFromPoint(event.clientX, event.clientY);
+        if (!isEditorRange(focusRange) || anchorCell.closest('table')?.contains(focusRange.startContainer)) return false;
+        const focusElement = focusRange.startContainer.nodeType === Node.ELEMENT_NODE
+            ? focusRange.startContainer : focusRange.startContainer.parentElement;
+        if (focusElement?.closest('input, textarea, select, button, [data-exclude-from-markdown="true"]')) return false;
+
+        const anchorRange = document.createRange();
+        if (!wholeCell && selection.rangeCount && anchorCell.contains(selection.anchorNode)) {
+            // An ordinary text drag keeps the exact position originally clicked.
+            anchorRange.setStart(selection.anchorNode, selection.anchorOffset);
+            anchorRange.collapse(true);
+        } else {
+            // A highlighted cell is selected as a whole in either direction.
+            anchorRange.selectNodeContents(anchorCell);
+            anchorRange.collapse(direction === 'down');
+        }
+        const range = createDirectionalSelectionRange(anchorRange, focusRange);
+        if (!range) return false;
+
+        tableManager.clearCellSelection();
+        tableManager.clearStructureSelection();
+        const dragStart = {
+            button: 0, shiftKey: false, target: anchorCell,
+            clientX: Number.isFinite(startX) ? startX : event.clientX,
+            clientY: Number.isFinite(startY) ? startY : event.clientY
+        };
+        beginManualPointerSelection(dragStart, anchorRange);
+        manualPointerSelection.moved = true;
+        if (typeof selection.setBaseAndExtent === 'function') {
+            selection.setBaseAndExtent(anchorRange.startContainer, anchorRange.startOffset,
+                focusRange.startContainer, focusRange.startOffset);
+        } else {
+            selection.removeAllRanges();
+            selection.addRange(range);
+        }
+        // Cell-selection mode stops the scroll helper. Rearm it for this same
+        // held-button drag so selection can continue beyond the viewport too.
+        dragSelectionScroll?.start(dragStart);
+        dragSelectionScroll?.move({ clientX: event.clientX, clientY: event.clientY, buttons: 1 });
+        return true;
     }
 
     function beginManualPointerSelection(e, anchorRange) {
@@ -13098,6 +13160,14 @@ const {
             return;
         }
 
+        const selection = window.getSelection();
+        if (!selection) return;
+        if (typeof selection.setBaseAndExtent === 'function') {
+            const anchorRange = manualPointerSelection.anchorRange;
+            selection.setBaseAndExtent(anchorRange.startContainer, anchorRange.startOffset,
+                focusRange.startContainer, focusRange.startOffset);
+            return;
+        }
         const selectionRange = createDirectionalSelectionRange(
             manualPointerSelection.anchorRange,
             focusRange
@@ -13106,10 +13176,6 @@ const {
             return;
         }
 
-        const selection = window.getSelection();
-        if (!selection) {
-            return;
-        }
         selection.removeAllRanges();
         selection.addRange(selectionRange);
     }
@@ -22801,6 +22867,10 @@ const {
                 if ((e.buttons & 1) !== 1) {
                     manualPointerSelection = null;
                 } else {
+                    // A drag promoted from a table began with a native
+                    // mousedown. Keep its default mousemove from replacing
+                    // the manual cross-table selection after this handler.
+                    e.preventDefault();
                     updateManualPointerSelection(e.clientX, e.clientY);
                 }
             }
@@ -24663,7 +24733,8 @@ const {
         // 水平線の選択状態を視覚的に反映 & チェックボックス付近のカーソル補正
         let isCorrectingCheckboxCursor = false;
         document.addEventListener('selectionchange', () => {
-            if (!isUpdating && !isComposing && !compositionUpdateGate.composing) {
+            if (!isUpdating && !isComposing && !compositionUpdateGate.composing &&
+                !dragSelectionScroll?.isSelectingWithPointer) {
                 footnoteManager.normalizeCaret();
                 mathManager.normalizeCaret();
                 normalizeCaretInHiddenSourceCodeBlock();
@@ -24695,7 +24766,8 @@ const {
 
             // チェックボックス付近のカーソル補正
             // チェックボックスが先頭にある場合のみ適用
-            if (isUpdating || isComposing || compositionUpdateGate.composing || isCorrectingCheckboxCursor) return;
+            if (isUpdating || isComposing || compositionUpdateGate.composing || isCorrectingCheckboxCursor ||
+                dragSelectionScroll?.isSelectingWithPointer) return;
             if (!sel || !sel.rangeCount || !sel.isCollapsed) return;
             const range = sel.getRangeAt(0);
             const container = range.startContainer;
