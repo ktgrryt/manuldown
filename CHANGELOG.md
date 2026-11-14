@@ -10,6 +10,11 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 - Keep the caret at the deletion point when removing a selection that includes a list and adjacent paragraphs.
 - Finish pending caret placement before Undo/Redo so delayed deletion callbacks cannot select removed content.
 
+## [2.2.6] - 2026-11-14
+
+### Changed
+- Keep Preview switches in muted colors while retaining the filled on state and outlined off state.
+
 ## [2.2.4] - 2026-11-11
 
 ### Added
