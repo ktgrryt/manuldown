@@ -167,6 +167,15 @@ function clipboardPasteFixture({ editor, document, window, range, copy }, option
         mathManager: {
             prepareClipboardImport: html => ({ html }), restoreClipboardImport() {},
         },
+        inlineTocManager: {
+            refresh() {},
+            createBlock() {
+                const block = document.createElement('div');
+                block.setAttribute('data-mdw-toc', 'true');
+                block.setAttribute('contenteditable', 'false');
+                return block;
+            },
+        },
         tableManager: {
             handleEdgePaste: () => false, handlePaste: () => false, wrapTables() {},
             _insertNodeAsBlock(_range, fragment) {
@@ -874,6 +883,31 @@ test('copying a file-backed image with an embedded display source reuses its Mar
         clipboard.paste();
         assert.equal(f.editor.querySelector('img').getAttribute('data-md-path'), 'images/doc/existing.png');
         assert.deepEqual(clipboard.messages, [], 'existing files must not be duplicated');
+    });
+});
+
+test('a trusted local copy preserves a live TOC as one noneditable object', async () => {
+    await withFixture('<div data-mdw-toc="true" contenteditable="false"><ul><li><a href="#one">One</a></li></ul></div>', f => {
+        const clipboard = clipboardPasteFixture(f);
+        assert.equal(clipboard.copy().defaultPrevented, true);
+        f.editor.innerHTML = '<p><br></p>';
+        assert.equal(clipboard.paste().defaultPrevented, true);
+        const block = f.editor.querySelector('[data-mdw-toc="true"]');
+        assert.ok(block);
+        assert.equal(block.getAttribute('contenteditable'), 'false');
+        assert.equal(f.editor.querySelectorAll('[data-mdw-toc]').length, 1);
+    });
+});
+
+test('untrusted clipboard HTML cannot create a live TOC or hide its text as readonly metadata', async () => {
+    await withFixture('<p><br></p>', f => {
+        const clipboard = clipboardPasteFixture(f);
+        clipboard.data.set('text/html', '<div data-mdw-toc="true" contenteditable="false"><ul><li><a href="#one">One</a></li></ul></div>');
+        clipboard.data.set('text/plain', 'One');
+        clipboard.paste();
+        assert.ok(!f.editor.querySelector('[data-mdw-toc]'));
+        assert.ok(!f.editor.querySelector('[contenteditable="false"]'));
+        assert.equal(f.editor.textContent, 'One');
     });
 });
 

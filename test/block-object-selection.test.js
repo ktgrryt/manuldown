@@ -389,3 +389,17 @@ test('view mutations refresh atomic selection state even without a selectionchan
     callback([{ type: 'childList', target: f.node('pre') }]);
     assert.equal(f.selected(f.node('pre')), true, 'preview replacement retains a complete object range');
 });
+
+test('a live TOC selects as one block, including when it has no headings', async t => {
+    const f = await fixture(t, '<div data-mdw-toc="true" contenteditable="false"><ul><li><a href="#one">One</a></li></ul></div>');
+    const block = f.node('[data-mdw-toc]');
+    f.selectContents(f.node('a'));
+    f.update();
+    assert.equal(f.selected(block), false);
+    f.selectNode(block);
+    f.update();
+    assert.equal(f.selected(block), true);
+    block.innerHTML = '';
+    f.update();
+    assert.equal(f.selected(block), true);
+});

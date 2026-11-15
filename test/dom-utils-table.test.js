@@ -59,6 +59,16 @@ async function cleanEditorHTML(editorHTML, options = {}, prepare = () => {}) {
     }
 }
 
+test('live TOC content is retained for saving but excluded from history comparisons', async () => {
+    const first = '<div class="mdw-toc-block" data-mdw-toc="true" contenteditable="false"><ul><li><a href="#first">First</a></li></ul></div>';
+    const updated = first.replaceAll('first', 'updated').replace('First', 'Updated');
+    assert.notEqual(await cleanEditorHTML(first), await cleanEditorHTML(updated));
+    assert.equal(await cleanEditorHTML(first, { historyComparable: true }),
+        await cleanEditorHTML(updated, { historyComparable: true }));
+    assert.notEqual(await cleanEditorHTML(first, { historyComparable: true }),
+        await cleanEditorHTML('', { historyComparable: true }));
+});
+
 async function cleanTableCell(cellHTML) {
     const cleanedHTML = await cleanEditorHTML(
         `<table><tbody><tr><td>${cellHTML}</td></tr></tbody></table>`

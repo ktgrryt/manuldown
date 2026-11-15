@@ -159,7 +159,7 @@ async function inlineCodeFixture(t, html) {
         event.initEvent('focusin', true, false);
         element.dispatchEvent(event);
     };
-    Object.defineProperty(editor, 'focus', { value: () => focus(editor) });
+    Object.defineProperty(editor, 'focus', { value: () => focus(editor), configurable: true });
     return { manager, editor, select, focus, savedStates };
 }
 
@@ -337,6 +337,50 @@ test('native ranges inside a footnote number disable tools while note text forma
     f.manager.updateCommandAvailability();
     assert.equal(button.disabled, false);
     assert.equal(f.manager.canToggleInlineCode(), true);
+});
+
+test('whole TOC selections reject every editing command before moving focus or creating history', async (t) => {
+    const f = await inlineCodeFixture(t, '<p>Before</p><div data-mdw-toc="true" contenteditable="false"><ul><li><a href="#heading">Heading</a></li></ul></div><p>After</p>');
+    const document = f.editor.ownerDocument;
+    let focusCalls = 0;
+    Object.defineProperty(f.editor, 'focus', { value: () => { focusCalls++; }, configurable: true });
+    for (const command of [...editingCommands, 'settings']) {
+        f.manager.commandButtons.set(command, document.createElement('button'));
+    }
+    let openedSettings = 0;
+    f.manager.onOpenSettings = () => { openedSettings++; };
+    const original = f.editor.innerHTML;
+    f.select(f.editor, 1, 2);
+    f.manager.updateToolbarState();
+    for (const command of editingCommands) {
+        assert.equal(f.manager.commandButtons.get(command).disabled, true, command);
+        f.manager.executeCommand(command);
+    }
+    f.manager.executeCommand('settings');
+    assert.equal(openedSettings, 1);
+    assert.equal(f.manager.commandButtons.get('settings').disabled, false);
+    assert.equal(focusCalls, 0);
+    assert.equal(f.savedStates.length, 0);
+    assert.equal(f.editor.innerHTML, original);
+    f.select(f.editor.lastChild.firstChild, 0);
+    f.manager.updateToolbarState();
+    for (const command of editingCommands) assert.equal(f.manager.commandButtons.get(command).disabled, false, command);
+});
+
+test('ranges inside generated TOC text and focused empty TOCs keep formatting disabled', async (t) => {
+    const f = await inlineCodeFixture(t, '<div data-mdw-toc="true" contenteditable="false"><ul><li><a href="#heading">Heading</a></li></ul></div><div data-mdw-toc="true" contenteditable="false"></div><p>Editable</p>');
+    const button = f.editor.ownerDocument.createElement('button');
+    f.manager.commandButtons.set('bold', button);
+    f.select(f.editor.querySelector('a').firstChild, 0, 4);
+    f.manager.updateToolbarState();
+    assert.equal(button.disabled, true);
+    assert.equal(button.getAttribute('aria-pressed'), 'false');
+    f.focus(f.editor.querySelectorAll('[data-mdw-toc]')[1]);
+    f.manager.updateToolbarState();
+    assert.equal(button.disabled, true);
+    f.select(f.editor.querySelector('p').firstChild, 0, 4);
+    f.manager.updateToolbarState();
+    assert.equal(button.disabled, false);
 });
 
 test('inline code is active at a caret inside code but not outside it', async (t) => {

@@ -81,6 +81,132 @@ function visibleText(html) {
     return html.replace(/<[^>]*>/g, '');
 }
 
+test('live table of contents saves readable Markdown and reopens as one object', () => {
+    const provider = new MarkdownEditorProvider({});
+    const input = '<div class="mdw-toc-block" data-mdw-toc="true" contenteditable="false"><ul><li>stale</li></ul></div>' +
+        '<h1>Plan</h1><h3>日本語 [draft]</h3><h2>Plan</h2>';
+    const saved = provider.htmlToMarkdown(input, createTextDocument(''));
+    assert.match(saved, /<!-- manuldown:toc -->\n- \[Plan\]\(#plan\)\n  - \[日本語 \\\[draft\\\]\]\(#日本語-draft\)\n  - \[Plan\]\(#plan-1\)\n\n<!-- \/manuldown:toc -->/);
+    assert.doesNotMatch(saved, /stale|data-mdw-toc/);
+    const reopened = convert(saved);
+    assert.match(reopened.html, /class="mdw-toc-block" data-mdw-toc="true" contenteditable="false"/);
+    assert.equal(reopened.markdown, saved);
+});
+
+test('live table of contents regenerates after heading changes while retaining surrounding Markdown', () => {
+    const source = '_keep_\n\n<!-- manuldown:toc -->\n- [Old](#old)\n<!-- /manuldown:toc -->\n\n## Old\n\n```js\nconst value = 1;\n```\n';
+    const provider = new MarkdownEditorProvider({});
+    const html = new MarkdownDocument(createTextDocument(source)).toHtml().replace('>Old</h2>', '>New</h2>');
+    const saved = provider.htmlToMarkdown(html, createTextDocument(source));
+    assert.match(saved, /^_keep_\n\n<!-- manuldown:toc -->\n- \[New\]\(#new\)/);
+    assert.match(saved, /## New\n\n```js\nconst value = 1;\n```\n$/);
+    assert.doesNotMatch(saved, /\[Old\]/);
+    assert.equal(convert(saved).markdown, saved);
+});
+
+test('live table of contents survives having no headings and supports multiple instances', () => {
+    const source = '<!-- manuldown:toc -->\n<!-- /manuldown:toc -->\n\nText\n\n<!-- manuldown:toc -->\n<!-- /manuldown:toc -->\n';
+    const converted = convert(source);
+    assert.equal((converted.html.match(/data-mdw-toc="true"/g) || []).length, 2);
+    assert.match(converted.html, /No headings yet/);
+    assert.equal((converted.markdown.match(/<!-- manuldown:toc -->/g) || []).length, 2);
+    assert.doesNotMatch(converted.markdown, /No headings yet/);
+    assert.equal(convert(converted.markdown).markdown, converted.markdown);
+});
+
+test('TOC marker examples in fenced and indented code and raw HTML stay literal', () => {
+    const markers = '<!-- manuldown:toc -->\n- [Example](#example)\n<!-- /manuldown:toc -->';
+    for (const source of [
+        `\`\`\`md\n${markers}\n\`\`\`\n`,
+        markers.split('\n').map(line => `    ${line}`).join('\n') + '\n',
+        `<div>\n\n${markers}\n\n</div>\n`,
+        `<script>literal\n${markers}\n</script>\n`,
+    ]) {
+        const result = convert(source);
+        assert.doesNotMatch(result.html, /data-mdw-toc="true"/);
+        assert.ok(result.markdown.includes(source.trim()));
+    }
+});
+
+test('existing ordinary Markdown lists do not become automatic TOCs', () => {
+    const result = convert('- [Plan](#plan)\n\n# Plan\n');
+    assert.doesNotMatch(result.html, /data-mdw-toc/);
+    assert.equal(result.markdown, '- [Plan](#plan)\n\n# Plan\n');
+});
+
+test('Copy as Markdown exports a TOC-only fragment as its visible links', () => {
+    const provider = new MarkdownEditorProvider({});
+    const html = '<div data-mdw-toc="true" contenteditable="false"><ul><li><a href="#日本語">日本語</a>' +
+        '<ul><li><a href="#child">Child</a></li></ul></li></ul></div>';
+    const clipboard = provider.htmlToClipboardMarkdown(html, createTextDocument('# 日本語\n\n## Child\n'));
+    assert.equal(clipboard, '* [日本語](#日本語)\n  * [Child](#child)');
+    assert.doesNotMatch(clipboard, /manuldown:toc|No headings yet/);
+});
+
+test('live TOCs reflect heading insertion, reordering and deletion on save', () => {
+    const provider = new MarkdownEditorProvider({});
+    const source = '<!-- manuldown:toc -->\n- [Old](#old)\n\n<!-- /manuldown:toc -->\n\n# Old\n';
+    const domino = require('@mixmark-io/domino');
+    const root = domino.createWindow(new MarkdownDocument(createTextDocument(source)).toHtml()).document;
+    root.querySelector('h1').outerHTML = '<h2>Second</h2><h1>First</h1><h3>Second</h3>';
+    const saved = provider.htmlToMarkdown(root.body.innerHTML, createTextDocument(source));
+    assert.match(saved, /- \[Second\]\(#second\)\n- \[First\]\(#first\)\n  - \[Second\]\(#second-1\)/);
+    root.querySelectorAll('h1,h2,h3').forEach(node => node.remove());
+    const empty = provider.htmlToMarkdown(root.body.innerHTML, createTextDocument(saved));
+    assert.match(empty, /<!-- manuldown:toc -->\n<!-- \/manuldown:toc -->/);
+    assert.doesNotMatch(empty, /\[Second\]|\[First\]/);
+});
+
+test('live TOCs reopen in CRLF documents without consuming neighboring text', () => {
+    const source = 'Before\r\n\r\n<!-- manuldown:toc -->\r\n- [Title](#title)\r\n\r\n' +
+        '<!-- /manuldown:toc -->\r\n\r\n# Title\r\n\r\nAfter\r\n';
+    const result = convert(source);
+    assert.match(result.html, /data-mdw-toc="true"/);
+    assert.match(result.markdown, /^Before\n\n<!-- manuldown:toc -->/);
+    assert.match(result.markdown, /# Title\n\nAfter\n$/);
+    assert.equal(convert(result.markdown).markdown, result.markdown);
+});
+
+test('generated TOC labels keep literal HTML and entity-like heading text literal', () => {
+    const provider = new MarkdownEditorProvider({});
+    const input = '<div data-mdw-toc="true"></div><h1>&lt;img src=x&gt; &amp;copy; &amp;</h1>';
+    const saved = provider.htmlToMarkdown(input, createTextDocument(''));
+    assert.match(saved, /\[&lt;img src=x&gt; &amp;copy; &amp;\]/);
+    const domino = require('@mixmark-io/domino');
+    const root = domino.createWindow(new MarkdownDocument(createTextDocument(saved)).toHtml()).document;
+    assert.equal(root.querySelector('[data-mdw-toc] a').textContent, '<img src=x> &copy; &');
+    assert.equal(root.querySelector('h1').textContent, '<img src=x> &copy; &');
+    assert.equal(root.querySelectorAll('img').length, 0);
+});
+
+test('an unpaired TOC opening cannot consume a closing-marker code example', () => {
+    const source = '<!-- manuldown:toc -->\n\n```md\n<!-- /manuldown:toc -->\n```\n\n# Title\n';
+    const result = convert(source);
+    assert.doesNotMatch(result.html, /data-mdw-toc="true"/);
+    assert.match(result.markdown, /```md\n<!-- \/manuldown:toc -->\n```/);
+});
+
+test('live TOCs inside blockquotes retain quote prefixes and reopen as objects', () => {
+    const source = '> Before\n>\n> <!-- manuldown:toc -->\n> - [Old](#old)\n>\n> <!-- /manuldown:toc -->\n>\n> After\n\n# Title\n';
+    const converted = convert(source);
+    assert.match(converted.html, /<blockquote>[\s\S]*data-mdw-toc="true"/);
+    assert.match(converted.markdown, /> <!-- manuldown:toc -->\n> - \[Title\]\(#title\)\n>\s*\n> <!-- \/manuldown:toc -->/);
+    assert.match(converted.markdown, /> Before\n/);
+    assert.match(converted.markdown, /> After\n/);
+    assert.equal(convert(converted.markdown).markdown, converted.markdown);
+});
+
+test('live TOCs inside footnotes retain definition indentation and reopen as objects', () => {
+    for (const prefix of ['[^note]: ', '[^note]: Before\n\n    ']) {
+        const source = 'Body[^note]\n\n# Title\n\n' + prefix + '<!-- manuldown:toc -->\n' +
+            '    - [Old](#old)\n\n    <!-- /manuldown:toc -->\n';
+        const converted = convert(source);
+        assert.match(converted.html, /data-mdw-footnote-definition="note"[\s\S]*data-mdw-toc="true"/);
+        assert.match(converted.markdown, /\n    - \[Title\]\(#title\)\n\s*\n    <!-- \/manuldown:toc -->/);
+        assert.equal(convert(converted.markdown).markdown, converted.markdown);
+    }
+});
+
 test('empty external tables cannot block saving the rest of the document', () => {
     const provider = new MarkdownEditorProvider({});
     for (const table of ['<table></table>', '<table><colgroup><col></colgroup></table>']) {

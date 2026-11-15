@@ -14,6 +14,7 @@ import {
 import { MAX_EDITABLE_FOOTNOTE_DEPTH, decodeFootnoteLabel, parseFootnoteDefinition, serializeFootnoteDefinition } from './Footnotes';
 import { MarkdownSourceBlock, preserveMarkdownSource } from './MarkdownSource';
 import { EmphasisBoundarySerializer } from './Emphasis';
+import { protectMarkdownTocs } from './MarkdownToc';
 import TurndownService from 'turndown';
 const { createWindow } = require('@mixmark-io/domino');
 const { gfm } = require('turndown-plugin-gfm');
@@ -3111,7 +3112,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         };
     }
 
-    private protectEditableFootnotes(html: string, document: vscode.TextDocument, depth: number, trustedBodySource?: string): {
+    private protectEditableFootnotes(html: string, document: vscode.TextDocument, depth: number, trustedBodySource?: string,
+        trustedPlaceholders: readonly string[] = []): {
         html: string;
         restore: (markdown: string) => string;
     } {
@@ -3154,7 +3156,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             const definition = original ? parseFootnoteDefinition(original) : null;
             const conversionContext = {
                 depth: depth + 1,
-                trustedBodySource: definition?.label === label ? definition.content : undefined
+                trustedBodySource: definition?.label === label ? definition.content : undefined,
+                trustedPlaceholders
             };
             const markdown = converter.htmlToMarkdown(content.innerHTML, document, conversionContext);
             let source = serializeFootnoteDefinition(label, markdown);
@@ -3224,10 +3227,23 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             node.removeAttribute('data-mdw-opaque-source');
         });
         root.querySelectorAll('[data-mdw-footnote-source]').forEach((node: any) => node.removeAttribute('data-mdw-footnote-source'));
+        // A clipboard fragment may contain just the TOC, without its headings.
+        // Export the visible links as ordinary Markdown rather than regenerating
+        // an empty object from an incomplete document.
+        root.querySelectorAll('div[data-mdw-toc="true"]').forEach((node: any) => {
+            const list = Array.from<any>(node.children).find(child => child.tagName === 'UL');
+            if (list) {
+                node.replaceWith(list);
+            } else {
+                node.remove();
+            }
+        });
         return this.htmlToMarkdown(root.innerHTML, document, { depth: 0, preserveSource: false }).replace(/\r?\n$/, '');
     }
 
-    private htmlToMarkdown(html: string, document: vscode.TextDocument, footnoteContext: { depth: number; trustedBodySource?: string; preserveSource?: boolean } = { depth: 0 }): string {
+    private htmlToMarkdown(html: string, document: vscode.TextDocument, footnoteContext: {
+        depth: number; trustedBodySource?: string; preserveSource?: boolean; trustedPlaceholders?: readonly string[];
+    } = { depth: 0 }): string {
         html = this.normalizeTableGrid(html);
         // Use Turndown for reliable HTML to Markdown conversion
         const placeholderNamespace = this.createPlaceholderNamespace(html, 'CONVERSION');
@@ -3237,6 +3253,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         const emptyCodeMarkerPrefix = `${placeholderNamespace}EMPTYCODE`;
         const emptyCodeMarkerSuffix = 'END';
         const mathBlockFenceInfo = `${placeholderNamespace}DOLLARMATH`;
+        const protectedTocs = protectMarkdownTocs(html, placeholderNamespace);
+        html = protectedTocs.html;
         const previousEmptyListItemMarker = this.currentEmptyListItemMarker;
         const previousMathBlockFenceInfo = this.currentMathBlockFenceInfo;
         const previousConversionDocumentText = this.currentConversionDocumentText;
@@ -3289,7 +3307,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     cache.blocks ??= originalDocument.getSourceBlocks());
             }
             html = preservedSource.html;
-            const protectedFootnotes = this.protectEditableFootnotes(html, document, footnoteContext.depth, footnoteContext.trustedBodySource);
+            const protectedFootnotes = this.protectEditableFootnotes(html, document, footnoteContext.depth,
+                footnoteContext.trustedBodySource, [...(footnoteContext.trustedPlaceholders || []), ...protectedTocs.markers]);
             html = protectedFootnotes.html;
             const protectedInlineSyntax = this.protectInlineSyntaxBoundaries(html);
             html = protectedInlineSyntax.html;
@@ -3676,11 +3695,15 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     mathBlockFenceInfo
                 ))
             ));
-            const restoredMarkdown = emphasisSerializer.restore(protectedInlineSyntax.restore(restoredContent.replace(
+            const restoredMarkdown = protectedTocs.restore(emphasisSerializer.restore(protectedInlineSyntax.restore(restoredContent.replace(
                 new RegExp(`${this.escapeRegExp(zeroWidthNamespace)}(200b|2060|feff)END`, 'g'),
                 (_match, characterCode) => String.fromCharCode(parseInt(characterCode, 16))
-            )));
-            this.assertNoLeakedPlaceholderMarkers(restoredMarkdown, documentText);
+            ))));
+            // Nested note conversion can carry a parent conversion's generated
+            // TOC placeholder. Only those exact host-created markers may pass
+            // through; the outer conversion restores and validates them later.
+            this.assertNoLeakedPlaceholderMarkers(restoredMarkdown,
+                documentText + '\n' + (footnoteContext.trustedPlaceholders || []).join('\n'));
             return restoredMarkdown;
         } catch (error) {
             console.error('Error converting HTML to Markdown:', error);

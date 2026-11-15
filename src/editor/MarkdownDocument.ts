@@ -3,6 +3,7 @@ import { marked, Tokens, Links } from 'marked';
 import { getNonce } from '../utils/getNonce';
 import { MAX_EDITABLE_FOOTNOTE_DEPTH, numberFootnotes, parseFootnoteDefinition } from './Footnotes';
 import { MarkdownSourceBlock } from './MarkdownSource';
+import { emptyMarkdownTocHtml, markdownTocRanges, matchMarkdownTocBlock, renderMarkdownTocs } from './MarkdownToc';
 
 function escapeOpaqueSourceForHtml(value: string): string {
     return value
@@ -84,6 +85,15 @@ marked.use({
     gfm: true,
     pedantic: false,
     extensions: [
+        {
+            name: 'markdownToc',
+            level: 'block',
+            tokenizer(source: string) {
+                const raw = matchMarkdownTocBlock(source);
+                return raw ? { type: 'markdownToc', raw } : undefined;
+            },
+            renderer() { return emptyMarkdownTocHtml(); }
+        },
         {
             name: 'listSourceIndent',
             // Only the per-document lexer below creates these tokens. Keeping
@@ -479,7 +489,7 @@ export class MarkdownDocument {
                 html = this.convertImagePaths(html);
             }
 
-            return numberFootnotes(this.protectOriginalZeroWidthCharacters(html));
+            return renderMarkdownTocs(numberFootnotes(this.protectOriginalZeroWidthCharacters(html)));
         } catch (error) {
             console.error('Error parsing markdown:', error);
             throw error;
@@ -1058,6 +1068,17 @@ export class MarkdownDocument {
         }
         protectedMarkdown = rawHtmlOutput.join('');
 
+        // Comment-delimited live TOCs remain one source block. The lexer-based
+        // ranges exclude literal examples in fenced code and raw HTML.
+        for (const range of markdownTocRanges(protectedMarkdown).reverse()) {
+            const source = protectedMarkdown.slice(range.start, range.end);
+            const marker = addProtectedBlock(source, 'toc');
+            const before = protectedMarkdown.slice(0, range.start);
+            const after = protectedMarkdown.slice(range.end);
+            const separator = after.startsWith('\n') || after.startsWith('\r\n') ? '\n' : '\n\n';
+            protectedMarkdown = before + (endsWithBlankLine(before) ? '' : '\n') + marker + separator + after;
+        }
+
         // Extract definitions before Marked parses reference-style links. Their
         // bodies are rendered separately as editable Markdown at the same position.
         const footnoteDefinitionPattern = /^ {0,3}\[\^[^\[\]\s\\]+\]:/;
@@ -1184,7 +1205,7 @@ export class MarkdownDocument {
                 let restoredHtml = html;
                 for (const block of protectedBlocks) {
                     const escapedMarker = block.marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                    const opaqueHtml = block.kind === 'footnote-definition'
+                    const opaqueHtml = block.kind === 'toc' ? emptyMarkdownTocHtml() : block.kind === 'footnote-definition'
                         ? this.renderFootnoteDefinition(block.source)
                         : renderOpaqueSource(block.source, block.kind, true);
                     const standaloneMarkerPattern = new RegExp(`<p>\\s*${escapedMarker}\\s*<\\/p>\\s*`, 'i');

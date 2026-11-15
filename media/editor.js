@@ -49,9 +49,9 @@ const {
 } = await import(`./modules/CursorManager.js${new URL(import.meta.url).search}`);
 const {
     assignStableHeadingIds,
-    getMarkdownHeadingLinkSuggestions,
-    createMarkdownTableOfContents
+    getMarkdownHeadingLinkSuggestions
 } = await import(`./modules/MarkdownHeadingSlug.js${new URL(import.meta.url).search}`);
+const { InlineTocManager } = await import(`./modules/InlineTocManager.js${new URL(import.meta.url).search}`);
 const { MathManager } = await import(`./modules/MathManager.js${new URL(import.meta.url).search}`);
 const { DragSelectionScroll } = await import(`./modules/DragSelectionScroll.js${new URL(import.meta.url).search}`);
 const { TableOfContentsManager } = await import(`./modules/TableOfContentsManager.js${new URL(import.meta.url).search}`);
@@ -1227,6 +1227,7 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
         assignStableHeadingIds(editor.querySelectorAll('h1, h2, h3, h4, h5, h6'));
         footnoteManager.cancelPendingDelete();
         footnoteManager.refresh();
+        inlineTocManager.refresh();
         // The formula being edited, if any, was replaced with the document.
         mathManager.dismissEditor();
     }
@@ -1322,7 +1323,8 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
             element.tagName === 'OL' ||
             element.tagName === 'BLOCKQUOTE' ||
             element.tagName === 'PRE' ||
-            element.tagName === 'INPUT'
+            element.tagName === 'INPUT' ||
+            element.getAttribute('data-mdw-toc') === 'true'
         ) {
             return true;
         }
@@ -1380,7 +1382,8 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
             element.tagName === 'HR' ||
             element.tagName === 'TABLE' ||
             element.tagName === 'PRE' ||
-            element.tagName === 'INPUT'
+            element.tagName === 'INPUT' ||
+            element.getAttribute('data-mdw-toc') === 'true'
         ) {
             return true;
         }
@@ -1692,6 +1695,7 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
             codeBlockGapManager.moveToGap(pre, direction, selection),
         revealMathSource: (pre) => codeBlockManager.revealMathSource(pre),
         moveAcrossFootnoteReference: (selection, direction) =>
+            inlineTocManager.moveAcross(selection, direction) ||
             footnoteManager.moveAcrossBackref(selection, direction) ||
             footnoteManager.moveAcrossReference(selection, direction) ||
             mathManager.moveAcrossFormula(selection, direction)
@@ -1705,6 +1709,22 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
     const tocManager = new TableOfContentsManager(editor, tocContainer, tocContent, tocEmpty, {
         enabled: settingsState.tocEnabled,
         scrollDuration: TOC_SCROLL_DURATION_MS
+    });
+    const inlineTocManager = new InlineTocManager(editor, {
+        isMac,
+        getCaretRect: range => cursorManager._getCaretRect(range),
+        beforeChange: () => { typingUndoGroup.break(); stateManager.saveState(); },
+        onChange: () => { notifyChange(); stateManager.commitStateAfterChange(); },
+        onNavigate: (href) => {
+            const heading = Array.from(editor.querySelectorAll('h1, h2, h3, h4, h5, h6'))
+                .find(node => `#${node.id}` === href);
+            if (heading) {
+                focusEditorWithoutScroll();
+                const selection = window.getSelection();
+                if (selection) placeCollapsedCaret(selection, heading, 0);
+                tocManager.scrollToHeading(heading);
+            }
+        }
     });
     const tableManager = new TableManager(editor, domUtils, stateManager, {
         placeCaretBeforeInlineCode: (code, selection) =>
@@ -5212,36 +5232,22 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
         if (!selection || selection.rangeCount !== 1) return false;
         const range = selection.getRangeAt(0);
         if (!isEditorRange(range)) return false;
-        const headingSelector = 'h1, h2, h3, h4, h5, h6';
-        if (!Array.from(editor.querySelectorAll(headingSelector)).some(
-            (heading) => (heading.textContent || '').trim()
-        )) {
-            notifyChange();
-            return false;
-        }
-
         stateManager.saveState();
-        const toc = document.createElement('ul');
+        const toc = inlineTocManager.createBlock();
         tableManager._insertNodeAsBlock(range, toc);
         // Block insertion can split or remove the paragraph/heading containing
         // /toc. Build the links from the resulting document so every ID matches.
-        const contents = createMarkdownTableOfContents(
-            editor.querySelectorAll(headingSelector), document
-        );
-        if (contents) {
-            while (contents.firstChild) toc.appendChild(contents.firstChild);
-        }
+        inlineTocManager.refresh();
         let after = toc.nextSibling;
         if (!after || after.nodeType !== Node.ELEMENT_NODE || after.tagName !== 'P') {
             after = document.createElement('p');
             after.appendChild(document.createElement('br'));
             toc.parentNode.insertBefore(after, toc.nextSibling);
         }
-        if (!contents) toc.remove();
         placeCollapsedCaret(selection, after, 0);
         editor.focus();
         notifyChange();
-        return !!contents;
+        return true;
     }
 
     function insertEmptyQuote() {
@@ -6964,6 +6970,7 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
     }
 
     function createSyncSnapshot(options = {}) {
+        if (!isComposing && !compositionUpdateGate.composing) inlineTocManager.refresh();
         codeBlockGapManager.reconcile(window.getSelection(), isComposing || compositionUpdateGate.composing);
         importPastedDataImages();
         const preservePendingUpdate = options.preservePendingUpdate === true;
@@ -7091,6 +7098,7 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
     function prepareEditorForNotify(options = {}) {
         footnoteManager.reconcileReferenceDeletion();
         footnoteManager.refresh();
+        if (!isComposing && !compositionUpdateGate.composing) inlineTocManager.refresh();
         codeBlockGapManager.reconcile(window.getSelection(), isComposing || compositionUpdateGate.composing);
         importPastedDataImages();
         if (options.preservePendingPastedPathLinks !== true) {
@@ -8900,6 +8908,7 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
     function syncUiAfterHistoryRestore() {
         footnoteManager.cancelPendingDelete();
         footnoteManager.refresh();
+        inlineTocManager.refresh();
         tocManager.cancelScrollAnimation();
         // A snapshot can carry a table cell selection, and the selected cells
         // it refers to are gone. Without this the next Backspace or paste
@@ -17333,7 +17342,7 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
             return true;
         }
 
-        if (navDirection && footnoteManager.handleKeydown(e, isMac)) {
+        if (navDirection && (inlineTocManager.handleKeyDown(e) || footnoteManager.handleKeydown(e, isMac))) {
             recordCtrlNavHandled(navDirection, fromCommand);
             return true;
         }
@@ -18173,7 +18182,7 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
             return;
         }
 
-        if (footnoteManager.handleKeydown(e, isMac)) {
+        if (inlineTocManager.handleKeyDown(e) || footnoteManager.handleKeydown(e, isMac)) {
             if (ctrlNavDirection) {
                 recordCtrlNavHandled(ctrlNavDirection, false);
             }
@@ -19157,7 +19166,7 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
                 return;
             }
 
-            if (footnoteManager.handleBeforeInput(e)) {
+            if (inlineTocManager.handleBeforeInput(e) || footnoteManager.handleBeforeInput(e)) {
                 return;
             }
 
@@ -20508,7 +20517,7 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
         };
 
         // Footnote numbers and formulas have no editable text position.
-        const atomicInlineSelector = 'sup[data-mdw-footnote-ref], span[data-mdw-math]';
+        const atomicInlineSelector = 'sup[data-mdw-footnote-ref], span[data-mdw-math], [data-mdw-toc="true"]';
         const setCaretToEndOfInsertedNode = (selection, node) => {
             if (!selection || !node) return;
             if (node.nodeType === Node.ELEMENT_NODE && node.matches(atomicInlineSelector)) {
@@ -20572,8 +20581,23 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
 
             const preparedFootnotes = footnoteManager.prepareClipboardImport(rawHtml);
             const preparedMath = mathManager.prepareClipboardImport(preparedFootnotes.html);
+            // Only exact copies made by this editor retain live TOC objects.
+            // External HTML still passes through the normal metadata policy.
+            const tocTemplate = document.createElement('template');
+            tocTemplate.innerHTML = preparedMath.html;
+            const tocPlaceholders = [];
+            if (trustedInternalContent) {
+                tocTemplate.content.querySelectorAll('[data-mdw-toc="true"]').forEach(block => {
+                    const placeholder = document.createElement('span');
+                    let id = `mdw-toc-copy-${Date.now()}-${tocPlaceholders.length}`;
+                    while (tocTemplate.content.querySelector(`[id="${id}"]`)) id += '-x';
+                    placeholder.id = id;
+                    block.replaceWith(placeholder);
+                    tocPlaceholders.push(id);
+                });
+            }
             const nativeImageSlots = [];
-            const container = createSanitizedContainerFromHtml(preparedMath.html, {
+            const container = createSanitizedContainerFromHtml(tocTemplate.innerHTML, {
                 allowLocalImageResolution: false,
                 onRemovedLocalImage: nativeImageFiles.length ? (image) => {
                     const placeholder = document.createComment('clipboard-image');
@@ -20739,9 +20763,12 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
             }
             const importedFootnotes = footnoteManager.restoreClipboardImport(container, preparedFootnotes, trustedInternalContent);
             mathManager.restoreClipboardImport(container, preparedMath);
+            for (const id of tocPlaceholders) {
+                container.querySelector(`[id="${id}"]`)?.replaceWith(inlineTocManager.createBlock());
+            }
             container.querySelectorAll('img').forEach(markPastedDataImage);
             importedFootnotes.forEach(note => note.querySelectorAll('img').forEach(markPastedDataImage));
-            if (!container.textContent && !container.querySelector('img,br,table,hr,ul,ol,input,pre') &&
+            if (!container.textContent && !container.querySelector('img,br,table,hr,ul,ol,input,pre,[data-mdw-toc="true"]') &&
                 !nativeImageInsertions.length && !importedFootnotes.length) return false;
             const nodes = Array.from(container.childNodes || []);
             if (nodes.length === 0) {
@@ -22401,7 +22428,7 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
         // so that pasting them keeps their structure and formatting.
         const clipboardPayloadHasStructure = (selection, payload, plainText) => (
             selectionContainsListStructure(selection) ||
-            /data-mdw-(?:footnote-(?:ref|definition)|math)=/.test(payload.html || '') ||
+            /data-mdw-(?:footnote-(?:ref|definition)|math|toc)=/.test(payload.html || '') ||
             plainText.includes('\n') ||
             (
                 typeof payload.html === 'string' &&
@@ -24944,6 +24971,7 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
     function init() {
         footnoteManager.setup();
         mathManager.setup();
+        inlineTocManager.setup();
         blockObjectSelection.setup();
         toolbarManager.setup();
         tableManager.setup({ notifyChange });

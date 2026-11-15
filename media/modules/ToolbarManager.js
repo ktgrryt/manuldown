@@ -27,6 +27,7 @@ export class ToolbarManager {
         this.overflowButtons = new Map();
         this.overflowSelection = null;
         this.focusedFootnoteNumber = null;
+        this.focusedTocBlock = null;
         this.overflowLayoutFrame = null;
         this.activeStateCommands = new Map([
             ['bold', 'bold'],
@@ -123,6 +124,7 @@ export class ToolbarManager {
         this.editor.addEventListener('focus', updateToolbarState);
         this.editor.addEventListener('focusin', (event) => {
             this.focusedFootnoteNumber = this.getFootnoteNumber(event.target);
+            this.focusedTocBlock = this.getTocBlock(event.target);
             this.updateToolbarState();
         });
         this.editor.addEventListener('blur', updateToolbarState);
@@ -357,9 +359,9 @@ export class ToolbarManager {
             return;
         }
 
-        // Check before focusing the editor: a number deliberately has no
-        // editable range, and focus could create an unrelated insertion point.
-        if (this.isSelectionOnFootnoteNumber()) {
+        // Check before focusing the editor: read-only objects deliberately have
+        // no editable range, and focus could create an unrelated insertion point.
+        if (this.isSelectionOnReadOnlyObject()) {
             this.updateToolbarState();
             return;
         }
@@ -512,12 +514,12 @@ export class ToolbarManager {
     }
 
     updateCommandAvailability() {
-        const onFootnoteNumber = this.isSelectionOnFootnoteNumber();
+        const onReadOnlyObject = this.isSelectionOnReadOnlyObject();
         const inTableCellContext = this.isSelectionInTableCellContext();
         const inHeadingContext = this.isSelectionInHeadingContext();
         const inListContext = this.isSelectionInListContext();
         const inCodeBlockContext = this.isSelectionInCodeBlockContext();
-        const activeHeadingCommand = onFootnoteNumber ? null : this.getActiveHeadingCommand();
+        const activeHeadingCommand = onReadOnlyObject ? null : this.getActiveHeadingCommand();
 
         this.commandButtons.forEach((button, command) => {
             const disabledByTable = this.tableCellRestrictedCommands.has(command) && inTableCellContext;
@@ -535,7 +537,7 @@ export class ToolbarManager {
             const disabledFootnote = command === 'footnote' && !this.canInsertFootnote();
             const disabledMath = command === 'math' && !this.canInsertMath();
             const isDisabled =
-                (onFootnoteNumber && command !== 'settings') ||
+                (onReadOnlyObject && command !== 'settings') ||
                 disabledByTable ||
                 disabledBoldInHeading ||
                 disabledByList ||
@@ -584,8 +586,49 @@ export class ToolbarManager {
             this.editor.contains(this.focusedFootnoteNumber) && !!this.toolbar?.contains(document.activeElement);
     }
 
+    getTocBlock(node) {
+        const element = node?.nodeType === 1 ? node : node?.parentElement;
+        const block = element?.closest?.('[data-mdw-toc="true"]');
+        return block && this.editor.contains(block) ? block : null;
+    }
+
+    isSelectionOnTocBlock() {
+        const document = this.editor.ownerDocument;
+        if (!document) return false;
+        const focused = this.getTocBlock(document.activeElement);
+        if (focused) {
+            this.focusedTocBlock = focused;
+            return true;
+        }
+        const selection = document.defaultView?.getSelection?.();
+        for (let index = 0; index < (selection?.rangeCount || 0); index++) {
+            const range = selection.getRangeAt(index);
+            let block = this.getTocBlock(range.startContainer) || this.getTocBlock(range.endContainer);
+            // selectNode() places both endpoints in the parent, outside the
+            // noneditable block. Protect that whole-object range as well.
+            if (!block && !range.collapsed && range.startContainer === range.endContainer &&
+                range.endOffset === range.startOffset + 1) {
+                block = this.getTocBlock(range.startContainer.childNodes?.[range.startOffset]);
+            }
+            if (block) {
+                this.focusedTocBlock = block;
+                return true;
+            }
+        }
+        if (!selection?.rangeCount && this.focusedTocBlock &&
+            this.editor.contains(this.focusedTocBlock) && this.toolbar?.contains(document.activeElement)) {
+            return true;
+        }
+        this.focusedTocBlock = null;
+        return false;
+    }
+
+    isSelectionOnReadOnlyObject() {
+        return this.isSelectionOnFootnoteNumber() || this.isSelectionOnTocBlock();
+    }
+
     updateCommandActiveStates() {
-        const shouldReflectActiveState = !this.isSelectionOnFootnoteNumber() && this.isSelectionInsideEditor();
+        const shouldReflectActiveState = !this.isSelectionOnReadOnlyObject() && this.isSelectionInsideEditor();
         this.activeStateCommands.forEach((nativeCommand, command) => {
             const button = this.commandButtons.get(command);
             if (!button) return;
@@ -601,7 +644,7 @@ export class ToolbarManager {
     }
 
     updateCommandContextStates() {
-        const shouldReflectState = !this.isSelectionOnFootnoteNumber() && this.isSelectionInsideEditor();
+        const shouldReflectState = !this.isSelectionOnReadOnlyObject() && this.isSelectionInsideEditor();
         const states = shouldReflectState ? this.getContextCommandStates() : {};
 
         this.contextStateCommands.forEach((command) => {

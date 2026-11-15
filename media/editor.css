@@ -644,6 +644,7 @@ body[data-list-dash-style="true"] #editor ul ul ul {
 }
 
 #editor pre.md-block-whole-selected,
+#editor [data-mdw-toc="true"].md-block-whole-selected,
 #editor span[data-mdw-math="display"].md-block-whole-selected {
     outline: 2px solid var(--vscode-focusBorder, #007fd4);
     outline-offset: 2px;
@@ -663,10 +664,40 @@ body[data-list-dash-style="true"] #editor ul ul ul {
 #editor table.md-table-whole-selected::selection,
 #editor table.md-table-whole-selected *::selection,
 #editor pre.md-block-whole-selected::selection,
-#editor pre.md-block-whole-selected *::selection {
+#editor pre.md-block-whole-selected *::selection,
+#editor [data-mdw-toc="true"].md-block-whole-selected::selection,
+#editor [data-mdw-toc="true"].md-block-whole-selected *::selection {
     background-color: transparent;
     color: inherit;
 }
+
+#editor .mdw-toc-block {
+    margin: 1em 0;
+    padding: 12px 16px;
+    border: 1px solid var(--md-divider-color);
+    border-radius: 6px;
+    background: var(--md-block-background);
+    cursor: default;
+}
+
+#editor .mdw-toc-block::before {
+    content: 'Table of contents';
+    display: block;
+    margin-bottom: 8px;
+    color: var(--vscode-editor-foreground);
+    font-size: 0.85em;
+}
+
+#editor .mdw-toc-block > ul { margin: 0; }
+#editor .mdw-toc-block a { cursor: pointer; }
+#editor .mdw-toc-block a:focus {
+    outline: 2px solid var(--vscode-focusBorder, currentColor);
+    outline-offset: 2px;
+    border-radius: 2px;
+    background: var(--vscode-editor-selectionBackground, var(--md-ui-selected));
+    color: var(--vscode-editor-selectionForeground, var(--vscode-editor-foreground));
+}
+#editor .mdw-toc-empty { margin: 0; color: var(--vscode-editor-foreground); }
 
 #editor .md-table-structure-handle {
     position: absolute;

@@ -106,7 +106,7 @@ Type `/` at the start of a line or after whitespace to open the insert menu. Dir
 | Command | Action |
 | --- | --- |
 | `/link` | Insert a link |
-| `/toc` | Insert a nested list of links to headings |
+| `/toc` | Insert a table of contents block that updates with headings |
 | `/footnote` | Add and edit a footnote |
 | `/table` | Insert a 2×2 table |
 | `/quote` | Convert to or insert a blockquote |
@@ -116,7 +116,11 @@ Type `/` at the start of a line or after whitespace to open the insert menu. Dir
 | `/checkbox` | Create a task list |
 | `/settings` | Open ManulDown settings |
 
-A table of contents inserted with `/toc` does not update automatically; insert it again after changing headings. The slash menu is unavailable inside code blocks, table cells, or during IME composition.
+A `/toc` block updates as headings are added, edited, moved, or removed. Click an item or navigate with arrows and `Tab`, then press `Enter` to jump to its heading. Its contents are read-only. Click the frame's padding to select the whole block, then press `Backspace` / `Delete` to delete it at once.
+
+To make an existing plain-list table of contents update automatically, replace it with a new `/toc` block.
+
+The slash menu is unavailable inside code blocks, table cells, or during IME composition.
 
 Add a file such as `~/.manuldown/meeting-minutes.md` to insert its contents with `/meeting-minutes`. Custom commands appear in green. Names are lowercased and spaces become `-`; names that duplicate built-in commands or another file are ignored.
 

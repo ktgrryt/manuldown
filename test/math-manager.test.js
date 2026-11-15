@@ -175,6 +175,7 @@ test('one Mac Ctrl navigation step selects a formula for both host and DOM deliv
             });
             const env = {
                 mathManager: f.manager, footnoteManager: { handleKeydown: () => false },
+                inlineTocManager: { handleKeyDown: () => false },
                 cursorManager: cursor, window: f.window, document: f.document,
                 tableManager: { handleCtrlNavKeydown: () => false },
                 getSelectedCodeBlockLanguageLabel: () => null, isHRSelected: () => null,

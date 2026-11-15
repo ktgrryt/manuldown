@@ -31,6 +31,7 @@ function fixture() {
         },
         normalizeLoadedEditorBoundaryWhitespace() {}, stripEditorControlCharacters() {}, assignStableHeadingIds() {},
         footnoteManager: { cancelPendingDelete() {}, refresh() {} },
+        inlineTocManager: { refresh() {} },
         mathManager: { dismissEditor() {} },
         performAuxiliaryHistoryCommand: () => false,
         flushPendingCaretPlacement: () => false,

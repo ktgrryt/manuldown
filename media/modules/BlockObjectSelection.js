@@ -33,17 +33,18 @@ export class BlockObjectSelection {
                 ranges.push(range);
             }
         }
-        const blocks = Array.from(this.editor.querySelectorAll('pre, span[data-mdw-math="display"], .md-block-whole-selected'));
+        const blocks = Array.from(this.editor.querySelectorAll('pre, span[data-mdw-math="display"], [data-mdw-toc="true"], .md-block-whole-selected'));
         for (const block of blocks) {
             const code = block.tagName === 'PRE'
                 ? Array.from(block.children).find(child => child.tagName === 'CODE') : null;
             const formula = block.matches('span[data-mdw-math="display"]');
+            const toc = block.getAttribute('data-mdw-toc') === 'true';
             const preview = block.getAttribute('data-mermaid-view') === 'diagram' ||
                 block.getAttribute('data-math-view') === 'preview';
-            const eligible = (code || formula) && !block.closest('[data-mdw-opaque-source], [data-exclude-from-markdown="true"]');
+            const eligible = (code || formula || toc) && !block.closest('[data-mdw-opaque-source], [data-exclude-from-markdown="true"]');
             let selected = false;
             if (eligible && ranges.length) {
-                const boundaries = formula || preview ? this._nodeBoundaries(block) : this._codeBoundaries(code);
+                const boundaries = formula || preview || toc ? this._nodeBoundaries(block) : this._codeBoundaries(code);
                 selected = ranges.some(range => boundaries.every(point => range.isPointInRange(point.node, point.offset)));
             }
             if (selected && !block.classList.contains('md-block-whole-selected')) {

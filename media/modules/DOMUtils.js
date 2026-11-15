@@ -591,6 +591,11 @@ export class DOMUtils {
         removeTransientClass('.md-block-whole-selected', 'md-block-whole-selected');
 
         if (historyComparable) {
+            // A TOC's presence is editable; its generated links are derived from
+            // headings and must not create an Undo step or invalidate Redo.
+            clone.querySelectorAll('[data-mdw-toc="true"]').forEach(block => {
+                block.innerHTML = '';
+            });
             // Footnote numbers and navigation targets are derived view state.
             clone.querySelectorAll('sup[data-mdw-footnote-ref]').forEach(reference => {
                 reference.textContent = '';

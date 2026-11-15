@@ -6,6 +6,12 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 
 ## [Unreleased]
 
+### Added
+- Insert live table-of-contents blocks with `/toc`. They update with heading changes, persist across saves, and can be selected and deleted as one object with Undo/Redo support. Navigate read-only items with arrows or Tab and press Enter to jump to a heading.
+
+### Fixed
+- Keep cursor entry into a table of contents stable from wrapped text, formatted text, and blank lines.
+
 ## [2.2.7] - 2026-11-15
 
 ### Changed

@@ -130,6 +130,7 @@ function hostNavigation(f) {
         settingsState: { useVsCodeCtrlP: false },
         tableManager: { handleCtrlNavKeydown: () => false },
         footnoteManager: { handleKeydown: () => false },
+        inlineTocManager: { handleKeyDown: () => false },
         // Native ArrowRight owns plain first-line text. Host Ctrl+F continues
         // through the logical-end check and the custom forward movement path.
         handleArrowKeydown: () => false,

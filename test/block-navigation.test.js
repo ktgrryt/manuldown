@@ -443,6 +443,7 @@ function loadCheckboxNavigation(fixture, nativeTopLine = true) {
     assert.notEqual(commandEnd, -1);
     return new Function('editor', 'domUtils', 'cursorManager', 'footnoteManager', 'codeBlockGapManager', 'nativeTopLine', `
         const isMac = true;
+        const inlineTocManager = { handleKeyDown: () => false };
         const searchCloseSelection = null;
         let lastCaretIntentSource = 'pointer';
         const lastPointerCaretIntentTs = Date.now();
@@ -1208,6 +1209,7 @@ test('the full keydown handler deduplicates host-first and keydown-first footnot
                 const names = ['handleKeydown', 'handleEmacsNavKeydown', 'recordCtrlNavHandled', 'shouldSuppressKeydownNav', 'shouldSuppressCommandNav'];
                 const navigation = new Function('footnoteManager', 'cursorManager', `
                     const isMac = true, isComposing = false;
+                    const inlineTocManager = { handleKeyDown: () => false };
                     const compositionUpdateGate = { composing: false };
                     const shouldRouteHorizontalArrowAfterComposition = () => false;
                     const isTextInputKeydown = () => false;
