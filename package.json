@@ -28,6 +28,7 @@
     "Other"
   ],
   "activationEvents": [
+    "onStartupFinished",
     "onCustomEditor:manulDown.editor",
     "onLanguage:markdown"
   ],
@@ -288,6 +289,11 @@
     "configuration": {
       "title": "ManulDown",
       "properties": {
+        "manulDown.images.moveWithDocument": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Automatically move referenced images in `images/<document-name>/` when moving or renaming a Markdown file in VS Code. Turn this off to keep images in their original location. Shared images are copied, existing destination files are preserved, and empty source image folders are removed. Requires `#markdown.updateLinksOnFileMove.enabled#` to be `never`."
+        },
         "manulDown.toolbar.visible": {
           "type": "boolean",
           "default": true,

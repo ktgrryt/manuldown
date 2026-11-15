@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { MarkdownEditorProvider } from './editor/MarkdownEditorProvider';
+import { registerMarkdownImageMover } from './editor/MarkdownImageMover';
 
 const MARKDOWN_ASSOCIATION_PROMPT_KEY = 'manulDown.markdownAssociationPromptShown';
 const MANULDOWN_EDITOR_VIEW_TYPE = 'manulDown.editor';
@@ -9,7 +10,20 @@ const MARKDOWN_FILE_ASSOCIATION_KEY = '*.md';
 const PREVIOUS_MARKDOWN_ASSOCIATION_KEY = 'manulDown.previousMarkdownEditorAssociation';
 
 export function activate(context: vscode.ExtensionContext) {
-    void initializeDefaultMarkdownAssociation(context);
+    context.subscriptions.push(registerMarkdownImageMover());
+    // Startup activation registers file-move handling even for unopened files.
+    // Keep the editor-association prompt tied to actually opening Markdown.
+    if (vscode.workspace.textDocuments.some(document => document.languageId === 'markdown')) {
+        void initializeDefaultMarkdownAssociation(context);
+    } else {
+        const firstMarkdownDocument = vscode.workspace.onDidOpenTextDocument(document => {
+            if (document.languageId === 'markdown') {
+                firstMarkdownDocument.dispose();
+                void initializeDefaultMarkdownAssociation(context);
+            }
+        });
+        context.subscriptions.push(firstMarkdownDocument);
+    }
 
     // Register the custom editor provider
     const provider = new MarkdownEditorProvider(context);

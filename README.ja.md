@@ -46,6 +46,16 @@ ManulDownは、MarkdownファイルをWYSIWYGエディタで編集できるVSCod
 
 `[!NOTE]` などのGitHubアラートのマーカーは、読み取り専用の原文として表示・保持します。フロントマター、raw HTML、参照定義も原文を保持します。
 
+### Markdownと画像の移動
+
+貼り付けやImageボタンで取り込んだ画像は、Markdownと同じフォルダの `images/<文書名（拡張子なし）>/` に保存します。VSCodeのエクスプローラーなどで `.md` を移動・名前変更すると、そのフォルダ内で文書が使っている画像も移動します。例えば `docs/memo.md` を `archive/notes.md` に移すと、画像は `docs/images/memo/` から `archive/images/notes/` へ移り、画像自体のファイル名は維持します。本文、参照形式の画像、HTML画像、脚注のパスは必要な箇所だけ更新します。
+
+他のMarkdownから画像や通常のリンクとして参照されているファイルは、元に残してコピーします。未使用の画像は元の場所に残り、移動先に同名ファイルがあれば連番を付けて上書きを避けます。移動で空になった画像フォルダは親の `images/` まで削除し、ファイル（隠しファイルを含む）が残るフォルダと元のMarkdownのディレクトリは保持します。画像と空フォルダの操作も、Markdownの移動とまとめてUndo/Redoできます。保存先にシンボリックリンクやフォルダとして使えない項目がある場合は、画像を元の場所に残し、新しいMarkdownからの相対パスを更新します。
+
+この機能は、信頼済みワークスペース内で移動元・移動先の両方がワークスペースに属する場合に動作します。フォルダごとの移動はVSCodeの通常の処理に任せます。Finderなど、VSCode外での移動には追従しません。VSCodeの設定で `manulDown.images.moveWithDocument` を検索し、チェックボックスでオン／オフを切り替えられます。既定値はオン（`true`）で、オフ（`false`）にすると画像は元の場所に残ります。変更は次の移動から反映されます。
+
+画像の追従は、VSCode標準の `markdown.updateLinksOnFileMove.enabled` が `never`（既定値）の場合に動作します。`always` または `prompt` の場合は、標準機能にリンク更新を任せ、画像を元の場所に残して通知します。
+
 ### ツールバーのボタン
 
 - **B**: 太字
@@ -206,6 +216,7 @@ VSCodeの設定（`Ctrl+,` / `Cmd+,`）で、以下のオプションを変更�
 | `manulDown.editor.theme` | `"vscode"` | エディタのテーマ: `"vscode"`（VSCodeに合わせる）、`"light"`、`"dark"` |
 | `manulDown.list.dashStyle` | `false` | 箇条書きのマーカーに `-` を使用します |
 | `manulDown.list.indentSize` | `2` | 文書のスタイルを検出できない場合の、入れ子のリストの既定インデント幅（`2` または `4` スペース） |
+| `manulDown.images.moveWithDocument` | `true` | VSCodeでMarkdownを移動・名前変更したとき、文書の画像フォルダ内で使用中の画像も移動します |
 | `manulDown.security.allowRemoteImages` | `false` | リモートのhttp/https画像をエディタ内で読み込めるようにします |
 | `manulDown.security.allowRemoteImageImport` | `false` | 貼り付けまたはドロップしたリモートのhttp/https画像URLから、ワークスペースへ画像をダウンロードできるようにします |
 | `manulDown.security.allowFileLinks` | `false` | エディタから `file://` リンクを開けるようにします |

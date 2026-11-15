@@ -46,6 +46,16 @@ Opening a file leaves its source unchanged. When editing, unchanged blocks and i
 
 GitHub alert markers such as `[!NOTE]` are shown as read-only source and kept intact. Front matter, raw HTML, and reference definitions also retain their source.
 
+### Moving Markdown and its images
+
+Images imported by pasting or using the Image button are saved beside the Markdown file in `images/<document name without extension>/`. When you move or rename a `.md` file through VSCode's Explorer or another VSCode file operation, images used by the document follow it. For example, moving `docs/memo.md` to `archive/notes.md` moves its images from `docs/images/memo/` to `archive/images/notes/`, keeping the image filenames. Paths in the body, reference-style images, HTML images, and footnotes are updated only where needed.
+
+Files referenced by other Markdown documents as images or ordinary links are copied, keeping the originals in place. Unused images stay in the original folder, and existing destination files are preserved by adding a number to the incoming filename. Empty source image folders are removed up to and including an empty `images/` parent; folders containing any files, including hidden files, and the original Markdown directory are preserved. Image and empty-folder operations share the Markdown move's Undo/Redo step. If the destination contains a symbolic link or an item that cannot serve as a folder, images stay in place and relative paths from the moved Markdown are updated.
+
+This works in trusted workspaces when both the source and destination belong to workspace folders. Moving a whole folder uses VSCode's normal file operation. Moves made outside VSCode, such as in Finder, are not tracked. Search VSCode Settings for `manulDown.images.moveWithDocument` and use its checkbox to turn image moves on or off. It is on (`true`) by default; turning it off (`false`) keeps images in their original location. Changes take effect on the next move.
+
+Image moves run when VSCode's built-in `markdown.updateLinksOnFileMove.enabled` is `never` (the default). With `always` or `prompt`, ManulDown leaves images in place, lets the built-in feature update links, and shows a notification.
+
 ### Toolbar Buttons
 
 - **B**: Bold
@@ -204,6 +214,7 @@ Choose **Settings** from the toolbar's **…** menu or run `/settings` to open s
 | `manulDown.editor.theme` | `"vscode"` | Editor theme mode: `"vscode"` (follow VSCode), `"light"`, or `"dark"` |
 | `manulDown.list.dashStyle` | `false` | Use `-` as the bullet marker style |
 | `manulDown.list.indentSize` | `2` | Default nested list indentation width (`2` or `4` spaces) when the document style cannot be detected |
+| `manulDown.images.moveWithDocument` | `true` | Move used images from the document's image folder when its Markdown file is moved or renamed in VSCode |
 | `manulDown.security.allowRemoteImages` | `false` | Allow remote http/https images to load inside the editor |
 | `manulDown.security.allowRemoteImageImport` | `false` | Allow pasted or dropped remote http/https image URLs to be downloaded into the workspace |
 | `manulDown.security.allowFileLinks` | `false` | Allow `file://` links to be opened from the editor |
