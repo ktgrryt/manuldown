@@ -6,6 +6,8 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 
 ## [Unreleased]
 
+## [2.2.7] - 2026-11-15
+
 ### Changed
 - Always follow the active VSCode color theme, including high contrast themes, instead of offering separate editor theme modes.
 
