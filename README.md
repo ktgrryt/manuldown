@@ -2,299 +2,193 @@
 
 # ManulDown for VSCode
 
-ManulDown is a VSCode extension that lets you edit Markdown files in a WYSIWYG editor.
+ManulDown is a VSCode extension for editing Markdown while viewing the rendered result. Changes are reflected in the Markdown file.
 
-![alt text](./images/image.png)
+![ManulDown editor](./images/image.png)
 
 ## Features
 
-- **WYSIWYG editing**: Edit while previewing the rendered result in real time.
-- **Core formatting**:
-  - Bold (`Ctrl+B` / `Cmd+B`)
-  - Italic (`Ctrl+I` / `Cmd+I`)
-  - Strikethrough (`Cmd+Shift+X`)
-  - Headings (H1-H6)
-  - Unordered lists
-  - Ordered lists
-  - Code blocks (with syntax highlighting)
-- **Automatic Markdown syntax conversion**: Recognizes syntax such as `#`, `**`, `*`, `-`, and `` ``` `` while typing.
-- **Syntax highlighting**: Multi-language highlighting powered by Prism.js.
-- **Image support**: Paste and drag-and-drop images.
-- **Links**: Insert HTTP, HTTPS, and email links, or safely encoded links to files in the current workspace folder.
-- **Footnotes**: Render and edit `[^label]` references and `[^label]: note` definitions. Numbers and notes follow reference order; click a number to edit its note and click ↩ to return to the text.
-- **Math**: Write TeX formulas as `$…$` (inline) or `$$…$$` (block), rendered with KaTeX. See [Math](#math).
-- **Mermaid diagrams**: Turn the **Preview** switch on to show the diagram, or off to edit the source. The **Copy icon**, shared by all code and math blocks, copies the source; choose **PNG/SVG** from the download icon to save the diagram. Open a diagram across the editor with the **expand icon (diagonal arrows)** at the right end of its toolbar. Scroll to zoom, or drag or use arrow keys to pan. The compact bottom controls show the current zoom and offer **− / +**, **100%** for actual size, and **Fit** for the whole diagram. Press `Esc` or the × at the top right to close.
-- **Table of contents**: Auto-generated from headings.
-- **Two-way sync**: Changes in the editor are reflected in the Markdown file immediately.
-- **Toolbar**: Quick access buttons for common formatting.
-- **Undo/Redo**: Edit history support.
-
-Local image imports require an image file from the clipboard or drag-and-drop, or the **Image** file picker. Local file URLs in pasted or dropped HTML are blocked. Image save folders must be real directories; symbolic links are rejected.
+- WYSIWYG editing for headings, formatting, lists, task lists, and tables
+- Image paste and drag-and-drop, with images following document moves
+- URL and workspace file links, footnotes, and an automatic table of contents
+- Syntax-highlighted code blocks, TeX formulas, and Mermaid diagrams
+- Automatic Markdown syntax conversion, search, and Undo/Redo
+- VSCode theme support, including high contrast themes
 
 ## Usage
 
 1. Open a Markdown file (`.md`).
-2. Right-click the file and choose `Open with ManulDown Editor`.
+2. Run **ManulDown: Open with ManulDown Editor** from the command palette.
 
-- Or run `ManulDown: Open with ManulDown Editor` from the command palette (`Ctrl+Shift+P` / `Cmd+Shift+P`).
+You can also right-click a file in the Explorer and choose **Open With… → ManulDown**.
 
-3. Start editing in the WYSIWYG editor.
+### Basic Editing
 
-### Preserving Markdown source
+Use the toolbar to format text and insert elements. Buttons that do not fit are available in the **…** menu.
 
-Opening a file leaves its source unchanged. When editing, unchanged blocks and inline formatting retain their original Markdown, including underscore emphasis, list markers, code fences, links, table spacing, and blank lines. Edited blocks are serialized with the escaping needed to preserve their meaning. Footnotes follow reference order on screen while existing definitions keep their source order.
+| Button | Action |
+| --- | --- |
+| **B** / **I** / **&lt;/&gt;** | Toggle bold, italic, or inline code |
+| **H1, H2, H3** | Change heading level |
+| **• / 1. / ☑** | Switch to an unordered, ordered, or task list |
+| **Link** | Insert or edit a link |
+| **Footnote** | Add a footnote |
+| **Code** | Insert a code block |
+| **Math** / **Math Block** (in **…**) | Insert an inline formula or math block |
+| **Image** | Import and insert an image file |
 
-GitHub alert markers such as `[!NOTE]` are shown as read-only source and kept intact. Front matter, raw HTML, and reference definitions also retain their source.
+Markdown patterns such as `# Heading`, `**bold**`, `*italic*`, `- item`, and `1. item` convert as you type. To create a code block, type a language fence such as `` ```javascript `` and press `Enter`.
 
-### Moving Markdown and its images
+### Links
 
-Images imported by pasting or using the Image button are saved beside the Markdown file in `images/<document name without extension>/`. When you move or rename a `.md` file through VSCode's Explorer or another VSCode file operation, images used by the document follow it. For example, moving `docs/memo.md` to `archive/notes.md` moves its images from `docs/images/memo/` to `archive/images/notes/`, keeping the image filenames. Paths in the body, reference-style images, HTML images, and footnotes are updated only where needed.
+Select text and use **Link**, `/link`, or `Cmd+K` / `Ctrl+K` to open the link field. Enter a URL (HTTP, HTTPS, or `mailto:`), an absolute workspace path, or a relative path starting with `./` or `../`, then press **Apply** or `Enter`. Type at least two characters to search for workspace files.
 
-Files referenced by other Markdown documents as images or ordinary links are copied, keeping the originals in place. Unused images stay in the original folder, and existing destination files are preserved by adding a number to the incoming filename. Empty source image folders are removed up to and including an empty `images/` parent; folders containing any files, including hidden files, and the original Markdown directory are preserved. Image and empty-folder operations share the Markdown move's Undo/Redo step. If the destination contains a symbolic link or an item that cannot serve as a folder, images stay in place and relative paths from the moved Markdown are updated.
+Workspace files are saved as relative links. Pasting an absolute file path over selected text also creates a link. Invalid and out-of-workspace paths remain plain text.
 
-This works in trusted workspaces when both the source and destination belong to workspace folders. Moving a whole folder uses VSCode's normal file operation. Moves made outside VSCode, such as in Finder, are not tracked. Search VSCode Settings for `manulDown.images.moveWithDocument` and use its checkbox to turn image moves on or off. It is on (`true`) by default; turning it off (`false`) keeps images in their original location. Changes take effect on the next move.
+Open links with `Cmd+Click` / `Ctrl+Click`, or place the caret inside a link and press `Cmd+Enter` / `Ctrl+Enter`.
 
-Image moves run when VSCode's built-in `markdown.updateLinksOnFileMove.enabled` is `never` (the default). With `always` or `prompt`, ManulDown leaves images in place, lets the built-in feature update links, and shows a notification.
+### Footnotes
 
-### Toolbar Buttons
+Use **Footnote** or `/footnote` to add a note, then edit its text at the end of the document. ManulDown supports `[^label]` and `[^label]: note`, displaying notes in reference order.
 
-- **B**: Bold
-- **I**: Italic
-- **&lt;/&gt;**: Toggle inline code on selected text. With no selection, insert an inline code span to type in, or remove code formatting when the caret is inside one.
-- **H1, H2, H3**: Heading levels
-- **• / 1. / ☑**: Unordered list, ordered list, and task list. Hover over each button to see its name.
-- **Link**: Open the inline link field for a URL, an absolute workspace path, or workspace file search
-- **Footnote**: Insert a reference at the caret (or after selected text) and focus its editable note at the end of the document
+- **Navigate**: Click a reference number to open its note, or ↩ to return to the text. With the keyboard, select a number using `Tab` or `Left` / `Right`, then press `Enter` to jump.
+- **Delete a whole note**: Hover over the note and click ×, or select its number in the note list and press `Backspace`. This also removes all its references.
+- **Delete one reference**: Use `Backspace` / `Delete` on a body reference. Deleting the last reference also deletes its note.
 
-Edit note text directly. Hover over a note to show × at its right edge, then click it to delete the note and all its references. Insertion, editing and deletion support Undo/Redo.
-With a note's list number focused, press `Backspace` (`Ctrl+H` on macOS) to delete the note and all its references, just like ×.
-Backspace or Delete on a reference removes that occurrence. Deleting the last reference also removes its note.
-Copying or moving annotated text preserves its notes. Notes can use reference-style links and images defined in the document. Nested footnote definitions are editable up to four levels; deeper definitions retain their original Markdown as read-only source.
-At the start of a note, press `Left` (`Ctrl+B` on macOS) to focus its number, or select a number with `Tab`. Press `Enter` to return to the reference, `Right` (`Ctrl+F` on macOS) to resume editing the note, or `Up` / `Down` to move between note numbers.
-At the end of a note, `Right` (`Ctrl+F` on macOS) moves to the next note number. `Left` from that number returns to the previous note's text end. At the end of the final note, the caret stays there.
-While a reference or note number is focused, toolbar editing commands are disabled and Settings remains available. Return to editable text to use formatting again.
-Body reference numbers can also be focused with `Left` / `Right` (`Ctrl+B` / `Ctrl+F` on macOS) or `Tab`. The focused number has an outline; press `Enter` to open its note, or another horizontal arrow to return to the surrounding text.
-- **Code**: Insert a code block
-- **Math** / **Math Block** (in the **…** menu): Insert an inline formula or a math block. With text selected, Math turns the selection into a formula.
-- **Image**: Choose an image file to copy into the document's image folder and insert at the original selection. Image and Link follow the other buttons in the left-aligned toolbar.
+Copying or moving text preserves its corresponding notes.
 
-When the editor is narrow, buttons that do not fit are available in the **…** menu. Widening the editor returns them to the toolbar. You can navigate the menu with the arrow keys and close it with Escape.
+### Images and Document Moves
 
-Select text and use the Link button, `/link`, `Cmd+K`, or `Ctrl+K` to open the same inline link popover used for existing links. Paste an HTTP, HTTPS, or `mailto:` URL directly, paste an absolute path or an explicit `./` / `../` path to an existing file in the current workspace, or type at least two characters such as `test3` to see matching workspace files below the field. Choosing a suggestion fills the field with its relative path; press **Apply** or Enter to confirm it. Absolute paths are stored as relative Markdown links.
+Import images by pasting, dragging and dropping, or using **Image**. They are saved beside the Markdown file in `images/<document name without extension>/`.
 
-Pasting an absolute local path directly over selected text also creates a relative link. Invalid, missing, symbolic-link, remote, and out-of-workspace targets remain an ordinary plain-text paste.
+When you move or rename a `.md` file inside VSCode, used images in that folder follow it and links are updated. For example, moving `docs/memo.md` to `archive/notes.md` moves images from `docs/images/memo/` to `archive/images/notes/`.
 
-Place the caret inside a link and press `Cmd+Enter` on macOS or `Ctrl+Enter` on Windows/Linux to open its URL, workspace file, or heading in the current document. `Cmd+Click` / `Ctrl+Click` also opens links.
+- Images shared with other Markdown documents are copied; unused images stay in place.
+- Incoming files receive numbered names to avoid collisions, and empty image folders are removed. Document and image moves share one Undo/Redo step.
+- Set `manulDown.images.moveWithDocument` to `false` to disable automatic image moves.
 
-Select content, right-click, and choose **Copy as Markdown**, or press `Cmd+Shift+C` on macOS / `Ctrl+Shift+C` on Windows/Linux while the editor body has focus. This copies the selection as Markdown text, including headings, formatting, links, lists, tables, code, math, images, and referenced footnotes. The shortcut does nothing without a selection.
+Both locations must be in trusted workspace folders, and `markdown.updateLinksOnFileMove.enabled` must be `never`. With `always` or `prompt`, VSCode handles link updates and images stay in place. Moves outside VSCode are not tracked.
 
-Normal copy (`Cmd+C` / `Ctrl+C`, or **Copy** in the context menu) copies a selected image as PNG. A selection containing text and/or multiple images copies rich HTML with embedded images in their original order; the destination app must support pasting HTML with images. Plain-text destinations receive the text and image descriptions. Image-only destinations do not receive multiple separate attachments. Images use their original pixel dimensions; animated images copy as a still PNG. Blocked or unavailable images, remote servers that disallow cross-origin access, and clipboard permission failures fall back to text and image references with a warning. Cut retains its existing behavior.
+To resize an image, select it with `Left` / `Right` from its edge, then use `Shift+Up` / `Shift+Down` to enlarge or shrink it. Importing images from local file URLs inside HTML and using symbolic links as image save folders are not supported.
+
+### Copying
+
+- **Copy as Markdown**: Right-click a selection to copy it as Markdown, including formatting, links, images, and footnotes. You can also use `Cmd+Shift+C` / `Ctrl+Shift+C`.
+- **Normal copy**: A single image copies as PNG; text with images or multiple images copies as HTML with embedded images. The destination must support HTML paste; multiple images are not sent as separate attachments. Animations copy as still images.
+
+If an image cannot be copied, ManulDown shows a warning and copies text and image references instead.
 
 ### Math
 
-Formulas use TeX syntax and are rendered with [KaTeX](https://katex.org/supported.html). KaTeX is loaded only for documents that contain a formula.
+TeX formulas are rendered with [KaTeX](https://katex.org/supported.html).
 
-- **Inline formulas**: Type `$E = mc^2$`; the formula renders when you type the closing `$`. As when a file is opened, the TeX must not start or end with a space, so `$5 and $10` stays text. Click a formula (or select it and press Enter) to edit its TeX in a small field: the formula updates as you type, a TeX error is shown below the field, Enter finishes, and Escape restores the previous TeX. Press Right before a formula or Left after it to select the whole formula, then Enter to edit. Another arrow key moves to that side of the formula. Backspace or Delete removes it.
-- **Math blocks**: Type `$$` on an empty line and press Enter, use `/math`, or choose **Math Block**. A math block is edited like a code block: turn the **Preview** switch off to show the TeX source with the formula below it, or on to show only the formula. Click a rendered formula to edit its TeX. A ```` ```math ```` fence is shown the same way, and choosing `math` as a code block's language turns it into one.
+- **Inline formulas**: Type `$E = mc^2$` without spaces just inside the `$` delimiters. Click a formula, or select it and press `Enter`, to edit. Press `Enter` to apply or `Esc` to cancel.
+- **Math blocks**: Type `$$` on an empty line and press `Enter`, or use `/math` or **Math Block**. The **Preview** switch toggles between TeX editing and the rendered formula.
 
-Formulas are saved as `$…$` and `$$` blocks. Unchanged formulas keep their original source. TeX that `$$` delimiters cannot hold, such as a blank line, is saved as a ```` ```math ```` fence instead.
+```` ```math ```` code blocks are also supported. Unchanged formulas keep their original syntax.
+
+### Mermaid Diagrams
+
+Create a code block with its language set to `mermaid`, then use **Preview** to switch between source and diagram. The copy icon copies the source; the download icon saves PNG or SVG.
+
+The expand icon opens the diagram across the editor. Scroll to zoom, drag or use arrow keys to pan, choose **Fit** to see the whole diagram, and press `Esc` to close.
+
+### Preserving Markdown Source
+
+Opening a file leaves its source unchanged. When editing, unchanged blocks, inline formatting, table spacing, and blank lines retain their original syntax.
+
+Front matter, raw HTML, and reference definitions also keep their source. GitHub alert markers such as `[!NOTE]` are displayed as read-only source.
 
 ### Slash Commands
 
-Type `/` at the start of a line or after whitespace in the editor to open the slash command menu. You can narrow results by typing a prefix such as `/ta`.
-
-To insert a footnote or another command directly after text, focus the document and press `Control+/` on macOS (`Alt+/` on Windows/Linux). Type a prefix such as `fo` in the search field, choose a command with the arrow keys or Tab, and press Enter to insert it. Search text stays out of the document. Escape cancels and restores the original cursor position. The shortcut is disabled while the accessibility view is shown.
+Type `/` at the start of a line or after whitespace to open the insert menu. Directly after text, use `Control+/` on macOS or `Alt+/` on Windows/Linux. Type to filter, select with arrows or `Tab`, press `Enter` to run, or `Esc` to cancel.
 
 | Command | Action |
 | --- | --- |
-| `/link` | Open the inline link field and insert a URL or workspace link |
-| `/toc` | Insert a nested list of links to the current document's headings |
-| `/footnote` | Insert a footnote and focus its note for editing |
-| `/table` | Insert a 2x2 table |
-| `/quote` | Convert the current block into a quote (or insert an empty quote block if conversion is not possible) |
-| `/code` | Insert a code block and focus the language label for editing |
-| `/math` | Insert a math block (`$$…$$`) and focus its TeX |
-| `/inline-math` | Insert an inline formula (`$…$`) and open its editor |
-| `/checkbox` | Create a checklist item (task list) |
-| `/settings` | Open VSCode settings filtered to ManulDown |
+| `/link` | Insert a link |
+| `/toc` | Insert a nested list of links to headings |
+| `/footnote` | Add and edit a footnote |
+| `/table` | Insert a 2×2 table |
+| `/quote` | Convert to or insert a blockquote |
+| `/code` | Insert a code block |
+| `/math` | Insert a math block |
+| `/inline-math` | Insert an inline formula |
+| `/checkbox` | Create a task list |
+| `/settings` | Open ManulDown settings |
 
-Custom slash commands:
+A table of contents inserted with `/toc` does not update automatically; insert it again after changing headings. The slash menu is unavailable inside code blocks, table cells, or during IME composition.
 
-Drop .md files into ~/.manuldown, and each file becomes a slash command based on its filename.
-For example, ~/.manuldown/meeting-minutes.md can be inserted with /meeting-minutes at the current cursor position.
-- The command name is the filename without .md
-- Running the command inserts the file contents at the cursor
-- User-defined commands appear in green in the slash menu
-
-Notes for custom command names:
-
-- Command IDs are normalized from file names (`spaces` -> `-`, leading `/` removed, lowercase).
-- Built-in command IDs (`link`, `toc`, `footnote`, `table`, `quote`, `code`, `math`, `inline-math`, `checkbox`, `settings`) are reserved.
-- Duplicate normalized command IDs are ignored.
-
-Menu controls:
-
-- `Enter`: Run the selected command
-- `Tab` / `Shift+Tab`: Move to next/previous command
-- `ArrowUp` / `ArrowDown`: Move to previous/next command (`Ctrl+P` / `Ctrl+N` also work on macOS)
-- `Esc`: Close the menu
-
-Notes:
-
-- Slash commands are available in normal text input context. The menu does not appear inside code blocks, inside table cells, or during IME composition.
-- `/toc` inserts a snapshot of the headings at the current cursor position. Run it again to insert an updated table of contents after changing headings. Documents without headings produce no list.
+Add a file such as `~/.manuldown/meeting-minutes.md` to insert its contents with `/meeting-minutes`. Custom commands appear in green. Names are lowercased and spaces become `-`; names that duplicate built-in commands or another file are ignored.
 
 ### Keyboard Shortcuts
 
-#### Formatting
-
-| Action | Mac | Windows / Linux |
+| Action | macOS | Windows / Linux |
 | --- | --- | --- |
 | Bold | `Cmd+B` | `Ctrl+B` |
 | Italic | `Cmd+I` | `Ctrl+I` |
 | Strikethrough | `Cmd+Shift+X` | `Alt+Shift+5` |
-
-#### Editing
-
-| Action | Mac | Windows / Linux |
-| --- | --- | --- |
 | Insert link | `Cmd+K` | `Ctrl+K` |
-| Open insert command menu | `Control+/` | `Alt+/` |
-| Open link at cursor | `Cmd+Enter` | `Ctrl+Enter` |
-| Undo | `Cmd+Z` | `Ctrl+Z` |
-| Redo | `Cmd+Shift+Z` | `Ctrl+Shift+Z` |
+| Insert menu | `Control+/` | `Alt+/` |
+| Open link | `Cmd+Enter` | `Ctrl+Enter` |
+| Copy as Markdown | `Cmd+Shift+C` | `Ctrl+Shift+C` |
+| Undo / Redo | `Cmd+Z` / `Cmd+Shift+Z` | `Ctrl+Z` / `Ctrl+Shift+Z` |
 | Find | `Cmd+F` | `Ctrl+F` |
-| Find next match | `Enter` | `Enter` |
-| Find previous match | `Shift+Enter` | `Shift+Enter` |
-| Select image from image edge caret | `ArrowLeft` / `ArrowRight` | `ArrowLeft` / `ArrowRight` |
-| Resize selected image smaller | `Shift+ArrowDown` | `Shift+ArrowDown` |
-| Resize selected image larger | `Shift+ArrowUp` | `Shift+ArrowUp` |
+| Next / previous match | `Enter` / `Shift+Enter` | `Enter` / `Shift+Enter` |
 | Toggle editor | `Cmd+Option+M` | `Ctrl+Alt+M` |
-
-Image resize flow: place the caret on the left or right edge of an image, press `ArrowLeft` / `ArrowRight` to select the image, then use `Shift+ArrowUp` or `Shift+ArrowDown`.
 
 #### Table Operations
 
-Select a range of cells, a row, or a column, then use the toolbar to apply bold, italic, strikethrough, or inline code to all selected cells. Clicking the same format again removes it when the entire selection already has that format.
+Select a range of cells, a row, or a column to apply or remove toolbar formatting across the selection.
 
-| Action | Mac | Windows / Linux |
+| Action | macOS | Windows / Linux |
 | --- | --- | --- |
-| Insert row/column | `Cmd+Ctrl+Shift+Up/Down/Left/Right` | `Ctrl+Shift+Alt+Up/Down/Left/Right` |
-| Select current column | `Ctrl+Shift+Option+Up/Down` | `Ctrl+Alt+Up/Down` |
-| Select current row | `Ctrl+Shift+Option+Left/Right` | `Ctrl+Alt+Left/Right` |
+| Insert row / column | `Cmd+Ctrl+Shift+Up/Down/Left/Right` | `Ctrl+Shift+Alt+Up/Down/Left/Right` |
+| Select column | `Ctrl+Shift+Option+Up/Down` | `Ctrl+Alt+Up/Down` |
+| Select row | `Ctrl+Shift+Option+Left/Right` | `Ctrl+Alt+Left/Right` |
 | Move selected column / row | `Shift+Left/Right` (column), `Shift+Up/Down` (row) | `Shift+Left/Right` (column), `Shift+Up/Down` (row) |
 
-#### Emacs Keybindings (macOS only)
-
-ManulDown supports standard macOS-style Emacs keybindings. These are disabled on Windows/Linux.
+#### Emacs Keybindings (macOS Only)
 
 | Action | Key |
 | --- | --- |
-| Move cursor up | `Ctrl+P` |
-| Move cursor down | `Ctrl+N` |
-| Move cursor left | `Ctrl+B` |
-| Move cursor right | `Ctrl+F` |
-| Move to beginning of line | `Ctrl+A` |
-| Move to end of line | `Ctrl+E` |
-| Delete line/list item | `Ctrl+K` |
+| Move up / down | `Ctrl+P` / `Ctrl+N` |
+| Move left / right | `Ctrl+B` / `Ctrl+F` |
+| Move to line start / end | `Ctrl+A` / `Ctrl+E` |
+| Delete line / list item | `Ctrl+K` |
 | Yank last `Ctrl+K` text | `Ctrl+Y` |
 | Delete backward one character | `Ctrl+H` |
 
 ### Settings
 
-You can change the following options from VSCode settings (`Ctrl+,` / `Cmd+,`):
-
-Choose **Settings** from the toolbar's **…** menu or run `/settings` to open settings filtered to ManulDown.
-
-The editor follows your VSCode color theme, including high contrast themes.
+Use **… → Settings** in the toolbar or `/settings` to open ManulDown settings.
 
 | Setting | Default | Description |
 | --- | --- | --- |
 | `manulDown.toolbar.visible` | `true` | Show the toolbar |
-| `manulDown.toc.enabled` | `true` | Automatically show the table of contents when headings exist |
-| `manulDown.openByDefault` | `true` | Open Markdown files with ManulDown by default (updates `workbench.editorAssociations` immediately) |
-| `manulDown.list.dashStyle` | `false` | Use `-` as the bullet marker style |
-| `manulDown.list.indentSize` | `2` | Default nested list indentation width (`2` or `4` spaces) when the document style cannot be detected |
-| `manulDown.images.moveWithDocument` | `true` | Move used images from the document's image folder when its Markdown file is moved or renamed in VSCode |
-| `manulDown.security.allowRemoteImages` | `false` | Allow remote http/https images to load inside the editor |
-| `manulDown.security.allowRemoteImageImport` | `false` | Allow pasted or dropped remote http/https image URLs to be downloaded into the workspace |
-| `manulDown.security.allowFileLinks` | `false` | Allow `file://` links to be opened from the editor |
+| `manulDown.toc.enabled` | `true` | Automatically show a table of contents when headings exist |
+| `manulDown.openByDefault` | `true` | Open Markdown with ManulDown by default |
+| `manulDown.list.dashStyle` | `false` | Use `-` for bullet markers |
+| `manulDown.list.indentSize` | `2` | Indentation width when the document style cannot be detected (`2` or `4` spaces) |
+| `manulDown.images.moveWithDocument` | `true` | Move images with document moves and renames |
+| `manulDown.security.allowRemoteImages` | `false` | Display remote HTTP/HTTPS images |
+| `manulDown.security.allowRemoteImageImport` | `false` | Download and import remote HTTP/HTTPS images |
+| `manulDown.security.allowFileLinks` | `false` | Open `file://` and local links outside the workspace |
 
-Security notes:
+The `manulDown.security.*` options can only be changed in user settings. Enabling them allows outbound requests, image downloads, or opening local files, applications, and network shares. Enable them only for Markdown you trust.
 
-The `manulDown.security.*` options are disabled by default. Enabling them can let Markdown documents trigger outbound network requests, download files from external sources, disclose network metadata such as IP address or access time, or open local `file://` targets such as files, applications, shortcuts, or Windows network shares. Only enable these options when you trust the Markdown files you open.
-
-Link selection runs only after you invoke the link command. Text entered in the inline URL/path field is sent to VSCode's extension host for validation; workspace file discovery stays in the host, and the editable document receives only bounded display labels and relative candidate paths. Candidate selection is resolved through a short-lived opaque ID and revalidated before insertion. New external links are limited to HTTP, HTTPS, and `mailto:` URLs, and ManulDown does not probe or open them while creating a link. Pasted absolute paths and explicit relative paths are accepted only for a real, non-symbolic file inside the current document's workspace and are converted to an encoded relative path; rejected absolute-path pastes remain plain text without probing outside the workspace. Workspace links remain relative, and links that resolve outside the current workspace folder stay blocked unless `manulDown.security.allowFileLinks` is enabled.
-
-### Markdown Syntax
-
-The editor automatically converts the following Markdown patterns:
-
-- `# Heading` -> Heading 1
-- `## Heading` -> Heading 2
-- `### Heading` -> Heading 3
-- `**text**` -> **bold**
-- `*text*` -> *italic*
-- `- item` -> Unordered list
-- `1. item` -> Ordered list
-- `` ```javascript `` -> Code block (type a language after `` ``` `` and press `Enter`)
-- `$tex$` -> Inline formula
-- `$$` -> Math block (press `Enter` on a line with only `$$`)
+Creating a link does not access its URL. Opening local links outside the workspace requires `manulDown.security.allowFileLinks`.
 
 ## Development
 
-### Project Structure
-
-```
-manuldown/
-|-- src/
-|   |-- extension.ts              # Extension entry point
-|   |-- editor/
-|   |   |-- MarkdownEditorProvider.ts  # Custom editor provider
-|   |   `-- MarkdownDocument.ts        # Markdown document handling
-|   `-- utils/
-|       `-- getNonce.ts           # Security utility
-|-- media/
-|   |-- editor.js                 # Webview entry point
-|   |-- editor.css                # Editor styles
-|   `-- modules/                  # Modularized webview features
-|       |-- CodeBlockManager.js
-|       |-- CursorManager.js
-|       |-- DOMUtils.js
-|       |-- ListManager.js
-|       |-- MarkdownConverter.js
-|       |-- MathManager.js
-|       |-- SearchManager.js
-|       |-- StateManager.js
-|       |-- TableManager.js
-|       |-- TableOfContentsManager.js
-|       `-- ToolbarManager.js
-|-- images/                       # README/document images
-|-- out/                          # Compiled output
-|-- README.md                     # Overview
-|-- USAGE.md                      # Detailed usage guide
-|-- package.json                  # Extension manifest
-`-- tsconfig.json                 # TypeScript config
+```sh
+npm ci
+npm run compile
+npm test
+npm run lint
 ```
 
-### Build Commands
-
-- `npm run compile`: Compile TypeScript
-- `npm run watch`: Compile on file changes
-- `npm run lint`: Run lint checks
-
-## Tech Stack
-
-- **TypeScript**: Type-safe development
-- **VSCode Extension API**: Extension platform
-- **Custom Editor API**: Custom editor implementation
-- **Webview API**: Editor UI rendering
-- **marked**: Markdown-to-HTML conversion
-- **turndown**: HTML-to-Markdown conversion
-- **Prism.js**: Syntax highlighting
-- **KaTeX**: Math rendering
-- **contenteditable**: WYSIWYG editing behavior
+Use `npm run watch` to watch TypeScript changes. Extension code is in `src/`, editor UI in `media/`, and tests in `test/`. See [CHANGELOG.md](./CHANGELOG.md) for release history.
 
 ## License
 
-MIT
+[MIT](./LICENSE)
