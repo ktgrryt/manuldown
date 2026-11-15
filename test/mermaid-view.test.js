@@ -14,9 +14,10 @@ const modules = Promise.all([
     importModule('CodeBlockManager.js'), importModule('DOMUtils.js'), importModule('StateManager.js'),
 ]);
 
-async function fixture(t, html = '<pre><code class="language-mermaid">graph TD\nA--&gt;B</code></pre>') {
+async function fixture(t, html = '<pre><code class="language-mermaid">graph TD\nA--&gt;B</code></pre>', options = {}) {
     const window = domino.createWindow(`<div id="editor" contenteditable="true">${html}</div>`);
     const document = window.document;
+    document.body.className = options.themeClass || '';
     const editor = document.getElementById('editor');
     let focused = null;
     Object.defineProperty(document, 'activeElement', { get: () => focused });
@@ -36,24 +37,35 @@ async function fixture(t, html = '<pre><code class="language-mermaid">graph TD\n
         removeAllRanges: () => { range = null; },
     });
     const renders = [];
+    const initializations = [];
     window.mermaid = {
-        initialize() {},
+        initialize(config) { initializations.push(config); },
         render(_id, code) {
             renders.push(code);
             return '<svg xmlns="http://www.w3.org/2000/svg"><text>Diagram</text></svg>';
         },
     };
-    const originals = new Map();
-    for (const [key, value] of Object.entries({
+    const globals = {
         window, document, Node: window.Node, navigator: { platform: 'MacIntel' },
         Prism: { languages: {} }, CustomEvent: window.CustomEvent,
-    })) {
+    };
+    const observers = [];
+    if (options.observeThemes) {
+        globals.MutationObserver = class {
+            constructor(callback) { this.callback = callback; observers.push(this); }
+            observe(target, config) { this.target = target; this.config = config; }
+            disconnect() {}
+        };
+    }
+    const originals = new Map();
+    for (const [key, value] of Object.entries(globals)) {
         originals.set(key, Object.getOwnPropertyDescriptor(global, key));
         Object.defineProperty(global, key, { configurable: true, writable: true, value });
     }
     const [{ CodeBlockManager }, { DOMUtils }, { StateManager }] = await modules;
     const manager = new CodeBlockManager(editor);
     t.after(() => {
+        manager.themeObserver?.disconnect();
         manager._closeMermaidExportMenu();
         manager._stopCopyButtonStateReconciler();
         editor.querySelectorAll('pre').forEach(pre => manager._clearMermaidPreview(pre));
@@ -82,7 +94,7 @@ async function fixture(t, html = '<pre><code class="language-mermaid">graph TD\n
     const pre = editor.querySelector('pre');
     manager.highlightCodeBlocks();
     return {
-        editor, pre, manager, domUtils, history, clickView, renders, dispatch, document,
+        editor, pre, manager, domUtils, history, clickView, renders, dispatch, document, initializations, observers,
         get focused() { return focused; },
         selectCode: () => { range = { startContainer: pre.querySelector('code').firstChild }; },
         get range() { return range; },
@@ -104,6 +116,57 @@ test('opening Mermaid blocks defaults to diagrams and exposes the toggle beside 
     assert.equal(actions.querySelectorAll('[role="switch"]').length, 1);
     assert.ok(actions.querySelector('.code-block-copy-btn'));
     assert.equal(actions.querySelectorAll('.code-block-export-btn').length, 2);
+});
+
+test('Mermaid uses the current VSCode light, dark and high contrast themes on opening', async t => {
+    for (const [themeClass, background] of [
+        ['vscode-light', '#ffffff'],
+        ['vscode-dark', '#1e1e1e'],
+        ['vscode-high-contrast', '#1e1e1e'],
+        ['vscode-high-contrast-light', '#ffffff'],
+    ]) {
+        await t.test(themeClass, async t => {
+            const f = await fixture(t, undefined, { themeClass });
+            assert.equal(f.initializations.length, 1);
+            assert.equal(f.initializations[0].themeVariables.background, background);
+            assert.ok(f.pre.querySelector('.mermaid-preview svg'));
+        });
+    }
+});
+
+test('Mermaid redraws for VSCode theme changes without changing source, view or undo history', async t => {
+    const f = await fixture(t, undefined, { themeClass: 'vscode-light', observeThemes: true });
+    const observer = f.observers.find(observer => observer.target === f.document.body);
+    assert.deepEqual(observer.config, { attributes: true, attributeFilter: ['class'] });
+    const source = f.pre.querySelector('code').textContent;
+    const before = f.domUtils.getCleanedHTML({ historyComparable: true });
+    const renders = f.renders.length;
+    f.history.seedState();
+    f.history.redoStack.push({ html: 'redo state' });
+
+    f.document.body.className = 'vscode-dark';
+    observer.callback();
+    assert.equal(f.initializations.length, 2);
+    assert.equal(f.initializations[1].themeVariables.background, '#1e1e1e');
+    assert.equal(f.renders.length, renders + 1);
+    assert.equal(f.pre.querySelector('code').textContent, source);
+    assert.equal(f.pre.getAttribute('data-mermaid-view'), 'diagram');
+    assert.equal(f.domUtils.getCleanedHTML({ historyComparable: true }), before);
+    f.history.commitStateAfterChange();
+    assert.equal(f.history.undoStack.length, 1);
+    assert.equal(f.history.redoStack.length, 1);
+
+    // The editor also changes body classes for layout and accessibility state.
+    f.document.body.className = 'vscode-high-contrast editor-overflowing';
+    observer.callback();
+    assert.equal(f.initializations.length, 2);
+    assert.equal(f.renders.length, renders + 1);
+
+    f.document.body.className = 'vscode-high-contrast-light';
+    observer.callback();
+    assert.equal(f.initializations.length, 3);
+    assert.equal(f.initializations[2].themeVariables.background, '#ffffff');
+    assert.equal(f.renders.length, renders + 2);
 });
 
 test('the native Preview switch keeps Enter and Space activation away from editor shortcuts', async t => {

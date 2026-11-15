@@ -137,17 +137,6 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
         return Math.max(TOC_PANEL_MIN_WIDTH, Math.min(TOC_PANEL_MAX_WIDTH, Math.round(value)));
     }
 
-    function normalizeEditorThemeMode(value) {
-        if (typeof value !== 'string') {
-            return 'vscode';
-        }
-        const normalized = value.toLowerCase();
-        if (normalized === 'light' || normalized === 'dark') {
-            return normalized;
-        }
-        return 'vscode';
-    }
-
     const initialSettings = window.__manulDownSettings || {};
     const settingsState = {
         toolbarVisible: initialSettings.toolbarVisible !== false,
@@ -155,7 +144,6 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
         tocPanelWidth: normalizeTocPanelWidth(initialSettings.tocPanelWidth),
         useVsCodeCtrlP: initialSettings.useVsCodeCtrlP !== false,
         listDashStyle: initialSettings.listDashStyle === true,
-        editorThemeMode: normalizeEditorThemeMode(initialSettings.editorThemeMode),
         allowRemoteImages: initialSettings.allowRemoteImages === true,
         allowRemoteImageImport: initialSettings.allowRemoteImageImport === true,
         allowFileLinks: initialSettings.allowFileLinks === true
@@ -1531,7 +1519,6 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
         document.body.dataset.toolbarVisible = settingsState.toolbarVisible ? 'true' : 'false';
         document.body.dataset.tocEnabled = settingsState.tocEnabled ? 'true' : 'false';
         document.body.dataset.listDashStyle = settingsState.listDashStyle ? 'true' : 'false';
-        document.body.dataset.themeMode = settingsState.editorThemeMode;
         document.body.dataset.platform = isMac ? 'mac' : 'other';
     };
     syncBodySettings();
@@ -1713,12 +1700,7 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
     const markdownConverter = new MarkdownConverter(editor, domUtils, {
         applyImageSourcePolicy
     });
-    const codeBlockManager = new CodeBlockManager(
-        editor,
-        cursorManager,
-        vscode,
-        settingsState.editorThemeMode
-    );
+    const codeBlockManager = new CodeBlockManager(editor, cursorManager, vscode);
     new MermaidViewer(editor);
     const tocManager = new TableOfContentsManager(editor, tocContainer, tocContent, tocEmpty, {
         enabled: settingsState.tocEnabled,
@@ -1977,9 +1959,6 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
         if (typeof nextSettings.listDashStyle === 'boolean') {
             settingsState.listDashStyle = nextSettings.listDashStyle;
         }
-        if (typeof nextSettings.editorThemeMode === 'string') {
-            settingsState.editorThemeMode = normalizeEditorThemeMode(nextSettings.editorThemeMode);
-        }
         if (typeof nextSettings.allowRemoteImages === 'boolean') {
             settingsState.allowRemoteImages = nextSettings.allowRemoteImages;
         }
@@ -1990,7 +1969,6 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
             settingsState.allowFileLinks = nextSettings.allowFileLinks;
         }
         syncBodySettings();
-        codeBlockManager.setThemeMode(settingsState.editorThemeMode);
         applyTocPanelWidth();
         syncToolbarBulletLabel();
         toolbarManager.updateOverflowLayout();

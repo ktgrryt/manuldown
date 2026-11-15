@@ -18,7 +18,7 @@ function codeBlockToolbarIcon(name) {
 }
 
 export class CodeBlockManager {
-    constructor(editor, cursorManager = null, vscodeApi = null, themeMode = 'vscode') {
+    constructor(editor, cursorManager = null, vscodeApi = null) {
         this.editor = editor;
         this.cursorManager = cursorManager;
         this.vscode = vscodeApi;
@@ -58,7 +58,7 @@ export class CodeBlockManager {
         this.mathRenderHandles = new WeakMap();
         this.transientMathSources = new Set();
         this.mathSourceCompositionActive = false;
-        this.editorThemeMode = this._normalizeThemeMode(themeMode);
+        this.themeObserver = null;
         this.clipboardWriteRequestSeq = 0;
         this.copyButtonStateReconcilerHandle = null;
         this.codeBlockControlReconcileScheduled = false;
@@ -91,6 +91,7 @@ export class CodeBlockManager {
         }
         this._observeCodeBlockControlMutations();
         this._initMermaid();
+        this._observeThemeChanges();
         // A math block's source is TeX; highlight it as LaTeX.
         if (typeof Prism !== 'undefined' && Prism.languages?.latex && !Prism.languages.math) {
             Prism.languages.math = Prism.languages.latex;
@@ -122,31 +123,7 @@ export class CodeBlockManager {
         this._rerenderMathBlocks();
     }
 
-    setThemeMode(themeMode) {
-        const normalized = this._normalizeThemeMode(themeMode);
-        if (normalized === this.editorThemeMode && this.mermaidInitialized) {
-            return;
-        }
-        this.editorThemeMode = normalized;
-        this._initMermaid();
-        this._rerenderMermaidBlocks();
-    }
-
-    _normalizeThemeMode(themeMode) {
-        const normalized = String(themeMode || 'vscode').toLowerCase();
-        if (normalized === 'light' || normalized === 'dark') {
-            return normalized;
-        }
-        return 'vscode';
-    }
-
     _isDarkTheme() {
-        if (this.editorThemeMode === 'dark') {
-            return true;
-        }
-        if (this.editorThemeMode === 'light') {
-            return false;
-        }
         if (typeof document === 'undefined' || !document.body) {
             return true;
         }
@@ -158,6 +135,21 @@ export class CodeBlockManager {
 
     _getMermaidThemeKey() {
         return this._isDarkTheme() ? 'dark' : 'light';
+    }
+
+    _observeThemeChanges() {
+        if (typeof MutationObserver === 'undefined' || typeof document === 'undefined' || !document.body) {
+            return;
+        }
+        let themeKey = this._getMermaidThemeKey();
+        this.themeObserver = new MutationObserver(() => {
+            const nextThemeKey = this._getMermaidThemeKey();
+            if (nextThemeKey === themeKey) return;
+            themeKey = nextThemeKey;
+            this._initMermaid();
+            this._rerenderMermaidBlocks();
+        });
+        this.themeObserver.observe(document.body, { attributes: true, attributeFilter: ['class'] });
     }
 
     _getMermaidThemeVariables() {

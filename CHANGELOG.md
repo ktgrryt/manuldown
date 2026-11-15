@@ -6,6 +6,9 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 
 ## [Unreleased]
 
+### Changed
+- Always follow the active VSCode color theme, including high contrast themes, instead of offering separate editor theme modes.
+
 ### Added
 - Move used images from `images/<document name>/` with Markdown files moved or renamed through VSCode in trusted workspaces, updating relative paths and keeping image operations in the same Undo/Redo step. Shared images are copied, existing files are preserved with numbered names, and unused images stay in place. Disable with `manulDown.images.moveWithDocument`.
 - Defer to VSCode's built-in link updater and notify when `markdown.updateLinksOnFileMove.enabled` is `always` or `prompt`; image moves run with the default `never` setting.

@@ -208,12 +208,13 @@ VSCodeの設定（`Ctrl+,` / `Cmd+,`）で、以下のオプションを変更�
 
 ツールバーの **…** メニューから **Settings** を選ぶか、`/settings` を実行すると、ManulDownの項目に絞り込んだ設定画面を開けます。
 
+エディタの配色は、高コントラストを含めVSCodeのテーマに追従します。
+
 | 設定 | 既定値 | 説明 |
 | --- | --- | --- |
 | `manulDown.toolbar.visible` | `true` | ツールバーを表示します |
 | `manulDown.toc.enabled` | `true` | 見出しがある場合に目次を自動表示します |
 | `manulDown.openByDefault` | `true` | Markdownファイルを既定でManulDownで開きます（`workbench.editorAssociations` を即座に更新します） |
-| `manulDown.editor.theme` | `"vscode"` | エディタのテーマ: `"vscode"`（VSCodeに合わせる）、`"light"`、`"dark"` |
 | `manulDown.list.dashStyle` | `false` | 箇条書きのマーカーに `-` を使用します |
 | `manulDown.list.indentSize` | `2` | 文書のスタイルを検出できない場合の、入れ子のリストの既定インデント幅（`2` または `4` スペース） |
 | `manulDown.images.moveWithDocument` | `true` | VSCodeでMarkdownを移動・名前変更したとき、文書の画像フォルダ内で使用中の画像も移動します |

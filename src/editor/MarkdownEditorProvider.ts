@@ -24,7 +24,6 @@ type CustomSlashCommandTemplate = {
     content: string;
 };
 type UnorderedListMarker = '-' | '*' | '+';
-type EditorThemeMode = 'vscode' | 'light' | 'dark';
 type MarkdownListLineInfo = {
     lineIndex: number;
     sequenceIndex: number;
@@ -4634,25 +4633,16 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         tocPanelWidth: number;
         useVsCodeCtrlP: boolean;
         listDashStyle: boolean;
-        editorThemeMode: EditorThemeMode;
         allowRemoteImages: boolean;
         allowRemoteImageImport: boolean;
         allowFileLinks: boolean;
     } {
-        const config = vscode.workspace.getConfiguration('manulDown');
-        const configuredThemeMode = String(config.get<string>('editor.theme', 'vscode')).toLowerCase();
-        const editorThemeMode: EditorThemeMode = configuredThemeMode === 'light'
-            ? 'light'
-            : configuredThemeMode === 'dark'
-                ? 'dark'
-                : 'vscode';
         return {
             toolbarVisible: this.getBooleanSetting('toolbar.visible', true),
             tocEnabled: this.getBooleanSetting('toc.enabled', true),
             tocPanelWidth: this.tocPanelWidthPx,
             useVsCodeCtrlP: true,
             listDashStyle: this.getBooleanSetting('list.dashStyle', false),
-            editorThemeMode,
             allowRemoteImages: this.getBooleanSetting('security.allowRemoteImages', false),
             allowRemoteImageImport: this.getBooleanSetting('security.allowRemoteImageImport', false),
             allowFileLinks: this.getBooleanSetting('security.allowFileLinks', false),
@@ -4683,7 +4673,6 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             : `${webview.cspSource} data:`;
         const toolbarVisibleAttr = settings.toolbarVisible ? 'true' : 'false';
         const tocEnabledAttr = settings.tocEnabled ? 'true' : 'false';
-        const themeModeAttr = settings.editorThemeMode;
 
         // Keep assets cacheable between editor opens while still invalidating
         // them when a new extension version is installed.
@@ -4745,20 +4734,6 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             color: var(--vscode-editor-foreground, #d4d4d4);
         }
 
-        body[data-theme-mode="light"] {
-            --manuldown-loading-background: #ffffff;
-            --manuldown-loading-foreground: #57606a;
-            --manuldown-loading-track: #d0d7de;
-            --manuldown-loading-accent: #0969da;
-        }
-
-        body[data-theme-mode="dark"] {
-            --manuldown-loading-background: #1e1e1e;
-            --manuldown-loading-foreground: #9da4ad;
-            --manuldown-loading-track: #454545;
-            --manuldown-loading-accent: #007fd4;
-        }
-
         body[data-editor-state="loading"] > [data-editor-content],
         body[data-editor-state="style-error"] > [data-editor-content] {
             visibility: hidden !important;
@@ -4774,14 +4749,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             justify-content: center;
             gap: 12px;
             box-sizing: border-box;
-            background: var(
-                --manuldown-loading-background,
-                var(--vscode-editor-background, #1e1e1e)
-            );
-            color: var(
-                --manuldown-loading-foreground,
-                var(--vscode-descriptionForeground, #a0a0a0)
-            );
+            background: var(--vscode-editor-background, #1e1e1e);
+            color: var(--vscode-descriptionForeground, #a0a0a0);
             font-family: var(
                 --vscode-font-family,
                 -apple-system,
@@ -4801,14 +4770,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             width: 24px;
             height: 24px;
             box-sizing: border-box;
-            border: 2px solid var(
-                --manuldown-loading-track,
-                var(--vscode-editorWidget-border, #555555)
-            );
-            border-top-color: var(
-                --manuldown-loading-accent,
-                var(--vscode-progressBar-background, #0e70c0)
-            );
+            border: 2px solid var(--vscode-editorWidget-border, #555555);
+            border-top-color: var(--vscode-progressBar-background, #0e70c0);
             border-radius: 50%;
             animation: manuldown-loading-spin 0.8s linear infinite;
         }
@@ -4837,7 +4800,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     <link href="${prismCssUri}" rel="stylesheet">
     <title>ManulDown</title>
 </head>
-<body data-toolbar-visible="${toolbarVisibleAttr}" data-toc-enabled="${tocEnabledAttr}" data-theme-mode="${themeModeAttr}" data-mermaid-script-src="${mermaidUri}" data-katex-script-src="${katexScriptUri}" data-katex-style-href="${katexStyleUri}" data-editor-state="loading">
+<body data-toolbar-visible="${toolbarVisibleAttr}" data-toc-enabled="${tocEnabledAttr}" data-mermaid-script-src="${mermaidUri}" data-katex-script-src="${katexScriptUri}" data-katex-style-href="${katexStyleUri}" data-editor-state="loading">
     <div id="editor-loading" role="status" aria-live="polite" aria-atomic="true">
         <div class="editor-loading-spinner" aria-hidden="true"></div>
         <div class="editor-loading-label">Loading ManulDown&hellip;</div>
