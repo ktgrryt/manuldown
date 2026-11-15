@@ -61,7 +61,9 @@ function locate(text: string, source: SourceText, from = 0): { source: SourceTex
         let found = source.text.indexOf(content, cursor);
         let positions: number[] | undefined;
         if (found === -1) {
-            // GFM removes the escape before a pipe in table-cell token.raw.
+            // Marked expands indentation tabs and removes table pipe escapes.
+            // Match their normalized forms, then map every token character
+            // (including a tab that remained literal) back to the source.
             const remaining = source.text.slice(cursor);
             const indices: number[] = [];
             let unescaped = '';
@@ -69,12 +71,20 @@ function locate(text: string, source: SourceText, from = 0): { source: SourceTex
                 if (remaining[index] === '\\' && remaining[index + 1] === '|') {
                     index++;
                 }
-                unescaped += remaining[index];
-                indices.push(cursor + index);
+                const expanded = remaining[index] === '\t' ? '    ' : remaining[index];
+                unescaped += expanded;
+                indices.push(...Array<number>(expanded.length).fill(cursor + index));
             }
-            const match = unescaped.indexOf(content);
+            const tokenPositions: number[] = [];
+            let normalized = '';
+            for (let index = 0; index < content.length; index++) {
+                const character = content[index];
+                tokenPositions.push(normalized.length);
+                normalized += character === '\t' ? '    ' : character;
+            }
+            const match = unescaped.indexOf(normalized);
             if (match !== -1) {
-                positions = indices.slice(match, match + content.length);
+                positions = tokenPositions.map(position => indices[match + position]);
                 found = positions[0];
             }
         }
@@ -157,10 +167,14 @@ function collectPaths(markdown: string, includeLinks: boolean): PathReference[] 
     const definitions: Array<{ label: string; href: string; source: SourceText; start: number; end: number }> = [];
     const usedDefinitions = new Set<string>();
     const seenFootnotes = new Set<number>();
+    const rawHtmlRanges: Array<[number, number]> = [];
+    const inRawHtml = (position: number): boolean =>
+        rawHtmlRanges.some(([start, end]) => position >= start && position < end);
     const normalizeLabel = (label: string): string => label.toLowerCase().replace(/\s+/g, ' ');
 
     const add = (source: SourceText, start: number, end: number, href: string, html = false, quote?: string): void => {
-        if (start >= end || source.offsets[start] === undefined || source.offsets[end - 1] === undefined) {
+        if (start >= end || source.offsets[start] === undefined || source.offsets[end - 1] === undefined ||
+            inRawHtml(source.offsets[start])) {
             return;
         }
         references.push({ start: source.offsets[start], end: source.offsets[end - 1] + 1,
@@ -170,6 +184,9 @@ function collectPaths(markdown: string, includeLinks: boolean): PathReference[] 
     const scanDefinitions = (source: SourceText): void => {
         const lines = /^(?: {0,3})\[/gm;
         for (let match; (match = lines.exec(source.text));) {
+            if (inRawHtml(source.offsets[match.index])) {
+                continue;
+            }
             const definition = tokenizer.def(source.text.slice(match.index));
             if (!definition || definition.tag.startsWith('^') || tokens.links[definition.tag]?.href !== definition.href) {
                 continue;
@@ -186,9 +203,26 @@ function collectPaths(markdown: string, includeLinks: boolean): PathReference[] 
     const scanHtml = (source: SourceText): void => {
         // Comments and raw-text/code elements may contain strings resembling
         // tags. They do not provide image references to relocate.
-        const tags = /<!--[\s\S]*?(?:-->|$)|<(script|style|pre|code|textarea)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)|<([a-z][\w:-]*)\b(?:"[^"]*"|'[^']*'|[^'">])*>/gi;
+        const tags = /<!--[\s\S]*?(?:-->|$)|<\/?([a-z][\w:-]*)\b(?:"[^"]*"|'[^']*'|[^'">])*>/gi;
         for (let tag; (tag = tags.exec(source.text));) {
-            const name = tag[2]?.toLowerCase();
+            const position = source.offsets[tag.index];
+            if (inRawHtml(position)) {
+                continue;
+            }
+            const name = tag[1]?.toLowerCase();
+            if (name && /^(?:script|style|pre|code|textarea)$/.test(name) && !tag[0].startsWith('</')) {
+                // Inline HTML is split into separate tokens. Protect the whole
+                // original range, so its later HTML and Markdown-looking tokens
+                // cannot supply image paths or reference definitions either.
+                const closing = new RegExp(`<\\/${name}\\s*>`, 'gi');
+                closing.lastIndex = source.offsets[tag.index + tag[0].length - 1] + 1;
+                const end = closing.exec(markdown) ? closing.lastIndex : markdown.length;
+                rawHtmlRanges.push([position, end]);
+                continue;
+            }
+            if (tag[0].startsWith('</')) {
+                continue;
+            }
             const attribute = name === 'img' ? 'src' : includeLinks && name === 'a' ? 'href' : '';
             if (!attribute) {
                 continue;
@@ -215,7 +249,7 @@ function collectPaths(markdown: string, includeLinks: boolean): PathReference[] 
         const prefix = /^ {0,3}\[\^[^\[\]\s\\]+\]:[ \t]*/gm;
         for (let match; (match = prefix.exec(source.text));) {
             const position = source.offsets[match.index];
-            if (seenFootnotes.has(position) ||
+            if (seenFootnotes.has(position) || inRawHtml(position) ||
                 (match.index !== 0 && !/(?:^|\n)[ \t]*\n$/.test(source.text.slice(0, match.index))) ||
                 protectedRanges.some(([start, end]) => position >= start && position < end)) {
                 continue;
@@ -274,7 +308,7 @@ function collectPaths(markdown: string, includeLinks: boolean): PathReference[] 
                 scanHtml(raw);
                 continue;
             }
-            if (token.type === 'image' || (includeLinks && token.type === 'link')) {
+            if (!inRawHtml(raw.offsets[0]) && (token.type === 'image' || (includeLinks && token.type === 'link'))) {
                 const closing = closingBracket(token.raw, token.type === 'image' ? 1 : 0);
                 if (closing === -1 && token.type === 'link' && token.raw.startsWith('<') && token.raw.endsWith('>')) {
                     add(raw, 1, token.raw.length - 1, token.href);

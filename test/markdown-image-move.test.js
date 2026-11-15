@@ -100,14 +100,19 @@ const vscodeMock = {
             state.documents.set(selected.toString(), doc);
             return doc;
         },
-        findFiles: async (_include, _exclude, maxResults) => {
+        findFiles: async (include, _exclude, maxResults) => {
             if (state.findFilesError) throw state.findFilesError;
+            // Honor the requested extension glob so an omitted reader extension
+            // cannot be hidden by a more permissive test fixture.
+            assert.ok(typeof include === 'string' && include.startsWith('**/*.{') && include.endsWith('}'));
+            const extensionPatterns = include.slice('**/*.{'.length, -1).split(',')
+                .map(pattern => new RegExp(`\\.(?:${pattern})$`));
             const files = [];
             const walk = async directory => {
                 for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
                     const nativePath = path.join(directory, entry.name);
                     if (entry.isDirectory()) await walk(nativePath);
-                    else if (/\.(?:md|markdown)$/i.test(entry.name)) files.push(fileUri(nativePath));
+                    else if (extensionPatterns.some(pattern => pattern.test(entry.name))) files.push(fileUri(nativePath));
                 }
             };
             for (const root of state.workspaceRoots) await walk(root);
@@ -258,6 +263,130 @@ async function fixture(t) {
     return { root, workspace, state, selected, write, read, exists, plan, apply, mover };
 }
 function assetOperations(edit) { return edit.operations.filter(op => op.kind === 'create' || op.kind === 'rename'); }
+
+test('case variants protect aliases of shared images without conflating distinct files', async t => {
+    const f = await fixture(t);
+    await f.write('docs/doc.md', '![image](images/doc/photo.png)\n');
+    await f.write('docs/images/doc/photo.png', 'SOURCE');
+    const caseInsensitive = await f.exists('docs/images/doc/PHOTO.PNG');
+    if (!caseInsensitive) {
+        await f.write('docs/images/doc/PHOTO.PNG', 'DISTINCT');
+    }
+    await f.write('overview.md', '![other](docs/images/doc/PHOTO.PNG)\n');
+    const edit = await f.plan();
+    assert.equal(assetOperations(edit).length, 1);
+    assert.equal(assetOperations(edit)[0].kind, caseInsensitive ? 'create' : 'rename');
+    const undo = await f.apply(edit);
+    assert.equal(await f.read('docs/images/doc/PHOTO.PNG'), caseInsensitive ? 'SOURCE' : 'DISTINCT');
+    assert.equal(await f.read('archive/images/doc/photo.png'), 'SOURCE');
+    await undo();
+    assert.equal(await f.read('docs/images/doc/photo.png'), 'SOURCE');
+});
+
+test('case-variant image references transfer each physical image once and keep every reference working', async t => {
+    const f = await fixture(t);
+    await f.write('docs/doc.md', '![first](images/doc/photo.png)\n![second](images/doc/PHOTO.PNG)\n');
+    await f.write('docs/images/doc/photo.png', 'FIRST');
+    const caseInsensitive = await f.exists('docs/images/doc/PHOTO.PNG');
+    if (!caseInsensitive) {
+        await f.write('docs/images/doc/PHOTO.PNG', 'SECOND');
+    }
+    const files = [{ oldUri: f.selected('docs/doc.md'), newUri: f.selected('archive/renamed.md') }];
+    const edit = await f.mover.createEdit(files, uncancelled);
+    assert.equal(assetOperations(edit).length, caseInsensitive ? 1 : 2);
+    await f.apply(edit, files);
+    const references = collectMarkdownFilePaths(await f.read('archive/renamed.md'));
+    const contents = await Promise.all(references.map(reference =>
+        fs.readFile(path.resolve(f.workspace, 'archive', decodeURIComponent(reference.path)), 'utf8')));
+    assert.deepEqual(contents, ['FIRST', caseInsensitive ? 'FIRST' : 'SECOND']);
+});
+
+test('case variants of the owned image directory retain their real relative subpaths', async t => {
+    const f = await fixture(t);
+    await f.write('docs/doc.md', '![image](IMAGES/DOC/nested/photo.png)\n');
+    await f.write('docs/images/doc/nested/photo.png', 'OWNED');
+    const caseInsensitive = await f.exists('docs/IMAGES/DOC/nested/photo.png');
+    if (!caseInsensitive) {
+        await f.write('docs/IMAGES/DOC/nested/photo.png', 'OUTSIDE OWNED DIRECTORY');
+    }
+    const files = [{ oldUri: f.selected('docs/doc.md'), newUri: f.selected('archive/renamed.md') }];
+    const edit = await f.mover.createEdit(files, uncancelled);
+    assert.equal(assetOperations(edit).length, caseInsensitive ? 1 : 0);
+    if (caseInsensitive) {
+        await f.apply(edit, files);
+        assert.equal(await f.read('archive/images/renamed/nested/photo.png'), 'OWNED');
+        assert.equal(await f.read('archive/renamed.md'), '![image](images/renamed/nested/photo.png)\n');
+    }
+});
+
+for (const extension of ['mkd', 'mkdn', 'mdwn', 'mdown', 'MARKDN', 'mdtxt', 'mdtext',
+    'litcoffee', 'ron', 'ronn', 'workbook', 'mdc']) {
+    test(`a closed .${extension} Markdown reader protects its shared image`, async t => {
+        const f = await fixture(t);
+        await f.write('docs/doc.md', '![image](images/doc/doc.png)\n');
+        await f.write('docs/images/doc/doc.png', 'SHARED');
+        await f.write(`overview.${extension}`, '![other](docs/images/doc/doc.png)\n');
+        assert.equal(state.documents.size, 0);
+        const edit = await f.plan();
+        assert.equal(assetOperations(edit)[0].kind, 'create');
+        await f.apply(edit);
+        assert.equal(await f.read('docs/images/doc/doc.png'), 'SHARED');
+        assert.equal(await f.read('archive/images/doc/doc.png'), 'SHARED');
+    });
+}
+
+for (const referenceStyle of ['file URI', 'absolute native path', 'workspace-relative root path']) {
+    test(`a ${referenceStyle} inside the moved document follows its image and preserves URL suffixes`, async t => {
+        const f = await fixture(t);
+        const image = await f.write('docs/images/doc/doc.png', 'IMAGE');
+        const href = referenceStyle === 'file URI' ? pathToFileURL(image.fsPath).href :
+            referenceStyle === 'absolute native path' ? image.fsPath : '/docs/images/doc/doc.png';
+        const suffix = '?view=1&zoom=2#crop';
+        const original = `![image](images/doc/doc.png)\n[download](<${href}${suffix}>)\n` +
+            `<a href="${href}?view=1&amp;zoom=2#crop">download</a>\n` +
+            (referenceStyle === 'file URI' ? `<${href}#preview>\n` : '');
+        await f.write('docs/doc.md', original);
+        const files = [{ oldUri: f.selected('docs/doc.md'), newUri: f.selected('archive/renamed.md') }];
+        const edit = await f.mover.createEdit(files, uncancelled);
+        const undo = await f.apply(edit, files);
+        const target = referenceStyle === 'file URI'
+            ? pathToFileURL(f.selected('archive/images/renamed/doc.png').fsPath).href : 'images/renamed/doc.png';
+        assert.equal(await f.read('archive/renamed.md'), '![image](images/renamed/doc.png)\n' +
+            `[download](<${target}${suffix}>)\n<a href="${target}?view=1&amp;zoom=2#crop">download</a>\n` +
+            (referenceStyle === 'file URI' ? `<${target}#preview>\n` : ''));
+        assert.equal(await f.read('archive/images/renamed/doc.png'), 'IMAGE');
+        await undo();
+        assert.equal(await f.read('docs/doc.md'), original);
+        assert.equal(await f.read('docs/images/doc/doc.png'), 'IMAGE');
+    });
+}
+
+for (const reference of ['-\t![shared](docs/images/doc/doc.png)\n', '- item\n\t[download](docs/images/doc/doc.png)\n']) {
+    test('tab-indented Markdown readers keep their shared image when another document moves', async t => {
+        const f = await fixture(t);
+        await f.write('docs/doc.md', '![image](images/doc/doc.png)\n');
+        await f.write('docs/images/doc/doc.png', 'SHARED');
+        await f.write('overview.md', reference);
+        const edit = await f.plan();
+        assert.equal(assetOperations(edit)[0].kind, 'create');
+        await f.apply(edit);
+        assert.equal(await f.read('docs/images/doc/doc.png'), 'SHARED');
+        assert.equal(await f.read('overview.md'), reference);
+    });
+}
+
+test('an inline textarea literal never triggers an image move or a text rewrite', async t => {
+    const f = await fixture(t);
+    const original = 'text <textarea><img src="images/doc/doc.png"></textarea>\n';
+    await f.write('docs/doc.md', original);
+    await f.write('docs/images/doc/doc.png', 'UNUSED');
+    const files = [{ oldUri: f.selected('docs/doc.md'), newUri: f.selected('archive/renamed.md') }];
+    const edit = await f.mover.createEdit(files, uncancelled);
+    assert.deepEqual(edit.operations, []);
+    await f.apply(edit, files);
+    assert.equal(await f.read('archive/renamed.md'), original);
+    assert.equal(await f.read('docs/images/doc/doc.png'), 'UNUSED');
+});
 
 test('moving only a Markdown file also moves its referenced dedicated images without changing the relative path', async t => {
     const f = await fixture(t);

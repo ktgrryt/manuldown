@@ -155,3 +155,45 @@ test('file URI autolinks count as readers of shared files', () => {
     assert.equal(reference.path, 'file:///workspace/images/doc/doc.png');
     assert.equal(markdown.slice(reference.start, reference.end), reference.path);
 });
+
+test('tab-indented lists retain image and link offsets, tabs, CRLF and Unicode', () => {
+    const markdown = '-\t😀 ![first](images/one.png)\r\n' +
+        '\t[download](images/shared.png)\r\n' +
+        '- second\r\n\t![second](images/two.png)\r\n' +
+        '\t- nested ![third](images/three.png)\r\n';
+    assert.deepEqual(paths(markdown), ['images/one.png', 'images/two.png', 'images/three.png']);
+    const references = collectMarkdownFilePaths(markdown);
+    assert.deepEqual(references.map(reference => reference.path),
+        ['images/one.png', 'images/shared.png', 'images/two.png', 'images/three.png']);
+    for (const reference of references) {
+        assert.equal(markdown.slice(reference.start, reference.end), reference.path);
+    }
+    assert.equal(rewriteMarkdownImagePaths(markdown, path => path.replace('images/', 'new/')),
+        markdown.replace('images/one.png', 'new/one.png').replace('images/two.png', 'new/two.png')
+            .replace('images/three.png', 'new/three.png'));
+});
+
+test('split inline raw HTML excludes literal images and links until its closing tag', () => {
+    for (const name of ['textarea', 'script', 'style', 'pre', 'code']) {
+        const markdown = `before <${name}><img src="images/fake.png">` +
+            `![fake](images/fake.png) <a href="images/fake.png">fake</a></${name}> ` +
+            '<img src="images/real.png"> [download](images/shared.png)\n';
+        assert.deepEqual(paths(markdown), ['images/real.png'], name);
+        assert.deepEqual(collectMarkdownFilePaths(markdown).map(reference => reference.path),
+            ['images/real.png', 'images/shared.png'], name);
+        assert.equal(rewriteMarkdownImagePaths(markdown, () => 'images/moved.png'),
+            markdown.replace('src="images/real.png"', 'src="images/moved.png"'), name);
+    }
+});
+
+test('literal raw HTML opening tags in code, escapes, comments and attributes do not hide real images', () => {
+    const markdown = '`<textarea>` \\<script> <!-- <style> --> ' +
+        '<span title="<code>">text</span> ![real](images/real.png)\n';
+    assert.deepEqual(paths(markdown), ['images/real.png']);
+});
+
+test('unclosed inline raw HTML protects the remaining literal contents', () => {
+    const markdown = 'before ![real](images/real.png) <textarea>\n\n' +
+        '<img src="images/fake.png">\n\n[^fake]: ![fake](images/fake.png)\n';
+    assert.deepEqual(paths(markdown), ['images/real.png']);
+});

@@ -9,17 +9,31 @@ type DocumentMove = {
     document: vscode.TextDocument;
     version: number;
     newUri: vscode.Uri;
-    images: Map<string, vscode.Uri>;
+    images: Map<string, { uri: vscode.Uri; relativePath: string }>;
 };
 type ImageDirectory = { uri: vscode.Uri; boundary: vscode.Uri };
 
 const maxSharedDocuments = 2000;
 const maxSharedDocumentBytes = 2 * 1024 * 1024;
 const maxSharedScanBytes = 32 * 1024 * 1024;
+// Keep closed readers consistent with VS Code's built-in Markdown language.
+const markdownExtensions = ['md', 'mkd', 'mkdn', 'mdwn', 'mdown', 'markdown', 'markdn',
+    'mdtxt', 'mdtext', 'litcoffee', 'ron', 'ronn', 'workbook', 'mdc'];
+const markdownReaderPattern = `**/*.{${markdownExtensions.map(extension =>
+    [...extension].map(character => `[${character}${character.toUpperCase()}]`).join('')).join(',')}}`;
+const markdownReaderExtension = new RegExp(`\\.(?:${markdownExtensions.join('|')})$`, 'i');
 
 function key(uri: vscode.Uri): string {
     const value = uri.with({ query: '', fragment: '' }).toString();
     return uri.scheme === 'file' && process.platform === 'win32' ? value.toLowerCase() : value;
+}
+
+function reservationKey(uri: vscode.Uri): string {
+    const value = key(uri);
+    // Missing destinations have no realpath yet. Reserve case variants together
+    // on macOS/Windows so a batch cannot plan two writes to the same pathname.
+    return uri.scheme === 'file' && (process.platform === 'darwin' || process.platform === 'win32')
+        ? value.toLowerCase() : value;
 }
 
 function imageDirectory(documentUri: vscode.Uri): vscode.Uri {
@@ -93,7 +107,41 @@ export class MarkdownImageMover {
         }
 
         const documents: DocumentMove[] = [];
-        const sources = new Map<string, vscode.Uri>();
+        const identities = new Map<string, Promise<string>>();
+        const knownSources = new Map<string, string>();
+        const sourceAliases = new Map<string, Set<string>>();
+        const existingKey = (uri: vscode.Uri): Promise<string> => {
+            const lexicalKey = key(uri);
+            let identity = identities.get(lexicalKey);
+            if (!identity) {
+                // Resolve existing files only: this respects the actual volume's
+                // case sensitivity without conflating distinct case-sensitive files.
+                identity = uri.scheme === 'file'
+                    ? fs.realpath(uri.fsPath).then(value => key(vscode.Uri.file(value)))
+                    : Promise.resolve(lexicalKey);
+                identities.set(lexicalKey, identity);
+            }
+            return identity;
+        };
+        const findSource = async (uri: vscode.Uri): Promise<string | undefined> => {
+            const lexicalKey = key(uri);
+            const known = knownSources.get(lexicalKey);
+            if (known) {
+                return known;
+            }
+            const candidates = sourceAliases.get(lexicalKey.toLowerCase());
+            if (!candidates) {
+                return undefined;
+            }
+            // Only inspect aliases of known sources, within the workspace and
+            // without following symbolic links. Never probe arbitrary reader URLs.
+            const root = vscode.workspace.getWorkspaceFolder(uri)?.uri;
+            if (!root || !await this.safePath(uri, root, false)) {
+                return undefined;
+            }
+            const identity = await existingKey(uri);
+            return candidates.has(identity) ? identity : undefined;
+        };
         let standardLinkUpdates = false;
         for (const move of files) {
             if (token.isCancellationRequested) {
@@ -117,20 +165,40 @@ export class MarkdownImageMover {
             const document = vscode.workspace.textDocuments.find(doc => key(doc.uri) === key(move.oldUri)) ||
                 await vscode.workspace.openTextDocument(move.oldUri);
             const version = document.version;
-            const images = new Map<string, vscode.Uri>();
+            const images: DocumentMove['images'] = new Map();
             const directory = imageDirectory(move.oldUri);
+            if (!await this.safePath(directory, root, false, true)) {
+                continue;
+            }
+            const directoryPath = directory.scheme === 'file' ? await fs.realpath(directory.fsPath) : directory.path;
             for (const reference of collectMarkdownImagePaths(document.getText())) {
                 if (token.isCancellationRequested) {
                     return empty;
                 }
                 const resolved = resolvePath(move.oldUri, reference.path);
-                if (!resolved || !isUriLexicallyWithinDirectory(resolved.uri, directory) ||
-                    !await this.safePath(resolved.uri, root, false)) {
+                if (!resolved || !await this.safePath(resolved.uri, root, false)) {
                     continue;
                 }
                 if ((await vscode.workspace.fs.stat(resolved.uri)).type === vscode.FileType.File) {
-                    images.set(key(resolved.uri), resolved.uri);
-                    sources.set(key(resolved.uri), resolved.uri);
+                    const sourceKey = await existingKey(resolved.uri);
+                    const sourcePath = resolved.uri.scheme === 'file'
+                        ? vscode.Uri.parse(sourceKey).fsPath : resolved.uri.path;
+                    const relative = resolved.uri.scheme === 'file'
+                        ? path.relative(directoryPath, sourcePath).replace(/\\/g, '/')
+                        : path.posix.relative(directoryPath, sourcePath);
+                    if (!relative || relative === '..' || relative.startsWith('../') || path.posix.isAbsolute(relative)) {
+                        continue;
+                    }
+                    if (!images.has(sourceKey)) {
+                        images.set(sourceKey, { uri: resolved.uri, relativePath: relative });
+                    }
+                    for (const spelling of [key(resolved.uri), sourceKey]) {
+                        knownSources.set(spelling, sourceKey);
+                        const alias = spelling.toLowerCase();
+                        const candidates = sourceAliases.get(alias) || new Set<string>();
+                        candidates.add(sourceKey);
+                        sourceAliases.set(alias, candidates);
+                    }
                 }
             }
             if (images.size) {
@@ -154,27 +222,28 @@ export class MarkdownImageMover {
             return empty;
         }
 
-        const readers = await this.findReaders(sources, token);
+        const readers = await this.findReaders(findSource, token);
         const edit = new vscode.WorkspaceEdit();
-        const reserved = new Set(files.map(move => key(move.newUri)));
+        const reserved = new Set(files.map(move => reservationKey(move.newUri)));
         const transfers = new Map<string, vscode.Uri>();
         const cleanupDirectories = new Map<string, ImageDirectory>();
         const metadata = { label: 'Move Markdown images', needsConfirmation: false };
         for (const move of documents) {
             const replacements = new Map<string, vscode.Uri>();
-            for (const [sourceKey, source] of move.images) {
+            for (const [sourceKey, image] of move.images) {
+                const source = image.uri;
                 if (token.isCancellationRequested) {
                     return empty;
                 }
                 const alreadyMoved = this.relocatedUri(source, files);
-                if (key(alreadyMoved) !== sourceKey) {
+                if (key(alreadyMoved) !== key(source)) {
                     // The user selected the image (or its parent) as well.
                     replacements.set(sourceKey, alreadyMoved);
                     continue;
                 }
                 const desired = vscode.Uri.joinPath(imageDirectory(move.newUri),
-                    path.posix.relative(imageDirectory(move.document.uri).path, source.path));
-                if (key(desired) === sourceKey) {
+                    image.relativePath);
+                if (key(desired) === key(source)) {
                     replacements.set(sourceKey, source);
                     continue;
                 }
@@ -218,15 +287,25 @@ export class MarkdownImageMover {
             // remainder of the document stay byte-for-byte as authored.
             const source = move.document.getText();
             for (const reference of collectMarkdownFilePaths(source)) {
-                const resolved = resolvePath(move.document.uri, reference.path);
-                const target = resolved && replacements.get(key(resolved.uri));
-                if (!resolved || !target) {
+                let target: vscode.Uri | undefined;
+                for (const resolved of resolveReaderPaths(move.document.uri, reference.path)) {
+                    const sourceKey = await findSource(resolved);
+                    target = sourceKey ? replacements.get(sourceKey) : undefined;
+                    if (target) {
+                        break;
+                    }
+                }
+                if (!target) {
                     continue;
                 }
-                if (key(resolvePath(move.newUri, reference.path)?.uri || move.newUri) === key(target)) {
+                if (resolveReaderPaths(move.newUri, reference.path).some(uri => key(uri) === key(target))) {
                     continue;
                 }
-                let href = relativeImagePath(move.newUri, target, reference.path) + resolved.suffix;
+                const suffixAt = reference.path.search(/[?#]/);
+                const suffix = suffixAt < 0 ? '' : reference.path.slice(suffixAt);
+                // Keep URI autolinks valid: <file:///...> cannot contain a relative path.
+                let href = (/^file:/i.test(reference.path) ? target.toString()
+                    : relativeImagePath(move.newUri, target, reference.path)) + suffix;
                 if (reference.format === 'html') {
                     href = href.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
                     if (!reference.quote) {
@@ -311,8 +390,8 @@ export class MarkdownImageMover {
             const candidate = sequence === 1 ? desired : desired.with({
                 path: path.posix.join(parsed.dir, `${parsed.name}-${sequence}${parsed.ext}`),
             });
-            if (!reserved.has(key(candidate)) && !await this.exists(candidate)) {
-                reserved.add(key(candidate));
+            if (!reserved.has(reservationKey(candidate)) && !await this.exists(candidate)) {
+                reserved.add(reservationKey(candidate));
                 return candidate;
             }
         }
@@ -375,17 +454,17 @@ export class MarkdownImageMover {
 
     /** An incomplete scan means copy, never assume an image is unshared. Read
      * dirty buffers first, and bound disk work for large workspaces. */
-    private async findReaders(sources: Map<string, vscode.Uri>, token: vscode.CancellationToken):
+    private async findReaders(findSource: (uri: vscode.Uri) => Promise<string | undefined>, token: vscode.CancellationToken):
         Promise<Map<string, Set<string>> | undefined> {
         const readers = new Map<string, Set<string>>();
         try {
-            const found = await vscode.workspace.findFiles('**/*.{[mM][dD],[mM][aA][rR][kK][dD][oO][wW][nN]}', null,
+            const found = await vscode.workspace.findFiles(markdownReaderPattern, null,
                 maxSharedDocuments + 1, token);
             if (found.length > maxSharedDocuments || token.isCancellationRequested) {
                 return undefined;
             }
             const open = new Map(vscode.workspace.textDocuments
-                .filter(doc => doc.languageId === 'markdown' || /\.(?:md|markdown)$/i.test(doc.uri.path))
+                .filter(doc => doc.languageId === 'markdown' || markdownReaderExtension.test(doc.uri.path))
                 .map(doc => [key(doc.uri), doc]));
             const versions = [...open.values()].map(document => ({ document, version: document.version }));
             const uris = new Map(found.map(uri => [key(uri), uri]));
@@ -425,8 +504,8 @@ export class MarkdownImageMover {
                 }
                 for (const reference of collectMarkdownFilePaths(text)) {
                     for (const resolved of resolveReaderPaths(uri, reference.path)) {
-                        const sourceKey = key(resolved);
-                        if (sources.has(sourceKey)) {
+                        const sourceKey = await findSource(resolved);
+                        if (sourceKey) {
                             const documents = readers.get(sourceKey) || new Set<string>();
                             documents.add(documentKey);
                             readers.set(sourceKey, documents);
