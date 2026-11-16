@@ -1210,6 +1210,7 @@ test('the full keydown handler deduplicates host-first and keydown-first footnot
                 const navigation = new Function('footnoteManager', 'cursorManager', `
                     const isMac = true, isComposing = false;
                     const inlineTocManager = { handleKeyDown: () => false };
+                    const calloutManager = { handleKeydown: () => false };
                     const compositionUpdateGate = { composing: false };
                     const shouldRouteHorizontalArrowAfterComposition = () => false;
                     const isTextInputKeydown = () => false;

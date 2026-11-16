@@ -101,6 +101,7 @@ body.toc-resizing {
 .toolbar-overflow-menu,
 .code-block-export-menu,
 .language-suggestions,
+.mdw-callout-type-picker,
 .link-popover,
 .math-popover,
 .slash-command-menu,
@@ -1575,6 +1576,148 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
 #editor blockquote > :last-child {
     margin-bottom: 0;
 }
+
+#editor .mdw-callout {
+    --mdw-callout-accent: var(--vscode-editorInfo-foreground, #3794ff);
+    --mdw-callout-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Cpath d='M12 11v6M12 7h.01'/%3E%3C/svg%3E");
+    border-left: 2px solid color-mix(in srgb, var(--mdw-callout-accent) 65%, var(--md-ui-border));
+    border-radius: var(--md-ui-radius);
+    background: var(--md-block-background);
+    margin: 0.65em 0;
+    padding: 10px 12px;
+    color: var(--vscode-editor-foreground);
+}
+
+#editor .mdw-callout[data-mdw-callout-variant="tip"] {
+    --mdw-callout-accent: var(--vscode-testing-iconPassed, #73a991);
+    --mdw-callout-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 18h6M10 21h4M9 15a6 6 0 1 1 6 0v3H9z'/%3E%3C/svg%3E");
+}
+
+#editor .mdw-callout[data-mdw-callout-variant="important"] {
+    --mdw-callout-accent: var(--vscode-symbolIcon-keywordForeground, #b180d7);
+    --mdw-callout-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Cpath d='M12 7v6M12 17h.01'/%3E%3C/svg%3E");
+}
+
+#editor .mdw-callout[data-mdw-callout-variant="warning"] {
+    --mdw-callout-accent: var(--vscode-editorWarning-foreground, #cca700);
+    --mdw-callout-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolygon points='12 3 22 21 2 21'/%3E%3Cpath d='M12 9v5M12 18h.01'/%3E%3C/svg%3E");
+}
+
+#editor .mdw-callout[data-mdw-callout-variant="caution"] {
+    --mdw-callout-accent: var(--vscode-editorError-foreground, #f14c4c);
+    --mdw-callout-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolygon points='8 2 16 2 22 8 22 16 16 22 8 22 2 16 2 8'/%3E%3Cpath d='M12 7v6M12 17h.01'/%3E%3C/svg%3E");
+}
+
+#editor .mdw-callout-title {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: fit-content;
+    max-width: 100%;
+    min-height: var(--md-ui-control-size);
+    margin: -2px 0 6px -6px;
+    padding: 4px 6px;
+    border-radius: var(--md-ui-radius);
+    color: var(--md-ui-muted);
+    font-family: var(--md-ui-font-family);
+    font-size: 12px;
+    font-weight: 400;
+    line-height: 20px;
+    overflow-wrap: anywhere;
+    user-select: none;
+    cursor: pointer;
+    transition: background-color 0.1s, color 0.1s;
+}
+
+#editor .mdw-callout-title:hover {
+    background: var(--md-ui-hover);
+    color: var(--md-ui-foreground);
+}
+
+#editor .mdw-callout-title.nav-selected,
+#editor .mdw-callout-title:focus-visible {
+    background: var(--md-ui-selected);
+    color: var(--md-ui-foreground);
+    outline: 1px solid var(--vscode-focusBorder);
+    outline-offset: -1px;
+}
+
+#editor .mdw-callout-title::before {
+    content: "";
+    flex-shrink: 0;
+    width: var(--md-ui-icon-size);
+    height: var(--md-ui-icon-size);
+    background: var(--mdw-callout-accent);
+    mask: var(--mdw-callout-icon) center / contain no-repeat;
+}
+
+/* Chromium can paint a caret on the following editable line while a
+   contenteditable=false label is selected as a node. The label highlight is
+   the active cursor indicator until selection returns to editable text. */
+#editor:has(.mdw-callout-title.nav-selected) {
+    caret-color: transparent;
+}
+
+.mdw-callout-type-picker {
+    position: fixed;
+    z-index: 10000;
+    display: flex;
+    flex-direction: column;
+    min-width: min(160px, calc(100vw - 16px));
+    max-width: min(280px, calc(100vw - 16px));
+    max-height: min(200px, calc(100vh - 16px));
+    overflow-y: auto;
+    padding: 4px;
+}
+
+.mdw-callout-type-option {
+    flex-shrink: 0;
+    min-height: var(--md-ui-control-size);
+    border: none;
+    border-radius: var(--md-ui-radius);
+    padding: 5px 10px;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    overflow-wrap: anywhere;
+    cursor: pointer;
+}
+
+.mdw-callout-type-option:focus {
+    outline: none;
+}
+
+.mdw-callout-type-option.active {
+    background: var(--md-ui-selected);
+    color: var(--md-ui-foreground);
+    outline: none;
+}
+
+.mdw-callout-type-picker::-webkit-scrollbar { width: 8px; }
+.mdw-callout-type-picker::-webkit-scrollbar-track { background: transparent; }
+.mdw-callout-type-picker::-webkit-scrollbar-thumb {
+    background: var(--vscode-scrollbarSlider-background);
+    border-radius: var(--md-ui-radius);
+}
+.mdw-callout-type-picker::-webkit-scrollbar-thumb:hover {
+    background: var(--vscode-scrollbarSlider-hoverBackground);
+}
+
+@media (forced-colors: active) {
+    #editor .mdw-callout-title::before {
+        background: CanvasText;
+        forced-color-adjust: none;
+    }
+    .mdw-callout-type-option.active {
+        background: Highlight;
+        color: HighlightText;
+        forced-color-adjust: none;
+    }
+}
+
+#editor .mdw-callout-content > :first-child { margin-top: 0; }
+#editor .mdw-callout-content > :last-child { margin-bottom: 0; }
 
 #editor a {
     color: var(--vscode-textLink-foreground);

@@ -15,6 +15,7 @@ import { MAX_EDITABLE_FOOTNOTE_DEPTH, decodeFootnoteLabel, parseFootnoteDefiniti
 import { MarkdownSourceBlock, preserveMarkdownSource } from './MarkdownSource';
 import { EmphasisBoundarySerializer } from './Emphasis';
 import { protectMarkdownTocs } from './MarkdownToc';
+import { isCalloutTypeChange, parseCallout, serializeCallout } from './Callouts';
 import TurndownService from 'turndown';
 const { createWindow } = require('@mixmark-io/domino');
 const { gfm } = require('turndown-plugin-gfm');
@@ -25,6 +26,13 @@ type CustomSlashCommandTemplate = {
     content: string;
 };
 type UnorderedListMarker = '-' | '*' | '+';
+type MarkdownConversionContext = {
+    depth: number;
+    calloutDepth?: number;
+    trustedBodySource?: string;
+    preserveSource?: boolean;
+    trustedPlaceholders?: readonly string[];
+};
 type MarkdownListLineInfo = {
     lineIndex: number;
     sequenceIndex: number;
@@ -3015,6 +3023,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         );
         const preservedSources: Array<{ marker: string; source: string; block: boolean }> = [];
         const allowedKinds = new Set([
+            'callout-source',
             'footnote-definition',
             'front-matter',
             'raw-html-block',
@@ -3108,6 +3117,103 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     );
                 }
                 return restored;
+            }
+        };
+    }
+
+    /** Serialize each callout independently, retaining its own delimiter dialect. */
+    private protectEditableCallouts(html: string, document: vscode.TextDocument, context: MarkdownConversionContext): {
+        html: string; restore: (markdown: string) => string;
+    } {
+        if (!/data-mdw-callout=/i.test(html)) {
+            return { html, restore: markdown => markdown };
+        }
+        if ((context.calloutDepth ?? 0) >= 32) {
+            throw new Error('Callout nesting is too deep to save safely');
+        }
+        const root = createWindow(`<div id="callouts-root">${html}</div>`).document.getElementById('callouts-root');
+        const namespace = this.createPlaceholderNamespace(html + document.getText(), 'CALLOUT');
+        const entries: Array<{ marker: string; source: string }> = [];
+        const decode = (value: string | null): string | null => {
+            if (value === null || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) {
+                return null;
+            }
+            const decoded = Buffer.from(value, 'base64').toString('utf8');
+            return Buffer.from(decoded, 'utf8').toString('base64') === value ? decoded : null;
+        };
+        const documentText = document.getText().replace(/\r\n?/g, '\n');
+        const converter = new MarkdownEditorProvider(this.context);
+        let originalRenderer: MarkdownDocument | undefined;
+        for (const node of Array.from<any>(root.querySelectorAll('div[data-mdw-callout="true"]'))) {
+            // The recursive body conversion handles nested callouts with the
+            // enclosing body's trusted source, including dequoted Markdown.
+            if (!root.contains(node) || node.parentElement?.closest('[data-mdw-callout="true"], [data-mdw-footnote-definition]')) {
+                continue;
+            }
+            const body = Array.from<any>(node.children).find(child => child.classList.contains('mdw-callout-content'));
+            const header = decode(node.getAttribute('data-mdw-callout-header'));
+            const footer = decode(node.getAttribute('data-mdw-callout-footer'));
+            const format = node.getAttribute('data-mdw-callout-format');
+            if (!body || header === null || footer === null || /[\r\n]/.test(header + footer)) {
+                continue;
+            }
+            const sample = format === 'quote' ? `${header}\n> body\n`
+                : format === 'container' ? `${header}\nbody\n${footer}\n`
+                : format === 'mkdocs' ? `${header}\n${header.match(/^ */)![0]}    body\n` : '';
+            const parsed = parseCallout(sample);
+            if (!parsed || parsed.header !== header || parsed.footer !== footer || parsed.format !== format) {
+                continue;
+            }
+            const rawSource = decode(node.getAttribute('data-mdw-callout-source'))?.replace(/\r\n?/g, '\n');
+            const original = rawSource && (documentText.includes(rawSource) || context.trustedBodySource?.includes(rawSource))
+                ? parseCallout(rawSource) : null;
+            const trustedOriginal = original && (original.header === header || isCalloutTypeChange(original, parsed)) && original.footer === footer && original.format === format
+                ? original : null;
+            const bodyContext: MarkdownConversionContext = {
+                ...context,
+                calloutDepth: (context.calloutDepth ?? 0) + 1,
+                preserveSource: false,
+                trustedBodySource: trustedOriginal?.body,
+            };
+            const markdown = converter.htmlToMarkdown(body.innerHTML, document, bodyContext);
+            let source = serializeCallout(parsed, markdown);
+            if (trustedOriginal) {
+                originalRenderer ??= new MarkdownDocument(document);
+                const originalHtml = originalRenderer.renderCalloutContent(trustedOriginal.body);
+                if (markdown === converter.htmlToMarkdown(originalHtml, document, bodyContext)) {
+                    const bodyStart = trustedOriginal.raw.indexOf('\n');
+                    source = trustedOriginal.header === header ? trustedOriginal.raw
+                        : header + (bodyStart < 0 ? '' : trustedOriginal.raw.slice(bodyStart));
+                }
+            }
+            let next = node.nextSibling;
+            while (next?.nodeType === 3 && next.textContent.trim() === '') {
+                next = next.nextSibling;
+            }
+            if (next && !/\n\n$/.test(source)) {
+                source = source.replace(/\n*$/, '') + '\n\n';
+            }
+            const marker = `${namespace}${entries.length}END`;
+            entries.push({ marker, source });
+            const placeholder = root.ownerDocument.createElement('p');
+            placeholder.textContent = marker;
+            node.replaceWith(placeholder);
+        }
+        return {
+            html: root.innerHTML,
+            restore: markdown => {
+                for (const { marker, source } of entries) {
+                    // Turndown indents only the placeholder. Apply the enclosing
+                    // quote/list prefix to every restored line as well.
+                    const pattern = new RegExp(`(^|\\n)([^\\n]*)${marker}(?:\\r?\\n){0,2}`, 'g');
+                    markdown = markdown.replace(pattern, (_match, boundary: string, prefix: string) => {
+                        const continuation = prefix.replace(/(?:[*+-]|\d+[.)])([ \t]+)/g, markerText => ' '.repeat(markerText.length));
+                        const lines = source.split('\n');
+                        return boundary + lines.map((line, index) => index === lines.length - 1 && line === '' ? ''
+                            : (index === 0 ? prefix : continuation) + line).join('\n');
+                    });
+                }
+                return markdown;
             }
         };
     }
@@ -3241,9 +3347,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         return this.htmlToMarkdown(root.innerHTML, document, { depth: 0, preserveSource: false }).replace(/\r?\n$/, '');
     }
 
-    private htmlToMarkdown(html: string, document: vscode.TextDocument, footnoteContext: {
-        depth: number; trustedBodySource?: string; preserveSource?: boolean; trustedPlaceholders?: readonly string[];
-    } = { depth: 0 }): string {
+    private htmlToMarkdown(html: string, document: vscode.TextDocument, footnoteContext: MarkdownConversionContext = { depth: 0 }): string {
         html = this.normalizeTableGrid(html);
         // Use Turndown for reliable HTML to Markdown conversion
         const placeholderNamespace = this.createPlaceholderNamespace(html, 'CONVERSION');
@@ -3307,6 +3411,11 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     cache.blocks ??= originalDocument.getSourceBlocks());
             }
             html = preservedSource.html;
+            const protectedCallouts = this.protectEditableCallouts(html, document, {
+                ...footnoteContext,
+                trustedPlaceholders: [...(footnoteContext.trustedPlaceholders || []), ...protectedTocs.markers],
+            });
+            html = protectedCallouts.html;
             const protectedFootnotes = this.protectEditableFootnotes(html, document, footnoteContext.depth,
                 footnoteContext.trustedBodySource, [...(footnoteContext.trustedPlaceholders || []), ...protectedTocs.markers]);
             html = protectedFootnotes.html;
@@ -3689,12 +3798,12 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             if (!markdown.endsWith('\n')) {
                 markdown += '\n';
             }
-            const restoredContent = preservedSource.restore(protectedFootnotes.restore(
+            const restoredContent = preservedSource.restore(protectedCallouts.restore(protectedFootnotes.restore(
                 protectedOpaqueSources.restore(this.restoreDollarMathBlocks(
                     protectedFencedMarkdown.restore(markdown),
                     mathBlockFenceInfo
                 ))
-            ));
+            )));
             const restoredMarkdown = protectedTocs.restore(emphasisSerializer.restore(protectedInlineSyntax.restore(restoredContent.replace(
                 new RegExp(`${this.escapeRegExp(zeroWidthNamespace)}(200b|2060|feff)END`, 'g'),
                 (_match, characterCode) => String.fromCharCode(parseInt(characterCode, 16))

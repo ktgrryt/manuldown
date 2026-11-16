@@ -52,6 +52,7 @@ const {
     getMarkdownHeadingLinkSuggestions
 } = await import(`./modules/MarkdownHeadingSlug.js${new URL(import.meta.url).search}`);
 const { InlineTocManager } = await import(`./modules/InlineTocManager.js${new URL(import.meta.url).search}`);
+const { CalloutManager } = await import(`./modules/CalloutManager.js${new URL(import.meta.url).search}`);
 const { MathManager } = await import(`./modules/MathManager.js${new URL(import.meta.url).search}`);
 const { DragSelectionScroll } = await import(`./modules/DragSelectionScroll.js${new URL(import.meta.url).search}`);
 const { TableOfContentsManager } = await import(`./modules/TableOfContentsManager.js${new URL(import.meta.url).search}`);
@@ -1228,6 +1229,7 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
         footnoteManager.cancelPendingDelete();
         footnoteManager.refresh();
         inlineTocManager.refresh();
+        calloutManager.refresh();
         // The formula being edited, if any, was replaced with the document.
         mathManager.dismissEditor();
     }
@@ -1751,6 +1753,15 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
         }
     });
     const footnoteManager = new FootnoteManager(editor, stateManager, { onChange: () => notifyChange() });
+    const calloutManager = new CalloutManager(editor, {
+        cursorManager,
+        isComposing: () => isUpdating || isComposing || compositionUpdateGate.composing ||
+            (lastCompositionEndTs > 0 && Date.now() - lastCompositionEndTs <= IME_ENTER_CONFIRM_GRACE_MS),
+        beforeChange: () => { typingUndoGroup.break(); stateManager.saveState(); },
+        onChange: () => { notifyChange(); stateManager.commitStateAfterChange(); }
+    });
+    cursorManager.moveAcrossCalloutType = (selection, direction) =>
+        calloutManager.handleTypeNavigation(selection, direction);
     const mathManager = new MathManager(editor, stateManager, {
         onChange: () => notifyChange(),
         scriptSrc: document.body?.dataset?.katexScriptSrc || '',
@@ -4287,6 +4298,13 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
 
     function getPreferredFirstTextNodeForElement(element) {
         if (!element || element.nodeType !== Node.ELEMENT_NODE) return null;
+        if (element.matches('[data-mdw-callout="true"]') || element.querySelector('[data-mdw-callout="true"]')) {
+            const bodyBlock = cursorManager._getCalloutBoundaryBlock(element, 'down');
+            if (bodyBlock !== element) {
+                const content = bodyBlock.tagName === 'PRE' ? bodyBlock.querySelector('code') || bodyBlock : bodyBlock;
+                return getPreferredFirstTextNodeForElement(content) || content;
+            }
+        }
         if (element.tagName === 'BLOCKQUOTE') {
             const firstParagraph = element.querySelector(':scope > p');
             if (firstParagraph) {
@@ -7890,6 +7908,10 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
             parent.appendChild(newP);
             focusTarget = newP;
         }
+        if (focusTarget.matches('[data-mdw-callout="true"]') || focusTarget.querySelector('[data-mdw-callout="true"]')) {
+            focusTarget = cursorManager._getCalloutBoundaryBlock(focusTarget, useNext ? 'down' : 'up');
+            if (focusTarget.tagName === 'PRE') focusTarget = focusTarget.querySelector('code') || focusTarget;
+        }
 
         const newRange = document.createRange();
         if (useNext) {
@@ -8909,6 +8931,7 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
         footnoteManager.cancelPendingDelete();
         footnoteManager.refresh();
         inlineTocManager.refresh();
+        calloutManager.refresh();
         tocManager.cancelScrollAnimation();
         // A snapshot can carry a table cell selection, and the selected cells
         // it refers to are gone. Without this the next Backspace or paste
@@ -9953,6 +9976,10 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
 
         const placeCaretInElement = (element, atEnd) => {
             if (!element) return false;
+            if (element.matches('[data-mdw-callout="true"]') || element.querySelector('[data-mdw-callout="true"]')) {
+                element = cursorManager._getCalloutBoundaryBlock(element, atEnd ? 'up' : 'down');
+                if (element.tagName === 'PRE') element = element.querySelector('code') || element;
+            }
             const textNode = atEnd ? domUtils.getLastTextNode(element) : domUtils.getFirstTextNode(element);
             if (textNode) {
                 const offset = atEnd ? textNode.textContent.length : 0;
@@ -11361,6 +11388,9 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
         }
 
         let prevElement = getPreviousElementSibling(pre);
+        if (prevElement && (prevElement.matches('[data-mdw-callout="true"]') || prevElement.querySelector('[data-mdw-callout="true"]'))) {
+            prevElement = cursorManager._getCalloutBoundaryBlock(prevElement, 'up');
+        }
         if (prevElement && prevElement.tagName === 'HR') {
             const newRange = document.createRange();
             newRange.selectNode(prevElement);
@@ -11410,6 +11440,9 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
         }
 
         let prevElement = getPreviousElementSibling(pre);
+        if (prevElement && (prevElement.matches('[data-mdw-callout="true"]') || prevElement.querySelector('[data-mdw-callout="true"]'))) {
+            prevElement = cursorManager._getCalloutBoundaryBlock(prevElement, 'up');
+        }
         if (prevElement && prevElement.tagName === 'HR') {
             const newRange = document.createRange();
             newRange.selectNode(prevElement);
@@ -11597,6 +11630,9 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
     function createCollapsedRangeAtElementBoundary(element, boundary = 'start') {
         if (!element || element.nodeType !== Node.ELEMENT_NODE) {
             return null;
+        }
+        if (element.matches('[data-mdw-callout="true"]') || element.querySelector('[data-mdw-callout="true"]')) {
+            element = cursorManager._getCalloutBoundaryBlock(element, boundary === 'end' ? 'up' : 'down');
         }
         const range = document.createRange();
         // Code-block controls precede the editable code in the DOM. A gap
@@ -13998,6 +14034,11 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
     function placeCursorAtElementBoundary(element, boundary) {
         const selection = window.getSelection();
         if (!selection || !element) return false;
+        if (element.nodeType === Node.ELEMENT_NODE &&
+            (element.matches('[data-mdw-callout="true"]') || element.querySelector('[data-mdw-callout="true"]'))) {
+            element = cursorManager._getCalloutBoundaryBlock(element, boundary === 'start' ? 'down' : 'up');
+            if (element.tagName === 'PRE') element = element.querySelector('code') || element;
+        }
 
         const newRange = document.createRange();
         if (boundary === 'start') {
@@ -14425,6 +14466,14 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
     }
 
     function handleArrowKeydown(e) {
+        if (!e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
+            const direction = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'backward', ArrowRight: 'forward' }[e.key];
+            if (direction && cursorManager.moveAcrossCalloutType?.(window.getSelection(), direction)) {
+                e.preventDefault();
+                e.stopPropagation();
+                return true;
+            }
+        }
         if (e.shiftKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
             prepareInlineCodeSelectionArrow(e);
         }
@@ -16503,6 +16552,12 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
         if (nextSibling && nextSibling.parentNode === parentNode) {
             if (nextSibling.nodeType === Node.TEXT_NODE) {
                 range.setStart(nextSibling, 0);
+            } else if (nextSibling.nodeType === Node.ELEMENT_NODE &&
+                (nextSibling.matches('[data-mdw-callout="true"]') || nextSibling.querySelector('[data-mdw-callout="true"]'))) {
+                let target = cursorManager._getCalloutBoundaryBlock(nextSibling, 'down');
+                if (target.tagName === 'PRE') target = target.querySelector('code') || target;
+                const firstText = cursorManager._getFirstNavigableTextNode(target);
+                range.setStart(firstText || target, 0);
             } else {
                 const firstText = domUtils.getFirstTextNode(nextSibling);
                 if (firstText) {
@@ -16515,6 +16570,12 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
         } else if (prevSibling && prevSibling.parentNode === parentNode) {
             if (prevSibling.nodeType === Node.TEXT_NODE) {
                 range.setStart(prevSibling, (prevSibling.textContent || '').length);
+            } else if (prevSibling.nodeType === Node.ELEMENT_NODE &&
+                (prevSibling.matches('[data-mdw-callout="true"]') || prevSibling.querySelector('[data-mdw-callout="true"]'))) {
+                let target = cursorManager._getCalloutBoundaryBlock(prevSibling, 'up');
+                if (target.tagName === 'PRE') target = target.querySelector('code') || target;
+                const lastText = cursorManager._getLastNavigableTextNode(target);
+                range.setStart(lastText || target, lastText ? lastText.textContent.length : target.childNodes.length);
             } else {
                 const lastText = domUtils.getLastTextNode(prevSibling);
                 if (lastText) {
@@ -17339,6 +17400,14 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
         if (!fromCommand && navDirection && shouldSuppressKeydownNav(navDirection)) {
             e.preventDefault();
             e.stopPropagation();
+            return true;
+        }
+
+        if (navDirection && cursorManager.moveAcrossCalloutType?.(window.getSelection(),
+            navDirection === 'left' ? 'backward' : navDirection === 'right' ? 'forward' : navDirection)) {
+            e.preventDefault();
+            e.stopPropagation();
+            recordCtrlNavHandled(navDirection, fromCommand);
             return true;
         }
 
@@ -18179,6 +18248,13 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
         if (ctrlNavDirection && shouldSuppressKeydownNav(ctrlNavDirection)) {
             e.preventDefault();
             e.stopPropagation();
+            return;
+        }
+
+        if (calloutManager.handleKeydown(e, isMac)) {
+            if (ctrlNavDirection) {
+                recordCtrlNavHandled(ctrlNavDirection, false);
+            }
             return;
         }
 
@@ -19030,7 +19106,7 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
                         stripEditorControlCharacters(editor);
                         domUtils.normalizeInlineCodeAfterInput();
                         stateManager.saveStateDebounced();
-                        const converted = markdownConverter.convertMarkdownSyntax(notifyChange, {
+                        const converted = calloutManager.handleInput({ inputType: 'insertText', data: e.data }) || markdownConverter.convertMarkdownSyntax(notifyChange, {
                             insertedText: e.data
                         });
                         if (!converted) {
@@ -19166,7 +19242,7 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
                 return;
             }
 
-            if (inlineTocManager.handleBeforeInput(e) || footnoteManager.handleBeforeInput(e)) {
+            if (calloutManager.handleBeforeInput(e) || inlineTocManager.handleBeforeInput(e) || footnoteManager.handleBeforeInput(e)) {
                 return;
             }
 
@@ -19359,6 +19435,8 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
                     hideSlashCommandMenu();
                     return;
                 }
+
+                calloutManager.handleInput(e);
 
                 codeBlockGapManager.reconcile(window.getSelection());
                 stripEditorControlCharacters(editor);
@@ -20534,6 +20612,15 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
                 return;
             }
 
+            if (node.matches('[data-mdw-callout="true"]') || node.querySelector('[data-mdw-callout="true"]')) {
+                const boundary = createCollapsedRangeAtElementBoundary(node, 'end');
+                if (boundary) {
+                    selection.removeAllRanges();
+                    selection.addRange(boundary);
+                    return;
+                }
+            }
+
             const lastTextNode = domUtils.getLastTextNode(node);
             if (lastTextNode) {
                 const reference = lastTextNode.parentElement?.closest(atomicInlineSelector);
@@ -20579,7 +20666,15 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
                 return false;
             }
 
-            const preparedFootnotes = footnoteManager.prepareClipboardImport(rawHtml);
+            const preparedCallouts = calloutManager.prepareClipboardImport(rawHtml, trustedInternalContent);
+            const calloutContentIds = new Set(preparedCallouts.blocks.map(block => block.id));
+            const isPreparedCalloutText = node => {
+                for (let parent = node.parentElement; parent; parent = parent.parentElement) {
+                    if (calloutContentIds.has(parent.id)) return true;
+                }
+                return false;
+            };
+            const preparedFootnotes = footnoteManager.prepareClipboardImport(preparedCallouts.html);
             const preparedMath = mathManager.prepareClipboardImport(preparedFootnotes.html);
             // Only exact copies made by this editor retain live TOC objects.
             // External HTML still passes through the normal metadata policy.
@@ -20642,6 +20737,7 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
                     NodeFilter.SHOW_TEXT,
                     {
                         acceptNode: (node) => {
+                            if (isPreparedCalloutText(node)) return NodeFilter.FILTER_SKIP;
                             const text = node && node.textContent ? node.textContent : '';
                             if (text.indexOf('](') === -1 && text.indexOf('![') === -1 && text.indexOf('`') === -1) {
                                 return NodeFilter.FILTER_SKIP;
@@ -20692,6 +20788,7 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
                     NodeFilter.SHOW_TEXT,
                     {
                         acceptNode: (node) => {
+                            if (isPreparedCalloutText(node)) return NodeFilter.FILTER_SKIP;
                             const text = node && node.textContent ? node.textContent : '';
                             if (!hasLinkLikeText(text)) {
                                 return NodeFilter.FILTER_SKIP;
@@ -20763,6 +20860,8 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
             }
             const importedFootnotes = footnoteManager.restoreClipboardImport(container, preparedFootnotes, trustedInternalContent);
             mathManager.restoreClipboardImport(container, preparedMath);
+            calloutManager.restoreClipboardImport(container, preparedCallouts);
+            importedFootnotes.forEach(note => calloutManager.restoreClipboardImport(note, preparedCallouts));
             for (const id of tocPlaceholders) {
                 container.querySelector(`[id="${id}"]`)?.replaceWith(inlineTocManager.createBlock());
             }
@@ -21261,6 +21360,16 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
             const { selection, range } = ctx;
             if (isRangeInsideCodeBlock(range)) {
                 return false;
+            }
+
+            const callouts = calloutManager.createPastedQuoteCallouts(lines, appendInlineMarkdownText);
+            if (callouts) {
+                const last = callouts.lastChild;
+                stateManager.saveState();
+                tableManager._insertNodeAsBlock(range, callouts);
+                setCaretToEndOfInsertedNode(selection, last);
+                notifyChange();
+                return true;
             }
 
             const blockquote = document.createElement('blockquote');
@@ -21831,6 +21940,13 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
                         quoteLines.push(qLine);
                         j++;
                     }
+                    const callouts = calloutManager.createPastedQuoteCallouts(lines.slice(i, j), appendInlineMarkdownText);
+                    if (callouts) {
+                        blocks.push(...Array.from(callouts.childNodes));
+                        hasMarkdownSyntax = true;
+                        i = j;
+                        continue;
+                    }
                     const blockquote = document.createElement('blockquote');
                     let paragraph = null;
                     const flushParagraph = () => {
@@ -22018,6 +22134,8 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
                     } else {
                         setCaretAfterNode(selection, lastInsertedNode);
                     }
+                } else if (lastInsertedNode.matches?.('[data-mdw-callout="true"]')) {
+                    setCaretToEndOfInsertedNode(selection, lastInsertedNode);
                 } else {
                     const lastTextNode = domUtils.getLastTextNode(lastInsertedNode);
                     if (lastTextNode) {
@@ -24797,6 +24915,7 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
 
             // コードブロック言語ラベルの選択状態を反映
             setCodeBlockLanguageNavSelection(getSelectedCodeBlockLanguageLabel());
+            if (!isUpdating && !isComposing && !compositionUpdateGate.composing) calloutManager.refresh();
 
             // チェックボックスのフォーカス表示管理
             syncCheckboxCaretIndicatorNow();

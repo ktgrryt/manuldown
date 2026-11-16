@@ -52,7 +52,8 @@ export function createMarkdownClipboardHtml(editor, range, footnoteManager) {
     let ancestor = originalRoot.nodeType === 1 ? originalRoot : originalRoot.parentElement;
     while (ancestor && ancestor !== editor) {
         // Text inside a cell or a note body is standalone prose when copied.
-        if (/^(TD|TH)$/.test(ancestor.tagName) || ancestor.classList.contains('mdw-footnote-content')) break;
+        if (/^(TD|TH)$/.test(ancestor.tagName) || ancestor.classList.contains('mdw-footnote-content') ||
+            ancestor.classList.contains('mdw-callout-content')) break;
         const shell = ancestor.cloneNode(false);
         if (/^H[1-6]$/.test(ancestor.tagName) &&
             fragment.textContent !== domUtils.getTextWithoutCaretAnchors(ancestor)) {

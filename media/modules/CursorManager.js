@@ -34,6 +34,7 @@ export class CursorManager {
         this.moveToCodeBlockGap = options.moveToCodeBlockGap || null;
         this.revealMathSource = options.revealMathSource || null;
         this.moveAcrossFootnoteReference = options.moveAcrossFootnoteReference || null;
+        this.moveAcrossCalloutType = options.moveAcrossCalloutType || null;
         this._forwardImageStep = null;
         this._inlineCodeLeftBoundaryState = null;
         this._inlineMathVerticalCaret = null;
@@ -549,12 +550,43 @@ export class CursorManager {
         return true;
     }
 
+    /** Enter the editable body, including empty edge paragraphs, rather than its title. */
+    _getCalloutBoundaryBlock(element, direction) {
+        let target = element;
+        // A quote or list can begin/end with a callout. Only unwrap that
+        // structural edge when it actually leads into a callout; ordinary
+        // quote/list navigation keeps its existing behavior.
+        if (target?.nodeType === Node.ELEMENT_NODE && /^(BLOCKQUOTE|UL|OL|LI)$/.test(target.tagName)) {
+            const nodes = Array.from(target.childNodes);
+            if (direction === 'up') nodes.reverse();
+            const edge = nodes.find(node => node.nodeType === Node.TEXT_NODE
+                ? !this._isIgnorableTextNode(node)
+                : node.nodeType === Node.ELEMENT_NODE && !this._isNavigationExcludedElement(node));
+            const resolved = edge?.nodeType === Node.ELEMENT_NODE ? this._getCalloutBoundaryBlock(edge, direction) : edge;
+            if (resolved && resolved !== edge) return resolved;
+        }
+        while (target?.nodeType === Node.ELEMENT_NODE &&
+            (target.matches('[data-mdw-callout="true"]') ||
+                (target.classList.contains('mdw-callout-content') && target.parentElement?.matches('[data-mdw-callout="true"]')))) {
+            const content = target.classList.contains('mdw-callout-content') ? target
+                : Array.from(target.children).find(child => child.classList.contains('mdw-callout-content'));
+            if (!content) break;
+            let child = direction === 'up' ? content.lastElementChild : content.firstElementChild;
+            while (child && this._isNavigationExcludedElement(child)) {
+                child = direction === 'up' ? child.previousElementSibling : child.nextElementSibling;
+            }
+            if (!child) return content;
+            target = child;
+        }
+        return target !== element ? this._getCalloutBoundaryBlock(target, direction) : target;
+    }
+
     _getNextNavigableElementSibling(element) {
         let next = element ? element.nextElementSibling : null;
         while (next && this._isNavigationExcludedElement(next)) {
             next = next.nextElementSibling;
         }
-        return next;
+        return this._getCalloutBoundaryBlock(next, 'down');
     }
 
     _getPrevNavigableElementSibling(element) {
@@ -562,7 +594,7 @@ export class CursorManager {
         while (prev && this._isNavigationExcludedElement(prev)) {
             prev = prev.previousElementSibling;
         }
-        return prev;
+        return this._getCalloutBoundaryBlock(prev, 'up');
     }
 
     _getLastNavigableChildElement(element) {
@@ -1014,7 +1046,7 @@ export class CursorManager {
                 if (next.nodeType === Node.TEXT_NODE) {
                     if (!this._isIgnorableTextNode(next)) return next;
                 } else if (next.nodeType === Node.ELEMENT_NODE && !this._isNavigationExcludedElement(next)) {
-                    return next;
+                    return this._getCalloutBoundaryBlock(next, direction);
                 }
                 next = direction === 'up' ? next.previousSibling : next.nextSibling;
             }
@@ -1068,7 +1100,12 @@ export class CursorManager {
      */
     _getLastBlockInQuote(block) {
         let current = block;
-        while (current && current.tagName === 'BLOCKQUOTE') {
+        while (current && (current.tagName === 'BLOCKQUOTE' || current.matches?.('[data-mdw-callout="true"]'))) {
+            if (current.matches('[data-mdw-callout="true"]')) {
+                current = this._getCalloutBoundaryBlock(current, 'up');
+                if (current.matches('[data-mdw-callout="true"]')) break;
+                continue;
+            }
             const lastChild = this._getLastNavigableChildElement(current);
             if (!lastChild) {
                 break;
@@ -1160,6 +1197,17 @@ export class CursorManager {
         }
 
         if (invalid) {
+            // Older history snapshots or a browser hit-test can leave a caret
+            // in a generated callout title. Recover locally instead of getting
+            // stuck vertically or jumping to the end of the document.
+            const title = element?.closest('.mdw-callout-title[contenteditable="false"]');
+            if (range.collapsed && title && this.editor.contains(title) &&
+                title.parentElement?.matches('[data-mdw-callout="true"]')) {
+                const block = this._getCalloutBoundaryBlock(title.parentElement, 'down');
+                const text = this._getFirstNavigableTextNode(block);
+                this._placeCollapsedCaret(selection, text || block, 0);
+                return true;
+            }
             // Vertical table navigation is owned by TableManager. If a browser probe
             // leaves the caret on an edge/handle, keep it there for that manager to
             // recover on the next event instead of converting it to the editor end.
@@ -1196,7 +1244,7 @@ export class CursorManager {
                 } else if (sibling.nodeType === Node.ELEMENT_NODE) {
                     if (!this._isNavigationExcludedElement(sibling)) {
                         // 水平線も有効なナビゲーションターゲットとして返す
-                        return sibling;
+                        return this._getCalloutBoundaryBlock(sibling, 'down');
                     }
                 }
                 sibling = sibling.nextSibling;
@@ -1243,7 +1291,7 @@ export class CursorManager {
                 } else if (sibling.nodeType === Node.ELEMENT_NODE) {
                     if (!this._isNavigationExcludedElement(sibling)) {
                         // 水平線も有効なナビゲーションターゲットとして返す
-                        return sibling;
+                        return this._getCalloutBoundaryBlock(sibling, 'up');
                     }
                 }
                 sibling = sibling.previousSibling;
@@ -2939,6 +2987,7 @@ export class CursorManager {
      * @returns {boolean} 配置できた場合true
      */
     placeCursorAtBlockEnd(block, selection) {
+        block = this._getCalloutBoundaryBlock(block, 'up');
         if (!block || block.nodeType !== Node.ELEMENT_NODE) {
             return false;
         }
@@ -4500,6 +4549,11 @@ export class CursorManager {
     moveCursorUp(notifyCallback) {
         const selection = window.getSelection();
         if (!selection || !selection.rangeCount) return;
+        if (this.moveAcrossCalloutType?.(selection, 'up')) {
+            this.clearInlineCodeBoundaryState();
+            this._clearForwardImageStep();
+            return;
+        }
         const verticalCode = this.domUtils.getParentElement(selection.getRangeAt(0).startContainer, 'CODE');
         if (!verticalCode || !this.domUtils.getParentElement(verticalCode, 'PRE')) {
             this.resetCodeVerticalNavigation();
@@ -4609,7 +4663,7 @@ export class CursorManager {
                             return;
                         }
                         const newRange = document.createRange();
-                        const lastNode = this.domUtils.getLastTextNode(prevElement);
+                        const lastNode = this._getLastNavigableTextNode(prevElement);
                         if (lastNode) {
                             newRange.setStart(lastNode, lastNode.textContent.length);
                         } else {
@@ -5363,7 +5417,7 @@ export class CursorManager {
             }
             if (elementAbove && this.editor.contains(elementAbove)) {
                 const caretRange = document.caretRangeFromPoint(currentX, targetY);
-                if (caretRange) {
+                if (caretRange && !this._isInNavigationExcludedElement(caretRange.startContainer)) {
                     const newRect = caretRange.getBoundingClientRect();
                     // 5px以上上に移動したか確認
                     if (newRect.top < currentY - 5) {
@@ -5476,7 +5530,8 @@ export class CursorManager {
                                     : newRect.top;
                                 if (lineCenterY > 0 && Math.abs(lineCenterY - targetY) > 2) {
                                     const adjustedRange = document.caretRangeFromPoint(currentX, lineCenterY);
-                                    if (adjustedRange && this.editor.contains(adjustedRange.startContainer)) {
+                                    if (adjustedRange && this.editor.contains(adjustedRange.startContainer) &&
+                                        !this._isInNavigationExcludedElement(adjustedRange.startContainer)) {
                                         caretRange.setStart(adjustedRange.startContainer, adjustedRange.startOffset);
                                         caretRange.collapse(true);
                                     }
@@ -5599,7 +5654,7 @@ export class CursorManager {
             }
 
             if (isAtTop && currentBlock) {
-                let prevElement = currentBlock.previousElementSibling;
+                let prevElement = this._getPrevNavigableElementSibling(currentBlock);
                 // 水平線の場合は水平線全体を選択
                 if (prevElement && prevElement.tagName === 'HR') {
                     const newRange = document.createRange();
@@ -5770,6 +5825,11 @@ export class CursorManager {
     moveCursorDown(notifyCallback) {
         const selection = window.getSelection();
         if (!selection || !selection.rangeCount) return;
+        if (this.moveAcrossCalloutType?.(selection, 'down')) {
+            this.clearInlineCodeBoundaryState();
+            this._clearForwardImageStep();
+            return;
+        }
         const verticalCode = this.domUtils.getParentElement(selection.getRangeAt(0).startContainer, 'CODE');
         if (!verticalCode || !this.domUtils.getParentElement(verticalCode, 'PRE')) {
             this.resetCodeVerticalNavigation();
@@ -6042,7 +6102,7 @@ export class CursorManager {
             const children = Array.from(this.editor.childNodes);
             const startIndex = Math.max(0, Math.min(range.startOffset, children.length));
             for (let i = startIndex; i < children.length; i++) {
-                const child = children[i];
+                const child = this._getCalloutBoundaryBlock(children[i], 'down');
                 if (!child) continue;
                 if (child.nodeType === Node.TEXT_NODE) {
                     if (!this._isIgnorableTextNode(child)) {
@@ -6065,7 +6125,7 @@ export class CursorManager {
                     if (child.tagName === 'PRE' && this._selectCodeBlockLanguageLabel(child, selection)) {
                         return;
                     }
-                    const firstNode = this.domUtils.getFirstTextNode(child);
+                    const firstNode = this._getFirstNavigableTextNode(child);
                     const newRange = document.createRange();
                     if (firstNode) {
                         newRange.setStart(firstNode, 0);
@@ -6122,7 +6182,7 @@ export class CursorManager {
                     return true;
                 }
                 const newRange = document.createRange();
-                const firstNode = this.domUtils.getFirstTextNode(nextElement);
+                const firstNode = this._getFirstNavigableTextNode(nextElement);
                 if (firstNode) {
                     newRange.setStart(firstNode, 0);
                 } else if (nextElement.tagName === 'P') {
@@ -7320,7 +7380,7 @@ export class CursorManager {
             }
 
             const caretRange = document.caretRangeFromPoint(currentX, targetY);
-            if (!caretRange) {
+            if (!caretRange || this._isInNavigationExcludedElement(caretRange.startContainer)) {
                 return false;
             }
             if (!originPreBlock) {
@@ -7467,7 +7527,8 @@ export class CursorManager {
                         : newRect.top;
                     if (lineCenterY > 0 && Math.abs(lineCenterY - targetY) > 2) {
                         const adjustedRange = document.caretRangeFromPoint(currentX, lineCenterY);
-                        if (adjustedRange && this.editor.contains(adjustedRange.startContainer)) {
+                        if (adjustedRange && this.editor.contains(adjustedRange.startContainer) &&
+                            !this._isInNavigationExcludedElement(adjustedRange.startContainer)) {
                             caretRange.setStart(adjustedRange.startContainer, adjustedRange.startOffset);
                             caretRange.collapse(true);
                         }
@@ -7591,7 +7652,7 @@ export class CursorManager {
                     }
                     // X位置を維持してカーソルを配置する
                     let placed = false;
-                    const firstNode = this.domUtils.getFirstTextNode(nextElement);
+                    const firstNode = this._getFirstNavigableTextNode(nextElement);
                     if (firstNode) {
                         const text = firstNode.textContent || '';
                         if (text.length > 0) {
@@ -7722,6 +7783,11 @@ export class CursorManager {
         this.resetCodeVerticalNavigation?.();
         const selection = window.getSelection();
         if (!selection) return false;
+        if (this.moveAcrossCalloutType?.(selection, 'forward')) {
+            this.clearInlineCodeBoundaryState();
+            this._clearForwardImageStep();
+            return true;
+        }
         if (this.moveAcrossFootnoteReference?.(selection, 'forward')) {
             this.clearInlineCodeBoundaryState();
             this._clearForwardImageStep();
@@ -7784,6 +7850,7 @@ export class CursorManager {
             return true;
         };
         const moveToBlockStart = (block) => {
+            block = this._getCalloutBoundaryBlock(block, 'down');
             if (!block || block.nodeType !== Node.ELEMENT_NODE) {
                 return false;
             }
@@ -7846,7 +7913,7 @@ export class CursorManager {
             return true;
         }
 
-        this._normalizeSelectionForNavigation(selection);
+        if (this._normalizeSelectionForNavigation(selection)) return true;
         range = selection.getRangeAt(0);
         node = range.startContainer;
         offset = range.startOffset;
@@ -8592,6 +8659,11 @@ export class CursorManager {
         this.resetCodeVerticalNavigation?.();
         const selection = window.getSelection();
         if (!selection) return false;
+        if (this.moveAcrossCalloutType?.(selection, 'backward')) {
+            this.clearInlineCodeBoundaryState();
+            this._clearForwardImageStep();
+            return true;
+        }
         if (this.moveAcrossFootnoteReference?.(selection, 'backward')) {
             this.clearInlineCodeBoundaryState();
             this._clearForwardImageStep();
@@ -8604,7 +8676,7 @@ export class CursorManager {
         }
         this.clearInlineCodeBoundaryState();
         this._clearForwardImageStep();
-        this._normalizeSelectionForNavigation(selection);
+        if (this._normalizeSelectionForNavigation(selection)) return true;
         let range = selection.getRangeAt(0);
         let node = range.startContainer;
         let offset = range.startOffset;
@@ -9145,7 +9217,10 @@ export class CursorManager {
                 currentOffset = previousVisibleIndex;
             } else {
                 while (true) {
-                    const prevNode = this.domUtils.getPreviousTextNode(currentNode);
+                    let prevNode = this.domUtils.getPreviousTextNode(currentNode);
+                    while (prevNode && this._isInNavigationExcludedElement(prevNode)) {
+                        prevNode = this.domUtils.getPreviousTextNode(prevNode);
+                    }
                     if (!prevNode) {
                         currentOffset = 0;
                         break;
@@ -9564,13 +9639,16 @@ export class CursorManager {
                 normalizeInlineCodeLineStartToOutsideLeft();
             }
         } else if (blockElement) {
-            const firstTextNode = this.domUtils.getFirstTextNode(blockElement);
+            const targetBlock = this._getCalloutBoundaryBlock(blockElement, 'down');
+            const firstTextNode = this.domUtils.getFirstTextNode(targetBlock);
             if (firstTextNode) {
                 range.setStart(firstTextNode, 0);
                 range.collapse(true);
                 selection.removeAllRanges();
                 selection.addRange(range);
                 normalizeInlineCodeLineStartToOutsideLeft();
+            } else if (targetBlock !== blockElement) {
+                this._placeCollapsedCaret(selection, targetBlock, 0);
             }
         }
     }
@@ -9735,6 +9813,11 @@ export class CursorManager {
                 selection.addRange(range);
             }
         } else if (blockElement) {
+            const targetBlock = this._getCalloutBoundaryBlock(blockElement, 'up');
+            if (targetBlock !== blockElement) {
+                this.placeCursorAtBlockEnd(targetBlock, selection);
+                return;
+            }
             // リストアイテムの場合、ネストされたリストを除外して現在の行の末尾のみを取得
             let lastTextNode;
             if (blockElement.tagName === 'LI') {

@@ -9,8 +9,10 @@ const moduleUrl = source => `data:text/javascript;base64,${Buffer.from(source).t
 const clipboardModule = import(moduleUrl(moduleSource('MarkdownClipboard.js')
     .replace("'./DOMUtils.js'", JSON.stringify(moduleUrl(moduleSource('DOMUtils.js'))))));
 const footnoteModule = import(moduleUrl(moduleSource('FootnoteManager.js')));
+const calloutModule = import(moduleUrl(moduleSource('CalloutManager.js')));
 const historyModule = import(moduleUrl(moduleSource('StateManager.js')));
 const domUtilsModule = import(moduleUrl(moduleSource('DOMUtils.js')));
+const cursorModule = import(moduleUrl(moduleSource('CursorManager.js')));
 const editorSource = fs.readFileSync(path.join(__dirname, '..', 'media', 'editor.js'), 'utf8');
 
 function extractEditorFunction(name) {
@@ -73,7 +75,12 @@ class FixtureRange {
     get collapsed() { return this.startContainer === this.endContainer && this.startOffset === this.endOffset; }
     get commonAncestorContainer() { return this.startContainer; }
     setStartBefore(node) { this.setStart(node.parentNode, Array.from(node.parentNode.childNodes).indexOf(node)); }
+    setStartAfter(node) { this.setStart(node.parentNode, Array.from(node.parentNode.childNodes).indexOf(node) + 1); }
     setEndAfter(node) { this.setEnd(node.parentNode, Array.from(node.parentNode.childNodes).indexOf(node) + 1); }
+    selectNodeContents(node) {
+        this.setStart(node, 0);
+        this.setEnd(node, node.nodeType === 3 ? node.length : node.childNodes.length);
+    }
     cloneRange() { return Object.assign(new FixtureRange(), this); }
     collapse(toStart) {
         if (toStart) this.setEnd(this.startContainer, this.startOffset);
@@ -113,7 +120,7 @@ class FixtureRange {
     }
 }
 
-function clipboardPasteFixture({ editor, document, window, range, copy }, options = {}) {
+function clipboardPasteFixture({ editor, document, window, range, copy, calloutManager, domUtils, cursorManager }, options = {}) {
     const slice = (startMarker, endMarker) => {
         const start = editorSource.indexOf(startMarker);
         const end = editorSource.indexOf(endMarker, start);
@@ -137,6 +144,7 @@ function clipboardPasteFixture({ editor, document, window, range, copy }, option
     let flushDataImages = () => {};
     const env = {
         editor, document, window, Node: window.Node, NodeFilter: window.NodeFilter,
+        cursorManager,
         createMarkdownClipboardHtml: (_editor, selection) => copy(selection),
         createImageClipboardSnapshot: () => null,
         isUpdating: false,
@@ -150,6 +158,8 @@ function clipboardPasteFixture({ editor, document, window, range, copy }, option
             },
             ensureInlineCodeSpaces() {}, cleanupGhostStyles() {},
             isBlockElement: element => /^(P|LI|BLOCKQUOTE|DIV)$/.test(element.tagName),
+            getFirstTextNode: element => domUtils.getFirstTextNode(element),
+            getLastTextNode: element => domUtils.getLastTextNode(element),
         },
         stateManager: options.stateManager || {
             saveState() {}, saveStateDebounced() {}, saveRange: value => value,
@@ -167,6 +177,8 @@ function clipboardPasteFixture({ editor, document, window, range, copy }, option
         mathManager: {
             prepareClipboardImport: html => ({ html }), restoreClipboardImport() {},
         },
+        calloutManager,
+        codeBlockManager: { addCodeBlockControls() {} },
         inlineTocManager: {
             refresh() {},
             createBlock() {
@@ -190,7 +202,6 @@ function clipboardPasteFixture({ editor, document, window, range, copy }, option
         applyImageSourcePolicy(image, src) { image.src = src; imagePolicyCalls.push(src); },
         applyImageRenderSizeFromAlt() {},
         applyImageRenderSizes() {}, normalizeCheckboxListItems() {}, updateListItemClasses() {},
-        setCaretToEndOfInsertedNode() {},
         notifyChange() { flushDataImages(); }, notifyChangeImmediate() { flushDataImages(); },
         finalizePendingPastedPathLinks() {}, removeEmptyLinePlaceholderAtRange() {},
         isImageOnlyBlockElement: () => false, setCaretToImageRightEdge: () => true,
@@ -215,8 +226,8 @@ function clipboardPasteFixture({ editor, document, window, range, copy }, option
         applyTextInsertionWithPasteRules: null,
         ...Object.fromEntries([
             'tryInsertHorizontalRuleFromPastedText', 'tryInsertFencedCodeBlockFromPastedText',
-            'tryInsertMarkdownTableFromPastedText', 'tryInsertMarkdownBlockquoteFromPastedText',
-            'tryInsertMarkdownHeadingsFromPastedText', 'tryInsertMixedMarkdownFromPastedText',
+            'tryInsertMarkdownTableFromPastedText',
+            'tryInsertMarkdownHeadingsFromPastedText',
             'tryInsertAutoLinkedTextFromPastedText',
         ].map(name => [name, () => false])),
         vscode: { postMessage: message => messages.push(message) },
@@ -230,6 +241,7 @@ function clipboardPasteFixture({ editor, document, window, range, copy }, option
         'isEditorRange', 'prunePendingImageInsertionRanges', 'beginImageInsertionRequest',
         'takePendingImageInsertion', 'discardPendingImageInsertion', 'markPastedDataImage',
         'importPastedDataImages', 'prepareEditorForNotify', 'rangesHaveSameBoundaries',
+        'createCollapsedRangeAtElementBoundary', 'setCaretAfterNode', 'placeCollapsedCaretAfter',
     ].map(extractEditorFunction).join('\n');
     const declarations = [
         'const pendingImageInsertionRanges = new Map(); const pendingPastedDataImages = new Set();',
@@ -242,7 +254,11 @@ function clipboardPasteFixture({ editor, document, window, range, copy }, option
         slice('const absoluteUrlPattern =', 'const isImageFile ='),
         slice('const getSelectionRangeForPaste =', 'const hasVisibleLinkText ='),
         slice('const clipboardVariationSelectorPattern =', 'const tryInsertMixedMarkdownFromPastedText ='),
+        slice('const splitMarkdownTableRow =', 'const isRangeInTableCell ='),
+        slice('const tryInsertMixedMarkdownFromPastedText =', 'const insertTextWithPasteBehavior ='),
+        slice('const tryInsertMarkdownBlockquoteFromPastedText =', 'const tryInsertMarkdownHeadingsFromPastedText ='),
         slice('const insertPlainTextPreservingLineBreaks =', '// Footnote numbers and formulas'),
+        slice('// Footnote numbers and formulas have no editable text position.', 'const tryInsertInternalHtmlFromClipboard ='),
         slice('const insertTextWithPasteBehavior =', 'applyTextInsertionWithPasteRules ='),
         slice('const tryInsertInternalHtmlFromClipboard =', 'const appendTextTokenWithLineBreaks ='),
         slice('const handleEditorCopy =', '// カットを補助:'),
@@ -289,8 +305,13 @@ function clipboardPasteFixture({ editor, document, window, range, copy }, option
 async function withFixture(html, callback) {
     const { createMarkdownClipboardHtml } = await clipboardModule;
     const { FootnoteManager } = await footnoteModule;
+    const { CalloutManager } = await calloutModule;
+    const { DOMUtils } = await domUtilsModule;
+    const { CursorManager } = await cursorModule;
     const window = domino.createWindow(`<div id="editor">${html}</div><p id="outside">outside</p>`);
     const document = window.document;
+    window.btoa = btoa;
+    window.TextEncoder = TextEncoder;
     const editor = document.getElementById('editor');
     editor.dataset = {};
     Object.getPrototypeOf(editor.querySelectorAll('a')).forEach = Array.prototype.forEach;
@@ -299,6 +320,9 @@ async function withFixture(html, callback) {
     const previous = { Node: global.Node, NodeFilter: global.NodeFilter, document: global.document, window: global.window };
     Object.assign(global, { Node: window.Node, NodeFilter: window.NodeFilter, document, window });
     const footnoteManager = new FootnoteManager(editor, {});
+    const calloutManager = new CalloutManager(editor);
+    const domUtils = new DOMUtils(editor);
+    const cursorManager = new CursorManager(editor, domUtils);
     const range = (node, start = 0, end = node.nodeType === 3 ? node.length : node.childNodes.length) => {
         const selection = new FixtureRange();
         selection.setStart(node, start);
@@ -306,7 +330,8 @@ async function withFixture(html, callback) {
         return selection;
     };
     try {
-        await callback({ editor, document, window, range, copy: selection => createMarkdownClipboardHtml(editor, selection, footnoteManager) });
+        await callback({ editor, document, window, range, calloutManager, domUtils, cursorManager,
+            copy: selection => createMarkdownClipboardHtml(editor, selection, footnoteManager) });
     } finally {
         Object.assign(global, previous);
     }
@@ -896,6 +921,214 @@ test('a trusted local copy preserves a live TOC as one noneditable object', asyn
         assert.ok(block);
         assert.equal(block.getAttribute('contenteditable'), 'false');
         assert.equal(f.editor.querySelectorAll('[data-mdw-toc]').length, 1);
+    });
+});
+
+test('a trusted local copy preserves callout syntax metadata and editable rich content', async () => {
+    await withFixture('', f => {
+        const block = f.calloutManager.createBlock({ header: ':::note warn', footer: ':::',
+            format: 'container', type: 'warn', variant: 'warning', title: 'Warning' });
+        block.querySelector('.mdw-callout-content').innerHTML = '<p><strong>Body</strong></p><ul><li>Item</li></ul>';
+        f.editor.appendChild(block);
+        const clipboard = clipboardPasteFixture(f);
+        assert.equal(clipboard.copy().defaultPrevented, true);
+        f.editor.innerHTML = '<p><br></p>';
+        assert.equal(clipboard.paste().defaultPrevented, true);
+        const restored = f.editor.querySelector('[data-mdw-callout="true"]');
+        assert.ok(restored);
+        assert.equal(Buffer.from(restored.getAttribute('data-mdw-callout-header'), 'base64').toString(), ':::note warn');
+        assert.equal(restored.getAttribute('data-mdw-callout-format'), 'container');
+        assert.equal(restored.querySelector('.mdw-callout-title').getAttribute('contenteditable'), 'false');
+        assert.equal(restored.querySelectorAll('.mdw-callout-title').length, 1);
+        assert.equal(restored.querySelector('.mdw-callout-content strong').textContent, 'Body');
+        assert.equal(restored.querySelector('li').textContent, 'Item');
+        assert.equal(restored.querySelector('.mdw-callout-content').getAttribute('contenteditable'), null);
+    });
+});
+
+for (const mixed of [false, true]) {
+    test(`pasted GitHub IMPORTANT and CAUTION become separate editable callouts${mixed ? ' among ordinary paragraphs' : ''}`, async () => {
+        await withFixture('<p><br></p>', f => {
+            const source = '> [!IMPORTANT]\n> 重要な**情報**です。\n\n> [!CAUTION]\n> 注意事項です。';
+            const clipboard = clipboardPasteFixture(f);
+            clipboard.data.set('text/plain', mixed ? 'Before.\n\n' + source + '\n\nAfter.' : source);
+            assert.equal(clipboard.paste().defaultPrevented, true);
+            const blocks = f.editor.querySelectorAll('[data-mdw-callout="true"]');
+            assert.equal(blocks.length, 2);
+            assert.equal(blocks[0].getAttribute('data-mdw-callout-type'), 'IMPORTANT');
+            assert.equal(blocks[0].getAttribute('data-mdw-callout-variant'), 'important');
+            assert.equal(blocks[0].querySelector('strong').textContent, '情報');
+            assert.equal(blocks[1].getAttribute('data-mdw-callout-type'), 'CAUTION');
+            assert.equal(blocks[1].getAttribute('data-mdw-callout-variant'), 'caution');
+            assert.equal(blocks[1].querySelector('.mdw-callout-content p').textContent, '注意事項です。');
+            for (const block of blocks) {
+                assert.equal(block.querySelector('.mdw-callout-title').getAttribute('contenteditable'), 'false');
+                assert.notEqual(block.lastElementChild.getAttribute('contenteditable'), 'false');
+            }
+            if (mixed) {
+                assert.equal(f.editor.firstElementChild.textContent, 'Before.');
+                assert.equal(f.editor.lastElementChild.textContent, 'After.');
+            } else {
+                const caret = f.window.getSelection().getRangeAt(0);
+                assert.ok(blocks[1].lastElementChild.contains(caret.startContainer));
+                assert.equal(caret.collapsed, true);
+            }
+        });
+    });
+}
+
+for (const source of [
+    '[!IMPORTANT]\\\n重要な情報です。\n\n[!CAUTION]\\\n注意事項です。',
+    '> [!UNKNOWN]\n> Body',
+    '> [!IMPORTANT]\\\n> Body',
+    '```markdown\n> [!IMPORTANT]\n> Body\n```',
+    '    > [!IMPORTANT]\n    > Body',
+    '> `[!IMPORTANT]`\n> Body',
+    '> Before [!IMPORTANT]\n> Body',
+]) {
+    test(`pasting literal or unsupported alert-like text does not create callouts: ${source.split('\n')[0]}`, async () => {
+        await withFixture('<p><br></p>', f => {
+            const clipboard = clipboardPasteFixture(f);
+            clipboard.data.set('text/plain', source);
+            clipboard.paste();
+            assert.equal(!!f.editor.querySelector('[data-mdw-callout]'), false);
+            assert.match(f.editor.textContent, /IMPORTANT|UNKNOWN/);
+            if (source.startsWith('```')) assert.match(f.editor.querySelector('pre code').textContent, /> \[!IMPORTANT\]/);
+        });
+    });
+}
+
+test('a pasted empty callout leaves the caret inside its editable paragraph', async () => {
+    await withFixture('<p><br></p>', f => {
+        const clipboard = clipboardPasteFixture(f);
+        clipboard.data.set('text/plain', '> [!IMPORTANT]');
+        clipboard.paste();
+        const body = f.editor.querySelector('.mdw-callout-content');
+        assert.ok(body.querySelector('p br'));
+        assert.ok(body.contains(f.window.getSelection().getRangeAt(0).startContainer));
+    });
+});
+
+for (const spec of [
+    { header: ':::note alert', footer: ':::', format: 'container', type: 'alert', variant: 'caution', title: 'alert' },
+    { header: '> [!warning]- 日本語のタイトル', footer: '', format: 'quote', type: 'warning', variant: 'warning', title: '日本語のタイトル' },
+    { header: ':::message alert', footer: ':::', format: 'container', type: 'alert', variant: 'caution', title: 'alert' },
+    { header: '::::danger[Custom title]', footer: '::::', format: 'container', type: 'danger', variant: 'caution', title: 'Custom title' },
+    { header: '???+ warning "Custom title"', footer: '', format: 'mkdocs', type: 'warning', variant: 'warning', title: 'Custom title' },
+]) {
+    test(`copying a callout into another document retains its syntax and literal rich text: ${spec.header}`, async () => {
+        let data;
+        await withFixture('', f => {
+            const block = f.calloutManager.createBlock(spec);
+            block.setAttribute('data-mdw-callout-source', Buffer.from('untrusted hidden source').toString('base64'));
+            block.lastElementChild.innerHTML = '<p><strong>Body</strong> [literal](https://example.com) `literal` ![literal](../secret.png)</p>' +
+                '<ul><li>Item</li></ul><pre><code>code</code></pre>';
+            f.editor.appendChild(block);
+            const clipboard = clipboardPasteFixture(f);
+            assert.equal(clipboard.copy().defaultPrevented, true);
+            data = new Map(clipboard.data);
+        });
+        await withFixture('<p><br></p>', f => {
+            const clipboard = clipboardPasteFixture(f);
+            data.forEach((value, key) => clipboard.data.set(key, value));
+            assert.equal(clipboard.paste().defaultPrevented, true);
+            const block = f.editor.querySelector('[data-mdw-callout="true"]');
+            assert.ok(block);
+            assert.equal(Buffer.from(block.getAttribute('data-mdw-callout-header'), 'base64').toString(), spec.header);
+            assert.equal(Buffer.from(block.getAttribute('data-mdw-callout-footer'), 'base64').toString(), spec.footer);
+            assert.equal(block.getAttribute('data-mdw-callout-type'), spec.type);
+            assert.equal(block.getAttribute('data-mdw-callout-variant'), spec.variant);
+            assert.equal(block.hasAttribute('data-mdw-callout-source'), false);
+            assert.equal(block.querySelector('.mdw-callout-title').textContent, spec.title);
+            const body = block.querySelector('.mdw-callout-content');
+            assert.equal(body.querySelector('strong').textContent, 'Body');
+            assert.match(body.querySelector('p').textContent, /\[literal\]\(https:\/\/example\.com\) `literal` !\[literal\]\(\.\.\/secret\.png\)/);
+            assert.equal(!!body.querySelector('a,img'), false);
+            assert.equal(body.querySelector('li').textContent, 'Item');
+            assert.equal(body.querySelector('pre code').textContent, 'code');
+            assert.equal(clipboard.imagePolicyCalls.length, 0);
+        });
+    });
+}
+
+for (const bodyHtml of ['<p><br></p>', '<p>Body</p><p><br></p>']) {
+    for (const anotherDocument of [false, true]) {
+        test(`pasting a callout ends in its empty editable paragraph (${anotherDocument ? 'another' : 'same'} document): ${bodyHtml}`, async () => {
+            let data;
+            const check = f => {
+                const block = f.editor.querySelector('[data-mdw-callout="true"]');
+                const paragraph = block.querySelector('.mdw-callout-content').lastElementChild;
+                const range = f.window.getSelection().getRangeAt(0);
+                assert.ok(range.startContainer === paragraph || paragraph.contains(range.startContainer));
+                const element = range.startContainer.nodeType === 3 ? range.startContainer.parentElement : range.startContainer;
+                assert.equal(element.closest('[contenteditable="false"]'), null);
+                assert.equal(range.collapsed, true);
+            };
+            await withFixture('', f => {
+                const block = f.calloutManager.createBlock({ header: ':::note info', footer: ':::', format: 'container', type: 'info', variant: 'note', title: 'info' });
+                block.lastElementChild.innerHTML = bodyHtml;
+                f.editor.appendChild(block);
+                const clipboard = clipboardPasteFixture(f);
+                clipboard.copy();
+                data = new Map(clipboard.data);
+                if (!anotherDocument) { clipboard.paste(); check(f); }
+            });
+            if (anotherDocument) await withFixture('<p><br></p>', f => {
+                const clipboard = clipboardPasteFixture(f);
+                data.forEach((value, key) => clipboard.data.set(key, value));
+                clipboard.paste(); check(f);
+            });
+        });
+    }
+}
+
+test('copied callout metadata cannot restore hidden source or bypass HTML sanitization in another document', async () => {
+    await withFixture('<p><br></p>', f => {
+        const block = f.calloutManager.createBlock({ header: ':::note warn', footer: ':::', format: 'container', type: 'warn', variant: 'warning', title: 'warn' });
+        block.setAttribute('data-mdw-callout-source', Buffer.from('<script>hidden()</script>').toString('base64'));
+        block.lastElementChild.innerHTML = '<p onclick="bad()">Visible<script>bad()</script><a href="javascript:bad()"> link</a>' +
+            '<code data-mdw-opaque-source="c2VjcmV0" data-mdw-opaque-kind="raw-html-inline"> literal</code></p>';
+        const clipboard = clipboardPasteFixture(f);
+        clipboard.data.set('text/html', block.outerHTML);
+        clipboard.data.set('application/x-manuldown-editor-html', block.outerHTML);
+        clipboard.data.set('text/plain', 'warn\nVisible link literal');
+        clipboard.paste();
+        const restored = f.editor.querySelector('[data-mdw-callout="true"]');
+        assert.ok(restored);
+        assert.equal(restored.hasAttribute('data-mdw-callout-source'), false);
+        assert.equal(!!restored.querySelector('script,[onclick],[data-mdw-opaque-source],a[href]'), false);
+        assert.match(restored.textContent, /Visible link literal/);
+        assert.doesNotMatch(restored.textContent, /hidden|bad\(\)|secret/);
+    });
+});
+
+test('invalid callout declarations or extra visible content fall back to sanitized ordinary HTML', async () => {
+    for (const change of [
+        block => block.setAttribute('data-mdw-callout-header', Buffer.from(':::unknown').toString('base64')),
+        block => block.setAttribute('data-mdw-callout-footer', Buffer.from('::: extra').toString('base64')),
+        block => { block.firstElementChild.textContent = 'Different title'; },
+        block => { const p = block.ownerDocument.createElement('p'); p.textContent = 'Extra'; block.appendChild(p); },
+    ]) await withFixture('<p><br></p>', f => {
+        const block = f.calloutManager.createBlock({ header: ':::note warn', footer: ':::', format: 'container', type: 'warn', variant: 'warning', title: 'warn' });
+        block.lastElementChild.innerHTML = '<p>Body</p>';
+        change(block);
+        const text = block.textContent;
+        const clipboard = clipboardPasteFixture(f);
+        clipboard.data.set('text/html', block.outerHTML);
+        clipboard.data.set('application/x-manuldown-editor-html', block.outerHTML);
+        clipboard.data.set('text/plain', text);
+        clipboard.paste();
+        assert.equal(!!f.editor.querySelector('[data-mdw-callout]'), false);
+        assert.equal(f.editor.textContent, text);
+    });
+});
+
+test('copying part of a callout body exports only its selected rich text', async () => {
+    await withFixture('<div class="mdw-callout" data-mdw-callout="true"><div class="mdw-callout-title" contenteditable="false">Warning</div>' +
+        '<div class="mdw-callout-content"><p><strong>Body text</strong></p></div></div>', f => {
+        const copied = f.copy(f.range(f.editor.querySelector('strong').firstChild, 0, 4));
+        assert.equal(copied, '<p><strong>Body</strong></p>');
+        assert.doesNotMatch(copied, /Warning|callout|data-mdw/);
     });
 });
 

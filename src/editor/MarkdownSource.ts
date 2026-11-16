@@ -54,7 +54,8 @@ function fingerprint(node: any): string {
     const attributes = ['href', 'src', 'alt', 'title', 'start', 'type', 'checked',
         'data-mdw-soft-break', 'data-mdw-break-prefix', 'data-mdw-image-hardbreak',
         'data-mdw-image-hardbreak-prefix', 'data-mdw-opaque-source', 'data-mdw-footnote-definition',
-        'data-mdw-math-delimiter'];
+        'data-mdw-math-delimiter', 'data-mdw-callout', 'data-mdw-callout-format',
+        'data-mdw-callout-type', 'data-mdw-callout-header', 'data-mdw-callout-footer'];
     const values = attributes.map(name => {
         let value = node.getAttribute(name);
         if (name === 'src') {
@@ -209,7 +210,7 @@ export function preserveMarkdownSource(html: string, source: string, originalHtm
     const inlineEntries: Array<{ source: string; marker: string }> = [];
     const inlineNodes = new Map<string, any[]>();
     for (const node of Array.from<any>(submitted.querySelectorAll('em,strong,code,a,img,del,s,sup,span[data-mdw-math]'))) {
-        if (!node.closest('[data-mdw-footnote-definition]')) {
+        if (!node.closest('[data-mdw-footnote-definition], [data-mdw-callout]')) {
             const signature = fingerprint(node);
             const candidates = inlineNodes.get(signature) || [];
             candidates.push(node);

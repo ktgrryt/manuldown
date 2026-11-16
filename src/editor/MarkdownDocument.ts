@@ -4,6 +4,7 @@ import { getNonce } from '../utils/getNonce';
 import { MAX_EDITABLE_FOOTNOTE_DEPTH, numberFootnotes, parseFootnoteDefinition } from './Footnotes';
 import { MarkdownSourceBlock } from './MarkdownSource';
 import { emptyMarkdownTocHtml, markdownTocRanges, matchMarkdownTocBlock, renderMarkdownTocs } from './MarkdownToc';
+import { calloutRanges, parseCallout, renderCallout, unsupportedCalloutSource } from './Callouts';
 
 function escapeOpaqueSourceForHtml(value: string): string {
     return value
@@ -86,6 +87,31 @@ marked.use({
     pedantic: false,
     extensions: [
         {
+            name: 'callout',
+            level: 'block',
+            // Deliberately do not interrupt paragraphs: their inline syntax can
+            // include multiline code spans with literal directive examples.
+            tokenizer(source: string) {
+                const callout = parseCallout(source);
+                if (callout) {
+                    if (callout.format === 'quote') {
+                        // Let Marked determine the whole quote's boundary. Lazy
+                        // continuation and adjacent quote constructs that cannot
+                        // be represented exactly remain ordinary blockquotes.
+                        const quote = (this.lexer as any).tokenizer.blockquote(source) as Tokens.Blockquote | undefined;
+                        if (!quote || quote.raw.replace(/\n+$/, '') !== callout.raw.replace(/\n+$/, '')) {return;}
+                    }
+                    return { type: 'callout', raw: callout.raw, callout, tokens: this.lexer.blockTokens(callout.body) };
+                }
+                const raw = unsupportedCalloutSource(source);
+                return raw ? { type: 'callout', raw, unsupported: true } : undefined;
+            },
+            renderer(token) {
+                return token.unsupported ? renderOpaqueSource(token.raw, 'callout-source', true)
+                    : renderCallout(token.callout, this.parser.parse(token.tokens!));
+            }
+        },
+        {
             name: 'markdownToc',
             level: 'block',
             tokenizer(source: string) {
@@ -147,16 +173,6 @@ marked.use({
                     ? renderMath(raw.slice(2, -2), 'display')
                     : renderMath(raw.slice(1, -1), 'inline');
             }
-        },
-        {
-            name: 'alertSource',
-            level: 'inline',
-            start(source: string) { return source.indexOf('[!'); },
-            tokenizer(source: string) {
-                const match = /^\[!(?:NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]/.exec(source);
-                return match ? { type: 'alertSource', raw: match[0] } : undefined;
-            },
-            renderer(token) { return renderOpaqueSource(token.raw, 'alert', false); }
         },
         {
             name: 'footnoteReference',
@@ -548,7 +564,7 @@ export class MarkdownDocument {
             return { source: raw, start: range.start, end, html: fragment.toHtml() };
         });
         marked.walkTokens(tokens, token => {
-            if (['codespan', 'em', 'strong', 'link', 'image', 'del', 'footnoteReference', 'mathSource', 'alertSource'].includes(token.type)) {
+            if (['codespan', 'em', 'strong', 'link', 'image', 'del', 'footnoteReference', 'mathSource'].includes(token.type)) {
                 blocks.push({ source: token.raw, start: 0, end: 0, inline: true,
                     html: marked.Parser.parseInline([token]) });
             }
@@ -1068,6 +1084,17 @@ export class MarkdownDocument {
         }
         protectedMarkdown = rawHtmlOutput.join('');
 
+        // Extract only lexer-confirmed blocks before whitespace/list markers
+        // are inserted. Their original delimiters and body remain trustworthy
+        // source, and body rendering uses the ordinary document pipeline.
+        for (const range of calloutRanges(protectedMarkdown).reverse()) {
+            const source = protectedMarkdown.slice(range.start, range.end);
+            const marker = addProtectedBlock(source, 'callout');
+            const before = protectedMarkdown.slice(0, range.start);
+            const after = protectedMarkdown.slice(range.end);
+            protectedMarkdown = before + (endsWithBlankLine(before) ? '' : '\n') + marker + '\n\n' + after;
+        }
+
         // Comment-delimited live TOCs remain one source block. The lexer-based
         // ranges exclude literal examples in fenced code and raw HTML.
         for (const range of markdownTocRanges(protectedMarkdown).reverse()) {
@@ -1207,6 +1234,7 @@ export class MarkdownDocument {
                     const escapedMarker = block.marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
                     const opaqueHtml = block.kind === 'toc' ? emptyMarkdownTocHtml() : block.kind === 'footnote-definition'
                         ? this.renderFootnoteDefinition(block.source)
+                        : block.kind === 'callout' ? this.renderCalloutBlock(block.source)
                         : renderOpaqueSource(block.source, block.kind, true);
                     const standaloneMarkerPattern = new RegExp(`<p>\\s*${escapedMarker}\\s*<\\/p>\\s*`, 'i');
                     if (standaloneMarkerPattern.test(restoredHtml)) {
@@ -1227,6 +1255,24 @@ export class MarkdownDocument {
                 return restoredHtml;
             }
         };
+    }
+
+    private renderCalloutBlock(source: string): string {
+        const callout = parseCallout(source);
+        return callout ? renderCallout(callout, this.renderCalloutContent(callout.body))
+            : renderOpaqueSource(source, 'callout-source', true);
+    }
+
+    public renderCalloutContent(content: string): string {
+        if (!this.referenceLinks) {
+            const protectedSource = this.protectNonRenderedMarkdown(this.document.getText());
+            this.referenceLinks = marked.lexer(protectedSource.markdown).links;
+        }
+        const bodyDocument = { getText: () => content, uri: this.document.uri } as vscode.TextDocument;
+        return new MarkdownDocument(bodyDocument, undefined, {
+            depth: this.footnoteContext?.depth ?? 0,
+            links: this.referenceLinks || this.footnoteContext?.links || {}
+        }).toHtml();
     }
 
     private renderFootnoteDefinition(source: string): string {

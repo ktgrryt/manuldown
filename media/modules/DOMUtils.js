@@ -10,11 +10,12 @@ export class DOMUtils {
         this.pendingCaretAnchorInputs = new Map();
     }
 
-    /** The editable document containing a node, excluding footnote controls. */
+    /** The editable document containing a node, excluding generated controls. */
     getEditingRoot(node) {
         const element = node?.nodeType === 3 ? node.parentElement : node;
-        const content = element?.closest?.('.mdw-footnote-content');
-        return content && this.editor.contains(content) && content.closest('[data-mdw-footnote-definition]')
+        const content = element?.closest?.('.mdw-footnote-content, .mdw-callout-content');
+        return content && this.editor.contains(content) &&
+            (content.parentElement?.matches('[data-mdw-callout="true"]') || content.closest('[data-mdw-footnote-definition]'))
             ? content : this.editor;
     }
 
@@ -30,6 +31,8 @@ export class DOMUtils {
             if (current.tagName === tagName) {
                 return current;
             }
+            // Editing a callout's body must not target a quote/list outside it.
+            if (current.classList?.contains('mdw-callout-content')) break;
             current = current.parentElement;
         }
         return null;
@@ -589,6 +592,8 @@ export class DOMUtils {
         removeTransientClass('table.md-table', 'md-table');
         removeTransientClass('table.md-table-whole-selected', 'md-table-whole-selected');
         removeTransientClass('.md-block-whole-selected', 'md-block-whole-selected');
+        removeTransientClass('.mdw-callout-title.nav-selected', 'nav-selected');
+        clone.querySelectorAll('.mdw-callout-title').forEach(title => title.setAttribute('aria-expanded', 'false'));
 
         if (historyComparable) {
             // A TOC's presence is editable; its generated links are derived from

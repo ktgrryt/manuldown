@@ -38,6 +38,7 @@ async function fixture(html = '') {
         domUtils: { commitCaretAnchorInput() {}, normalizeInlineCodeAfterInput() {} },
         stateManager: { saveStateDebounced() {} },
         markdownConverter: { convertMarkdownSyntax: () => false },
+        calloutManager: { handleInput: () => false },
         stripEditorControlCharacters() {},
         hideSlashCommandMenu() {},
         notifyChange: () => updates.push(editor.innerHTML),
