@@ -24,6 +24,7 @@ function fileUri(nativePath) {
 let state;
 const vscodeMock = {
     FileType: { File: 1, Directory: 2, SymbolicLink: 64 },
+    ViewColumn: { Active: -1 },
     Uri: {
         file: fileUri,
         parse: value => {
@@ -52,6 +53,9 @@ const vscodeMock = {
         showOpenDialog: async () => state.selection,
         showErrorMessage: message => state.errors.push(message),
     },
+    commands: {
+        executeCommand: async (...args) => state.commands.push(args),
+    },
 };
 const originalLoad = Module._load;
 Module._load = function (name, ...args) {
@@ -75,7 +79,7 @@ async function fixture(t) {
     const outside = path.join(root, 'outside');
     await fs.mkdir(workspace);
     await fs.mkdir(outside);
-    state = { settings: {}, stats: [], reads: [], errors: [], selection: undefined, workspace };
+    state = { settings: {}, stats: [], reads: [], errors: [], commands: [], selection: undefined, workspace };
     const messages = [];
     const provider = new MarkdownEditorProvider({ extensionUri: fileUri(path.join(root, 'extension')) });
     const document = { uri: fileUri(path.join(workspace, 'doc.md')) };
@@ -250,6 +254,59 @@ test('inserted images keep portable paths for document names with Markdown delim
         assert.equal(img.getAttribute('data-md-path'), expected);
         assert.equal(f.provider.htmlToMarkdown(window.document.body.innerHTML, document), message.markdown + '\n');
     }
+});
+
+test('double-clicking pasted images resolves encoded Markdown paths exactly once, including after reload', async t => {
+    for (const name of ['日本語', 'my notes', 'a(b)', 'a#b%20', '日本語%2F画像', '100%完成']) {
+        const f = await fixture(t);
+        const document = { uri: fileUri(path.join(f.workspace, `${name}.md`)), getText: () => '' };
+        assert.equal(await f.provider.saveImageFromDataUrl(dataUrl, 'image/png', document, f.webview), true);
+        const message = f.messages.find(message => message.type === 'insertImage');
+
+        await f.provider.openImageFile(message.markdownPath, document);
+        assert.deepEqual(f.state.errors, [], name);
+        assert.equal(f.state.commands.length, 1, name);
+        assert.equal(f.state.commands[0][0], 'vscode.open');
+        assert.equal(f.state.commands[0][1].fsPath, path.join(f.workspace, 'images', name, `${name}.png`));
+        assert.deepEqual(f.state.commands[0][2], { viewColumn: -1, preview: true });
+
+        const reloaded = { ...document, getText: () => message.markdown + '\n' };
+        const html = new MarkdownDocument(reloaded, f.webview).toHtml();
+        const image = require('@mixmark-io/domino').createWindow(html).document.querySelector('img');
+        await f.provider.openImageFile(image.getAttribute('data-md-path'), reloaded);
+        assert.deepEqual(f.state.errors, [], name);
+        assert.equal(f.state.commands.length, 2, name);
+        assert.equal(f.state.commands[1][1].fsPath, f.state.commands[0][1].fsPath, name);
+    }
+});
+
+test('opening encoded file image URIs decodes them only once', async t => {
+    const f = await fixture(t);
+    const image = path.join(f.workspace, '日本語#%20.png');
+    await fs.writeFile(image, imageBytes);
+    await f.provider.openImageFile(pathToFileURL(image).href, f.document);
+    assert.deepEqual(f.state.errors, []);
+    assert.equal(f.state.commands.length, 1);
+    assert.equal(f.state.commands[0][1].fsPath, image);
+});
+
+test('decoding image paths still blocks traversal and symlinks outside the workspace', async t => {
+    const f = await fixture(t);
+    const secret = path.join(f.outside, '日本語.png');
+    await fs.writeFile(secret, imageBytes);
+    await fs.symlink(f.outside, path.join(f.workspace, '画像'));
+    const encodedName = encodeURIComponent('日本語.png');
+    for (const source of [
+        `../outside/${encodedName}`,
+        `.%2e/outside/${encodedName}`,
+        `${encodeURIComponent('画像')}/${encodedName}`,
+        pathToFileURL(secret).href,
+    ]) {
+        await f.provider.openImageFile(source, f.document);
+    }
+    assert.deepEqual(f.state.commands, []);
+    assert.equal(f.state.errors.length, 4);
+    assert.ok(f.state.errors.every(message => /Opening images outside the current workspace folder is blocked/.test(message)));
 });
 
 test('the image picker can still import an explicitly selected outside file', async t => {

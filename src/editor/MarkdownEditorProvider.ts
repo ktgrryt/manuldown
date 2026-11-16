@@ -4580,8 +4580,17 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 vscode.env.openExternal(vscode.Uri.parse(imageSrc));
                 return;
             } else {
-                // Relative path - resolve relative to the document
-                imageUri = this.resolveImageSourceUri(imageSrc, document);
+                // Markdown paths are URL-encoded, while Uri.joinPath expects
+                // filesystem text. URI schemes are already decoded by Uri.parse.
+                let imagePath = imageSrc;
+                if (!/^[a-z][a-z0-9+.-]*:/i.test(imagePath) || path.win32.isAbsolute(imagePath)) {
+                    try {
+                        imagePath = decodeURIComponent(imagePath);
+                    } catch {
+                        // Preserve literal percent signs in unencoded paths.
+                    }
+                }
+                imageUri = this.resolveImageSourceUri(imagePath, document);
             }
 
             const allowFileLinks = this.getBooleanSetting('security.allowFileLinks', false);

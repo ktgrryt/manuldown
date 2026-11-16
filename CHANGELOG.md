@@ -11,6 +11,7 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 
 ### Fixed
 - Keep cursor entry into a table of contents stable from wrapped text, formatted text, and blank lines.
+- Open pasted images by double-clicking when Markdown filenames contain Japanese, spaces, or other URL-encoded characters.
 
 ## [2.2.7] - 2026-11-15
 
