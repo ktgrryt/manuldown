@@ -113,9 +113,18 @@ export class CursorManager {
             const tempRange = document.createRange();
             tempRange.selectNodeContents(codeElement);
             tempRange.setEnd(range.startContainer, range.startOffset);
-            const offset = tempRange.toString().replace(/[\u200B\u2060\uFEFF]/g, '').length;
-            const total = (codeElement.textContent || '').replace(/[\u200B\u2060\uFEFF]/g, '').length;
-            return { offset, total };
+            const rawOffset = tempRange.toString().length;
+            let offset = rawOffset;
+            let rawStart = 0;
+            let text = '';
+            for (const node of this.domUtils.getTextNodes(codeElement)) {
+                const raw = node.textContent || '';
+                const anchor = this.domUtils.getCaretAnchorOffset?.(node) ?? -1;
+                if (anchor >= 0 && rawStart + anchor < rawOffset) offset--;
+                text += anchor >= 0 ? raw.slice(0, anchor) + raw.slice(anchor + 1) : raw;
+                rawStart += raw.length;
+            }
+            return { offset, total: text.length, text };
         } catch (e) {
             return null;
         }
@@ -1671,41 +1680,32 @@ export class CursorManager {
         return true;
     }
 
-    _getInlineCodeStartTextPosition(code) {
+    _getInlineCodeTextPosition(code, offset) {
         if (!code || code.nodeType !== Node.ELEMENT_NODE || code.tagName !== 'CODE') {
             return null;
         }
-        const textNodes = this.domUtils.getTextNodes(code);
-        if (!textNodes || textNodes.length === 0) {
-            return null;
-        }
-        for (const textNode of textNodes) {
-            const text = textNode.textContent || '';
-            const firstOffset = this._getFirstNonZwspOffset(text);
-            if (firstOffset !== null) {
-                return { node: textNode, offset: firstOffset };
+        // Native edits and paste can split one code span into several Text
+        // nodes. Map a whole-code text offset back to its live DOM position.
+        for (const node of this.domUtils.getTextNodes(code)) {
+            const raw = node.textContent || '';
+            const anchor = this.domUtils.getCaretAnchorOffset?.(node) ?? -1;
+            const length = raw.length - (anchor >= 0 ? 1 : 0);
+            if (length > 0 && offset <= length) {
+                return { node, offset: offset + (anchor >= 0 && anchor <= offset ? 1 : 0) };
             }
+            offset -= length;
         }
-        // Fallback: inline code that only has boundary chars/empty text.
-        return { node: textNodes[0], offset: 0 };
+        return null;
     }
 
     _getInlineCodeAfterFirstCharPosition(code) {
-        const startPos = this._getInlineCodeStartTextPosition(code);
-        if (!startPos) {
-            return null;
-        }
-        const text = startPos.node.textContent || '';
-        // Empty code has a single inside caret. Its editable placeholder is not
-        // a character to advance through before leaving the code.
-        if (this._getFirstNonZwspOffset(text) === null) {
-            return null;
-        }
-        const targetOffset = this._getAdjacentInlineCodeTextOffset(text, startPos.offset, 'forward');
-        return {
-            node: startPos.node,
-            offset: targetOffset
-        };
+        const range = document.createRange();
+        range.selectNodeContents(code);
+        range.collapse(true);
+        const info = this._getInlineCodeCursorInfo(range, code);
+        if (!info?.total) return null;
+        return this._getInlineCodeTextPosition(code,
+            this._getAdjacentInlineCodeTextOffset(info.text, 0, 'forward'));
     }
 
     _getAdjacentInlineCodeTextOffset(text, offset, direction) {
@@ -2317,18 +2317,10 @@ export class CursorManager {
         if (container === codeElement) {
             return offset >= (codeElement.childNodes ? codeElement.childNodes.length : 0);
         }
-        if (container && container.nodeType === Node.TEXT_NODE && codeElement.contains(container)) {
+        if (container && container.nodeType === Node.TEXT_NODE &&
+            container === this.domUtils.getLastTextNode(codeElement)) {
             const text = container.textContent || '';
-            if (text.length === 0) {
-                return true;
-            }
-            // Safari/WebView can report one-char-short offset when a leading ZWSP exists.
-            // Do not apply this tolerance to word-joiner inline-code markers, otherwise
-            // the caret can skip the inside-right edge of inline code.
-            const threshold = text[0] === '\u200B'
-                ? Math.max(0, text.length - 1)
-                : text.length;
-            return offset >= threshold;
+            return offset >= text.length;
         }
         return false;
     }
@@ -8226,35 +8218,18 @@ export class CursorManager {
         const preBlock = codeElement ? this.domUtils.getParentElement(codeElement, 'PRE') : null;
         if (codeElement && !preBlock) {
             const cursorInfo = this._getInlineCodeCursorInfo(range, codeElement);
-            const atInlineCodeStart = (cursorInfo && cursorInfo.offset <= 0) ||
-                this._isRangeAtInlineCodeStart(range, codeElement);
-            if (atInlineCodeStart) {
-                const firstStepPos = this._getInlineCodeAfterFirstCharPosition(codeElement);
-                if (firstStepPos) {
-                    const startNode = range.startContainer;
-                    const startOffset = range.startOffset;
-                    if (!(startNode === firstStepPos.node && startOffset >= firstStepPos.offset)) {
-                        const advanceRange = document.createRange();
-                        advanceRange.setStart(firstStepPos.node, firstStepPos.offset);
-                        advanceRange.collapse(true);
-                        applyRange(advanceRange);
-                        return true;
-                    }
-                }
-            }
-            const hasCursorInfo = !!cursorInfo &&
-                typeof cursorInfo.offset === 'number' &&
-                typeof cursorInfo.total === 'number';
-            const atInlineCodeEnd = (hasCursorInfo && cursorInfo.offset >= cursorInfo.total) ||
-                this._isRangeAtInlineCodeEnd(range, codeElement) ||
-                this._isRangeNearInlineCodeEnd(range, codeElement);
+            const atInlineCodeEnd = cursorInfo ? cursorInfo.offset >= cursorInfo.total :
+                this._isRangeAtInlineCodeEnd(range, codeElement) || this._isRangeNearInlineCodeEnd(range, codeElement);
             if (atInlineCodeEnd) {
                 return this._placeCursorAfterInlineCodeElement(codeElement, selection);
             }
-            if (node.nodeType === Node.TEXT_NODE) {
-                this._placeCollapsedCaret(selection, node,
-                    this._getAdjacentInlineCodeTextOffset(node.textContent || '', offset, 'forward'));
-                return true;
+            if (cursorInfo) {
+                const target = this._getInlineCodeTextPosition(codeElement,
+                    this._getAdjacentInlineCodeTextOffset(cursorInfo.text, cursorInfo.offset, 'forward'));
+                if (target) {
+                    this._placeCollapsedCaret(selection, target.node, target.offset);
+                    return true;
+                }
             }
         }
 
@@ -8877,25 +8852,23 @@ export class CursorManager {
         let startedAtInlineCodeStart = false;
         if (codeElement && !preBlock) {
             const cursorInfo = this._getInlineCodeCursorInfo(range, codeElement);
-            startedAtInlineCodeStart = (cursorInfo && cursorInfo.offset <= 0) ||
+            startedAtInlineCodeStart = cursorInfo ? cursorInfo.offset <= 0 :
                 this._isRangeAtInlineCodeStart(range, codeElement);
             if (startedAtInlineCodeStart) {
                 if (this._placeCursorBeforeInlineCodeElement(codeElement, selection)) {
                     return true;
                 }
             }
-            const textNode = node.nodeType === Node.TEXT_NODE ? node
-                : node === codeElement ? this.domUtils.getLastTextNode(codeElement) : null;
-            if (textNode) {
-                const text = textNode.textContent || '';
-                const fromOffset = node === textNode ? offset : text.length;
-                const targetOffset = this._getAdjacentInlineCodeTextOffset(text, fromOffset, 'backward');
-                const startOffset = this._getFirstNonZwspOffset(text) ?? 0;
-                if (targetOffset <= startOffset) {
+            if (cursorInfo) {
+                const targetOffset = this._getAdjacentInlineCodeTextOffset(cursorInfo.text, cursorInfo.offset, 'backward');
+                if (targetOffset <= 0) {
                     return this._placeCursorInsideInlineCodeStart(codeElement, selection);
                 }
-                this._placeCollapsedCaret(selection, textNode, targetOffset);
-                return true;
+                const target = this._getInlineCodeTextPosition(codeElement, targetOffset);
+                if (target) {
+                    this._placeCollapsedCaret(selection, target.node, target.offset);
+                    return true;
+                }
             }
         }
 

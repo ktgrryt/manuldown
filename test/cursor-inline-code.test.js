@@ -185,8 +185,9 @@ function createDomUtils(editor) {
     return {
         getParentElement,
         getTextNodes: collectTextNodes,
-        getCaretAnchorOffset: node => node?.mdwCaretAnchor?.text === node?.textContent
-            ? node.mdwCaretAnchor.offset : -1,
+        getCaretAnchorOffset: node => typeof node?.mdwCaretAnchor === 'string'
+            ? (node.textContent === node.mdwCaretAnchor ? 0 : -1)
+            : node?.mdwCaretAnchor?.text === node?.textContent ? node.mdwCaretAnchor.offset : -1,
         getFirstTextNode: (element) => collectTextNodes(element)[0] || null,
         getLastTextNode: (element) => collectTextNodes(element).at(-1) || null,
         getNextTextNode: (node) => {
@@ -813,6 +814,10 @@ for (const codeText of ['', '\u200B']) {
     test(`an empty code-only line keeps one inside position between its outside edges (${JSON.stringify(codeText)})`, async () => {
         const fixture = await createInlineCodeFixture({ before: '', codeText, after: '' });
         try {
+            if (codeText) {
+                fixture.code.setAttribute('data-is-new', 'true');
+                fixture.code.firstChild.mdwCaretAnchor = codeText;
+            }
             fixture.manager._placeCursorBeforeInlineCodeElement(fixture.code, fixture.selection);
             const positions = [describeCaret(fixture)];
             for (let i = 0; i < 2; i++) {
@@ -885,6 +890,88 @@ test('inline-code arrows move by whole graphemes, including emoji, accents and j
         fixture.restoreGlobals();
     }
 });
+
+function loadInlineCodeExit(fixture) {
+    const start = editorSource.indexOf('    function moveCursorOutOfInlineCodeRight(');
+    const end = editorSource.indexOf('\n    function createCommandNavEvent(', start);
+    return new Function('window', 'document', 'Node', 'Range', 'domUtils', 'cursorManager',
+        `${editorSource.slice(start, end)}\nreturn moveCursorOutOfInlineCodeRight;`
+    )(global.window, global.document, global.Node, global.Range, fixture.manager.domUtils, fixture.manager);
+}
+
+for (const direction of ['forward', 'backward']) {
+    test(`${direction} arrow crosses split inline-code text without skipping characters after paste`, async () => {
+        const fixture = await createInlineCodeFixture({ codeText: 'aPb' });
+        try {
+            const inserted = fixture.code.firstChild.splitText(1);
+            const remaining = inserted.splitText(1);
+            const range = new TestRange();
+            range.setStart(inserted, 1);
+            range.collapse(true);
+            fixture.selection.addRange(range);
+            const move = direction === 'forward' ? 'moveCursorForward' : 'moveCursorBackward';
+            const exit = loadInlineCodeExit(fixture);
+            assert.equal(exit(), false, 'the pasted text endpoint is inside the code');
+
+            assert.equal(fixture.manager[move](), true);
+            const caret = fixture.selection.getRangeAt(0);
+            assert.equal(fixture.code.contains(caret.startContainer), true);
+            const info = fixture.manager._getInlineCodeCursorInfo(caret, fixture.code);
+            assert.equal(info.offset, direction === 'forward' ? 3 : 1);
+            if (direction === 'forward') {
+                assert.equal(caret.startContainer, remaining);
+                assert.equal(exit(), true, 'only the end of the whole code exits to outside-right');
+                assert.equal(describeCaret(fixture), 'outside-right');
+            }
+        } finally {
+            fixture.restoreGlobals();
+        }
+    });
+}
+
+test('arrows treat graphemes split across inline-code text nodes as whole characters', async () => {
+    const text = 'e\u0301👨‍👩‍👧‍👦';
+    const fixture = await createInlineCodeFixture({ codeText: text });
+    try {
+        let node = fixture.code.firstChild;
+        while (node.length > 1) node = node.splitText(1);
+        const range = new TestRange();
+        range.setStart(fixture.code.firstChild, 0);
+        range.collapse(true);
+        fixture.selection.addRange(range);
+        for (const offset of [2, text.length]) {
+            assert.equal(fixture.manager.moveCursorForward(), true);
+            assert.equal(fixture.manager._getInlineCodeCursorInfo(
+                fixture.selection.getRangeAt(0), fixture.code).offset, offset);
+        }
+        assert.equal(fixture.manager.moveCursorBackward(), true);
+        assert.equal(fixture.manager._getInlineCodeCursorInfo(
+            fixture.selection.getRangeAt(0), fixture.code).offset, 2);
+        assert.equal(fixture.code.textContent, text);
+    } finally {
+        fixture.restoreGlobals();
+    }
+});
+
+for (const prefix of ['\u200B', '\u2060', '\uFEFF']) {
+    test(`code beginning with user ${JSON.stringify(prefix)} reaches its final character before exiting`, async () => {
+        const fixture = await createInlineCodeFixture({ codeText: prefix + 'ab' });
+        try {
+            const range = new TestRange();
+            range.setStart(fixture.code.firstChild, 2);
+            range.collapse(true);
+            fixture.selection.addRange(range);
+            assert.equal(loadInlineCodeExit(fixture)(), false);
+            assert.equal(fixture.manager.moveCursorForward(), true);
+            assert.equal(fixture.selection.getRangeAt(0).startContainer, fixture.code.firstChild);
+            assert.equal(fixture.selection.getRangeAt(0).startOffset, 3);
+            assert.equal(fixture.manager.moveCursorForward(), true);
+            assert.equal(describeCaret(fixture), 'outside-right');
+        } finally {
+            fixture.restoreGlobals();
+        }
+    });
+}
 
 for (const tag of ['strong', 'em', 'a']) {
     test(`code inside ${tag} retains every boundary in both directions`, async () => {

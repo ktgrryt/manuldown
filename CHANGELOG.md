@@ -10,6 +10,8 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 - Insert live table-of-contents blocks with `/toc`. They update with heading changes, persist across saves, and can be selected and deleted as one object with Undo/Redo support. Navigate read-only items with arrows or Tab and press Enter to jump to a heading.
 
 ### Fixed
+- Keep inline-code arrow navigation on every character after pasting into the middle of code, including text and emoji split across DOM nodes.
+- Preserve inline-code formatting when copying or cutting a single line, including selections inside the code and text around it.
 - Keep cursor entry into a table of contents stable from wrapped text, formatted text, and blank lines.
 - Open pasted images by double-clicking when Markdown filenames contain Japanese, spaces, or other URL-encoded characters.
 

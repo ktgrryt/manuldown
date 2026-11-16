@@ -3108,11 +3108,24 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
         const wrapper = document.createElement('div');
         wrapper.appendChild(fragment);
         wrapper.querySelectorAll('[data-exclude-from-markdown="true"]').forEach((node) => node.remove());
+        const enclosingCode = domUtils.getParentElement(range.commonAncestorContainer, 'CODE');
+        const hasInlineCode = !domUtils.getParentElement(range.commonAncestorContainer, 'PRE') &&
+            (!!enclosingCode || Array.from(wrapper.querySelectorAll('code')).some(code => !code.closest('pre')));
+        if (hasInlineCode) {
+            // cloneContents omits CODE when the selection is wholly inside it.
+            // Restore inline ancestors and remove caret anchors without adding
+            // paragraph/list wrappers to text copied from within a block.
+            wrapper.innerHTML = createMarkdownClipboardHtml(editor, range, footnoteManager, {
+                includeBlockAncestors: false,
+                includeFootnoteDefinitions: false
+            });
+        }
         const text = fragmentToClipboardPlainText(wrapper);
         footnoteManager.appendClipboardDefinitions(wrapper);
         return {
             html: wrapper.innerHTML,
-            text
+            text,
+            hasInlineCode
         };
     }
 
@@ -18007,50 +18020,8 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
             return false;
         }
 
-        let atInlineCodeEnd = false;
-        try {
-            const tempRange = document.createRange();
-            tempRange.selectNodeContents(codeElement);
-            tempRange.setEnd(range.startContainer, range.startOffset);
-            const offset = tempRange.toString().replace(/[\u200B\u2060\uFEFF]/g, '').length;
-            const total = (codeElement.textContent || '').replace(/[\u200B\u2060\uFEFF]/g, '').length;
-            atInlineCodeEnd = offset >= total;
-        } catch (e) {
-            atInlineCodeEnd = false;
-        }
-        if (!atInlineCodeEnd) {
-            try {
-                const endRange = document.createRange();
-                endRange.selectNodeContents(codeElement);
-                endRange.collapse(false);
-                atInlineCodeEnd = range.compareBoundaryPoints(Range.START_TO_START, endRange) === 0;
-            } catch (e) {
-                atInlineCodeEnd = false;
-            }
-        }
-        if (!atInlineCodeEnd) {
-            const container = range.startContainer;
-            const offset = range.startOffset;
-            if (container === codeElement) {
-                atInlineCodeEnd = offset >= (codeElement.childNodes ? codeElement.childNodes.length : 0);
-            } else if (container && container.nodeType === Node.TEXT_NODE && codeElement.contains(container)) {
-                const text = container.textContent || '';
-                if (text.length === 0) {
-                    atInlineCodeEnd = true;
-                } else {
-                    // Safari/WebView can report one-char-short offset when a leading
-                    // ZWSP marker exists. Do not apply this tolerance to word-joiner markers,
-                    // otherwise right-arrow may skip inline-code inside-right.
-                    const threshold = text[0] === '\u200B'
-                        ? Math.max(0, text.length - 1)
-                        : text.length;
-                    if (offset >= threshold) {
-                        atInlineCodeEnd = true;
-                    }
-                }
-            }
-        }
-        if (!atInlineCodeEnd) {
+        const cursorInfo = cursorManager._getInlineCodeCursorInfo(range, codeElement);
+        if (!cursorInfo || cursorInfo.offset < cursorInfo.total) {
             return false;
         }
 
@@ -22542,10 +22513,11 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
                 });
             }
         };
-        // Lists, several lines or blocks need the editor's own clipboard format
-        // so that pasting them keeps their structure and formatting.
+        // Inline code, lists and multiple lines/blocks need the editor's own
+        // clipboard format so pasting keeps their structure and formatting.
         const clipboardPayloadHasStructure = (selection, payload, plainText) => (
             selectionContainsListStructure(selection) ||
+            payload.hasInlineCode ||
             /data-mdw-(?:footnote-(?:ref|definition)|math|toc)=/.test(payload.html || '') ||
             plainText.includes('\n') ||
             (

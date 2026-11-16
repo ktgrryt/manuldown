@@ -109,7 +109,19 @@ class TestRange {
     }
 
     toString() {
-        return '';
+        const textBefore = (node, offset) => {
+            let length = node.nodeType === 3 ? offset : Array.from(node.childNodes)
+                .slice(0, offset).reduce((sum, child) => sum + (child.textContent || '').length, 0);
+            for (let current = node; current; current = current.parentNode) {
+                for (let previous = current.previousSibling; previous; previous = previous.previousSibling) {
+                    length += (previous.textContent || '').length;
+                }
+            }
+            return length;
+        };
+        const root = this.startContainer.ownerDocument.documentElement;
+        return root.textContent.slice(textBefore(this.startContainer, this.startOffset),
+            textBefore(this.endContainer, this.endOffset));
     }
 }
 

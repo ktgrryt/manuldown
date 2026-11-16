@@ -2,7 +2,7 @@
 import { DOMUtils } from './DOMUtils.js';
 
 /** Build a standalone Markdown-conversion snapshot without changing the editor. */
-export function createMarkdownClipboardHtml(editor, range, footnoteManager) {
+export function createMarkdownClipboardHtml(editor, range, footnoteManager, options = {}) {
     if (!range || range.collapsed || !editor.contains(range.commonAncestorContainer)) return '';
 
     const document = editor.ownerDocument;
@@ -51,6 +51,7 @@ export function createMarkdownClipboardHtml(editor, range, footnoteManager) {
     let fragment = copiedRange.cloneContents();
     let ancestor = originalRoot.nodeType === 1 ? originalRoot : originalRoot.parentElement;
     while (ancestor && ancestor !== editor) {
+        if (options.includeBlockAncestors === false && domUtils.isBlockElement(ancestor)) break;
         // Text inside a cell or a note body is standalone prose when copied.
         if (/^(TD|TH)$/.test(ancestor.tagName) || ancestor.classList.contains('mdw-footnote-content') ||
             ancestor.classList.contains('mdw-callout-content')) break;
@@ -91,7 +92,7 @@ export function createMarkdownClipboardHtml(editor, range, footnoteManager) {
 
     const wrapper = document.createElement('div');
     wrapper.appendChild(fragment);
-    footnoteManager.appendClipboardDefinitions(wrapper);
+    if (options.includeFootnoteDefinitions !== false) footnoteManager.appendClipboardDefinitions(wrapper);
     Array.from(wrapper.querySelectorAll('ol')).forEach(list => {
         const number = list.firstElementChild?.getAttribute('data-mdw-copy-list-number');
         if (number) list.setAttribute('start', number);

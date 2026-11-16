@@ -145,7 +145,7 @@ function clipboardPasteFixture({ editor, document, window, range, copy, calloutM
     const env = {
         editor, document, window, Node: window.Node, NodeFilter: window.NodeFilter,
         cursorManager,
-        createMarkdownClipboardHtml: (_editor, selection) => copy(selection),
+        createMarkdownClipboardHtml: (_editor, selection, _footnotes, options) => copy(selection, options),
         createImageClipboardSnapshot: () => null,
         isUpdating: false,
         isComposing: false, compositionUpdateGate: { composing: false },
@@ -236,7 +236,7 @@ function clipboardPasteFixture({ editor, document, window, range, copy, calloutM
         'hasExplicitScheme', 'sanitizeLinkHref', 'unwrapElement', 'sanitizeFragmentForEditor',
         'createSanitizedContainerFromHtml', 'isBlockElement',
         'selectionContainsImage', 'selectionContainsListStructure', 'fragmentToClipboardPlainText',
-        'createClipboardPayloadFromRange', 'createClipboardPayloadFromSelection',
+        'createClipboardPayloadFromRange', 'createClipboardPayloadFromSelection', 'insertPlainTextAtSelection',
         'createMarkdownImageSyntaxFromElement',
         'isEditorRange', 'prunePendingImageInsertionRanges', 'beginImageInsertionRequest',
         'takePendingImageInsertion', 'discardPendingImageInsertion', 'markPastedDataImage',
@@ -289,7 +289,7 @@ function clipboardPasteFixture({ editor, document, window, range, copy, calloutM
     };
     return {
         data, imagePolicyCalls, messages, nativeImages, receive: imageImports.receive,
-        copy() { currentRange = range(editor); return dispatch('copy'); },
+        copy(target = editor, start, end) { currentRange = range(target, start, end); return dispatch('copy'); },
         cut(target, start, end, eventTarget = editor) {
             currentRange = range(target, start, end);
             return dispatch('cut', eventTarget);
@@ -331,7 +331,7 @@ async function withFixture(html, callback) {
     };
     try {
         await callback({ editor, document, window, range, calloutManager, domUtils, cursorManager,
-            copy: selection => createMarkdownClipboardHtml(editor, selection, footnoteManager) });
+            copy: (selection, options) => createMarkdownClipboardHtml(editor, selection, footnoteManager, options) });
     } finally {
         Object.assign(global, previous);
     }
@@ -576,6 +576,96 @@ for (const markersOnly of [false, true]) {
         });
     });
 }
+
+for (const markersOnly of [false, true]) {
+    for (const selected of ['text', 'partial text', 'code contents', 'code element', 'mixed prose']) {
+        test(`copy and paste retains inline code (${selected}, ${markersOnly ? 'HTML markers' : 'custom types'})`, async () => {
+            await withFixture('<p>before <code>code value</code> after</p>', f => {
+                const clipboard = clipboardPasteFixture(f);
+                const code = f.editor.querySelector('code');
+                const paragraph = code.parentElement;
+                const target = selected === 'code contents' ? code
+                    : /^(code element|mixed prose)$/.test(selected) ? paragraph : code.firstChild;
+                const partial = selected === 'partial text';
+                const expectedCode = partial ? 'value' : 'code value';
+                const expectedHtml = selected === 'mixed prose'
+                    ? 'before <code>code value</code> after' : `<code>${expectedCode}</code>`;
+                const start = partial ? 5 : selected === 'code element' ? 1 : 0;
+                const end = partial ? 10 : selected === 'code element' ? 2 : undefined;
+                const original = f.editor.innerHTML;
+
+                assert.equal(clipboard.copy(target, start, end).defaultPrevented, true);
+                assert.equal(f.editor.innerHTML, original, 'copy must not change the source');
+                assert.equal(clipboard.data.get('application/x-manuldown-editor-html'), expectedHtml);
+                assert.equal(clipboard.data.get('text/plain'), selected === 'mixed prose'
+                    ? 'before code value after' : expectedCode);
+                if (markersOnly) clipboard.forgetCustomTypes();
+                f.editor.innerHTML = '<p>left  right</p>';
+
+                assert.equal(clipboard.paste(f.editor.firstChild.firstChild, 5).defaultPrevented, true);
+                assert.equal(f.editor.innerHTML, `<p>left ${expectedHtml} right</p>`);
+            });
+        });
+    }
+}
+
+test('cut and paste retains a partial inline code without copying unselected source metadata', async () => {
+    await withFixture('<h2>before <code data-mdw-opaque-source="hidden" data-mdw-opaque-kind="raw-html-inline" data-mdw-code-leading="2020" data-mdw-code-trailing="2020">code value</code> after</h2>', f => {
+        const clipboard = clipboardPasteFixture(f);
+        const text = f.editor.querySelector('code').firstChild;
+        assert.equal(clipboard.cut(text, 5, 10).defaultPrevented, true);
+        assert.equal(f.editor.querySelector('code').textContent, 'code ');
+        assert.equal(clipboard.data.get('application/x-manuldown-editor-html'), '<code>value</code>');
+        assert.equal(clipboard.data.get('text/plain'), 'value');
+
+        f.editor.innerHTML = '<p><br></p>';
+        assert.equal(clipboard.paste(f.editor.firstChild, 0, 1).defaultPrevented, true);
+        assert.equal(f.editor.innerHTML, '<p><code>value</code></p>');
+    });
+});
+
+test('inline-code copies remove editor caret anchors while retaining user zero-width text and literal Markdown', async () => {
+    await withFixture('<p>\u200b<code>\u200bA\u200bB\u2060 **literal** https://example.test `literal`</code>\u200b</p>', f => {
+        const paragraph = f.editor.firstChild;
+        for (const text of [paragraph.firstChild, paragraph.lastChild, paragraph.querySelector('code').firstChild]) {
+            text.mdwCaretAnchor = { character: '\u200b', text: text.textContent, offset: 0 };
+        }
+        const clipboard = clipboardPasteFixture(f);
+        const expected = 'A\u200bB\u2060 **literal** https://example.test `literal`';
+        assert.equal(clipboard.copy(paragraph).defaultPrevented, true);
+        assert.equal(clipboard.data.get('application/x-manuldown-editor-html'), `<code>${expected}</code>`);
+        assert.equal(clipboard.data.get('text/plain'), expected);
+        f.editor.innerHTML = '<p><br></p>';
+
+        clipboard.paste(f.editor.firstChild, 0, 1);
+        assert.equal(f.editor.innerHTML, `<p><code>${expected}</code></p>`);
+    });
+});
+
+test('pasting a copied inline code inside another code inserts its literal text', async () => {
+    await withFixture('<p><code>source</code></p>', f => {
+        const clipboard = clipboardPasteFixture(f);
+        assert.equal(clipboard.copy(f.editor.querySelector('code').firstChild).defaultPrevented, true);
+        f.editor.innerHTML = '<p><code>target </code></p>';
+        const text = f.editor.querySelector('code').firstChild;
+
+        assert.equal(clipboard.paste(text, text.length).defaultPrevented, true);
+        assert.equal(f.editor.innerHTML, '<p><code>target source</code></p>');
+    });
+});
+
+test('single-line code-block copies retain the native clipboard behavior', async () => {
+    for (const selected of ['text', 'code contents', 'pre contents', 'pre element']) {
+        await withFixture('<pre><code>code value</code></pre>', f => {
+            const clipboard = clipboardPasteFixture(f);
+            const code = f.editor.querySelector('code');
+            const target = selected === 'text' ? code.firstChild : selected === 'code contents' ? code
+                : selected === 'pre contents' ? code.parentElement : f.editor;
+            assert.equal(clipboard.copy(target).defaultPrevented, false);
+            assert.equal(clipboard.data.size, 0);
+        });
+    }
+});
 
 for (const nativeDelete of ['returns false', 'throws', 'returns true without deleting']) {
     test(`cut removes selected list text when native delete ${nativeDelete}`, async () => {
