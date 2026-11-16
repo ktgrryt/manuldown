@@ -1966,13 +1966,10 @@ export class CodeBlockManager {
                     event.preventDefault();
                     event.stopPropagation();
                     this._closeMermaidExportMenu(true);
-                } else if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+                } else if (!menu.hidden && menu.contains(event.target) &&
+                    ['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
                     event.preventDefault();
                     event.stopPropagation();
-                    if (menu.hidden) {
-                        this._openMermaidExportMenu(pre, download, downloadBtn, menu, event.key === 'ArrowUp' || event.key === 'End');
-                        return;
-                    }
                     const items = Array.from(menu.querySelectorAll('[role="menuitem"]'));
                     const index = items.indexOf(document.activeElement);
                     const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 :

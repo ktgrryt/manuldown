@@ -340,7 +340,10 @@ test('Download supports keyboard navigation, Escape, outside clicks and focus ch
     const f = await fixture(t);
     const toggle = f.pre.querySelector('.code-block-download-btn');
     const menu = f.pre.querySelector('.code-block-export-menu');
-    f.dispatch(toggle, 'keydown', { key: 'ArrowDown' });
+    f.manager.focusCodeBlockAction(f.pre, toggle);
+    assert.equal(f.dispatch(toggle, 'keydown', { key: 'Enter' }).defaultPrevented, false);
+    // Domino does not synthesize the native button click after Enter.
+    f.dispatch(toggle, 'click');
     assert.equal(f.focused.getAttribute('data-format'), 'png');
     f.dispatch(menu, 'keydown', { key: 'ArrowDown' });
     assert.equal(f.focused.getAttribute('data-format'), 'svg');
@@ -353,7 +356,14 @@ test('Download supports keyboard navigation, Escape, outside clicks and focus ch
     f.dispatch(menu, 'keydown', { key: 'Escape' });
     assert.equal(menu.hidden, true);
     assert.equal(f.focused, toggle);
-    f.dispatch(toggle, 'keydown', { key: 'ArrowUp' });
+    for (const key of ['Home', 'End']) {
+        f.dispatch(toggle, 'keydown', { key });
+        assert.equal(menu.hidden, true, `${key} must not open the download menu`);
+    }
+    assert.equal(f.dispatch(toggle, 'keydown', { key: 'Enter' }).defaultPrevented, false);
+    f.dispatch(toggle, 'click');
+    assert.equal(f.focused.getAttribute('data-format'), 'png');
+    f.dispatch(f.focused, 'keydown', { key: 'ArrowUp' });
     assert.equal(f.focused.getAttribute('data-format'), 'svg');
     f.dispatch(f.editor, 'mousedown');
     assert.equal(menu.hidden, true);

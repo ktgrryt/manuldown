@@ -1426,7 +1426,7 @@ test('Up and Down from code toolbar actions use the language label navigation pa
             });
             const before = fixture.domUtils.getCleanedHTML({ historyComparable: true });
             const buttons = Array.from(pre.querySelectorAll(
-                '.code-block-preview-toggle, .code-block-copy-btn, .code-block-expand-btn'));
+                '.code-block-preview-toggle, .code-block-copy-btn, .code-block-download-btn, .code-block-expand-btn'));
             for (const button of buttons) {
                 for (const key of ['ArrowUp', 'ArrowDown']) {
                     if (view) pre.setAttribute(`data-${language}-view`, view);
@@ -1437,6 +1437,8 @@ test('Up and Down from code toolbar actions use the language label navigation pa
                     Object.assign(event, { key });
                     button.dispatchEvent(event);
                     assert.equal(event.defaultPrevented, true, `${language}/${view}: ${key}`);
+                    assert.equal(pre.querySelector('.code-block-export-menu')?.hidden ?? true, true,
+                        'toolbar navigation must keep the download menu closed');
                     const range = selection.getRangeAt(0);
                     const destination = key === 'ArrowUp' ? editor.firstElementChild :
                         language === 'mermaid' && view === 'diagram' ? editor.lastElementChild : pre.querySelector('code');
