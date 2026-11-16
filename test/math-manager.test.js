@@ -888,8 +888,7 @@ test('empty math blocks load with the TeX input visible without changing their s
             assert.equal(toggle.getAttribute('aria-checked'), 'true');
             f.click(toggle);
             assert.equal(toggle.getAttribute('aria-checked'), 'false');
-            assert.ok(f.pre.querySelector('code').contains(f.range.startContainer));
-            assert.equal(f.range.collapsed, true);
+            assert.equal(f.range, null, 'the Preview switch retains focus instead of entering source');
         });
     }
 });
@@ -1079,7 +1078,7 @@ test('turning Preview off pins TeX while an existing source view is never made t
             } else if (choice === 'Preview switch') {
                 f.click(f.pre.querySelector('.code-block-preview-toggle'));
                 assert.equal(f.pre.querySelector('.code-block-preview-toggle').getAttribute('aria-checked'), 'false');
-                assert.ok(f.pre.querySelector('code').contains(f.range.startContainer));
+                assert.equal(f.range, null, 'turning Preview off keeps focus on the switch');
             } else {
                 f.enter();
                 f.click(f.pre.querySelector('.math-preview'));

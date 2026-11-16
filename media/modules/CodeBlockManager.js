@@ -1414,6 +1414,17 @@ export class CodeBlockManager {
         }
     }
 
+    focusCodeBlockAction(pre, button = pre?.querySelector('.code-block-actions button')) {
+        if (!button || button.disabled || !this.editor.contains(button)) return false;
+        button.focus({ preventScroll: true });
+        // Buttons use DOM focus, never an editable selection behind the toolbar.
+        window.getSelection()?.removeAllRanges();
+        this.editor.querySelectorAll('.code-block-language.nav-selected').forEach(label => {
+            label.classList.remove('nav-selected');
+        });
+        return true;
+    }
+
     /**
      * コードブロックに言語ラベルとコピーボタンを追加
      * @param {HTMLElement} pre - pre要素
@@ -1772,6 +1783,13 @@ export class CodeBlockManager {
                 return;
             }
 
+            if (e.key === 'ArrowRight' && !e.isComposing &&
+                !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && this.focusCodeBlockAction(pre)) {
+                e.preventDefault();
+                e.stopPropagation();
+                return;
+            }
+
             if (isPlainTextEditKey(e)) {
                 e.preventDefault();
                 e.stopPropagation();
@@ -1812,10 +1830,6 @@ export class CodeBlockManager {
                 e.preventDefault();
                 e.stopPropagation();
             });
-            button.addEventListener('keydown', (e) => {
-                // Let the native button activate without editing the selection behind it.
-                if (e.key === ' ' || e.key === 'Enter') e.stopPropagation();
-            });
             button.addEventListener('click', (e) => {
                 e.preventDefault();
                 e.stopPropagation();
@@ -1823,24 +1837,14 @@ export class CodeBlockManager {
                 const showingPreview = isMermaid
                     ? this._getMermaidView(pre) === 'diagram'
                     : this._getMathView(pre) === 'preview';
-                if (isMath && showingPreview) {
-                    this._editMathSource(pre);
-                    return;
-                }
                 if (isMath) this.transientMathSources.delete(pre);
-                const selection = window.getSelection();
-                // A hidden source must not retain an editable caret.
-                if (!showingPreview && code && selection?.rangeCount > 0 &&
-                    code.contains(selection.getRangeAt(0).startContainer)) {
-                    selection.removeAllRanges();
-                    button.focus({ preventScroll: true });
-                }
+                this.focusCodeBlockAction(pre, button);
                 if (isMermaid) {
                     this._setMermaidView(pre, showingPreview ? 'code' : 'diagram');
                     if (!showingPreview && code) this._scheduleMermaidRender(pre, code, true);
                 } else {
-                    this._setMathView(pre, 'preview');
-                    if (code) this._scheduleMathRender(pre, code, true);
+                    this._setMathView(pre, showingPreview ? 'code' : 'preview');
+                    if (!showingPreview && code) this._scheduleMathRender(pre, code, true);
                 }
             });
             viewToggle.appendChild(button);
@@ -1995,6 +1999,47 @@ export class CodeBlockManager {
         }
 
         toolbar.appendChild(actionGroup);
+
+        const selectLanguageLabel = () => {
+            const selection = window.getSelection();
+            if (!selection) return false;
+            this.editor.focus({ preventScroll: true });
+            const range = document.createRange();
+            range.selectNode(langLabel);
+            selection.removeAllRanges();
+            selection.addRange(range);
+            langLabel.classList.add('nav-selected');
+            return true;
+        };
+
+        toolbar.addEventListener('keydown', (e) => {
+            const button = e.target.closest?.('button');
+            if (!button) return;
+            if (!e.isComposing && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey &&
+                (e.key === 'ArrowUp' || e.key === 'ArrowDown') &&
+                !button.closest('[role="menu"]') && selectLanguageLabel()) {
+                // Continue through the editor's existing vertical navigation,
+                // which also restores caret focus and reveals its destination.
+                return;
+            }
+            // Preserve native Enter/Space activation and Tab focus movement,
+            // while keeping toolbar keys out of the editor's text handlers.
+            e.stopPropagation();
+            if (e.isComposing || e.shiftKey || e.metaKey || e.ctrlKey || e.altKey ||
+                (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight')) return;
+
+            const buttons = Array.from(actionGroup.querySelectorAll('button:not([role="menuitem"])'))
+                .filter(action => !action.disabled);
+            const index = buttons.indexOf(button);
+            if (index < 0) return;
+            e.preventDefault();
+            if (e.key === 'ArrowLeft' && index === 0) {
+                selectLanguageLabel();
+            } else {
+                const next = buttons[index + (e.key === 'ArrowRight' ? 1 : -1)];
+                if (next) this.focusCodeBlockAction(pre, next);
+            }
+        });
         
         // ツールバーをpreの先頭に挿入
         pre.insertBefore(toolbar, pre.firstChild);

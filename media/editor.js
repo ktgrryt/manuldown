@@ -15343,7 +15343,9 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
             if (selectedLabel) {
                 e.preventDefault();
                 e.stopPropagation();
-                moveCursorIntoCodeBlockFromLabel(selectedLabel);
+                if (!codeBlockManager.focusCodeBlockAction(selectedLabel.closest('pre'))) {
+                    moveCursorIntoCodeBlockFromLabel(selectedLabel);
+                }
                 return true;
             }
             {

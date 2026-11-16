@@ -21,10 +21,12 @@ async function fixture(t, html = '<pre><code class="language-mermaid">graph TD\n
     const editor = document.getElementById('editor');
     let focused = null;
     Object.defineProperty(document, 'activeElement', { get: () => focused });
+    Object.defineProperty(editor, 'focus', { value() { focused = this; } });
     const createElement = document.createElement.bind(document);
     document.createElement = name => {
         const element = createElement(name);
         Object.defineProperty(element, 'focus', { value() { focused = this; } });
+        if (name === 'input') element.select = () => {};
         return element;
     };
     const nodeListPrototype = Object.getPrototypeOf(editor.querySelectorAll('pre'));
@@ -35,6 +37,7 @@ async function fixture(t, html = '<pre><code class="language-mermaid">graph TD\n
         get rangeCount() { return range ? 1 : 0; },
         getRangeAt: () => range,
         removeAllRanges: () => { range = null; },
+        addRange: value => { range = value; },
     });
     const renders = [];
     const initializations = [];
@@ -183,6 +186,111 @@ test('the native Preview switch keeps Enter and Space activation away from edito
     }
     assert.equal(f.pre.getAttribute('data-mermaid-view'), 'diagram');
     assert.equal(toggle.getAttribute('aria-checked'), 'true');
+});
+
+test('Preview retains button focus through repeated on/off keyboard activation for math and Mermaid', async t => {
+    for (const language of ['math', 'mermaid']) {
+        await t.test(language, async t => {
+            const f = await fixture(t, `<pre><code class="language-${language}">x + y</code></pre>`);
+            const toggle = f.pre.querySelector('.code-block-preview-toggle');
+            const original = f.domUtils.getCleanedHTML({ historyComparable: true });
+            f.dispatch(f.pre.querySelector('.code-block-language'), 'keydown', { key: 'ArrowRight' });
+            assert.equal(f.focused, toggle);
+            for (const checked of [false, true, false, true]) {
+                assert.equal(f.dispatch(toggle, 'keydown', { key: 'Enter' }).defaultPrevented, false);
+                // Domino needs the native activation click to be dispatched explicitly.
+                f.dispatch(toggle, 'click');
+                assert.equal(toggle.getAttribute('aria-checked'), String(checked));
+                assert.equal(f.focused, toggle);
+                assert.equal(f.range, null, 'toggling never transfers the caret into source');
+                assert.equal(f.manager.transientMathSources.size, 0);
+            }
+            assert.equal(f.domUtils.getCleanedHTML({ historyComparable: true }), original);
+        });
+    }
+});
+
+test('toolbar arrows focus each whole action in order and return to the language label', async t => {
+    for (const language of ['javascript', 'math', 'mermaid']) {
+        await t.test(language, async t => {
+            const f = await fixture(t, `<pre><code class="language-${language}">x + y</code></pre>`);
+            const label = f.pre.querySelector('.code-block-language');
+            const selectors = language === 'javascript' ? ['.code-block-copy-btn'] :
+                ['.code-block-preview-toggle', '.code-block-copy-btn'];
+            if (language === 'mermaid') selectors.push('.code-block-download-btn', '.code-block-expand-btn');
+            const buttons = selectors.map(selector => f.pre.querySelector(selector));
+            const before = f.domUtils.getCleanedHTML({ historyComparable: true });
+            let editorKeydowns = 0;
+            f.editor.addEventListener('keydown', () => editorKeydowns++);
+            f.document.createRange = () => ({ selectNode(node) { this.selectedNode = node; } });
+            label.classList.add('nav-selected');
+            f.selectCode();
+
+            const enter = f.dispatch(label, 'keydown', { key: 'ArrowRight' });
+            assert.equal(enter.defaultPrevented, true);
+            assert.equal(f.focused, buttons[0]);
+            assert.equal(f.range, null, 'button focus clears the editable selection');
+            assert.equal(label.classList.contains('nav-selected'), false);
+            for (const button of buttons.slice(1)) {
+                f.dispatch(f.focused, 'keydown', { key: 'ArrowRight' });
+                assert.equal(f.focused, button);
+            }
+            f.dispatch(f.focused, 'keydown', { key: 'ArrowRight' });
+            assert.equal(f.focused, buttons.at(-1), 'the right edge stays on the last action');
+            assert.equal(f.pre.querySelector('.code-block-export-menu')?.hidden ?? true, true);
+            for (const button of buttons.slice(0, -1).reverse()) {
+                f.dispatch(f.focused, 'keydown', { key: 'ArrowLeft' });
+                assert.equal(f.focused, button);
+            }
+            f.dispatch(f.focused, 'keydown', { key: 'ArrowLeft' });
+            assert.equal(f.focused, f.editor);
+            assert.equal(f.range.selectedNode, label);
+            assert.equal(label.classList.contains('nav-selected'), true);
+            assert.equal(editorKeydowns, 0);
+            assert.equal(f.domUtils.getCleanedHTML({ historyComparable: true }), before);
+        });
+    }
+});
+
+test('focused toolbar actions preserve native activation and never send editing keys to the editor', async t => {
+    const f = await fixture(t);
+    const label = f.pre.querySelector('.code-block-language');
+    const toggle = f.pre.querySelector('.code-block-preview-toggle');
+    const copy = f.pre.querySelector('.code-block-copy-btn');
+    const writes = [];
+    f.manager._writeTextToClipboard = async text => writes.push(text);
+    let editorKeydowns = 0;
+    f.editor.addEventListener('keydown', () => editorKeydowns++);
+    f.dispatch(label, 'keydown', { key: 'ArrowRight' });
+    assert.equal(f.focused, toggle);
+    assert.equal(f.dispatch(toggle, 'keydown', { key: 'Enter' }).defaultPrevented, false);
+    // Domino does not synthesize the native button click after key events.
+    f.dispatch(toggle, 'click');
+    assert.equal(f.pre.getAttribute('data-mermaid-view'), 'code');
+    assert.equal(f.focused, toggle);
+    f.dispatch(toggle, 'keydown', { key: 'ArrowRight' });
+    assert.equal(f.focused, copy);
+    assert.equal(f.dispatch(copy, 'keydown', { key: 'Enter' }).defaultPrevented, false);
+    f.dispatch(copy, 'click');
+    await Promise.resolve();
+    assert.deepEqual(writes, ['graph TD\nA-->B']);
+    assert.equal(copy.getAttribute('data-copy-state'), 'success');
+    for (const key of [' ', 'Tab', 'Backspace', 'Delete', 'x']) {
+        assert.equal(f.dispatch(copy, 'keydown', { key }).defaultPrevented, false, key);
+    }
+    assert.equal(editorKeydowns, 0);
+});
+
+test('language text editing keeps native horizontal arrows inside its input', async t => {
+    const f = await fixture(t);
+    const label = f.pre.querySelector('.code-block-language');
+    f.dispatch(label, 'click');
+    const input = label.querySelector('input');
+    for (const key of ['ArrowRight', 'ArrowLeft']) {
+        assert.equal(f.dispatch(input, 'keydown', { key }).defaultPrevented, false);
+        assert.equal(f.focused, input);
+    }
+    assert.equal(label.classList.contains('editing'), true);
 });
 
 test('returning to a cached diagram invalidates an older pending render', async t => {

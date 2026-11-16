@@ -1347,6 +1347,111 @@ const MATH_PREVIEW = '<pre data-math-view="preview">' +
     '<code class="language-math">first line\nlast line\n</code>' +
     '<div class="math-preview" contenteditable="false" data-exclude-from-markdown="true">Formula</div></pre>';
 
+test('Right from a range-selected code language focuses its first toolbar action', async () => {
+    for (const language of ['javascript', 'math', 'mermaid']) {
+        const hasPreview = language !== 'javascript';
+        const fixture = await createFixture(`<pre><div class="code-block-toolbar" contenteditable="false">` +
+            `<span class="code-block-language">${language}</span><div class="code-block-actions">` +
+            (hasPreview ? '<button class="code-block-preview-toggle">Preview</button>' : '') +
+            '<button class="code-block-copy-btn">Copy</button></div></div>' +
+            `<code class="language-${language}">source</code></pre>`);
+        try {
+            let focused = null;
+            const firstAction = fixture.editor.querySelector('.code-block-actions button');
+            Object.defineProperty(firstAction, 'focus', { value() { focused = this; } });
+            const navigation = loadEditorFunctions(fixture, [
+                'handleArrowKeydown', 'getSelectedCodeBlockLanguageLabel',
+                'selectCodeBlockLanguageLabel', 'setCodeBlockLanguageNavSelection',
+            ], {
+                isCursorOnCheckbox: () => null,
+                isHRSelected: () => null,
+                tableManager: { handleArrowKeydown: () => false },
+                shouldUseNativeArrowForTopLine: () => false,
+                moveCursorOutOfInlineCodeRight: () => false,
+                moveCursorIntoCodeBlockFromLabel: () => assert.fail('Right should focus a toolbar button'),
+            });
+            assert.equal(navigation.selectCodeBlockLanguageLabel(fixture.editor.querySelector('pre')), true);
+            let prevented = false;
+            assert.equal(navigation.handleArrowKeydown({
+                key: 'ArrowRight', preventDefault() { prevented = true; }, stopPropagation() {},
+            }), true);
+            assert.equal(prevented, true);
+            assert.equal(focused, firstAction);
+            assert.equal(fixture.selection.rangeCount, 0);
+            assert.equal(!!fixture.editor.querySelector('.code-block-language.nav-selected'), false);
+        } finally {
+            fixture.restoreGlobals();
+        }
+    }
+});
+
+test('Up and Down from code toolbar actions use the language label navigation paths', async () => {
+    for (const [language, view] of [
+        ['javascript', null], ['math', 'preview'], ['math', 'code'],
+        ['mermaid', 'diagram'], ['mermaid', 'code'],
+    ]) {
+        const attribute = view ? ` data-${language}-view="${view}"` : '';
+        const fixture = await createFixture('<p>before</p>' +
+            `<pre${attribute}><code class="language-${language}">first\nlast\n</code></pre><p>after</p>`);
+        try {
+            const { editor, codeBlockManager: manager, selection } = fixture;
+            const pre = editor.querySelector('pre');
+            Object.assign(manager, {
+                mermaidRenderHandles: new WeakMap(), mermaidRenderTokens: new WeakMap(),
+                mermaidCache: new WeakMap(), mathRenderHandles: new WeakMap(), mermaidControlIdCounter: 0,
+                _scheduleMathRender() {}, _scheduleMermaidRender() {},
+            });
+            manager.addCodeBlockControls(pre, language);
+            const navigation = loadEditorFunctions(fixture, [
+                'handleArrowKeydown', 'getSelectedCodeBlockLanguageLabel',
+                'moveCursorAboveCodeBlockFromLabel', 'moveCursorIntoCodeBlockFromLabel',
+                'getNextNavigableNodeAfter', 'getNextNavigableSibling', ...CODE_BLOCK_NAVIGATION,
+            ], {
+                isCursorOnCheckbox: () => null, isHRSelected: () => null,
+                tableManager: { handleArrowKeydown: () => false },
+                shouldUseNativeArrowForTopLine: () => false, isEditorEffectivelyEmpty: () => false,
+                moveCursorUpFromFootnoteToCodeGap: () => false,
+                moveVerticallyAcrossBlockImages: () => false,
+                moveCodeBlockDownToFollowingEmptyParagraph: () => false,
+                exitCodeBlockDownByLogicalLine: () => false,
+                getSelectedImageNodeFromRange: () => null,
+                moveCursorDownBelowTrailingImageBlock: () => false,
+                moveDownFromEmptyCheckboxListItemOneStep: () => false,
+                getListItemFromRange: () => null,
+                handleEmptyLineAboveCodeBlockNav: () => false,
+                moveCursorDownFromEmptyBlock: () => false,
+            });
+            editor.addEventListener('keydown', event => {
+                assert.equal(navigation.handleArrowKeydown(event), true);
+            });
+            const before = fixture.domUtils.getCleanedHTML({ historyComparable: true });
+            const buttons = Array.from(pre.querySelectorAll(
+                '.code-block-preview-toggle, .code-block-copy-btn, .code-block-expand-btn'));
+            for (const button of buttons) {
+                for (const key of ['ArrowUp', 'ArrowDown']) {
+                    if (view) pre.setAttribute(`data-${language}-view`, view);
+                    manager.transientMathSources.clear();
+                    manager.focusCodeBlockAction(pre, button);
+                    assert.equal(selection.rangeCount, 0);
+                    const event = new window.Event('keydown', { bubbles: true, cancelable: true });
+                    Object.assign(event, { key });
+                    button.dispatchEvent(event);
+                    assert.equal(event.defaultPrevented, true, `${language}/${view}: ${key}`);
+                    const range = selection.getRangeAt(0);
+                    const destination = key === 'ArrowUp' ? editor.firstElementChild :
+                        language === 'mermaid' && view === 'diagram' ? editor.lastElementChild : pre.querySelector('code');
+                    assert.ok(destination.contains(range.startContainer), `${language}/${view}: ${key}`);
+                    assert.equal(range.collapsed, true);
+                    assert.equal(document.activeElement, editor);
+                    assert.equal(fixture.domUtils.getCleanedHTML({ historyComparable: true }), before);
+                }
+            }
+        } finally {
+            fixture.restoreGlobals();
+        }
+    }
+});
+
 function assertVisibleMathCaret(fixture, expectedOffset) {
     const pre = fixture.editor.querySelector('pre');
     const code = pre.querySelector('code');
