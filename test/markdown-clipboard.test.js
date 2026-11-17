@@ -149,6 +149,7 @@ function clipboardPasteFixture({ editor, document, window, range, copy, calloutM
         createImageClipboardSnapshot: () => null,
         isUpdating: false,
         isComposing: false, compositionUpdateGate: { composing: false },
+        currentLink: null,
         codeBlockGapManager: { reconcile() {} },
         normalizeListRenderingAfterStructureChange() {}, scheduleEditorOverflowStateUpdate() {},
         domUtils: {
@@ -217,6 +218,8 @@ function clipboardPasteFixture({ editor, document, window, range, copy, calloutM
         placeCollapsedCaretAfter() {}, setCaretAfterNode() {},
         replaceListBoundarySelectionWithInlineFragment: () => false,
         insertInlineFragmentAtCollapsedListBoundary: () => false,
+        replaceListBoundarySelectionWithDirectLink: () => false,
+        insertLinkAtCollapsedListBoundary: () => false,
         normalizeLineBreakMode: () => 'hard', createLineBreakNode: () => document.createElement('br'),
         cleanupEmptyStrikeAtSelection() {}, cleanupEmptyStrikes() {}, unwrapStrikeAtSelection() {},
         saveImageFileToWorkspace(file, targetRange, alt) {
@@ -253,6 +256,7 @@ function clipboardPasteFixture({ editor, document, window, range, copy, calloutM
         slice('function normalizeClipboardPlainText(', 'function focusEditorWithoutScroll('),
         slice('const absoluteUrlPattern =', 'const isImageFile ='),
         slice('const getSelectionRangeForPaste =', 'const hasVisibleLinkText ='),
+        slice('const hasVisibleLinkText =', 'const getSingleListItemSelectedAtListBoundary ='),
         slice('const clipboardVariationSelectorPattern =', 'const tryInsertMixedMarkdownFromPastedText ='),
         slice('const splitMarkdownTableRow =', 'const isRangeInTableCell ='),
         slice('const tryInsertMixedMarkdownFromPastedText =', 'const insertTextWithPasteBehavior ='),
@@ -336,6 +340,99 @@ async function withFixture(html, callback) {
         Object.assign(global, previous);
     }
 }
+
+for (const [start, end] of [[0, 9], [2, 6], [4, 4]]) {
+    test(`pasting a URL into an existing link updates its destination for range ${start}:${end}`, async () => {
+        await withFixture('<p>before <a href="https://old.example" title="Caption"><strong>link text</strong></a> after</p>', f => {
+            const clipboard = clipboardPasteFixture(f);
+            const link = f.editor.querySelector('a');
+            const label = link.innerHTML;
+            clipboard.data.set('text/plain', 'https://new.example/path?q=1#section');
+            assert.equal(clipboard.paste(link.querySelector('strong').firstChild, start, end).defaultPrevented, true);
+            assert.equal(f.editor.querySelectorAll('a').length, 1);
+            assert.equal(link.getAttribute('href'), 'https://new.example/path?q=1#section');
+            assert.equal(link.getAttribute('title'), 'Caption');
+            assert.equal(link.innerHTML, label);
+            assert.equal(f.editor.textContent, 'before link text after');
+            const caret = f.window.getSelection().getRangeAt(0);
+            assert.equal(caret.collapsed, true);
+            assert.equal(caret.startContainer, link.parentNode);
+            assert.equal(caret.startOffset, 2);
+        });
+    });
+}
+
+test('pasting a URL over a selected link element preserves its label and formatting', async () => {
+    await withFixture('<p>before <a href="https://old.example"><em>label</em></a> after</p>', f => {
+        const clipboard = clipboardPasteFixture(f);
+        clipboard.data.set('text/plain', 'https://new.example');
+        clipboard.paste(f.editor.querySelector('p'), 1, 2);
+        assert.equal(f.editor.innerHTML, '<p>before <a href="https://new.example"><em>label</em></a> after</p>');
+    });
+});
+
+for (const html of [
+    '<p><a href="https://old.example"><strong>label</strong></a></p>',
+    '<ul><li><a href="https://old.example"><strong>label</strong></a></li></ul>',
+    '<table><tbody><tr><td><a href="https://old.example"><strong>label</strong></a></td></tr></tbody></table>',
+]) {
+    test(`pasting an email address updates the existing link in ${html}`, async () => {
+        await withFixture(html, f => {
+            const clipboard = clipboardPasteFixture(f);
+            clipboard.data.set('text/plain', 'person@example.com');
+            clipboard.paste(f.editor.querySelector('strong').firstChild, 0, 5);
+            assert.equal(f.editor.innerHTML, html.replace('https://old.example', 'mailto:person@example.com'));
+        });
+    });
+}
+
+for (const customTypes of [true, false]) {
+    test(`a copied URL with ${customTypes ? 'custom clipboard types' : 'HTML markers'} updates an existing link before rich insertion`, async () => {
+        await withFixture('<p><a href="https://old.example"><strong>keep label</strong></a></p>', f => {
+            const clipboard = clipboardPasteFixture(f);
+            const html = '<a href="https://new.example">https://new.example</a>';
+            clipboard.data.set('text/plain', 'https://new.example');
+            clipboard.data.set('text/html', `<!--manuldown-clipboard-start-->${html}<!--manuldown-clipboard-end-->`);
+            if (customTypes) {
+                clipboard.data.set('application/x-manuldown-editor-html', html);
+                clipboard.data.set('application/x-manuldown-editor-plain-text', 'https://new.example');
+            }
+            clipboard.paste(f.editor.querySelector('strong').firstChild, 0, 10);
+            assert.equal(f.editor.innerHTML, '<p><a href="https://new.example"><strong>keep label</strong></a></p>');
+        });
+    });
+}
+
+test('replacing a preserved destination with a pasted URL clears the old destination metadata', async () => {
+    await withFixture('<p><a data-mdw-preserved-href="tel:123">phone</a></p>', f => {
+        const clipboard = clipboardPasteFixture(f);
+        clipboard.data.set('text/plain', 'https://new.example');
+        clipboard.paste(f.editor.querySelector('a').firstChild, 0, 5);
+        assert.equal(f.editor.innerHTML, '<p><a href="https://new.example">phone</a></p>');
+    });
+});
+
+test('changing an existing link by paste is one immediately undoable and redoable edit', async () => {
+    const { StateManager } = await historyModule;
+    await withFixture('<p><a href="https://old.example"><strong>label</strong></a></p>', f => {
+        f.editor.focus = () => {};
+        const history = new StateManager(f.editor, {});
+        const clipboard = clipboardPasteFixture(f, { stateManager: history });
+        history.seedState();
+        const original = f.editor.innerHTML;
+        clipboard.data.set('text/plain', 'https://new.example');
+        clipboard.paste(f.editor.querySelector('strong').firstChild, 0, 5);
+        const updated = '<p><a href="https://new.example"><strong>label</strong></a></p>';
+        assert.equal(f.editor.innerHTML, updated);
+        assert.equal(history.undoStack.length, 2);
+        history.performUndo(() => {});
+        history.flushPendingHistoryRestore();
+        assert.equal(f.editor.innerHTML, original);
+        history.performRedo(() => {});
+        history.flushPendingHistoryRestore();
+        assert.equal(f.editor.innerHTML, updated);
+    });
+});
 
 test('copying part of a formatted link preserves its formatting and URL without unselected text', async () => {
     await withFixture('<p>before <a href="./note.md"><strong>selected text</strong></a> after</p>', ({ editor, range, copy }) => {

@@ -20333,6 +20333,25 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
             return link;
         };
 
+        const getExistingLinkForPaste = (range) => {
+            if (!range) return null;
+            const startLink = domUtils.getParentElement(range.startContainer, 'A');
+            const endLink = domUtils.getParentElement(range.endContainer, 'A');
+            if (startLink && startLink === endLink && editor.contains(startLink)) {
+                return startLink;
+            }
+
+            // selectNode(anchor) puts both boundaries in the anchor's parent.
+            if (range.startContainer === range.endContainer &&
+                range.endOffset === range.startOffset + 1) {
+                const node = range.startContainer.childNodes[range.startOffset];
+                if (node && node.nodeType === Node.ELEMENT_NODE && node.tagName === 'A' && editor.contains(node)) {
+                    return node;
+                }
+            }
+            return null;
+        };
+
         const getSingleListItemSelectedAtListBoundary = (range) => {
             if (!range || range.collapsed || range.startContainer !== range.endContainer) {
                 return null;
@@ -22214,6 +22233,26 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
                     ((pastedHtmlContainsImage || !rawExternalPastedText) ? extractHtmlClipboardFragment(pastedHtml) : '');
                 const richHtmlHasStructure = nativeImageFiles.length > 0 ||
                     (!!richPastedHtml && !internalHtmlIsListlessPlainText(richPastedHtml));
+
+                // Update the anchor itself instead of nesting a new link inside
+                // it. Do this before rich insertion, which may carry the URL as
+                // copied HTML as well as plain text.
+                const existingPasteLink = directLinkTarget && !pastedHtmlContainsImage &&
+                    !isRangeInsideCodeBlock(pasteRange) ? getExistingLinkForPaste(pasteRange) : null;
+                if (existingPasteLink) {
+                    e.preventDefault();
+                    if (currentLink === existingPasteLink) {
+                        hideLinkPopover();
+                    }
+                    const historySelection = stateManager.saveRange(pasteRange);
+                    stateManager.beginChangeAtSelection(historySelection);
+                    existingPasteLink.setAttribute('href', directLinkTarget.href);
+                    existingPasteLink.removeAttribute('data-mdw-preserved-href');
+                    placeCollapsedCaretAfter(selection, existingPasteLink);
+                    stateManager.commitStateAfterChange({ changeSelection: historySelection });
+                    notifyChange();
+                    return;
+                }
 
                 if (
                     hasListLikeText &&
