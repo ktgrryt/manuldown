@@ -847,6 +847,10 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         const expectedWillSaveUpdates = new Map<string, ExpectedWillSaveUpdate>();
         let syncSnapshotRequestSequence = 0;
         let editorDisposed = false;
+        const isCurrentEditor = (): boolean =>
+            !editorDisposed &&
+            !document.isClosed &&
+            this.webviewPanels.get(documentKey) === webviewPanel;
         let activeWorkspaceLinkRequest: {
             requestId: string;
             cancellation: vscode.CancellationTokenSource;
@@ -871,8 +875,13 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         // that revision or older has nothing left to write. Converting it again
         // would only rewrite the file through the lossy HTML round trip.
         let lastAppliedWebviewRevision = 0;
+        let lastFailedApplyRevision = 0;
+        let applyFailureReported = false;
         const markWebviewRevisionApplied = (revision: number): void => {
             lastAppliedWebviewRevision = Math.max(lastAppliedWebviewRevision, revision);
+            if (lastAppliedWebviewRevision >= lastFailedApplyRevision) {
+                applyFailureReported = false;
+            }
         };
 
         const normalizeWebviewRevision = (value: unknown): number =>
@@ -1156,6 +1165,22 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             );
         };
 
+        const reportApplyFailure = (revision: number): void => {
+            if (!isCurrentEditor()) {
+                return;
+            }
+            lastFailedApplyRevision = Math.max(lastFailedApplyRevision, revision);
+            void webviewPanel.webview.postMessage({ type: 'updateFailed', revision, reason: 'apply' });
+            void webviewPanel.webview.postMessage({ type: 'retryPendingUpdate' });
+            if (applyFailureReported) {
+                return;
+            }
+            applyFailureReported = true;
+            void vscode.window.showErrorMessage(
+                'ManulDown could not apply the latest edit to the Markdown document. The edit is still in this editor. Keep it open and try saving again.'
+            );
+        };
+
         const postExternalDocumentUpdate = (force = false): void => {
             if (unresolvedExternalChangeId === 0) {
                 return;
@@ -1225,6 +1250,9 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             }
         };
 
+        const hasNewerPendingUpdate = (revision: number): boolean =>
+            pendingWebviewUpdate !== null && pendingWebviewUpdate.revision > revision;
+
         const flushPendingWebviewUpdate = (): Promise<boolean> => {
             if (webviewUpdateFlushPromise) {
                 return webviewUpdateFlushPromise;
@@ -1232,9 +1260,11 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
 
             let operationSucceeded = true;
             const operation = (async (): Promise<boolean> => {
+                let currentUpdateRevision = 0;
                 try {
-                    while (pendingWebviewUpdate !== null && unresolvedExternalChangeId === 0) {
+                    while (pendingWebviewUpdate !== null && unresolvedExternalChangeId === 0 && isCurrentEditor()) {
                         const updateToApply = pendingWebviewUpdate;
+                        currentUpdateRevision = updateToApply.revision;
                         pendingWebviewUpdate = null;
                         if (updateToApply.revision <= lastAppliedWebviewRevision) {
                             // Already written, or older than what was written:
@@ -1260,14 +1290,59 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                             operationSucceeded = false;
                             continue;
                         }
+                        const originalDocumentText = document.getText();
+                        const originalDocumentVersion = document.version;
                         activeWebviewUpdateTexts.add(markdown);
                         let applied = false;
+                        let applyError: unknown;
+                        let attempts = 0;
                         try {
-                            applied = await this.updateTextDocument(document, markdown);
+                            // A save or another VS Code transaction can reject an
+                            // otherwise valid edit. Retry briefly while the source
+                            // text is unchanged, yielding to newer Webview snapshots.
+                            while (
+                                attempts < 3 &&
+                                isCurrentEditor() &&
+                                unresolvedExternalChangeId === 0 &&
+                                updateToApply.revision > lastAppliedWebviewRevision &&
+                                !hasNewerPendingUpdate(updateToApply.revision) &&
+                                document.getText() === originalDocumentText
+                            ) {
+                                attempts++;
+                                try {
+                                    applied = await this.updateTextDocument(document, markdown);
+                                } catch (error) {
+                                    applyError = error;
+                                }
+                                // A will-save edit may have written this exact
+                                // snapshot while applyEdit was in flight.
+                                if (document.getText() === markdown) {
+                                    applied = true;
+                                }
+                                if (
+                                    applied ||
+                                    !isCurrentEditor() ||
+                                    unresolvedExternalChangeId !== 0 ||
+                                    hasNewerPendingUpdate(updateToApply.revision) ||
+                                    document.getText() !== originalDocumentText
+                                ) {
+                                    break;
+                                }
+                                if (attempts < 3) {
+                                    await new Promise<void>(resolve => setTimeout(resolve, attempts * 50));
+                                }
+                            }
                         } finally {
                             activeWebviewUpdateTexts.delete(markdown);
                         }
-                        const appliedTextIsCurrent = applied && document.getText() === markdown;
+                        if (!isCurrentEditor()) {
+                            return false;
+                        }
+                        if (updateToApply.revision <= lastAppliedWebviewRevision) {
+                            continue;
+                        }
+                        const currentDocumentText = document.getText();
+                        const appliedTextIsCurrent = currentDocumentText === markdown;
                         if (appliedTextIsCurrent) {
                             lastObservedDocumentText = markdown;
                             lastAppliedWebviewText = markdown;
@@ -1277,31 +1352,39 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                                 type: 'updateApplied',
                                 revision: updateToApply.revision,
                             });
-                        } else if (!applied) {
-                            operationSucceeded = false;
-                            void webviewPanel.webview.postMessage({ type: 'retryPendingUpdate' });
-                        }
-
-                        // applyEdit normally emits the document-change event while
-                        // the expected-text marker is active. If another writer races that edit,
-                        // detect the final text mismatch explicitly instead of
-                        // suppressing the external change with our own event.
-                        if (applied && !appliedTextIsCurrent) {
-                            operationSucceeded = false;
+                        } else if (applied || currentDocumentText !== originalDocumentText) {
+                            // Also detect external changes whose notification has
+                            // not arrived yet. Retrying a full replacement here
+                            // would overwrite the other writer's text.
                             if (unresolvedExternalChangeId === 0) {
+                                lastObservedDocumentText = currentDocumentText;
+                                lastAppliedWebviewText = null;
                                 unresolvedExternalChangeId = ++externalChangeSequence;
                                 postExternalDocumentUpdate();
                             }
+                            operationSucceeded = false;
+                        } else if (unresolvedExternalChangeId !== 0) {
+                            operationSucceeded = false;
+                        } else if (!hasNewerPendingUpdate(updateToApply.revision)) {
+                            operationSucceeded = false;
+                            console.error('[webview update] VS Code could not apply the editor update:', {
+                                uri: document.uri.toString(),
+                                revision: updateToApply.revision,
+                                attempts,
+                                originalDocumentVersion,
+                                currentDocumentVersion: document.version,
+                                error: applyError,
+                            });
+                            reportApplyFailure(updateToApply.revision);
                         }
                     }
                     return operationSucceeded &&
+                        isCurrentEditor() &&
                         pendingWebviewUpdate === null &&
                         unresolvedExternalChangeId === 0;
                 } catch (error) {
                     console.error('[webview update] Failed to apply editor update:', error);
-                    void vscode.window.showErrorMessage(
-                        'ManulDown could not convert the edit to Markdown. The document was not changed.'
-                    );
+                    reportApplyFailure(currentUpdateRevision);
                     return false;
                 }
             })();
@@ -1318,7 +1401,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 if (
                     pendingWebviewUpdate !== null &&
                     unresolvedExternalChangeId === 0 &&
-                    !editorDisposed
+                    isCurrentEditor()
                 ) {
                     void flushPendingWebviewUpdate();
                 }
@@ -1328,7 +1411,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         };
 
         const flushAllPendingWebviewUpdates = async (): Promise<boolean> => {
-            while (pendingWebviewUpdate !== null && unresolvedExternalChangeId === 0) {
+            while (pendingWebviewUpdate !== null && unresolvedExternalChangeId === 0 && isCurrentEditor()) {
                 const succeeded = await flushPendingWebviewUpdate();
                 if (!succeeded && pendingWebviewUpdate === null) {
                     return false;
@@ -1338,7 +1421,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 // in a microtask; yield once before starting the next drain.
                 await Promise.resolve();
             }
-            return pendingWebviewUpdate === null && unresolvedExternalChangeId === 0;
+            return isCurrentEditor() && pendingWebviewUpdate === null && unresolvedExternalChangeId === 0;
         };
 
         // Handle messages from the webview
@@ -2539,6 +2622,9 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         document: vscode.TextDocument,
         markdown: string
     ): Promise<boolean> {
+        if (document.isClosed) {
+            return false;
+        }
         if (markdown === document.getText()) {
             return true;
         }
@@ -2547,10 +2633,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         edit.replace(document.uri, this.getFullDocumentRange(document), markdown);
 
         const applied = await vscode.workspace.applyEdit(edit);
-        if (!applied) {
-            vscode.window.showErrorMessage('Failed to apply the ManulDown editor update.');
-        }
-        return applied;
+        return applied || (!document.isClosed && document.getText() === markdown);
     }
 
     private getListItemPrefix(node: any, defaultBullet: string): string {

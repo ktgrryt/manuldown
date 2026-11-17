@@ -73,9 +73,10 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
     let notifyTimeout = null;
     let localUpdateRevision = 0;
     let acknowledgedUpdateRevision = 0;
-    // Latest revision the host could not convert to Markdown. Until a newer
-    // revision is acknowledged, that edit exists only in this Webview.
+    // Latest revision the host could not synchronize. Until that revision or a
+    // newer one is acknowledged, the edit exists only in this Webview.
     let failedUpdateRevision = 0;
+    let failedUpdateReason = 'conversion';
     let pendingDeleteListItem = null;
     let pendingStrikeCleanup = false;
     let pendingEmptyListItemInsert = null;
@@ -6978,13 +6979,17 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
         };
     }
 
-    function syncConversionFailureWarning() {
+    function syncUpdateFailureWarning() {
         const warning = document.getElementById('editor-sync-warning');
         if (!warning) return;
         const unsaved = failedUpdateRevision > acknowledgedUpdateRevision;
-        if (unsaved && warning.hidden) {
-            warning.textContent = 'Your latest edit could not be converted to Markdown and is not in the file yet. ' +
-                'Undo or change the last edit before closing this editor, or the edit will be lost.';
+        if (unsaved) {
+            const text = failedUpdateReason === 'apply'
+                ? 'Your latest edit could not be applied to the Markdown document and is not in the file yet. ' +
+                    'Keep this editor open and try saving again.'
+                : 'Your latest edit could not be converted to Markdown and is not in the file yet. ' +
+                    'Undo or change the last edit before closing this editor, or the edit will be lost.';
+            if (warning.textContent !== text) warning.textContent = text;
         }
         warning.hidden = !unsaved;
     }
@@ -25141,16 +25146,14 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
                         Math.floor(message.revision)
                     );
                 }
-                syncConversionFailureWarning();
+                syncUpdateFailureWarning();
                 break;
             case 'updateFailed':
-                if (Number.isFinite(message.revision)) {
-                    failedUpdateRevision = Math.max(
-                        failedUpdateRevision,
-                        Math.floor(message.revision)
-                    );
+                if (Number.isFinite(message.revision) && message.revision >= failedUpdateRevision) {
+                    failedUpdateRevision = Math.floor(message.revision);
+                    failedUpdateReason = message.reason === 'apply' ? 'apply' : 'conversion';
                 }
-                syncConversionFailureWarning();
+                syncUpdateFailureWarning();
                 break;
             case 'update':
                 if (
@@ -25226,7 +25229,7 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
                 stateManager.clearHistory();
                 stateManager.seedState();
                 acknowledgedUpdateRevision = localUpdateRevision;
-                syncConversionFailureWarning();
+                syncUpdateFailureWarning();
                 scheduleEditorOverflowStateUpdate();
                 if (message.external === true) {
                     vscode.postMessage({

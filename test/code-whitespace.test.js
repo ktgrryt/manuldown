@@ -30,6 +30,8 @@ const vscodeMockState = {
     statCalls: [],
     statHandler: null,
     workspaceFolder: null,
+    workspaceEdits: [],
+    applyEditHandler: null,
 };
 
 function resetVscodeMockState() {
@@ -56,6 +58,8 @@ function resetVscodeMockState() {
     vscodeMockState.statCalls.length = 0;
     vscodeMockState.statHandler = null;
     vscodeMockState.workspaceFolder = null;
+    vscodeMockState.workspaceEdits.length = 0;
+    vscodeMockState.applyEditHandler = null;
 }
 
 function addMockListener(listeners, listener) {
@@ -112,6 +116,15 @@ function loadExtensionModules() {
         TextEdit: {
             replace: (range, newText) => ({ range, newText }),
         },
+        WorkspaceEdit: class WorkspaceEdit {
+            constructor() {
+                this.edits = [];
+            }
+
+            replace(uri, range, newText) {
+                this.edits.push({ uri, range, newText });
+            }
+        },
         EndOfLine: {
             LF: 1,
             CRLF: 2,
@@ -143,6 +156,12 @@ function loadExtensionModules() {
             }
         },
         workspace: {
+            applyEdit: async (edit) => {
+                vscodeMockState.workspaceEdits.push(edit);
+                return vscodeMockState.applyEditHandler
+                    ? vscodeMockState.applyEditHandler(edit)
+                    : false;
+            },
             getWorkspaceFolder: () => vscodeMockState.workspaceFolder,
             findFiles: async (...args) => {
                 vscodeMockState.findFilesCalls.push(args);
@@ -1413,6 +1432,215 @@ test('a ManulDown edit in a CRLF document is not reported as external', async ()
         webview.dispose();
     }
 });
+
+test('a temporarily rejected editor update is retried before saving without an error', async () => {
+    const { document, webview } = await createEditorSyncHarness();
+    vscodeMockState.applyEditHandler = (edit) => {
+        if (vscodeMockState.workspaceEdits.length === 1) return false;
+        document.setText(edit.edits[0].newText);
+        fireDocumentChange(document);
+        return true;
+    };
+
+    try {
+        await webview.sendMessage({ type: 'saveDocument', content: 'latest edit', revision: 1 });
+        assert.equal(vscodeMockState.workspaceEdits.length, 2);
+        assert.equal(document.getText(), 'latest edit');
+        assert.deepEqual(document.savedTexts, ['latest edit']);
+        assert.deepEqual(vscodeMockState.errors, []);
+        assert.deepEqual(webview.postedMessages.filter(message => message.external === true), []);
+        assert.ok(webview.postedMessages.some(message => message.type === 'updateApplied' && message.revision === 1));
+    } finally {
+        webview.dispose();
+    }
+});
+
+test('a rejected editor update already written by a concurrent save is acknowledged', async () => {
+    const { document, webview } = await createEditorSyncHarness();
+    vscodeMockState.applyEditHandler = (edit) => {
+        document.setText(edit.edits[0].newText);
+        fireDocumentChange(document);
+        return false;
+    };
+
+    try {
+        await webview.sendMessage({ type: 'saveDocument', content: 'saved edit', revision: 1 });
+        assert.equal(vscodeMockState.workspaceEdits.length, 1);
+        assert.deepEqual(document.savedTexts, ['saved edit']);
+        assert.deepEqual(vscodeMockState.errors, []);
+        assert.ok(webview.postedMessages.some(message => message.type === 'updateApplied' && message.revision === 1));
+    } finally {
+        webview.dispose();
+    }
+});
+
+test('a newer queued edit replaces a rejected update before retrying', async () => {
+    const { document, webview } = await createEditorSyncHarness();
+    vscodeMockState.applyEditHandler = async (edit) => {
+        if (vscodeMockState.workspaceEdits.length === 1) {
+            await webview.sendMessage({ type: 'update', content: 'newer edit', revision: 2 });
+            return false;
+        }
+        document.setText(edit.edits[0].newText);
+        fireDocumentChange(document);
+        return true;
+    };
+
+    try {
+        await webview.sendMessage({ type: 'saveDocument', content: 'older edit', revision: 1 });
+        assert.deepEqual(vscodeMockState.workspaceEdits.map(edit => edit.edits[0].newText), ['older edit', 'newer edit']);
+        assert.deepEqual(document.savedTexts, ['newer edit']);
+        assert.deepEqual(vscodeMockState.errors, []);
+        assert.equal(webview.postedMessages.some(message => message.type === 'retryPendingUpdate'), false);
+    } finally {
+        webview.dispose();
+    }
+});
+
+test('a matching save snapshot arriving during retry backoff completes without another replacement', async () => {
+    const { document, webview } = await createEditorSyncHarness();
+    vscodeMockState.applyEditHandler = (edit) => {
+        setTimeout(() => {
+            document.setText(edit.edits[0].newText);
+            fireDocumentChange(document);
+        }, 10);
+        return false;
+    };
+
+    try {
+        await webview.sendMessage({ type: 'saveDocument', content: 'saved during retry', revision: 1 });
+        assert.equal(vscodeMockState.workspaceEdits.length, 1);
+        assert.deepEqual(document.savedTexts, ['saved during retry']);
+        assert.deepEqual(vscodeMockState.errors, []);
+        assert.equal(webview.postedMessages.some(message => message.external === true), false);
+    } finally {
+        webview.dispose();
+    }
+});
+
+test('retry backoff does not strand a queued edit after the editor is disposed', async () => {
+    const { document, webview } = await createEditorSyncHarness();
+    vscodeMockState.applyEditHandler = () => {
+        setTimeout(async () => {
+            await webview.sendMessage({ type: 'update', content: 'newer edit', revision: 2 });
+            webview.dispose();
+        }, 10);
+        return false;
+    };
+
+    try {
+        await webview.sendMessage({ type: 'saveDocument', content: 'older edit', revision: 1 });
+        assert.equal(vscodeMockState.workspaceEdits.length, 1);
+        assert.deepEqual(document.savedTexts, []);
+        assert.deepEqual(vscodeMockState.errors, []);
+        assert.equal(webview.postedMessages.some(message => message.type === 'retryPendingUpdate'), false);
+    } finally {
+        webview.dispose();
+    }
+});
+
+for (const changeEventDelayed of [false, true]) {
+    test(`a rejected update preserves an external edit with a ${changeEventDelayed ? 'delayed' : 'synchronous'} change event`, async () => {
+        const { document, webview } = await createEditorSyncHarness();
+        vscodeMockState.applyEditHandler = () => {
+            document.setText('external edit');
+            if (!changeEventDelayed) fireDocumentChange(document);
+            return false;
+        };
+
+        try {
+            await webview.sendMessage({ type: 'saveDocument', content: 'local edit', revision: 1 });
+            assert.equal(vscodeMockState.workspaceEdits.length, 1);
+            assert.equal(document.getText(), 'external edit');
+            assert.deepEqual(document.savedTexts, []);
+            assert.deepEqual(vscodeMockState.errors, []);
+            assert.equal(webview.postedMessages.filter(message => message.external === true).length, 1);
+            assert.equal(webview.postedMessages.some(message => message.type === 'updateApplied'), false);
+            fireDocumentChange(document);
+            assert.equal(webview.postedMessages.filter(message => message.external === true).length, 1);
+        } finally {
+            webview.dispose();
+        }
+    });
+}
+
+test('persistent editor update rejection is bounded, reported once, and recovers on a later edit', async (t) => {
+    t.mock.method(console, 'error', () => {});
+    const { document, webview } = await createEditorSyncHarness();
+    vscodeMockState.applyEditHandler = () => false;
+
+    try {
+        for (const revision of [1, 2]) {
+            await webview.sendMessage({ type: 'saveDocument', content: 'rejected edit', revision });
+        }
+        assert.equal(vscodeMockState.workspaceEdits.length, 6);
+        assert.equal(vscodeMockState.errors.length, 1);
+        assert.match(vscodeMockState.errors[0], /could not apply the latest edit/);
+        assert.equal(document.getText(), 'before');
+        assert.deepEqual(document.savedTexts, []);
+        assert.deepEqual(webview.postedMessages.filter(message => message.type === 'updateFailed'), [
+            { type: 'updateFailed', revision: 1, reason: 'apply' },
+            { type: 'updateFailed', revision: 2, reason: 'apply' },
+        ]);
+        assert.equal(webview.postedMessages.some(message => message.type === 'retryPendingUpdate'), true);
+
+        vscodeMockState.applyEditHandler = (edit) => {
+            document.setText(edit.edits[0].newText);
+            fireDocumentChange(document);
+            return true;
+        };
+        await webview.sendMessage({ type: 'saveDocument', content: 'recovered edit', revision: 3 });
+        assert.deepEqual(document.savedTexts, ['recovered edit']);
+        assert.ok(webview.postedMessages.some(message => message.type === 'updateApplied' && message.revision === 3));
+
+        vscodeMockState.applyEditHandler = () => false;
+        await webview.sendMessage({ type: 'saveDocument', content: 'rejected again', revision: 4 });
+        assert.equal(vscodeMockState.errors.length, 2, 'success resets the failure notification');
+    } finally {
+        webview.dispose();
+    }
+});
+
+test('a thrown editor update is retried and reported as an apply failure', async (t) => {
+    t.mock.method(console, 'error', () => {});
+    const { document, webview } = await createEditorSyncHarness();
+    vscodeMockState.applyEditHandler = () => { throw new Error('Workspace edit unavailable'); };
+
+    try {
+        await webview.sendMessage({ type: 'saveDocument', content: 'latest edit', revision: 1 });
+        assert.equal(vscodeMockState.workspaceEdits.length, 3);
+        assert.equal(document.getText(), 'before');
+        assert.deepEqual(document.savedTexts, []);
+        assert.equal(vscodeMockState.errors.length, 1);
+        assert.match(vscodeMockState.errors[0], /could not apply the latest edit/);
+        assert.deepEqual(webview.postedMessages.filter(message => message.type === 'updateFailed'), [
+            { type: 'updateFailed', revision: 1, reason: 'apply' },
+        ]);
+    } finally {
+        webview.dispose();
+    }
+});
+
+for (const closedDocument of [false, true]) {
+    test(`a rejected update stops when the ${closedDocument ? 'document closes' : 'editor is disposed'}`, async () => {
+        const { document, webview } = await createEditorSyncHarness();
+        vscodeMockState.applyEditHandler = () => {
+            if (closedDocument) document.isClosed = true;
+            else webview.dispose();
+            return false;
+        };
+
+        try {
+            await webview.sendMessage({ type: 'saveDocument', content: 'latest edit', revision: 1 });
+            assert.equal(vscodeMockState.workspaceEdits.length, 1);
+            assert.deepEqual(vscodeMockState.errors, []);
+            assert.deepEqual(document.savedTexts, []);
+            assert.equal(webview.postedMessages.some(message => message.type === 'retryPendingUpdate'), false);
+        } finally {
+            webview.dispose();
+        }
+    });
+}
 
 test('a restored Webview snapshot follows an in-flight edit through the normal update queue', async () => {
     const codeBlockMarkdown = '```\n\n```\n';

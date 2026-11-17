@@ -20,6 +20,7 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 - Insert live table-of-contents blocks with `/toc`. They update with heading changes, persist across saves, and can be selected and deleted as one object with Undo/Redo support. Navigate read-only items with arrows or Tab and press Enter to jump to a heading.
 
 ### Fixed
+- Retry temporarily rejected editor updates without interrupting editing, recognize snapshots already applied during saving, and keep failed edits visible without repeated error notifications. Preserve concurrent external changes and stop retrying after the editor closes.
 - Preserve literal task markers, blocked link destinations, empty links, remote-image alt text, and link-title backslashes when loading and editing Markdown. Keep escaped dollars and angle brackets literal, and retain existing punctuation and Windows-path spelling when it remains valid after an edit.
 - Load PDF parser and renderer workers as complete Blob bundles in VS Code Webviews, avoiding failed worker imports and slow main-thread fallbacks. Prioritize the first visible PDF page and preserve display completion across resizing during initial loading.
 - Keep inline-code arrow navigation on every character after pasting into the middle of code, including text and emoji split across DOM nodes.
