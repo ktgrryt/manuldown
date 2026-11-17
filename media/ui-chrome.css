@@ -1,0 +1,106 @@
+/* Shared theme and preview controls for the editor, Mermaid and PDF views. */
+body {
+    --md-ui-font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
+    --md-ui-foreground: var(--vscode-editor-foreground, var(--vscode-foreground, #24292f));
+    --md-ui-muted: var(--vscode-descriptionForeground, var(--md-ui-foreground));
+    --md-ui-surface: var(--vscode-editorWidget-background, var(--vscode-editor-background, #fff));
+    --md-ui-border: var(--vscode-editorWidget-border, var(--vscode-editorGroup-border, #d0d7de));
+    --md-ui-hover: var(--vscode-list-hoverBackground, #8882);
+    --md-ui-selected: color-mix(in srgb, var(--md-ui-foreground) 12%, var(--md-ui-surface));
+    --md-ui-radius: 4px;
+    --md-ui-menu-radius: 6px;
+    --md-ui-control-size: 28px;
+    --md-ui-icon-size: 16px;
+    --md-ui-shadow: 0 4px 12px rgba(0, 0, 0, 0.18);
+}
+
+body.vscode-high-contrast,
+body.vscode-high-contrast-light {
+    --md-ui-border: var(--vscode-contrastBorder, var(--md-ui-foreground));
+}
+
+.md-preview { font-family: var(--md-ui-font-family); font-size: 13px; line-height: 1.5; }
+
+.md-preview button,
+.md-preview .viewer-control {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    min-width: var(--md-ui-control-size);
+    min-height: var(--md-ui-control-size);
+    padding: 0 8px;
+    border: 1px solid transparent;
+    border-radius: var(--md-ui-radius);
+    background: transparent;
+    color: var(--md-ui-muted);
+    font: inherit;
+    font-size: 12px;
+    font-weight: 400;
+    cursor: pointer;
+}
+
+.md-preview button:hover,
+.md-preview .viewer-control:hover,
+.md-preview button[aria-expanded=true] {
+    background: var(--md-ui-hover);
+    color: var(--md-ui-foreground);
+}
+
+.md-preview button:active,
+.md-preview button[aria-pressed=true] {
+    background: var(--md-ui-selected);
+    color: var(--md-ui-foreground);
+}
+
+.md-preview button:focus-visible,
+.md-preview .viewer-control:focus-visible {
+    outline: 1px solid var(--vscode-focusBorder, #007fd4);
+    outline-offset: -1px;
+}
+
+.md-preview button svg,
+.md-preview .viewer-control svg {
+    width: var(--md-ui-icon-size);
+    height: var(--md-ui-icon-size);
+    flex-shrink: 0;
+    pointer-events: none;
+}
+
+.md-preview button:disabled {
+    opacity: .45;
+    cursor: default;
+    background: transparent;
+}
+
+.md-preview-toolbar {
+    display: flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    min-height: 40px;
+    padding: 4px 12px;
+    border-bottom: 1px solid var(--vscode-editorGroup-border, var(--md-ui-border));
+}
+
+.md-preview-title { font-size: 12px; font-weight: 500; }
+.md-preview .icon-button,
+.md-preview .md-preview-icon { width: var(--md-ui-control-size); padding: 0; }
+
+.md-preview-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    width: fit-content;
+    max-width: 100%;
+    margin: 0 auto;
+}
+
+.md-preview-zoom { display: flex; flex-shrink: 0; align-items: center; }
+.md-preview-zoom button { width: var(--md-ui-control-size); padding: 0; }
+.md-preview-scale { min-width: 48px; padding: 0 4px; color: var(--md-ui-foreground); font-size: 12px; text-align: center; font-variant-numeric: tabular-nums; }
+.md-preview-divider { display: inline-block; flex-shrink: 0; width: 1px; height: 16px; margin: 0 4px; background: var(--vscode-editorGroup-border, var(--md-ui-border)); }
+.md-preview-footer { position: relative; flex-shrink: 0; padding: 8px 12px; border-top: 1px solid var(--vscode-editorGroup-border, var(--md-ui-border)); }

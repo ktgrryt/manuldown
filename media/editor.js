@@ -11,6 +11,7 @@ import { createMarkdownClipboardHtml } from './modules/MarkdownClipboard.js';
 import { createImageClipboardSnapshot, writeImageClipboard } from './modules/ImageClipboard.js';
 import { InsertCommandMenu, isInsertMenuShortcut } from './modules/InsertCommandMenu.js';
 import { CompositionUpdateGate } from './modules/CompositionUpdateGate.js';
+import { prepareExportSnapshot } from './modules/ExportPreparation.js';
 import { TypingUndoGroup } from './modules/TypingUndoGroup.js';
 import {
     fitTocBodyMinWidth,
@@ -1786,7 +1787,8 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
         onInsertMath: () => mathManager.insert(),
         canInsertMath: () => mathManager.canInsert(),
         onInsertMathBlock: () => insertMathBlock(),
-        onOpenSettings: () => openManulDownSettings()
+        onOpenSettings: () => openManulDownSettings(),
+        onExportPdf: () => vscode.postMessage({ type: 'openPdfPreview' })
     });
 
     function openManulDownSettings() {
@@ -25566,6 +25568,21 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
                 break;
             case 'prepareSyncSnapshot':
                 {
+                    if (message.reason === 'pdfExport') {
+                        if (editorLoadFailed) {
+                            vscode.postMessage({ type: 'syncSnapshotFailed', requestId: message.requestId });
+                            break;
+                        }
+                        void prepareExportSnapshot({
+                            isComposing: () => isComposing || compositionUpdateGate.composing || compositionUpdateGate.finalizing,
+                            hasPendingImages: () => pendingImageInsertionRanges.size > 0 || pendingPastedDataImages.size > 0,
+                            createSnapshot: () => createSyncSnapshot({ preservePendingUpdate: true })
+                        }).then(snapshot => vscode.postMessage({
+                            type: 'syncSnapshot', requestId: message.requestId,
+                            content: snapshot.content, revision: snapshot.revision
+                        }), () => vscode.postMessage({ type: 'syncSnapshotFailed', requestId: message.requestId }));
+                        break;
+                    }
                     // A will-save handshake must not cancel the normal update
                     // retry path in case the host cannot use this snapshot.
                     const snapshot = createSyncSnapshot({ preservePendingUpdate: true });

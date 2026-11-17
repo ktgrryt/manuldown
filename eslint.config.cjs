@@ -3,7 +3,7 @@ const tsPlugin = require("@typescript-eslint/eslint-plugin");
 
 module.exports = [
   {
-    ignores: ["out/**", "dist/**", "**/*.d.ts", "media/vendor/*.bundle.js", "media/vendor/katex/**"],
+    ignores: ["out/**", "dist/**", "**/*.d.ts", "media/vendor/*.bundle.js", "media/vendor/katex/**", "media/vendor/pdfjs/**"],
   },
   {
     files: ["src/**/*.ts"],

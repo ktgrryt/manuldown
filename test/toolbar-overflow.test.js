@@ -7,7 +7,7 @@ const domino = require('@mixmark-io/domino');
 const source = fs.readFileSync(path.join(__dirname, '..', 'media/modules/ToolbarManager.js'), 'utf8');
 const modulePromise = import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 
-async function fixture(t, initialWidth, { withFootnote = false, withToc = false } = {}) {
+async function fixture(t, initialWidth, { withFootnote = false, withToc = false, withPdf = false } = {}) {
     const window = domino.createWindow(`
         <div class="toolbar">
             <button class="toolbar-btn" data-command="bold" title="Bold (Ctrl+B)">B</button>
@@ -16,6 +16,7 @@ async function fixture(t, initialWidth, { withFootnote = false, withToc = false 
             <button class="toolbar-btn" data-command="h1" title="Heading 1">H1</button>
             <button class="toolbar-btn" data-command="image" title="Insert Image">Image</button>
             ${withFootnote || withToc ? '<button class="toolbar-btn" data-command="settings" title="Settings">Settings</button>' : ''}
+            ${withPdf ? '<button class="toolbar-btn" data-command="exportPdf" data-overflow-only title="Export as PDF…" hidden>PDF</button>' : ''}
             <button class="toolbar-btn toolbar-overflow-toggle" hidden>…</button>
             <div class="toolbar-overflow-menu" hidden></div>
         </div>
@@ -93,6 +94,18 @@ async function fixture(t, initialWidth, { withFootnote = false, withToc = false 
         get range() { return range; }, get focused() { return activeElement; },
     };
 }
+
+test('PDF export remains in the ellipsis even when every editing button fits', async t => {
+    const f = await fixture(t, 2000, { withPdf: true });
+    assert.ok(!f.visible().includes('exportPdf'));
+    assert.deepEqual(f.overflow(), ['exportPdf']);
+    assert.equal(f.manager.overflowToggle.hidden, false);
+    let opened = 0;
+    f.manager.onExportPdf = () => { opened++; };
+    f.event('click', f.manager.overflowToggle);
+    f.event('click', f.manager.overflowButtons.get('exportPdf'));
+    assert.equal(opened, 1);
+});
 
 test('footnote numbers keep editing tools disabled in the overflow menu while Settings remains available', async (t) => {
     const f = await fixture(t, 80, { withFootnote: true });

@@ -6,10 +6,21 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 
 ## [Unreleased]
 
+### Changed
+- Show the shared ManulDown startup spinner while preparing PDF previews, centered on first load and compact during regeneration. Keep loading feedback visible in narrow panels and stop it on completion or errors.
+- Match PDF footer page numbers to the document font and increase their size from 9px to 11px.
+- Center the PDF manual-break removal action using the shared preview button design. Hide insertion lines at existing page starts and track the current page at the viewport's top edge, including when several pages fit on screen.
+- Keep PDF preview labels, tooltips, and notices in English regardless of VS Code's language. Share the actual toolbar/footer/zoom styles with Mermaid, including the compact percentage display and neutral action buttons.
+- Use shared editor and Mermaid control styles in PDF previews. Keep document actions in a compact toolbar and page navigation/zoom in the footer, with contextual page break tools and a Done action. Support direct page entry and Mermaid-style zoom shortcuts.
+
 ### Added
+- Navigate PDF previews with a left thumbnail sidebar, current-page highlighting, keyboard controls, and a show/hide toggle. Render nearby thumbnails after the first main page and bound the bitmap cache for long documents.
+- Export PDF from the toolbar's **…** menu: preview pages, adjust page breaks and paper layout, and save the PDF shown in the preview. Adjustments stay separate from Markdown and its editing history. Local VS Code Desktop workspaces require Chrome or Edge; configure a custom executable with `manulDown.pdf.browserPath`.
+- Edit page breaks directly on PDF pages using thin horizontal lines that highlight on hover or focus, with separate Remove controls in page gaps. Keep guides visible while updating, confirm changes with a quick Undo action, and clear manual breaks together. Preserve the viewed content while repaginating, support Undo/Redo, and restore document-specific breaks across restarts and source edits without changing Markdown.
 - Insert live table-of-contents blocks with `/toc`. They update with heading changes, persist across saves, and can be selected and deleted as one object with Undo/Redo support. Navigate read-only items with arrows or Tab and press Enter to jump to a heading.
 
 ### Fixed
+- Load PDF parser and renderer workers as complete Blob bundles in VS Code Webviews, avoiding failed worker imports and slow main-thread fallbacks. Prioritize the first visible PDF page and preserve display completion across resizing during initial loading.
 - Keep inline-code arrow navigation on every character after pasting into the middle of code, including text and emoji split across DOM nodes.
 - Preserve inline-code formatting when copying or cutting a single line, including selections inside the code and text around it.
 - Keep cursor entry into a table of contents stable from wrapped text, formatted text, and blank lines.

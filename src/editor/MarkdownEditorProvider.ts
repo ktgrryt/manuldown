@@ -5,6 +5,7 @@ import * as fs from 'fs/promises';
 import { MarkdownDocument } from './MarkdownDocument';
 import { WorkspaceLinkPicker } from './WorkspaceLinkPicker';
 import { getNonce } from '../utils/getNonce';
+import { getLoadingSpinnerCss } from '../utils/loadingSpinner';
 import {
     encodeMarkdownRelativePath,
     isUriLexicallyWithinDirectory,
@@ -16,6 +17,7 @@ import { MarkdownSourceBlock, preserveMarkdownSource } from './MarkdownSource';
 import { EmphasisBoundarySerializer } from './Emphasis';
 import { protectMarkdownTocs } from './MarkdownToc';
 import { isCalloutTypeChange, parseCallout, serializeCallout } from './Callouts';
+import { PdfPreviewProvider } from '../export/PdfPreviewProvider';
 import TurndownService from 'turndown';
 const { createWindow } = require('@mixmark-io/domino');
 const { gfm } = require('turndown-plugin-gfm');
@@ -94,6 +96,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     private currentEmphasisSerializer: EmphasisBoundarySerializer | null = null;
     private sourceCache: { text: string; html: string; blocks?: MarkdownSourceBlock[] } | undefined;
     private readonly workspaceLinkPicker = new WorkspaceLinkPicker();
+    private pdfPreviewProvider: PdfPreviewProvider | undefined;
     public explicitlyRequested = false;
 
     constructor(private readonly context: vscode.ExtensionContext) {
@@ -1339,6 +1342,45 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         webviewPanel.webview.onDidReceiveMessage(
             async (message) => {
                 switch (message.type) {
+                    case 'openPdfPreview':
+                        if (!this.pdfPreviewProvider) {
+                            this.pdfPreviewProvider = new PdfPreviewProvider(this.context);
+                            this.context.subscriptions.push(this.pdfPreviewProvider);
+                        }
+                        await this.pdfPreviewProvider.open(document, async () => {
+                            let captured: { source: string; version: number } | undefined;
+                            await enqueueTerminalAction(async () => {
+                                if (editorDisposed) {
+                                    // Closing an editor flushes its pending edits first.
+                                    if (document.isClosed) { throw new Error('Reopen the Markdown document to refresh its PDF preview.'); }
+                                    captured = { source: document.getText(), version: document.version };
+                                    return;
+                                }
+                                if (unresolvedExternalChangeId !== 0) { throw new Error('Resolve the external edit conflict before exporting.'); }
+                                const snapshot = await requestWebviewSyncSnapshot('pdfExport', 15000);
+                                if (!snapshot) { throw new Error('The latest edit or image import is not ready. Finish editing and try again.'); }
+                                if (editorDisposed || unresolvedExternalChangeId !== 0) { throw new Error('The document changed while preparing PDF preview. Try again.'); }
+                                queueWebviewUpdate(snapshot.content, snapshot.revision);
+                                if (!await flushPendingWebviewUpdate() || !await flushAllPendingWebviewUpdates()) {
+                                    throw new Error('The latest edit could not be synchronized. Resolve the edit before exporting.');
+                                }
+                                captured = { source: document.getText(), version: document.version };
+                            });
+                            if (!captured) { throw new Error('The Markdown document could not be captured.'); }
+                            return captured;
+                        }, async (source) => {
+                            if (/^https?:\/\//i.test(source)) {
+                                if (!this.getBooleanSetting('security.allowRemoteImages', false) || !/^https:\/\//i.test(source)) { return null; }
+                                const fetched = await this.fetchRemoteImage(vscode.Uri.parse(source), true);
+                                const mime = fetched.mimeType || this.getImageMimeTypeFromPath(source);
+                                return `data:${mime};base64,${Buffer.from(fetched.bytes).toString('base64')}`;
+                            }
+                            return this.resolveImageSrcForWebview(source, document, webviewPanel.webview);
+                        });
+                        break;
+                    case 'syncSnapshotFailed':
+                        if (typeof message.requestId === 'string') { settleSyncSnapshotRequest(message.requestId, null); }
+                        break;
                     case 'markdownCopyFocus':
                         if (!editorDisposed) {
                             this.updateMarkdownCopyFocus(webviewPanel, message.focused === true);
@@ -4276,7 +4318,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     }
 
     private async fetchRemoteImage(
-        sourceUri: vscode.Uri
+        sourceUri: vscode.Uri,
+        httpsOnly = false
     ): Promise<{ bytes: Uint8Array; mimeType: string | null }> {
         type SimpleBodyReader = {
             read(): Promise<{ done: boolean; value?: Uint8Array }>;
@@ -4291,7 +4334,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         };
         type SimpleFetch = (
             input: string,
-            init?: { headers?: Record<string, string>; signal?: AbortSignal }
+            init?: { headers?: Record<string, string>; signal?: AbortSignal; redirect?: 'manual' }
         ) => Promise<SimpleFetchResponse>;
 
         const fetchFn = (globalThis as unknown as { fetch?: SimpleFetch }).fetch;
@@ -4307,12 +4350,28 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         }, MarkdownEditorProvider.remoteImageTimeoutMs);
 
         try {
-            const response = await fetchFn(sourceUri.toString(), {
+            const requestOptions = {
                 headers: {
                     accept: 'image/*,*/*;q=0.8'
                 },
-                signal: controller.signal
-            });
+                signal: controller.signal,
+                ...(httpsOnly ? { redirect: 'manual' as const } : {}),
+            };
+            let url = sourceUri.toString();
+            let response = await fetchFn(url, requestOptions);
+            if (httpsOnly) {
+                for (let redirects = 0; [301, 302, 303, 307, 308].includes(response.status); redirects++) {
+                    const location = response.headers.get('location');
+                    if (!location || redirects >= 5) { throw new ImageImportError('The remote image has too many redirects.'); }
+                    const next = new URL(location, url);
+                    if (next.protocol !== 'https:' || next.username || next.password) {
+                        throw new ImageImportError('PDF images can only redirect to HTTPS image URLs.');
+                    }
+                    await response.body?.getReader().cancel();
+                    url = next.href;
+                    response = await fetchFn(url, requestOptions);
+                }
+            }
 
             if (!response.ok) {
                 throw new Error(`Request failed: ${response.status} ${response.statusText}`);
@@ -4833,6 +4892,9 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         const styleUri = webview.asWebviewUri(
             vscode.Uri.joinPath(this.context.extensionUri, 'media', 'editor.css')
         ).toString() + `?v=${assetVersion}`;
+        const chromeStyleUri = webview.asWebviewUri(
+            vscode.Uri.joinPath(this.context.extensionUri, 'media', 'ui-chrome.css')
+        ).toString() + `?v=${assetVersion}`;
 
         // Prism.js for syntax highlighting, with the grammars exposed in the
         // code-block language picker (built by scripts/bundle-prism.js).
@@ -4907,15 +4969,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             text-align: center;
         }
 
-        .editor-loading-spinner {
-            width: 24px;
-            height: 24px;
-            box-sizing: border-box;
-            border: 2px solid var(--vscode-editorWidget-border, #555555);
-            border-top-color: var(--vscode-progressBar-background, #0e70c0);
-            border-radius: 50%;
-            animation: manuldown-loading-spin 0.8s linear infinite;
-        }
+        ${getLoadingSpinnerCss('.editor-loading-spinner')}
 
         body[data-editor-state="ready"] > #editor-loading {
             display: none;
@@ -4925,18 +4979,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             display: none;
         }
 
-        @keyframes manuldown-loading-spin {
-            to {
-                transform: rotate(360deg);
-            }
-        }
-
-        @media (prefers-reduced-motion: reduce) {
-            .editor-loading-spinner {
-                animation: none;
-            }
-        }
     </style>
+    <link href="${chromeStyleUri}" rel="stylesheet">
     <link id="manuldown-editor-styles" href="${styleUri}" rel="stylesheet">
     <link href="${prismCssUri}" rel="stylesheet">
     <title>ManulDown</title>
@@ -4999,6 +5043,10 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         </button>
         <button class="toolbar-btn" data-command="mathblock" data-overflow-only title="Insert Math Block ($$…$$)" aria-label="Insert Math Block" hidden>
             Math Block
+        </button>
+        <div class="toolbar-separator"></div>
+        <button class="toolbar-btn" data-command="exportPdf" data-overflow-only title="Export as PDF…" aria-label="Export as PDF…" hidden>
+            PDF
         </button>
         <div class="toolbar-separator"></div>
         <button class="toolbar-btn" data-command="settings" data-overflow-only title="Settings" hidden>

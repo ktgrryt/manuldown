@@ -289,6 +289,12 @@
     "configuration": {
       "title": "ManulDown",
       "properties": {
+        "manulDown.pdf.browserPath": {
+          "type": "string",
+          "scope": "application",
+          "default": "",
+          "description": "Path to the Google Chrome, Microsoft Edge, or Chromium executable used for PDF export. Leave empty to detect an installed browser automatically."
+        },
         "manulDown.images.moveWithDocument": {
           "type": "boolean",
           "default": true,
@@ -350,12 +356,13 @@
   },
   "scripts": {
     "vscode:prepublish": "npm run bundle:webview && tsc -p ./ && node scripts/bundle-host.js --minify",
-    "bundle:webview": "esbuild media/vendor/mermaid-entry.js --bundle --platform=browser --format=iife --minify --legal-comments=inline --outfile=media/vendor/mermaid.bundle.js && node scripts/bundle-prism.js && node scripts/bundle-katex.js",
+    "bundle:webview": "esbuild media/vendor/mermaid-entry.js --bundle --platform=browser --format=iife --minify --legal-comments=inline --outfile=media/vendor/mermaid.bundle.js && node scripts/bundle-prism.js && node scripts/bundle-katex.js && node scripts/bundle-pdfjs.js",
     "bundle:host": "node scripts/bundle-host.js",
     "compile": "npm run bundle:webview && tsc -p ./ && npm run bundle:host",
     "watch": "npm run bundle:webview && tsc -watch -p ./",
     "pretest": "npm run compile",
     "test": "node --test test/*.test.js",
+    "test:pdf": "npm run compile && node --test test/browser/*.test.js",
     "lint": "eslint src media",
     "package:vsix": "vsce package --githubBranch main",
     "publish:vsce": "vsce publish --githubBranch main"
@@ -371,6 +378,7 @@
     "eslint": "^10.0.0",
     "katex": "^0.18.2",
     "mermaid": "^11.16.0",
+    "pdfjs-dist": "^6.5.438",
     "typescript": "^5.3.3"
   },
   "overrides": {
@@ -380,6 +388,7 @@
   "dependencies": {
     "@mixmark-io/domino": "^2.2.0",
     "marked": "^11.1.1",
+    "pdf-lib": "^1.17.1",
     "prismjs": "^1.30.0",
     "turndown": "^7.2.2",
     "turndown-plugin-gfm": "^1.0.2"

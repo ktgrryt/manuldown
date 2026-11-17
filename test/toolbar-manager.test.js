@@ -25,6 +25,19 @@ async function createToolbarManager() {
     return { manager, savedStates };
 }
 
+test('PDF export opens without moving a read-only object selection or adding editor history', async () => {
+    const { ToolbarManager } = await toolbarManagerModulePromise;
+    let opened = 0;
+    const manager = new ToolbarManager(
+        { focus: () => assert.fail('PDF preview owns its focus') },
+        { saveState: () => assert.fail('PDF export must not add an editing undo step') },
+        { onExportPdf: () => { opened++; } }
+    );
+    manager.isSelectionOnReadOnlyObject = () => true;
+    manager.executeCommand('exportPdf');
+    assert.equal(opened, 1);
+});
+
 for (const command of ['bold', 'italic', 'strikethrough', 'inlinecode']) {
     test(`${command} delegates the selected cell range before creating a native caret`, async () => {
         const { ToolbarManager } = await toolbarManagerModulePromise;

@@ -29,14 +29,14 @@ export class MermaidViewer {
         selection?.removeAllRanges();
 
         const dialog = document.createElement('dialog');
-        dialog.className = 'mermaid-viewer';
+        dialog.className = 'mermaid-viewer md-preview';
         dialog.contentEditable = 'false';
         dialog.setAttribute('aria-label', 'Mermaid preview');
         dialog.setAttribute('data-exclude-from-markdown', 'true');
         dialog.innerHTML = `
-            <div class="mermaid-viewer-toolbar">
-                <strong class="mermaid-viewer-title">Mermaid preview</strong>
-                <button type="button" class="mermaid-viewer-close" data-action="close" aria-label="Close preview" title="Close preview (Esc)">
+            <div class="mermaid-viewer-toolbar md-preview-toolbar">
+                <strong class="mermaid-viewer-title md-preview-title">Mermaid preview</strong>
+                <button type="button" class="mermaid-viewer-close md-preview-icon" data-action="close" aria-label="Close preview" title="Close preview (Esc)">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="m6 6 12 12M18 6 6 18"/></svg>
                 </button>
             </div>
@@ -44,20 +44,20 @@ export class MermaidViewer {
                 <div class="mermaid-viewer-stage"></div>
                 <p class="mermaid-viewer-status" role="status"></p>
             </div>
-            <div class="mermaid-viewer-footer">
-                <div class="mermaid-viewer-actions" role="group" aria-label="Diagram controls">
-                    <div class="mermaid-viewer-zoom" role="group" aria-label="Zoom">
+            <div class="mermaid-viewer-footer md-preview-footer">
+                <div class="mermaid-viewer-actions md-preview-actions" role="group" aria-label="Diagram controls">
+                    <div class="mermaid-viewer-zoom md-preview-zoom" role="group" aria-label="Zoom">
                         <button type="button" data-action="zoom-out" aria-label="Zoom out" title="Zoom out (−)">
                             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M5 12h14"/></svg>
                         </button>
-                        <output class="mermaid-viewer-scale" aria-label="Zoom level" aria-live="polite"></output>
+                        <output class="mermaid-viewer-scale md-preview-scale" aria-label="Zoom level" aria-live="polite"></output>
                         <button type="button" data-action="zoom-in" aria-label="Zoom in" title="Zoom in (+)">
                             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M5 12h14M12 5v14"/></svg>
                         </button>
                     </div>
-                    <span class="mermaid-viewer-divider" aria-hidden="true"></span>
+                    <span class="mermaid-viewer-divider md-preview-divider" aria-hidden="true"></span>
                     <button type="button" class="mermaid-viewer-actual" data-action="actual" aria-label="Actual size (100%)" title="Actual size (0)">100%</button>
-                    <span class="mermaid-viewer-divider" aria-hidden="true"></span>
+                    <span class="mermaid-viewer-divider md-preview-divider" aria-hidden="true"></span>
                     <button type="button" data-action="fit" aria-label="Fit diagram to view" title="Fit diagram to view (F)">Fit</button>
                 </div>
             </div>`;
@@ -241,8 +241,11 @@ export class MermaidViewer {
     }
 
     _applyTransform() {
+        if (!this.dialog) return;
         this.stage.style.transform = `translate(${this.x}px, ${this.y}px) scale(${this.scale})`;
         this.scaleLabel.textContent = `${Math.round(this.scale * 100)}%`;
+        this.dialog.querySelector('[data-action="fit"]').setAttribute('aria-pressed', String(this.fitted));
+        this.dialog.querySelector('[data-action="actual"]').setAttribute('aria-pressed', String(!this.fitted && Math.abs(this.scale - 1) < .001));
     }
 
     close() {

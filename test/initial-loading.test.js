@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
+const { getLoadingSpinnerCss } = require('../out/utils/loadingSpinner');
 
 const providerSource = fs.readFileSync(
     path.join(__dirname, '..', 'src', 'editor', 'MarkdownEditorProvider.ts'),
@@ -36,7 +37,8 @@ test('critical loading styles hide editor UI before the external stylesheet load
         criticalStyles,
         /body\[data-editor-state="style-error"\] \.editor-loading-spinner[\s\S]*display: none;/
     );
-    assert.match(criticalStyles, /@media \(prefers-reduced-motion: reduce\)/);
+    assert.match(criticalStyles, /\$\{getLoadingSpinnerCss\('\.editor-loading-spinner'\)\}/);
+    assert.match(getLoadingSpinnerCss('.editor-loading-spinner'), /@media \(prefers-reduced-motion: reduce\)/);
 });
 
 test('the webview starts busy with an accessible, non-interactive loading gate', () => {

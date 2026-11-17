@@ -21,6 +21,7 @@ export class ToolbarManager {
         this.canInsertMath = options.canInsertMath || (() => true);
         this.onInsertMathBlock = options.onInsertMathBlock || null;
         this.onOpenSettings = options.onOpenSettings || null;
+        this.onExportPdf = options.onExportPdf || null;
         this.onFormatSelectedCells = options.onFormatSelectedCells || null;
         this.getSelectedCellFormatState = options.getSelectedCellFormatState || (() => null);
         this.commandButtons = new Map();
@@ -102,7 +103,7 @@ export class ToolbarManager {
                 this.executeCommand(command);
                 // ダイアログを開くコマンドはダイアログ側でフォーカスを管理するため、ここではスキップ
                 if (command !== 'table' && command !== 'link' && command !== 'image' && command !== 'footnote' &&
-                    command !== 'math' && command !== 'settings') {
+                    command !== 'math' && command !== 'settings' && command !== 'exportPdf') {
                     setTimeout(() => this.editor.focus(), 0);
                 }
             });
@@ -168,7 +169,7 @@ export class ToolbarManager {
                 this.closeOverflowMenu({ restoreSelection: true });
                 this.executeCommand(command);
                 if (command !== 'table' && command !== 'link' && command !== 'image' && command !== 'footnote' &&
-                    command !== 'math' && command !== 'settings') {
+                    command !== 'math' && command !== 'settings' && command !== 'exportPdf') {
                     setTimeout(() => this.editor.focus(), 0);
                 }
             });
@@ -278,6 +279,7 @@ export class ToolbarManager {
     }
 
     updateOverflowMenuState() {
+        let hasCheckableItems = false;
         this.overflowButtons.forEach((menuItem, command) => {
             const button = this.commandButtons.get(command);
             if (!button) return;
@@ -287,11 +289,13 @@ export class ToolbarManager {
             menuItem.textContent = (button.getAttribute('aria-label') || button.title || button.textContent.trim())
                 .replace(/^Insert\s+/, '').replace(/\s+\([^)]*\)$/, '');
             const pressed = button.getAttribute('aria-pressed');
+            if (!menuItem.hidden && pressed !== null) hasCheckableItems = true;
             menuItem.setAttribute('role', pressed === null ? 'menuitem' : 'menuitemcheckbox');
             menuItem.classList.toggle('is-active', pressed === 'true');
             if (pressed === null) menuItem.removeAttribute('aria-checked');
             else menuItem.setAttribute('aria-checked', pressed);
         });
+        this.overflowMenu?.classList.toggle('has-checkable-items', hasCheckableItems);
         this.overflowSeparators?.forEach((separator, original) => {
             const index = this.toolbarItems.indexOf(original);
             separator.hidden = !(
@@ -354,6 +358,10 @@ export class ToolbarManager {
      * @param {string} command - 実行するコマンド
      */
     executeCommand(command) {
+        if (command === 'exportPdf') {
+            if (this.onExportPdf) this.onExportPdf();
+            return;
+        }
         if (command === 'settings') {
             if (this.onOpenSettings) this.onOpenSettings();
             return;
@@ -537,7 +545,7 @@ export class ToolbarManager {
             const disabledFootnote = command === 'footnote' && !this.canInsertFootnote();
             const disabledMath = command === 'math' && !this.canInsertMath();
             const isDisabled =
-                (onReadOnlyObject && command !== 'settings') ||
+                (onReadOnlyObject && command !== 'settings' && command !== 'exportPdf') ||
                 disabledByTable ||
                 disabledBoldInHeading ||
                 disabledByList ||

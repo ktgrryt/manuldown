@@ -12,6 +12,7 @@ ManulDownは、Markdownの表示結果を見ながら編集できるVSCode拡張
 - 画像の貼り付け・ドラッグ＆ドロップと、文書移動時の画像の追随
 - URL・ワークスペース内ファイルへのリンク、脚注、自動目次
 - シンタックスハイライト付きコードブロック、TeX数式、Mermaid図
+- PDFプレビュー、プレビュー内での改ページ・用紙設定の調整とエクスポート
 - Markdown記法の自動変換、検索、Undo/Redo
 - 高コントラストを含むVSCodeテーマへの追従
 
@@ -92,6 +93,22 @@ TeXの数式を[KaTeX](https://katex.org/supported.html)で表示します。
 言語を `mermaid` にしたコードブロックを作成し、**Preview** スイッチでソースと図を切り替えます。コピーアイコンでソースをコピー、ダウンロードアイコンでPNG／SVGを保存できます。
 
 拡大アイコンで図をエディタ領域いっぱいに表示します。ホイールでズーム、ドラッグや矢印キーで移動し、**Fit** で全体表示、`Esc` で閉じます。
+
+### PDFへのエクスポート
+
+UIの表記は、エディタやMermaidプレビューと同じく英語です。
+
+プレビュー左側のサムネイルをクリックすると、そのページに移動できます。表示領域の上端にあるページを現在ページとし、対応するサムネイルが枠で示されます。上端がページ間の隙間にある場合は次のページを選びます。上部のサイドバーアイコンで一覧を表示・非表示にでき、サムネイルにフォーカスした状態では ↑ / ↓、Home / End でも移動できます。下部の矢印やページ番号の入力（Enterで移動）も使えます。
+
+Mermaidプレビューと共通の配色・ボタン・操作バーを使用しています。表示倍率は下部の **＋ / −、100%、Fit** で調整でき、倍率の数字をクリックするとプリセットを選べます。キーボードの **＋ / −、0、F** でも操作できます。改ページ編集を終えたら **Done** を押します。
+
+ツールバーの **… → Export as PDF…** からPDFプレビューを開きます。**Page breaks** をONにすると、段落・見出し・画像・表・リスト・コードなどのブロック間に薄い横線が表示されます。カーソルやキーボードのフォーカスを合わせた線が強調され、クリックするとその位置に改ページを追加できます。すでにページ先頭にあるブロックの前には挿入線を表示しません。手動改ページはページ間の隙間に表示され、線の中央の **Remove page break** で解除します。変更後の通知の **Undo** ですぐ取り消せるほか、**Clear all** で手動改ページをまとめて解除できます。**Done** を押すと編集用の表示をすべて隠します。**Layout** では用紙、縦横、余白、文字サイズ、ページ番号を変更できます。
+
+確認後、**Export…** で保存先を選びます。プレビューに表示したPDFをそのまま保存します。画像、数式、Mermaid図も出力され、長い表ではヘッダーを各ページに繰り返します。画像や図の読み込みに問題がある場合は、プレビューにお知らせを表示します。
+
+改ページの指定は文書ごとのVS Code内部データに自動保存され、同じVS Code環境で再度開いたときにも復元されます。Markdown本文や通常の編集メニューには追加しません。編集モードの **Undo / Redo** と Ctrl/Cmd+Z、Ctrl+Y / Cmd+Shift+Z で取り消し・やり直しができます。本文を編集した場合は **Refresh preview** で更新してください。内容と前後のブロックを使って改ページを引き継ぎ、対象が削除されたり識別できなくなった場合は解除してお知らせします。段落内の文字・行の途中への改ページには対応していません。
+
+PDF出力はVS Code Desktopのローカル環境に対応し、Google ChromeまたはMicrosoft Edgeが必要です。標準の場所にインストールされたブラウザーを自動検出します。検出できない場合は `manulDown.pdf.browserPath` にブラウザーの実行ファイルを指定してください。macOSでは `.app` のパスも指定できます。
 
 ### Markdown原文の保持
 
@@ -174,6 +191,7 @@ TeXの数式を[KaTeX](https://katex.org/supported.html)で表示します。
 | `manulDown.list.dashStyle` | `false` | 箇条書きのマーカーに `-` を使用 |
 | `manulDown.list.indentSize` | `2` | 文書のスタイルを検出できない場合のインデント幅（`2` / `4` スペース） |
 | `manulDown.images.moveWithDocument` | `true` | 文書の移動・名前変更に画像を追随 |
+| `manulDown.pdf.browserPath` | 空文字 | PDF生成に使うChrome・Edge・Chromiumの実行ファイル。空の場合は自動検出（ユーザー設定のみ） |
 | `manulDown.security.allowRemoteImages` | `false` | リモートのHTTP/HTTPS画像を表示 |
 | `manulDown.security.allowRemoteImageImport` | `false` | リモートのHTTP/HTTPS画像をダウンロードして取り込み |
 | `manulDown.security.allowFileLinks` | `false` | `file://` やワークスペース外のローカルリンクを開く |
@@ -184,12 +202,16 @@ TeXの数式を[KaTeX](https://katex.org/supported.html)で表示します。
 
 ## 開発
 
+開発にはNode.js 22.13以上を使用してください。PDF.jsはブラウザー向けアセットとして同梱し、拡張機能の実行時にはNode.js向けのPDF.jsを読み込みません。
+
 ```sh
 npm ci
 npm run compile
 npm test
 npm run lint
 ```
+
+実際のブラウザーによるPDF生成・プレビューの検証は、ChromeまたはEdgeがある環境で `npm run test:pdf` を実行します。
 
 `npm run watch` でTypeScriptの変更を監視できます。拡張機能のコードは `src/`、エディタのUIは `media/`、テストは `test/` にあります。変更履歴は [CHANGELOG.md](./CHANGELOG.md) を参照してください。
 

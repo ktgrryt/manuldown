@@ -49,6 +49,17 @@ test('the VSIX ships the bundles instead of node_modules', () => {
     assert.match(readRepositoryFile('media', 'vendor', 'prism.bundle.js'), /^\/\*! Prism /);
 });
 
+test('PDF preview ships browser assets and keeps its executable path in user settings', () => {
+    const manifest = JSON.parse(readRepositoryFile('package.json'));
+    assert.equal(manifest.contributes.configuration.properties['manulDown.pdf.browserPath'].scope, 'application');
+    assert.ok(manifest.devDependencies['pdfjs-dist']);
+    assert.ok(!manifest.dependencies['pdfjs-dist']);
+    for (const asset of ['pdf.mjs', 'pdf.worker.mjs', 'pdf.renderer.mjs', 'LICENSE']) {
+        assert.ok(fs.existsSync(path.join(repositoryRoot, 'media/vendor/pdfjs', asset)), asset);
+    }
+    assert.match(providerSource, /data-command="exportPdf" data-overflow-only/);
+});
+
 test('the Webview page does not load Mermaid up front', () => {
     assert.doesNotMatch(providerSource, /<script[^>]*src="\$\{mermaidUri\}"/);
     assert.match(providerSource, /data-mermaid-script-src="\$\{mermaidUri\}"/);

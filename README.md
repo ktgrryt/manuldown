@@ -12,6 +12,7 @@ ManulDown is a VSCode extension for editing Markdown while viewing the rendered 
 - Image paste and drag-and-drop, with images following document moves
 - URL and workspace file links, footnotes, and an automatic table of contents
 - Syntax-highlighted code blocks, TeX formulas, and Mermaid diagrams
+- PDF preview, page break and layout adjustments, and export
 - Automatic Markdown syntax conversion, search, and Undo/Redo
 - VSCode theme support, including high contrast themes
 
@@ -92,6 +93,20 @@ TeX formulas are rendered with [KaTeX](https://katex.org/supported.html).
 Create a code block with its language set to `mermaid`, then use **Preview** to switch between source and diagram. The copy icon copies the source; the download icon saves PNG or SVG.
 
 The expand icon opens the diagram across the editor. Scroll to zoom, drag or use arrow keys to pan, choose **Fit** to see the whole diagram, and press `Esc` to close.
+
+### Exporting PDF
+
+Click a thumbnail in the left sidebar to jump to that page. The page at the top edge of the preview is current, and its thumbnail is outlined as you scroll. If the top edge is in a gap, the following page is current. Use the sidebar icon to show or hide thumbnails, or focus a thumbnail and use ↑ / ↓ or Home / End to navigate. The footer also provides previous/next buttons and a page number field; press Enter to jump.
+
+The preview uses English labels, like the editor and Mermaid viewer, and shares its toolbar, footer, controls, and zoom styling with Mermaid. Use **+ / −, 100%, Fit** in the footer, click the zoom percentage to choose a preset, or use **+ / −, 0, F** on the keyboard. Choose **Done** to leave page break editing.
+
+Open **… → Export as PDF…** in the toolbar to preview your document as pages. Turn on **Page breaks** to see faint horizontal lines between paragraphs, headings, images, tables, lists, or code blocks. Hover or focus a line to highlight it, then click to insert a break. Blocks that already start a page have no insertion line. Manual breaks appear in the page gap with a centered **Remove page break** action. Use the confirmation's **Undo** to quickly reverse a change, or **Clear all** to remove all manual breaks. Choose **Done** to hide all editing controls. **Layout** controls paper size, orientation, margins, text size, and page numbers.
+
+Choose **Export…** to save the PDF shown in the preview. Images, formulas, and Mermaid diagrams are included, and long tables repeat their headers on subsequent pages. Missing images or diagram errors appear as notices in the preview.
+
+Page breaks are saved automatically in VS Code's private storage for each document and restored when you reopen it in the same VS Code environment. Markdown and its regular editing menus stay unchanged. Use **Undo / Redo** in edit mode, Ctrl/Cmd+Z, or Ctrl+Y / Cmd+Shift+Z. After editing Markdown, choose **Refresh**: breaks follow their source content and neighboring blocks where possible. If a target is deleted or cannot be identified, its break is removed with a notice. Breaks inside a paragraph or line are not supported.
+
+PDF export supports local workspaces in VS Code Desktop and requires Google Chrome or Microsoft Edge. Browsers in standard locations are detected automatically. If needed, set `manulDown.pdf.browserPath` to the browser executable. On macOS, an `.app` path is also accepted.
 
 ### Preserving Markdown Source
 
@@ -174,6 +189,7 @@ Use **… → Settings** in the toolbar or `/settings` to open ManulDown setting
 | `manulDown.list.dashStyle` | `false` | Use `-` for bullet markers |
 | `manulDown.list.indentSize` | `2` | Indentation width when the document style cannot be detected (`2` or `4` spaces) |
 | `manulDown.images.moveWithDocument` | `true` | Move images with document moves and renames |
+| `manulDown.pdf.browserPath` | Empty | Chrome, Edge, or Chromium executable for PDF export; empty detects an installed browser (user settings only) |
 | `manulDown.security.allowRemoteImages` | `false` | Display remote HTTP/HTTPS images |
 | `manulDown.security.allowRemoteImageImport` | `false` | Download and import remote HTTP/HTTPS images |
 | `manulDown.security.allowFileLinks` | `false` | Open `file://` and local links outside the workspace |
@@ -184,12 +200,16 @@ Creating a link does not access its URL. Opening local links outside the workspa
 
 ## Development
 
+Use Node.js 22.13 or later for development. PDF.js ships as browser assets and is not loaded as a Node.js library by the extension host.
+
 ```sh
 npm ci
 npm run compile
 npm test
 npm run lint
 ```
+
+Run `npm run test:pdf` with Chrome or Edge installed to verify actual PDF generation and the preview UI.
 
 Use `npm run watch` to watch TypeScript changes. Extension code is in `src/`, editor UI in `media/`, and tests in `test/`. See [CHANGELOG.md](./CHANGELOG.md) for release history.
 
