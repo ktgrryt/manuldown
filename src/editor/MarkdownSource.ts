@@ -38,6 +38,12 @@ function fingerprint(node: any): string {
         return '';
     }
     const tag = node.nodeName;
+    if (tag === 'BUTTON' && node.classList.contains('mdw-callout-format-toggle') &&
+        node.parentElement?.getAttribute('data-mdw-callout') === 'true' &&
+        node.getAttribute('data-exclude-from-markdown') === 'true' && node.getAttribute('contenteditable') === 'false' &&
+        (node.textContent === '' || node.textContent === '…') && !node.children.length) {
+        return '';
+    }
     if (node.hasAttribute('data-mdw-footnote-backref') && node.closest('[data-mdw-footnote-definition]')) {
         return '';
     }

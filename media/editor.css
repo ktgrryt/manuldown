@@ -88,6 +88,7 @@ body.toc-resizing {
 .code-block-export-menu,
 .language-suggestions,
 .mdw-callout-type-picker,
+.mdw-callout-format-picker,
 .link-popover,
 .math-popover,
 .slash-command-menu,
@@ -1463,6 +1464,7 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
 #editor .mdw-callout {
     --mdw-callout-accent: var(--vscode-editorInfo-foreground, #3794ff);
     --mdw-callout-icon: var(--md-icon-information);
+    position: relative;
     border-left: 2px solid color-mix(in srgb, var(--mdw-callout-accent) 65%, var(--md-ui-border));
     border-radius: var(--md-ui-radius);
     background: var(--md-block-background);
@@ -1496,7 +1498,7 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
     align-items: center;
     gap: 6px;
     width: fit-content;
-    max-width: 100%;
+    max-width: calc(100% - 30px);
     min-height: var(--md-ui-control-size);
     margin: -2px 0 6px -6px;
     padding: 4px 6px;
@@ -1534,6 +1536,49 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
     mask: var(--mdw-callout-icon) center / contain no-repeat;
 }
 
+#editor .mdw-callout-format-toggle {
+    position: absolute;
+    top: 8px;
+    right: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: var(--md-ui-control-size);
+    height: var(--md-ui-control-size);
+    padding: 0;
+    border: none;
+    border-radius: var(--md-ui-radius);
+    background: transparent;
+    color: var(--md-ui-muted);
+    opacity: 0.55;
+    cursor: pointer;
+    user-select: none;
+    transition: background-color 0.1s, color 0.1s, opacity 0.1s;
+}
+
+#editor .mdw-callout-format-toggle::before {
+    content: "";
+    width: var(--md-ui-icon-size);
+    height: var(--md-ui-icon-size);
+    background: currentColor;
+    mask: var(--md-icon-overflow-menu--horizontal) center / contain no-repeat;
+    pointer-events: none;
+    forced-color-adjust: none;
+}
+
+#editor .mdw-callout-format-toggle:hover,
+#editor .mdw-callout-format-toggle:focus-visible,
+#editor .mdw-callout-format-toggle[aria-expanded="true"] {
+    background: var(--md-ui-hover);
+    color: var(--md-ui-foreground);
+    opacity: 1;
+}
+
+#editor .mdw-callout-format-toggle:focus-visible {
+    outline: 1px solid var(--vscode-focusBorder);
+    outline-offset: -1px;
+}
+
 /* Chromium can paint a caret on the following editable line while a
    contenteditable=false label is selected as a node. The label highlight is
    the active cursor indicator until selection returns to editable text. */
@@ -1541,7 +1586,8 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
     caret-color: transparent;
 }
 
-.mdw-callout-type-picker {
+.mdw-callout-type-picker,
+.mdw-callout-format-picker {
     position: fixed;
     z-index: 10000;
     display: flex;
@@ -1571,19 +1617,28 @@ body.md-table-structure-dragging #editor .md-table-structure-handle {
     outline: none;
 }
 
+.mdw-callout-type-option:disabled {
+    opacity: 0.45;
+    cursor: default;
+}
+
 .mdw-callout-type-option.active {
     background: var(--md-ui-selected);
     color: var(--md-ui-foreground);
     outline: none;
 }
 
-.mdw-callout-type-picker::-webkit-scrollbar { width: 8px; }
-.mdw-callout-type-picker::-webkit-scrollbar-track { background: transparent; }
-.mdw-callout-type-picker::-webkit-scrollbar-thumb {
+.mdw-callout-type-picker::-webkit-scrollbar,
+.mdw-callout-format-picker::-webkit-scrollbar { width: 8px; }
+.mdw-callout-type-picker::-webkit-scrollbar-track,
+.mdw-callout-format-picker::-webkit-scrollbar-track { background: transparent; }
+.mdw-callout-type-picker::-webkit-scrollbar-thumb,
+.mdw-callout-format-picker::-webkit-scrollbar-thumb {
     background: var(--vscode-scrollbarSlider-background);
     border-radius: var(--md-ui-radius);
 }
-.mdw-callout-type-picker::-webkit-scrollbar-thumb:hover {
+.mdw-callout-type-picker::-webkit-scrollbar-thumb:hover,
+.mdw-callout-format-picker::-webkit-scrollbar-thumb:hover {
     background: var(--vscode-scrollbarSlider-hoverBackground);
 }
 

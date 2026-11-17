@@ -1,6 +1,13 @@
 import { marked } from 'marked';
 
 export type CalloutVariant = 'note' | 'tip' | 'important' | 'warning' | 'caution';
+export type CalloutService = 'github' | 'qiita' | 'zenn' | 'obsidian' | 'container' | 'mkdocs';
+
+export function resolveCalloutService(value: unknown): CalloutService {
+    return typeof value === 'string' && ['github', 'qiita', 'zenn', 'obsidian', 'container', 'mkdocs'].includes(value)
+        ? value as CalloutService : 'github';
+}
+
 export type Callout = {
     raw: string;
     body: string;
@@ -111,6 +118,15 @@ export function isCalloutTypeChange(original: Callout, updated: Callout): boolea
     const after = descriptor(updated, before?.dialect);
     return !!before && !!after && before.dialect === after.dialect &&
         before.prefix === after.prefix && before.suffix === after.suffix;
+}
+
+/** A format change may replace delimiters and default labels, but not a custom title. */
+export function isCalloutFormatChange(original: Callout, updated: Callout): boolean {
+    const before = calloutDeclaration(original.header, original.format);
+    const after = calloutDeclaration(updated.header, updated.format);
+    if (!before || !after) {return false;}
+    return before.title === after.title ||
+        (before.title === before.sourceType && after.title === after.sourceType);
 }
 
 function literalMarkdownRanges(source: string): Array<{ start: number; end: number }> {

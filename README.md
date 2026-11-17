@@ -127,6 +127,7 @@ Type `/` at the start of a line or after whitespace to open the insert menu. Dir
 | `/footnote` | Add and edit a footnote |
 | `/table` | Insert a 2×2 table |
 | `/quote` | Convert to or insert a blockquote |
+| `/callout` | Insert a callout using the configured default service |
 | `/code` | Insert a code block |
 | `/math` | Insert a math block |
 | `/inline-math` | Insert an inline formula |
@@ -188,6 +189,7 @@ Use **… → Settings** in the toolbar or `/settings` to open ManulDown setting
 | `manulDown.toolbar.visible` | `true` | Show the toolbar |
 | `manulDown.toolbar.items` | Per-button defaults | Select toolbar buttons with checkboxes; H1–H6 are available |
 | `manulDown.toc.enabled` | `true` | Automatically show a table of contents when headings exist |
+| `manulDown.callout.defaultService` | `github` | Format for `/callout`: GitHub / GitLab, Qiita, Zenn, Obsidian, Docusaurus / VitePress, or MkDocs. Changes apply to new callouts immediately |
 | `manulDown.openByDefault` | `true` | Open Markdown with ManulDown by default |
 | `manulDown.list.dashStyle` | `false` | Use `-` for bullet markers |
 | `manulDown.list.indentSize` | `2` | Indentation width when the document style cannot be detected (`2` or `4` spaces) |

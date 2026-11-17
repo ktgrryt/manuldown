@@ -125,12 +125,182 @@ async function fixture(source, { surround = false } = {}) {
 }
 const key = (name, extra = {}) => ({ key: name, defaultPrevented: false,
     preventDefault() { this.defaultPrevented = true; }, stopPropagation() {}, ...extra });
-const popupKey = (f, name) => {
+const popupKey = (f, name, extra = {}) => {
     const event = new f.window.Event('keydown', { bubbles: true, cancelable: true });
-    Object.assign(event, { key: name });
+    Object.assign(event, { key: name, ...extra });
     f.document.activeElement.dispatchEvent(event);
     return event;
 };
+
+for (const [service, expected, label] of [
+    ['github', '> [!NOTE]\n> Body\n', 'NOTE'],
+    ['qiita', ':::note info\nBody\n:::\n', 'info'],
+    ['zenn', ':::message\nBody\n:::\n', 'message'],
+    ['obsidian', '> [!note]\n> Body\n', 'note'],
+    ['container', ':::info\nBody\n:::\n', 'info'],
+    ['mkdocs', '!!! note\n    Body\n', 'note'],
+]) {
+    test(`new ${service} callouts save, reopen empty, and retain their format after typing`, async () => {
+        const f = await fixture('> [!NOTE]\n> Original.\n');
+        try {
+            const block = f.manager.createEmptyBlock(service);
+            f.editor.innerHTML = ''; f.editor.appendChild(block); f.manager.refresh();
+            assert.equal(block.querySelector('.mdw-callout-title').textContent, label);
+            assert.equal(f.manager.getTypeDescriptor(block).dialect, service);
+            const empty = save(f.editor.innerHTML, '');
+            assert.ok(render(empty).includes('data-mdw-callout="true"'), empty);
+            block.querySelector('.mdw-callout-content p').textContent = 'Body';
+            assert.equal(save(f.editor.innerHTML, ''), expected);
+            assert.equal(save(render(expected), expected), expected);
+            assert.equal(f.before.length, 0); assert.equal(f.after.length, 0);
+        } finally { f.restore(); }
+    });
+}
+
+test('the subtle format control opens a separate menu without changing the document or history', async () => {
+    const source = ':::note warn\nBody\n:::\n';
+    const f = await fixture(source);
+    try {
+        const button = f.block.querySelector('.mdw-callout-format-toggle');
+        assert.equal(button.textContent, '');
+        assert.equal(button.getAttribute('contenteditable'), 'false');
+        assert.match(button.getAttribute('aria-label'), /Qiita/);
+        button.dispatchEvent(new f.window.Event('click', { bubbles: true, cancelable: true }));
+        const menu = f.document.querySelector('.mdw-callout-format-picker');
+        assert.ok(menu); assert.equal(f.editor.contains(menu), false);
+        assert.equal(f.title.classList.contains('nav-selected'), false);
+        assert.equal(button.getAttribute('aria-expanded'), 'true');
+        assert.equal(f.title.getAttribute('aria-expanded'), 'false');
+        assert.deepEqual(Array.from(menu.children, option => option.textContent),
+            ['GitHub / GitLab', 'Qiita', 'Zenn', 'Obsidian', 'Docusaurus / VitePress', 'MkDocs']);
+        assert.equal(menu.querySelector('[aria-selected="true"]').getAttribute('data-callout-dialect'), 'qiita');
+        popupKey(f, 'Escape');
+        assert.ok(!f.document.querySelector('.mdw-callout-format-picker'));
+        assert.equal(f.document.activeElement, button);
+        assert.equal(save(f.editor.innerHTML, source), source);
+        assert.equal(f.domUtils.getCleanedHTML().includes('mdw-callout-format-toggle'), false);
+        assert.equal(f.before.length, 0); assert.equal(f.after.length, 0);
+    } finally { f.restore(); }
+});
+
+for (const kind of ['type', 'format']) {
+    for (const shiftKey of [false, true]) {
+        test(`${shiftKey ? 'Shift+Tab' : 'Tab'} exits the ${kind} picker inside the editor without an edit`, async () => {
+            const f = await fixture(':::note warn\nBody\n:::\n');
+            try {
+                let reveals = 0;
+                f.manager.onNavigate = () => { reveals++; };
+                f.manager.openTypePicker(f.block, kind);
+                assert.equal(popupKey(f, 'Tab', { shiftKey }).defaultPrevented, true);
+                assert.ok(!f.manager.typePicker);
+                if (shiftKey) assert.equal(f.manager.getSelectedTypeLabel(), f.title);
+                else if (kind === 'type') assert.ok(f.manager.getFocusedFormatButton());
+                else assert.ok(f.block.querySelector('.mdw-callout-content').contains(f.range().startContainer));
+                assert.equal(reveals, 1);
+                assert.equal(f.before.length, 0); assert.equal(f.after.length, 0);
+            } finally { f.restore(); }
+        });
+    }
+}
+
+for (const [source, dialect, expected, types] of [
+    [':::note warn\n_Body_\n:::\n', 'github', '> [!WARNING]\n> _Body_\n', ['NOTE', 'TIP', 'IMPORTANT', 'WARNING', 'CAUTION']],
+    ['> [!WARNING]\n> _Body_\n', 'qiita', ':::note warn\n_Body_\n:::\n', ['info', 'warn', 'alert']],
+    ['> [!CAUTION]\n> _Body_\n', 'zenn', ':::message alert\n_Body_\n:::\n', ['message', 'alert']],
+    [':::note warn\n_Body_\n:::\n', 'obsidian', '> [!warn]\n> _Body_\n', null],
+    [':::note warn\n_Body_\n:::\n', 'container', ':::warning\n_Body_\n:::\n', null],
+    [':::note warn\n_Body_\n:::\n', 'mkdocs', '!!! warn\n    _Body_\n', null],
+    [':::note info\n_Body_\n:::\n', 'container', ':::info\n_Body_\n:::\n', null],
+    ['!!! warning "日本語のタイトル"\n    _Body_\n', 'obsidian', '> [!warning] 日本語のタイトル\n> _Body_\n', null],
+    ['> [!warning]- Custom title\n> _Body_\n', 'mkdocs', '??? warning "Custom title"\n    _Body_\n', null],
+]) {
+    test(`format picker converts ${source.split('\n')[0]} to ${dialect} and reopens`, async () => {
+        const f = await fixture(source);
+        try {
+            const content = f.block.querySelector('.mdw-callout-content'), originalHtml = content.innerHTML;
+            f.manager.openFormatPicker(f.block);
+            f.document.querySelector(`[data-callout-dialect="${dialect}"]`).dispatchEvent(new f.window.Event('click', { bubbles: true, cancelable: true }));
+            assert.ok(!f.document.querySelector('.mdw-callout-format-picker'));
+            assert.equal(content.innerHTML, originalHtml);
+            assert.equal(f.manager.getTypeDescriptor(f.block).dialect, dialect);
+            if (types) assert.deepEqual(f.manager.getTypeOptions(f.block), types);
+            const saved = save(f.editor.innerHTML, source);
+            assert.equal(saved, expected);
+            assert.equal(save(render(saved), saved), saved);
+            assert.equal(f.before.length, 1); assert.equal(f.after.length, 1);
+        } finally { f.restore(); }
+    });
+}
+
+test('format conversion retains rich source spelling, nested content and subsequent body edits', async () => {
+    const source = ':::note warn\n_keep_ and [label][ref].\n\n> [!TIP]\n> Inner _body_.\n\n- first\n- second\n:::\n\n[ref]: https://example.com\n';
+    const f = await fixture(source);
+    try {
+        assert.equal(f.manager.changeFormat(f.block, 'github'), true);
+        const saved = save(f.editor.innerHTML, source);
+        assert.equal(saved, '> [!WARNING]\n> _keep_ and [label][ref].\n>\n> > [!TIP]\n> > Inner _body_.\n>\n> - first\n> - second\n\n[ref]: https://example.com\n');
+        assert.equal(save(render(saved), saved), saved);
+        f.block.querySelector('.mdw-callout-content > p').textContent = 'Edited body.';
+        const edited = save(f.editor.innerHTML, source);
+        assert.match(edited, /^> \[!WARNING\]\n> Edited body\./);
+        assert.match(edited, /> > \[!TIP\]/);
+        assert.doesNotMatch(edited, /_keep_/);
+    } finally { f.restore(); }
+});
+
+test('format menu skips choices that cannot retain a custom title and ignores no-op choices', async () => {
+    const source = '> [!warning] Custom title\n> Body\n';
+    const f = await fixture(source);
+    try {
+        assert.equal(f.manager.changeFormat(f.block, 'obsidian'), false);
+        assert.equal(f.manager.changeFormat(f.block, 'qiita'), false);
+        assert.equal(f.manager.changeFormat(f.block, 'invalid'), false);
+        f.manager.openFormatPicker(f.block);
+        const menu = f.document.querySelector('.mdw-callout-format-picker');
+        assert.equal(menu.querySelector('[data-callout-dialect="qiita"]').disabled, true);
+        assert.equal(menu.querySelector('[data-callout-dialect="zenn"]').disabled, true);
+        popupKey(f, 'Home'); popupKey(f, 'ArrowDown');
+        assert.equal(f.document.activeElement.getAttribute('data-callout-dialect'), 'obsidian');
+        popupKey(f, 'Enter');
+        assert.equal(save(f.editor.innerHTML, source), source);
+        assert.equal(f.before.length, 0); assert.equal(f.after.length, 0);
+    } finally { f.restore(); }
+});
+
+test('format conversion and its keyboard control remain usable after Undo/Redo', async () => {
+    const source = ':::note warn\nBody **bold**.\n:::\n';
+    const f = await fixture(source);
+    try {
+        const history = new f.StateManager(f.editor, {});
+        history.saveSelection = () => null; history.restoreSelection = () => true;
+        history.finishHistoryRestore = () => { f.manager.refresh(); history.rebaseCurrentHistoryStateComparable(); };
+        f.manager.beforeChange = () => history.saveState();
+        f.manager.onChange = () => history.commitStateAfterChange();
+        history.seedState();
+        assert.equal(f.manager.changeFormat(f.block, 'github'), true);
+        const changed = save(f.editor.innerHTML, source);
+        assert.equal(history.performUndo(), true);
+        assert.equal(save(f.editor.innerHTML, source), source);
+        assert.equal(history.performRedo(), true);
+        assert.equal(save(f.editor.innerHTML, source), changed);
+        const button = f.editor.querySelector('.mdw-callout-format-toggle');
+        const event = new f.window.Event('keydown', { bubbles: true, cancelable: true });
+        Object.assign(event, { key: 'Enter' }); button.dispatchEvent(event);
+        assert.ok(f.document.querySelector('.mdw-callout-format-picker'));
+        popupKey(f, 'Escape');
+        assert.ok(!f.document.querySelector('.mdw-callout-format-picker'));
+    } finally { f.restore(); }
+});
+
+test('IME composition blocks format changes and menu opening', async () => {
+    const f = await fixture(':::note warn\nBody\n:::\n');
+    try {
+        f.manager.isComposing = () => true;
+        assert.equal(f.manager.openFormatPicker(f.block), false);
+        assert.equal(f.manager.changeFormat(f.block, 'github'), false);
+        assert.equal(f.before.length, 0); assert.equal(f.after.length, 0);
+    } finally { f.restore(); }
+});
 
 for (const [header, body, initial, next, nextHeader, variant] of [
     [':::note info', '_Body_\n:::', 'info', 'alert', ':::note alert', 'caution'],
@@ -535,7 +705,7 @@ for (const [method, direction] of [['moveCursorUp', 'up'], ['moveCursorBackward'
 }
 
 for (const [method, intoBody] of [
-    ['moveCursorDown', true], ['moveCursorForward', true], ['moveCursorUp', false], ['moveCursorBackward', false],
+    ['moveCursorDown', true], ['moveCursorUp', false], ['moveCursorBackward', false],
 ]) {
     test(`${method} leaves a selected type label in one navigation step`, async () => {
         const f = await fixture(':::note warn\nBody\n:::\n', { surround: true });
@@ -547,6 +717,71 @@ for (const [method, intoBody] of [
             assert.equal(range.collapsed, true);
             assert.ok(target === range.startContainer || target.contains(range.startContainer));
             assert.equal(f.manager.getSelectedTypeLabel(), null);
+            assert.equal(f.before.length, 0); assert.equal(f.after.length, 0);
+        } finally { f.restore(); }
+    });
+}
+
+test('Right reaches the format control, Enter opens choices and arrows plus Enter select a format', async () => {
+    const source = ':::note warn\nBody\n:::\n';
+    const f = await fixture(source);
+    try {
+        f.manager.selectTypeLabel(f.block);
+        f.cursor.moveCursorForward();
+        assert.equal(f.manager.getFocusedFormatButton(), f.block.querySelector('.mdw-callout-format-toggle'));
+        assert.equal(f.selection.rangeCount, 0);
+        assert.equal(f.title.classList.contains('nav-selected'), false);
+        assert.equal(popupKey(f, 'Enter').defaultPrevented, true);
+        const popup = f.document.querySelector('.mdw-callout-format-picker');
+        assert.ok(popup);
+        assert.equal(f.document.activeElement.getAttribute('data-callout-dialect'), 'qiita');
+        popupKey(f, 'ArrowUp');
+        assert.equal(f.document.activeElement.getAttribute('data-callout-dialect'), 'github');
+        popupKey(f, 'Enter');
+        assert.ok(!f.document.querySelector('.mdw-callout-format-picker'));
+        assert.equal(save(f.editor.innerHTML, source), '> [!WARNING]\n> Body\n');
+        assert.ok(f.manager.getFocusedFormatButton());
+        assert.equal(f.before.length, 1); assert.equal(f.after.length, 1);
+    } finally { f.restore(); }
+});
+
+test('a focused format control allows modified shortcuts to reach the editor', async () => {
+    const f = await fixture(':::note warn\nBody\n:::\n');
+    try {
+        f.manager.focusFormatButton(f.block);
+        let received = false;
+        const observe = () => { received = true; };
+        f.editor.addEventListener('keydown', observe);
+        const event = new f.window.Event('keydown', { bubbles: true, cancelable: true });
+        Object.assign(event, { key: 'z', ctrlKey: true });
+        f.document.activeElement.dispatchEvent(event);
+        f.editor.removeEventListener('keydown', observe);
+        assert.equal(received, true);
+        assert.equal(event.defaultPrevented, false);
+        assert.equal(f.before.length, 0); assert.equal(f.after.length, 0);
+    } finally { f.restore(); }
+});
+
+for (const [method, target] of [
+    ['moveCursorBackward', 'title'], ['moveCursorForward', 'body'], ['moveCursorDown', 'body'], ['moveCursorUp', 'before'],
+]) {
+    test(`${method} leaves the focused format control without creating an edit`, async () => {
+        const source = ':::note warn\nBody\n:::\n';
+        const f = await fixture(source, { surround: true });
+        try {
+            const baseline = f.domUtils.getCleanedHTML({ historyComparable: true });
+            f.manager.selectTypeLabel(f.block); f.cursor.moveCursorForward();
+            assert.ok(f.manager.getFocusedFormatButton());
+            f.cursor[method]();
+            assert.equal(f.manager.getFocusedFormatButton(), null);
+            assert.equal(f.document.activeElement, f.editor);
+            if (target === 'title') assert.equal(f.manager.getSelectedTypeLabel(), f.title);
+            else {
+                const expected = target === 'body' ? f.block.querySelector('.mdw-callout-content p') : f.editor.firstElementChild;
+                assert.ok(expected === f.range().startContainer || expected.contains(f.range().startContainer));
+                assert.equal(f.range().collapsed, true);
+            }
+            assert.equal(f.domUtils.getCleanedHTML({ historyComparable: true }), baseline);
             assert.equal(f.before.length, 0); assert.equal(f.after.length, 0);
         } finally { f.restore(); }
     });
@@ -602,8 +837,16 @@ for (const source of [
                 const inner = blocks[1], innerTitle = inner.querySelector('.mdw-callout-title');
                 const text = inner.querySelector('.mdw-callout-content p').firstChild;
                 f.manager.selectTypeLabel(f.block);
+                if (method === 'moveCursorForward') {
+                    f.cursor.moveCursorForward();
+                    assert.equal(f.manager.getFocusedFormatButton()?.parentElement, f.block);
+                }
                 f.cursor[method]();
                 assert.equal(f.manager.getSelectedTypeLabel(), innerTitle);
+                if (method === 'moveCursorForward') {
+                    f.cursor.moveCursorForward();
+                    assert.equal(f.manager.getFocusedFormatButton()?.parentElement, inner);
+                }
                 f.cursor[method]();
                 assert.equal(f.range().startContainer, text);
                 assert.equal(f.range().startOffset, 0);

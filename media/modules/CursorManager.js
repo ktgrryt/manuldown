@@ -4540,12 +4540,13 @@ export class CursorManager {
      */
     moveCursorUp(notifyCallback) {
         const selection = window.getSelection();
-        if (!selection || !selection.rangeCount) return;
+        if (!selection) return;
         if (this.moveAcrossCalloutType?.(selection, 'up')) {
             this.clearInlineCodeBoundaryState();
             this._clearForwardImageStep();
             return;
         }
+        if (!selection.rangeCount) return;
         const verticalCode = this.domUtils.getParentElement(selection.getRangeAt(0).startContainer, 'CODE');
         if (!verticalCode || !this.domUtils.getParentElement(verticalCode, 'PRE')) {
             this.resetCodeVerticalNavigation();
@@ -5816,12 +5817,13 @@ export class CursorManager {
      */
     moveCursorDown(notifyCallback) {
         const selection = window.getSelection();
-        if (!selection || !selection.rangeCount) return;
+        if (!selection) return;
         if (this.moveAcrossCalloutType?.(selection, 'down')) {
             this.clearInlineCodeBoundaryState();
             this._clearForwardImageStep();
             return;
         }
+        if (!selection.rangeCount) return;
         const verticalCode = this.domUtils.getParentElement(selection.getRangeAt(0).startContainer, 'CODE');
         if (!verticalCode || !this.domUtils.getParentElement(verticalCode, 'PRE')) {
             this.resetCodeVerticalNavigation();

@@ -11,6 +11,18 @@ const variants = Object.assign(Object.create(null), {
     missing: 'caution', bug: 'caution'
 });
 const containerTypes = new Set(['note', 'tip', 'info', 'warning', 'danger', 'important', 'caution']);
+const calloutDialects = [
+    { value: 'github', label: 'GitHub / GitLab' },
+    { value: 'qiita', label: 'Qiita' },
+    { value: 'zenn', label: 'Zenn' },
+    { value: 'obsidian', label: 'Obsidian' },
+    { value: 'container', label: 'Docusaurus / VitePress' },
+    { value: 'mkdocs', label: 'MkDocs' },
+];
+export function resolveCalloutService(value) {
+    return calloutDialects.some(option => option.value === value) ? value : 'github';
+}
+
 const metadataNames = ['source', 'header', 'footer', 'format', 'type', 'variant'];
 const elementOf = node => node?.nodeType === 1 ? node : node?.parentElement;
 const encode = (value, view) => view.btoa(Array.from(new view.TextEncoder().encode(value), byte => String.fromCharCode(byte)).join(''));
@@ -36,14 +48,16 @@ function typeDescriptor(header, format) {
         const existing = options.findIndex(type => type.toLowerCase() === match[2].toLowerCase());
         if (existing >= 0) options[existing] = match[2];
         else options.unshift(match[2]);
-        return { current: match[2], options, custom: !!match[5]?.trim(),
+        return { current: match[2], options, custom: !!match[5]?.trim(), title: match[5]?.trim(), fold: match[4],
+            dialect: uppercase && githubTypes.includes(match[2]) && !match[4] ? 'github' : 'obsidian',
             rewrite: type => match[1] + type + match[3],
             variant: type => variants[type.toLowerCase()] };
     }
     if (format === 'mkdocs') {
         const match = /^( {0,3}(?:!!!|\?\?\?\+?)[ \t]+)([a-z]+)((?:[ \t]+"([^"\r\n]*)")?[ \t]*)$/.exec(header);
         if (!match || !variants[match[2]]) return null;
-        return { current: match[2], options: Object.keys(variants), custom: match[4] !== undefined,
+        return { current: match[2], options: Object.keys(variants), custom: match[4] !== undefined, title: match[4], dialect: 'mkdocs',
+            fold: header.trimStart().startsWith('???+') ? '+' : header.trimStart().startsWith('???') ? '-' : '',
             rewrite: type => match[1] + type + match[3], variant: type => variants[type] };
     }
     if (format !== 'container') return null;
@@ -52,20 +66,61 @@ function typeDescriptor(header, format) {
     const [, prefix, type, tail] = match;
     if (type === 'note' && /^(?:[ \t]+(?:info|warn|alert))?[ \t]*$/.test(tail)) {
         const subtype = /^([ \t]+)(info|warn|alert)([ \t]*)$/.exec(tail);
-        return { current: subtype?.[2] || 'info', label: subtype?.[2] || 'note', options: ['info', 'warn', 'alert'], custom: false,
+        return { current: subtype?.[2] || 'info', label: subtype?.[2] || 'note', options: ['info', 'warn', 'alert'], custom: false, dialect: 'qiita',
             rewrite: value => subtype ? prefix + 'note' + subtype[1] + value + subtype[3]
                 : prefix + 'note' + (value === 'info' ? '' : ' ' + value) + tail,
             variant: value => value === 'warn' ? 'warning' : value === 'alert' ? 'caution' : 'note' };
     }
     if (type === 'message' && /^(?:[ \t]+alert)?[ \t]*$/.test(tail)) {
         const alert = /^([ \t]+)alert([ \t]*)$/.exec(tail);
-        return { current: alert ? 'alert' : 'message', options: ['message', 'alert'], custom: false,
+        return { current: alert ? 'alert' : 'message', options: ['message', 'alert'], custom: false, dialect: 'zenn',
             rewrite: value => prefix + 'message' + (value === 'alert' ? (alert?.[1] || ' ') + 'alert' : '') + (alert?.[2] ?? tail),
             variant: value => value === 'alert' ? 'caution' : 'note' };
     }
     if (!containerTypes.has(type) || !containerHeader(header)) return null;
-    return { current: type, options: Array.from(containerTypes), custom: !!tail.trim(),
+    const title = tail.startsWith('[') ? tail.slice(1, tail.lastIndexOf(']')) : tail.trim();
+    return { current: type, options: Array.from(containerTypes), custom: !!tail.trim(), title, dialect: 'container',
         rewrite: value => prefix + value + tail, variant: value => variants[value] };
+}
+
+/** Map the visual meaning to a supported declaration in the chosen dialect. */
+function dialectDeclaration(descriptor, dialect) {
+    if (!calloutDialects.some(option => option.value === dialect) || descriptor.dialect === dialect) return null;
+    // These two syntaxes have no custom-title field. Keep those choices disabled
+    // rather than silently dropping a title when converting a callout.
+    if (descriptor.custom && ['qiita', 'zenn'].includes(dialect)) return null;
+    const variant = descriptor.variant(descriptor.current), originalType = descriptor.current.toLowerCase();
+    const defaults = { note: 'note', tip: 'tip', important: 'important', warning: 'warning', caution: 'caution' };
+    let type = defaults[variant], header, footer = '', format;
+    if (dialect === 'github' || dialect === 'obsidian') {
+        type = dialect === 'github' ? type.toUpperCase() : variants[originalType] ? originalType : type;
+        const fold = dialect === 'obsidian' ? descriptor.fold || '' : '';
+        header = `> [!${type}]${fold}${descriptor.custom ? ' ' + descriptor.title : ''}`;
+        format = 'quote';
+    } else if (dialect === 'mkdocs') {
+        if (descriptor.custom && /["\r\n]/.test(descriptor.title)) return null;
+        type = variants[originalType] ? originalType : type;
+        header = `${descriptor.fold === '+' ? '???+' : descriptor.fold === '-' ? '???' : '!!!'} ${type}${descriptor.custom ? ' "' + descriptor.title + '"' : ''}`;
+        format = 'mkdocs';
+    } else {
+        format = 'container'; footer = ':::';
+        if (dialect === 'qiita') {
+            type = variant === 'warning' ? 'warn' : variant === 'caution' ? 'alert' : 'info';
+            header = ':::note ' + type;
+        } else if (dialect === 'zenn') {
+            type = variant === 'warning' || variant === 'caution' ? 'alert' : 'message';
+            header = ':::message' + (type === 'alert' ? ' alert' : '');
+        } else {
+            type = containerTypes.has(originalType) ? originalType : type;
+            // A bare :::note is interpreted as Qiita when it is reopened.
+            if (type === 'note' && !descriptor.custom) type = 'info';
+            header = ':::' + type + (descriptor.custom ? '[' + descriptor.title + ']' : '');
+        }
+    }
+    const next = typeDescriptor(header, format);
+    // Empty or unrepresentable custom titles must not silently disappear.
+    if (!next || (descriptor.custom && (!next.custom || next.title !== descriptor.title))) return null;
+    return { header, footer, format, type, variant: next.variant(next.current) };
 }
 
 function quoteHeader(line) {
@@ -115,16 +170,46 @@ function clipboardCalloutSpec(header, footer, format) {
     return spec ? { ...spec, footer } : null;
 }
 
-/** The visual wrapper is shared with MarkdownDocument; no insertion UI. */
+/** The visual wrapper is shared with MarkdownDocument and the insert commands. */
 export class CalloutManager {
     constructor(editor, options = {}) {
         this.editor = editor;
         this.beforeChange = options.beforeChange || (() => {});
         this.onChange = options.onChange || (() => {});
+        this.onNavigate = options.onNavigate || (() => {});
         this.isComposing = options.isComposing || (() => false);
         this.cursorManager = options.cursorManager || null;
         this.typePicker = null;
+        // Delegate handlers so controls restored by Undo/Redo remain usable.
+        this.editor.addEventListener('mousedown', event => {
+            if (elementOf(event.target)?.closest('.mdw-callout-format-toggle')) event.preventDefault();
+        });
+        this.editor.addEventListener('keydown', event => {
+            const button = elementOf(event.target)?.closest('.mdw-callout-format-toggle');
+            if (!button || event.isComposing || event.keyCode === 229 || this.isComposing() ||
+                event.ctrlKey || event.metaKey || event.altKey) return;
+            const direction = { ArrowLeft: 'backward', ArrowRight: 'forward', ArrowUp: 'up', ArrowDown: 'down' }[event.key];
+            if (!event.shiftKey) {
+                if (direction && this.handleTypeNavigation(this.selection, direction)) event.preventDefault();
+                else if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); this.openFormatPicker(button); }
+                else if (event.key === 'Escape') { event.preventDefault(); this.moveToBody(button.parentElement, this.selection); }
+            }
+            if (event.key === 'Tab') {
+                event.preventDefault();
+                if (event.shiftKey) this.selectTypeLabel(button); else this.moveToBody(button.parentElement, this.selection);
+            }
+            if (event.defaultPrevented) this.onNavigate();
+            // A focused control must not trigger the editor's text handlers.
+            event.stopImmediatePropagation();
+        }, true);
         this.editor.addEventListener('click', event => {
+            const formatButton = elementOf(event.target)?.closest('.mdw-callout-format-toggle');
+            if (formatButton && this.editor.contains(formatButton)) {
+                event.preventDefault(); event.stopPropagation();
+                if (this.pickerKind === 'format' && this.pickerTitle?.parentElement === formatButton.parentElement) this.closeTypePicker(true);
+                else this.openFormatPicker(formatButton);
+                return;
+            }
             const title = elementOf(event.target)?.closest('.mdw-callout-title');
             if (title && this.editor.contains(title) && !this.isComposing()) {
                 event.preventDefault();
@@ -140,13 +225,14 @@ export class CalloutManager {
         });
         this.document.addEventListener('mousedown', event => {
             if (this.typePicker && !this.typePicker.contains(event.target) &&
-                !this.pickerTitle?.contains(event.target)) this.closeTypePicker(false);
+                !this.pickerTitle?.contains(event.target) &&
+                !elementOf(event.target)?.closest('.mdw-callout-format-toggle')) this.closeTypePicker(false);
         });
         for (const eventName of ['paste', 'cut']) this.editor.addEventListener(eventName, event => {
             const title = this.getSelectedTypeLabel();
-            if (!title) return;
+            if (!title && !this.getFocusedFormatButton()) return;
             event.preventDefault(); event.stopImmediatePropagation();
-            if (eventName === 'paste') this.openTypePicker(title);
+            if (eventName === 'paste' && title) this.openTypePicker(title);
         }, true);
     }
 
@@ -189,6 +275,21 @@ export class CalloutManager {
         return true;
     }
 
+    getFocusedFormatButton() {
+        const button = this.document.activeElement;
+        return button?.classList?.contains('mdw-callout-format-toggle') && this.editor.contains(button) ? button : null;
+    }
+
+    focusFormatButton(node, selection = this.selection) {
+        const block = this.getTypeBlock(node);
+        const button = block && Array.from(block.children).find(child => child.classList.contains('mdw-callout-format-toggle'));
+        if (!button || !this.getTypeDescriptor(block)) return false;
+        button.focus?.({ preventScroll: true });
+        selection?.removeAllRanges();
+        this.refresh();
+        return true;
+    }
+
     refresh() {
         if (this.typePicker && (!this.editor.contains(this.pickerTitle) ||
             this.pickerHeader !== this.pickerTitle.parentElement.getAttribute('data-mdw-callout-header'))) this.closeTypePicker(false);
@@ -203,8 +304,42 @@ export class CalloutManager {
             title.setAttribute('role', 'button'); title.setAttribute('tabindex', '-1');
             title.setAttribute('aria-haspopup', 'listbox');
             title.setAttribute('aria-label', `Change callout type (${descriptor?.current || ''})`);
-            title.setAttribute('aria-expanded', this.typePicker && title === this.pickerTitle ? 'true' : 'false');
+            title.setAttribute('aria-expanded', this.typePicker && this.pickerKind === 'type' && title === this.pickerTitle ? 'true' : 'false');
+            this.refreshFormatButton(title.parentElement, descriptor);
         });
+    }
+
+    refreshFormatButton(block, descriptor) {
+        let button = Array.from(block.children).find(child => child.classList.contains('mdw-callout-format-toggle'));
+        if (!descriptor) { button?.remove(); return; }
+        if (!button) {
+            button = this.document.createElement('button'); button.type = 'button';
+            button.className = 'mdw-callout-format-toggle';
+            button.setAttribute('contenteditable', 'false'); button.setAttribute('data-exclude-from-markdown', 'true');
+            button.setAttribute('aria-haspopup', 'listbox');
+            block.insertBefore(button, Array.from(block.children).find(child => child.classList.contains('mdw-callout-content')) || null);
+        }
+        // Older history snapshots used a text glyph for this generated control.
+        if (button.textContent) button.textContent = '';
+        const label = calloutDialects.find(option => option.value === descriptor.dialect)?.label;
+        const description = `Callout format: ${label}`;
+        if (button.title !== description) button.title = description;
+        if (button.getAttribute('aria-label') !== description) button.setAttribute('aria-label', description);
+        const expanded = this.typePicker && this.pickerKind === 'format' && this.pickerTitle?.parentElement === block ? 'true' : 'false';
+        if (button.getAttribute('aria-expanded') !== expanded) button.setAttribute('aria-expanded', expanded);
+    }
+
+    changeFormat(node, dialect) {
+        const block = this.getTypeBlock(node), descriptor = this.getTypeDescriptor(block);
+        if (this.isComposing() || !descriptor) return false;
+        const next = dialectDeclaration(descriptor, dialect);
+        if (!next) return false;
+        this.beforeChange();
+        for (const name of ['header', 'footer']) block.setAttribute('data-mdw-callout-' + name, encode(next[name], this.document.defaultView));
+        for (const name of ['format', 'type', 'variant']) block.setAttribute('data-mdw-callout-' + name, next[name]);
+        this.pickerHeader = block.getAttribute('data-mdw-callout-header');
+        this.refresh(); this.finishChange();
+        return true;
     }
 
     changeType(node, type) {
@@ -224,62 +359,83 @@ export class CalloutManager {
         return true;
     }
 
-    openTypePicker(node) {
+    openFormatPicker(node) { return this.openTypePicker(node, 'format'); }
+
+    openTypePicker(node, kind = 'type') {
         if (this.isComposing()) return false;
         const block = this.getTypeBlock(node), descriptor = this.getTypeDescriptor(block);
-        if (!descriptor || !this.selectTypeLabel(block)) return false;
+        if (!descriptor || !(kind === 'format' ? this.focusFormatButton(block) : this.selectTypeLabel(block))) return false;
         this.closeTypePicker(false);
-        const title = this.getSelectedTypeLabel();
+        const title = Array.from(block.children).find(child => child.classList.contains('mdw-callout-title'));
+        const choices = kind === 'format' ? calloutDialects.map(option => ({ ...option,
+            disabled: option.value !== descriptor.dialect && !dialectDeclaration(descriptor, option.value) }))
+            : descriptor.options.map(value => ({ value, label: value }));
+        const currentValue = kind === 'format' ? descriptor.dialect : descriptor.current;
+        const attribute = kind === 'format' ? 'data-callout-dialect' : 'data-callout-type';
         const picker = this.document.createElement('div');
-        picker.className = 'mdw-callout-type-picker'; picker.setAttribute('role', 'listbox');
-        picker.setAttribute('aria-label', 'Callout type');
+        picker.className = kind === 'format' ? 'mdw-callout-format-picker' : 'mdw-callout-type-picker'; picker.setAttribute('role', 'listbox');
+        picker.setAttribute('aria-label', kind === 'format' ? 'Callout format' : 'Callout type');
+        this.pickerKind = kind;
         this.pickerTitle = title; this.pickerHeader = block.getAttribute('data-mdw-callout-header'); this.typePicker = picker;
-        const choose = value => { this.changeType(block, value); this.closeTypePicker(true); };
-        this.pickerIndex = Math.max(0, descriptor.options.indexOf(descriptor.current));
+        const choose = value => {
+            if (kind === 'format') this.changeFormat(block, value); else this.changeType(block, value);
+            this.closeTypePicker(true);
+        };
+        this.pickerIndex = Math.max(0, choices.findIndex(option => option.value === currentValue));
         const activateOption = (index, focus = false) => {
             this.pickerIndex = index;
             Array.from(picker.children).forEach((option, position) => option.classList.toggle('active', position === index));
             if (focus && this.document.activeElement !== picker.children[index]) picker.children[index]?.focus();
         };
-        descriptor.options.forEach((value, index) => {
+        choices.forEach(({ value, label, disabled }, index) => {
             const option = this.document.createElement('button'); option.type = 'button';
-            option.className = 'mdw-callout-type-option'; option.textContent = value;
-            option.setAttribute('role', 'option'); option.setAttribute('data-callout-type', value);
-            option.setAttribute('aria-selected', value === descriptor.current ? 'true' : 'false');
+            option.className = 'mdw-callout-type-option'; option.textContent = label;
+            option.setAttribute('role', 'option'); option.setAttribute(attribute, value);
+            option.setAttribute('aria-selected', value === currentValue ? 'true' : 'false');
+            option.disabled = !!disabled;
+            if (disabled) { option.setAttribute('aria-disabled', 'true'); option.title = 'This format cannot preserve the custom title.'; }
             option.addEventListener('mousedown', event => event.preventDefault());
-            option.addEventListener('click', event => { event.preventDefault(); choose(value); });
+            option.addEventListener('click', event => { event.preventDefault(); if (!disabled) choose(value); });
             option.addEventListener('focus', () => activateOption(index));
-            option.addEventListener('mouseenter', () => activateOption(index, true));
-            option.addEventListener('mousemove', () => activateOption(index, true));
+            option.addEventListener('mouseenter', () => { if (!disabled) activateOption(index, true); });
+            option.addEventListener('mousemove', () => { if (!disabled) activateOption(index, true); });
             picker.appendChild(option);
         });
         this.pickerKeydown = event => {
             if (event.isComposing || event.keyCode === 229) return;
-            const options = Array.from(picker.children);
-            const focused = options.indexOf(this.document.activeElement), current = focused < 0 ? this.pickerIndex : focused;
+            const options = Array.from(picker.children).filter(option => !option.disabled);
+            const focused = options.indexOf(this.document.activeElement), current = focused < 0 ? options.indexOf(picker.children[this.pickerIndex]) : focused;
             if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); this.closeTypePicker(true); }
             else if (event.key === 'ArrowDown' || event.key === 'ArrowUp' || event.key === 'Home' || event.key === 'End') {
                 event.preventDefault(); event.stopPropagation();
                 const index = event.key === 'Home' ? 0 : event.key === 'End' ? options.length - 1
                     : (Math.max(0, current) + (event.key === 'ArrowDown' ? 1 : -1) + options.length) % options.length;
-                activateOption(index, true);
+                activateOption(Array.from(picker.children).indexOf(options[index]), true);
             } else if (event.key === 'Enter' || event.key === ' ') {
                 event.preventDefault(); event.stopPropagation();
-                const option = options[current >= 0 ? current : descriptor.options.indexOf(descriptor.current)];
-                if (option) choose(option.getAttribute('data-callout-type'));
-            } else if (event.key === 'Tab') this.closeTypePicker(false);
+                const option = options[Math.max(0, current)];
+                if (option) choose(option.getAttribute(attribute));
+            } else if (event.key === 'Tab') {
+                event.preventDefault(); event.stopPropagation();
+                this.closeTypePicker(true);
+                if (event.shiftKey) this.selectTypeLabel(block);
+                else if (kind === 'format') this.moveToBody(block, this.selection);
+                else this.focusFormatButton(block);
+                this.onNavigate();
+            }
         };
         picker.addEventListener('keydown', this.pickerKeydown);
         this.document.body.appendChild(picker);
-        const rect = title.getBoundingClientRect?.();
+        const anchor = kind === 'format' ? Array.from(block.children).find(child => child.classList.contains('mdw-callout-format-toggle')) : title;
+        const rect = anchor?.getBoundingClientRect?.();
         const view = this.document.defaultView;
         if (rect) {
             const viewportWidth = view.innerWidth || 800, viewportHeight = view.innerHeight || 600;
             const measured = picker.getBoundingClientRect?.();
-            const width = measured?.width || 160, height = measured?.height || Math.min(200, descriptor.options.length * 28 + 10);
+            const width = measured?.width || 160, height = measured?.height || Math.min(200, choices.length * 28 + 10);
             const below = rect.bottom + 4;
             const top = below + height <= viewportHeight - 8 ? below : rect.top - height - 4;
-            picker.style.left = `${Math.max(8, Math.min(rect.left, viewportWidth - width - 8))}px`;
+            picker.style.left = `${Math.max(8, Math.min(kind === 'format' ? rect.right - width : rect.left, viewportWidth - width - 8))}px`;
             picker.style.top = `${Math.max(8, Math.min(top, viewportHeight - height - 8))}px`;
         }
         this.refresh();
@@ -290,8 +446,11 @@ export class CalloutManager {
     closeTypePicker(restoreSelection = true) {
         if (!this.typePicker) return false;
         const title = this.pickerTitle;
-        this.typePicker.remove(); this.typePicker = null; this.pickerTitle = null; this.pickerKeydown = null;
-        if (restoreSelection && this.editor.contains(title)) this.selectTypeLabel(title);
+        const kind = this.pickerKind;
+        this.typePicker.remove(); this.typePicker = null; this.pickerTitle = null; this.pickerKeydown = null; this.pickerKind = null;
+        if (restoreSelection && this.editor.contains(title)) {
+            if (kind === 'format') this.focusFormatButton(title); else this.selectTypeLabel(title);
+        }
         else this.refresh();
         return true;
     }
@@ -315,6 +474,7 @@ export class CalloutManager {
     moveToBody(block, selection, direction = 'down') {
         const content = Array.from(block.children).find(child => child.classList.contains('mdw-callout-content'));
         if (!content) return false;
+        this.editor.focus?.({ preventScroll: true });
         let first = Array.from(content.children).find(child => !child.matches('[contenteditable="false"]')) || content;
         while (first.tagName === 'BLOCKQUOTE') {
             const child = Array.from(first.children).find(node => !node.matches('[contenteditable="false"]'));
@@ -345,11 +505,19 @@ export class CalloutManager {
     }
 
     handleTypeNavigation(selection, direction) {
-        if (this.isComposing() || this.typePicker || !selection?.rangeCount) return false;
+        if (this.isComposing() || this.typePicker || !selection) return false;
         const backwards = direction === 'up' || direction === 'backward' || direction === 'left';
         const vertical = direction === 'up' || direction === 'down';
+        const formatButton = this.getFocusedFormatButton();
+        if (formatButton) {
+            if (!backwards) return this.moveToBody(formatButton.parentElement, selection, direction);
+            if (!this.selectTypeLabel(formatButton, selection)) return false;
+            if (!vertical) return true;
+        }
+        if (!selection.rangeCount) return false;
         const selected = this.getSelectedTypeLabel(selection);
         if (selected) {
+            if (!backwards && !vertical) return this.focusFormatButton(selected, selection);
             if (!backwards) return this.moveToBody(selected.parentElement, selection, direction);
             let current = selected.parentElement;
             while (current && current !== this.editor) {
@@ -428,6 +596,15 @@ export class CalloutManager {
         if (!node || !/^(P|DIV)$/.test(node.tagName) ||
             Array.from(node.childNodes).some(child => child.nodeType !== 3)) return null;
         return node.textContent;
+    }
+
+    createEmptyBlock(service = 'github') {
+        const dialect = resolveCalloutService(service);
+        const initial = quoteHeader('> [!NOTE]');
+        const spec = dialect === 'github' ? initial : dialectDeclaration(typeDescriptor(initial.header, initial.format), dialect);
+        const block = this.createBlock({ ...spec, title: spec.type });
+        block.lastElementChild.appendChild(this.emptyParagraph());
+        return block;
     }
 
     createBlock(spec) {
@@ -669,6 +846,12 @@ export class CalloutManager {
             ['b', 'i', 'u', 'k'].includes(event.key?.toLowerCase())) {
             event.preventDefault(); return true;
         }
+        if (title && event.key === 'Tab' && !event.ctrlKey && !event.metaKey && !event.altKey) {
+            event.preventDefault();
+            const moved = event.shiftKey ? this.handleTypeNavigation(this.selection, 'backward') : this.focusFormatButton(title);
+            if (moved) this.onNavigate();
+            return moved;
+        }
         if (title && !event.ctrlKey && !event.metaKey && !event.altKey) {
             if (event.key === 'Enter' || event.key === ' ' || event.key?.length === 1) {
                 event.preventDefault(); this.openTypePicker(title); return true;
@@ -719,6 +902,12 @@ export class CalloutManager {
         for (const block of Array.from(template.content.querySelectorAll('[data-mdw-callout="true"]')).reverse()) {
             const content = Array.from(block.children).find(node => node.classList.contains('mdw-callout-content'));
             if (!content) continue;
+            // Live/history HTML can include the generated format control.
+            // Strip only its exact UI shape; other extra content still falls back.
+            Array.from(block.children).filter(node => node.tagName === 'BUTTON' &&
+                node.classList.contains('mdw-callout-format-toggle') && node.getAttribute('contenteditable') === 'false' &&
+                node.getAttribute('data-exclude-from-markdown') === 'true' && ['', '…'].includes(node.textContent) && !node.children.length)
+                .forEach(node => node.remove());
             const titleNode = Array.from(block.children).find(node => node.classList.contains('mdw-callout-title'));
             let spec;
             if (!trusted) {

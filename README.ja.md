@@ -129,6 +129,7 @@ PDF出力はVS Code Desktopのローカル環境に対応し、Google Chromeま�
 | `/footnote` | 脚注を追加し、注釈を編集 |
 | `/table` | 2×2の表を挿入 |
 | `/quote` | 引用に変換・挿入 |
+| `/callout` | 設定したサービスのコールアウトを挿入 |
 | `/code` | コードブロックを挿入 |
 | `/math` | 数式ブロックを挿入 |
 | `/inline-math` | インライン数式を挿入 |
@@ -190,6 +191,7 @@ PDF出力はVS Code Desktopのローカル環境に対応し、Google Chromeま�
 | `manulDown.toolbar.visible` | `true` | ツールバーを表示 |
 | `manulDown.toolbar.items` | 項目ごとの初期値 | チェックボックスで表示項目を選択。H1〜H6に対応 |
 | `manulDown.toc.enabled` | `true` | 見出しがある場合に目次を自動表示 |
+| `manulDown.callout.defaultService` | `github` | `/callout` で挿入する記法。GitHub / GitLab・Qiita・Zenn・Obsidian・Docusaurus / VitePress・MkDocsから選択。変更は次の挿入から即時反映 |
 | `manulDown.openByDefault` | `true` | Markdownを既定でManulDownで開く |
 | `manulDown.list.dashStyle` | `false` | 箇条書きのマーカーに `-` を使用 |
 | `manulDown.list.indentSize` | `2` | 文書のスタイルを検出できない場合のインデント幅（`2` / `4` スペース） |

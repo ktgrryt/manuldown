@@ -180,6 +180,22 @@ test('inline settings cannot close their script element', () => {
     );
 });
 
+test('callout default service settings expose only supported services and fall back to GitHub', () => {
+    const setting = packageJson.contributes.configuration.properties['manulDown.callout.defaultService'];
+    assert.equal(setting.default, 'github');
+    assert.equal(setting.enum.length, setting.enumItemLabels.length);
+    for (const service of setting.enum) {
+        const provider = loadProviderWithConfiguration({ 'callout.defaultService': service });
+        assert.equal(getInlineSettings(renderWebviewHtml(provider)).calloutDefaultService, service);
+    }
+    for (const value of [undefined, null, false, 1, [], {}, 'unknown', '</script><img src=https://evil.example/p.png>']) {
+        const provider = loadProviderWithConfiguration({ 'callout.defaultService': value });
+        const html = renderWebviewHtml(provider);
+        assert.equal(getInlineSettings(html).calloutDefaultService, 'github');
+        assert.doesNotMatch(html, /evil\.example/);
+    }
+});
+
 test('toolbar checkbox preferences reach the Webview without carrying unknown setting values', () => {
     const provider = loadProviderWithConfiguration({
         'toolbar.items': { bold: false, h4: true, link: true, math: 'true',

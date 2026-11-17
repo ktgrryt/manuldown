@@ -53,7 +53,7 @@ const {
 } = await import(`./modules/MarkdownHeadingSlug.js${new URL(import.meta.url).search}`);
 const { InlineTocManager } = await import(`./modules/InlineTocManager.js${new URL(import.meta.url).search}`);
 const { FootnoteManager } = await import(`./modules/FootnoteManager.js${new URL(import.meta.url).search}`);
-const { CalloutManager } = await import(`./modules/CalloutManager.js${new URL(import.meta.url).search}`);
+const { CalloutManager, resolveCalloutService } = await import(`./modules/CalloutManager.js${new URL(import.meta.url).search}`);
 const { MathManager } = await import(`./modules/MathManager.js${new URL(import.meta.url).search}`);
 const { DragSelectionScroll } = await import(`./modules/DragSelectionScroll.js${new URL(import.meta.url).search}`);
 const { TableOfContentsManager } = await import(`./modules/TableOfContentsManager.js${new URL(import.meta.url).search}`);
@@ -148,6 +148,7 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
         tocPanelWidth: normalizeTocPanelWidth(initialSettings.tocPanelWidth),
         useVsCodeCtrlP: initialSettings.useVsCodeCtrlP !== false,
         listDashStyle: initialSettings.listDashStyle === true,
+        calloutDefaultService: resolveCalloutService(initialSettings.calloutDefaultService),
         allowRemoteImages: initialSettings.allowRemoteImages === true,
         allowRemoteImageImport: initialSettings.allowRemoteImageImport === true,
         allowFileLinks: initialSettings.allowFileLinks === true
@@ -1765,7 +1766,8 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
         isComposing: () => isUpdating || isComposing || compositionUpdateGate.composing ||
             (lastCompositionEndTs > 0 && Date.now() - lastCompositionEndTs <= IME_ENTER_CONFIRM_GRACE_MS),
         beforeChange: () => { typingUndoGroup.break(); stateManager.saveState(); },
-        onChange: () => { notifyChange(); stateManager.commitStateAfterChange(); }
+        onChange: () => { notifyChange(); stateManager.commitStateAfterChange(); },
+        onNavigate: () => revealCaretAfterKeyboardNavigation()
     });
     cursorManager.moveAcrossCalloutType = (selection, direction) =>
         calloutManager.handleTypeNavigation(selection, direction);
@@ -2002,6 +2004,9 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
         }
         if (typeof nextSettings.listDashStyle === 'boolean') {
             settingsState.listDashStyle = nextSettings.listDashStyle;
+        }
+        if (Object.prototype.hasOwnProperty.call(nextSettings, 'calloutDefaultService')) {
+            settingsState.calloutDefaultService = resolveCalloutService(nextSettings.calloutDefaultService);
         }
         if (typeof nextSettings.allowRemoteImages === 'boolean') {
             settingsState.allowRemoteImages = nextSettings.allowRemoteImages;
@@ -5235,6 +5240,23 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
         return true;
     }
 
+    function insertSlashCallout() {
+        const selection = window.getSelection();
+        if (!selection || selection.rangeCount !== 1 || isSelectionInListItem()) return false;
+        const range = selection.getRangeAt(0);
+        if (!canOpenInsertCommandMenu(range)) return false;
+        const block = calloutManager.createEmptyBlock(settingsState.calloutDefaultService);
+        calloutManager.beforeChange();
+        tableManager._insertNodeAsBlock(range, block);
+        calloutManager.refresh();
+        calloutManager.moveToBody(block, selection);
+        notifyChange();
+        // Redo resumes in the new body rather than the preceding paragraph.
+        stateManager.commitStateAfterChange({ preferLiveSelection: true });
+        revealCaretAfterKeyboardNavigation();
+        return true;
+    }
+
     function insertEmptyQuote() {
         const selection = window.getSelection();
         if (!selection || !selection.rangeCount) return;
@@ -6058,6 +6080,7 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
         { id: 'footnote', source: 'builtin', description: 'Insert a footnote', action: () => footnoteManager.insert() },
         { id: 'table', source: 'builtin', description: 'Insert a 2x2 table', action: insertSlashTable },
         { id: 'quote', source: 'builtin', description: 'Insert a quote block', action: insertSlashQuote },
+        { id: 'callout', source: 'builtin', description: 'Insert a callout', action: insertSlashCallout },
         { id: 'code', source: 'builtin', description: 'Insert a code block', action: insertSlashCodeBlock },
         { id: 'math', source: 'builtin', description: 'Insert a math block ($$…$$)', action: insertMathBlock },
         { id: 'inline-math', source: 'builtin', description: 'Insert an inline formula ($…$)', action: () => mathManager.insert() },
@@ -6073,7 +6096,7 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
         }
     ];
     const builtInSlashCommandIdSet = new Set(builtInSlashCommands.map((cmd) => cmd.id.toLowerCase()));
-    const listRestrictedSlashCommandIds = new Set(['table', 'quote', 'code', 'math', 'toc']);
+    const listRestrictedSlashCommandIds = new Set(['table', 'quote', 'callout', 'code', 'math', 'toc']);
 
     function getAllSlashCommands() {
         return builtInSlashCommands.concat(customSlashCommands);

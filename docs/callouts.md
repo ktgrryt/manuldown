@@ -1,11 +1,26 @@
 # Callout compatibility
 
-Callouts are a compatibility feature. There is no toolbar button, slash command,
-or output-format setting. The body uses the existing rich editor. Its type label
+Use **/callout** to insert a callout and start editing its body.
+The **Callout: Default Service** setting (`manulDown.callout.defaultService`)
+chooses the format for new callouts. It defaults to GitHub / GitLab and also
+offers Qiita, Zenn, Obsidian, Docusaurus / VitePress, and MkDocs. Settings changes
+apply immediately to subsequent insertions; existing callouts keep their format.
+Like quote blocks, callouts are not inserted inside list items or table cells.
+The body uses the existing rich editor. Its type label
 can be selected with the cursor, like a code block's language label. Enter or a
 click opens the supported types for that callout's existing Markdown dialect.
 Qiita offers `info`, `warn`, and `alert`; Zenn offers `message` and `alert`.
 Choosing a type changes the declaration within that dialect, not its format.
+The subtle **…** button at the right of the title row opens a format picker for
+GitHub / GitLab, Qiita, Zenn, Obsidian, Docusaurus / VitePress, and MkDocs.
+From the type label, Right or Tab focuses this button; Left returns to the label.
+Enter opens its menu, Up/Down moves through the options, and Enter selects one.
+Escape closes the menu and returns focus to the button. Down or Right from the
+button returns to the editable body.
+Choosing a format converts that callout's Markdown declaration and offers the
+types supported by the selected format. The body and Undo/Redo history are
+preserved. Types without an exact counterpart use the closest supported type.
+Formats that cannot retain a custom title are disabled for that callout.
 Default labels use the original type spelling and case: Qiita `alert` stays
 `alert`, `warn` stays `warn`, and GitHub `WARNING` stays `WARNING`. The shared
 note/tip/important/warning/caution variants determine only color and icons.

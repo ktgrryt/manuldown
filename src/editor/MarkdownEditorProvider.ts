@@ -17,7 +17,7 @@ import { MAX_EDITABLE_FOOTNOTE_DEPTH, decodeFootnoteLabel, deduplicateFootnotes,
 import { MarkdownSourceBlock, markdownContentMatches, preserveMarkdownSource } from './MarkdownSource';
 import { EmphasisBoundarySerializer } from './Emphasis';
 import { protectMarkdownTocs } from './MarkdownToc';
-import { isCalloutTypeChange, parseCallout, serializeCallout } from './Callouts';
+import { CalloutService, isCalloutFormatChange, isCalloutTypeChange, parseCallout, resolveCalloutService, serializeCallout } from './Callouts';
 import { PdfPreviewProvider } from '../export/PdfPreviewProvider';
 import TurndownService from 'turndown';
 const { createWindow } = require('@mixmark-io/domino');
@@ -61,7 +61,7 @@ class ImageImportError extends Error {
 
 export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     private static readonly viewType = 'manulDown.editor';
-    private static readonly builtInSlashCommandIds = new Set(['table', 'quote', 'code', 'checkbox', 'link', 'toc', 'footnote', 'math', 'inline-math', 'settings']);
+    private static readonly builtInSlashCommandIds = new Set(['table', 'quote', 'callout', 'code', 'checkbox', 'link', 'toc', 'footnote', 'math', 'inline-math', 'settings']);
     private static readonly workspaceLinkRequestIdPattern = /^workspace-link-\d{1,16}-\d{1,10}$/;
     private static readonly workspaceLinkSuggestionRequestIdPattern =
         /^workspace-link-suggest-\d{1,16}-\d{1,10}$/;
@@ -3360,7 +3360,9 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             const rawSource = decode(node.getAttribute('data-mdw-callout-source'))?.replace(/\r\n?/g, '\n');
             const original = rawSource && (documentText.includes(rawSource) || context.trustedBodySource?.includes(rawSource))
                 ? parseCallout(rawSource) : null;
-            const trustedOriginal = original && (original.header === header || isCalloutTypeChange(original, parsed)) && original.footer === footer && original.format === format
+            const declarationOnly = original && original.footer === footer && original.format === format &&
+                (original.header === header || isCalloutTypeChange(original, parsed));
+            const trustedOriginal = original && (declarationOnly || isCalloutFormatChange(original, parsed))
                 ? original : null;
             const bodyContext: MarkdownConversionContext = {
                 ...context,
@@ -3375,8 +3377,10 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 const originalHtml = originalRenderer.renderCalloutContent(trustedOriginal.body);
                 if (markdown === converter.htmlToMarkdown(originalHtml, document, bodyContext)) {
                     const bodyStart = trustedOriginal.raw.indexOf('\n');
-                    source = trustedOriginal.header === header ? trustedOriginal.raw
-                        : header + (bodyStart < 0 ? '' : trustedOriginal.raw.slice(bodyStart));
+                    source = declarationOnly
+                        ? trustedOriginal.header === header ? trustedOriginal.raw
+                            : header + (bodyStart < 0 ? '' : trustedOriginal.raw.slice(bodyStart))
+                        : serializeCallout(parsed, trustedOriginal.body);
                 }
             }
             let next = node.nextSibling;
@@ -4974,6 +4978,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         tocPanelWidth: number;
         useVsCodeCtrlP: boolean;
         listDashStyle: boolean;
+        calloutDefaultService: CalloutService;
         allowRemoteImages: boolean;
         allowRemoteImageImport: boolean;
         allowFileLinks: boolean;
@@ -4985,6 +4990,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             tocPanelWidth: this.tocPanelWidthPx,
             useVsCodeCtrlP: true,
             listDashStyle: this.getBooleanSetting('list.dashStyle', false),
+            calloutDefaultService: resolveCalloutService(vscode.workspace.getConfiguration('manulDown').get<unknown>('callout.defaultService')),
             allowRemoteImages: this.getBooleanSetting('security.allowRemoteImages', false),
             allowRemoteImageImport: this.getBooleanSetting('security.allowRemoteImageImport', false),
             allowFileLinks: this.getBooleanSetting('security.allowFileLinks', false),

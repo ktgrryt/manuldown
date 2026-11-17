@@ -440,6 +440,13 @@
           },
           "markdownDescription": "Choose the buttons shown in the toolbar. Changes apply immediately. Unchecked buttons are also hidden from the **…** menu; their slash commands and keyboard shortcuts remain available. PDF export and Settings always remain in **…**."
         },
+        "manulDown.callout.defaultService": {
+          "type": "string",
+          "default": "github",
+          "enum": ["github", "qiita", "zenn", "obsidian", "container", "mkdocs"],
+          "enumItemLabels": ["GitHub / GitLab", "Qiita", "Zenn", "Obsidian", "Docusaurus / VitePress", "MkDocs"],
+          "description": "Default service for callouts inserted with /callout. Changes apply to new callouts immediately; existing callouts retain their own format."
+        },
         "manulDown.toc.enabled": {
           "type": "boolean",
           "default": true,
