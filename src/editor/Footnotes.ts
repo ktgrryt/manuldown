@@ -1,3 +1,5 @@
+import { markdownContentMatches } from './MarkdownSource';
+
 const { createWindow } = require('@mixmark-io/domino');
 
 // Deeper definitions stay as preserved, read-only Markdown instead of
@@ -31,6 +33,42 @@ export function serializeFootnoteDefinition(label: string, content: string): str
         .map(line => line === '' ? '\n' : `    ${line}\n`).join('');
 }
 
+function removeDuplicateDefinitions(root: any): boolean {
+    const definitions = new Map<string, any[]>();
+    let changed = false;
+    for (const node of Array.from<any>(root.querySelectorAll('div[data-mdw-footnote-definition]'))) {
+        if (!root.contains(node)) {
+            continue;
+        }
+        const label = decodeFootnoteLabel(node.getAttribute('data-mdw-footnote-definition'));
+        const content = Array.from<any>(node.children).find(child => child.classList.contains('mdw-footnote-content'));
+        if (!label || !content) {
+            continue;
+        }
+        const bodies = definitions.get(label) ?? [];
+        // A repeated reference shares one body. Preserve conflicting definitions
+        // rather than discarding text, links or formatting from either copy.
+        if (bodies.some(body => markdownContentMatches(body.innerHTML, content.innerHTML))) {
+            node.remove();
+            changed = true;
+        } else {
+            bodies.push(content);
+            definitions.set(label, bodies);
+        }
+    }
+    return changed;
+}
+
+/** Normalize duplicate rows before source preservation can serialize both copies. */
+export function deduplicateFootnotes(html: string): string {
+    if ((html.match(/\bdata-mdw-footnote-definition\s*=/g) ?? []).length < 2) {
+        return html;
+    }
+    const document = createWindow(`<div id="footnotes-root">${html}</div>`).document;
+    const root = document.getElementById('footnotes-root')!;
+    return removeDuplicateDefinitions(root) ? root.innerHTML : html;
+}
+
 /** Number and order notes by reading order, keeping repeated labels together. */
 export function numberFootnotes(html: string): string {
     if (!html.includes('data-mdw-footnote-')) {
@@ -38,6 +76,7 @@ export function numberFootnotes(html: string): string {
     }
     const document = createWindow(`<div id="footnotes-root">${html}</div>`).document;
     const root = document.getElementById('footnotes-root')!;
+    removeDuplicateDefinitions(root);
     const numbers = new Map<string, number>();
     const counts = new Map<string, number>();
     const references = Array.from<any>(root.querySelectorAll('[data-mdw-footnote-ref]'));

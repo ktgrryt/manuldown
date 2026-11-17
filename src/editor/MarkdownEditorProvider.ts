@@ -13,7 +13,7 @@ import {
     isUriSecurelyWithinDirectory,
     normalizeExternalLinkHref,
 } from '../utils/workspaceLinks';
-import { MAX_EDITABLE_FOOTNOTE_DEPTH, decodeFootnoteLabel, parseFootnoteDefinition, serializeFootnoteDefinition } from './Footnotes';
+import { MAX_EDITABLE_FOOTNOTE_DEPTH, decodeFootnoteLabel, deduplicateFootnotes, parseFootnoteDefinition, serializeFootnoteDefinition } from './Footnotes';
 import { MarkdownSourceBlock, markdownContentMatches, preserveMarkdownSource } from './MarkdownSource';
 import { EmphasisBoundarySerializer } from './Emphasis';
 import { protectMarkdownTocs } from './MarkdownToc';
@@ -3458,6 +3458,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     }
 
     private htmlToMarkdown(html: string, document: vscode.TextDocument, footnoteContext: MarkdownConversionContext = { depth: 0 }): string {
+        html = deduplicateFootnotes(html);
         html = this.normalizeTableGrid(html);
         // Use Turndown for reliable HTML to Markdown conversion
         const placeholderNamespace = this.createPlaceholderNamespace(html, 'CONVERSION');

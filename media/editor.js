@@ -6,7 +6,6 @@ import { MarkdownConverter } from './modules/MarkdownConverter.js';
 import { MermaidViewer } from './modules/MermaidViewer.js';
 import { ToolbarManager } from './modules/ToolbarManager.js';
 import { SearchManager } from './modules/SearchManager.js';
-import { FootnoteManager } from './modules/FootnoteManager.js';
 import { createMarkdownClipboardHtml } from './modules/MarkdownClipboard.js';
 import { createImageClipboardSnapshot, writeImageClipboard } from './modules/ImageClipboard.js';
 import { InsertCommandMenu, isInsertMenuShortcut } from './modules/InsertCommandMenu.js';
@@ -53,6 +52,7 @@ const {
     getMarkdownHeadingLinkSuggestions
 } = await import(`./modules/MarkdownHeadingSlug.js${new URL(import.meta.url).search}`);
 const { InlineTocManager } = await import(`./modules/InlineTocManager.js${new URL(import.meta.url).search}`);
+const { FootnoteManager } = await import(`./modules/FootnoteManager.js${new URL(import.meta.url).search}`);
 const { CalloutManager } = await import(`./modules/CalloutManager.js${new URL(import.meta.url).search}`);
 const { MathManager } = await import(`./modules/MathManager.js${new URL(import.meta.url).search}`);
 const { DragSelectionScroll } = await import(`./modules/DragSelectionScroll.js${new URL(import.meta.url).search}`);

@@ -55,7 +55,7 @@ Open links with `Cmd+Click` / `Ctrl+Click`, or place the caret inside a link and
 Use **Footnote** or `/footnote` to add a note, then edit its text at the end of the document. ManulDown supports `[^label]` and `[^label]: note`, displaying notes in reference order.
 
 - **Navigate**: Click a reference number to open its note, or ↩ to return to the text. With the keyboard, select a number using `Tab` or `Left` / `Right`, then press `Enter` to jump.
-- **Delete a whole note**: Hover over the note and click ×, or select its number in the note list and press `Backspace`. This also removes all its references.
+- **Delete a whole note**: Select its number in the note list and press `Backspace` (or `Ctrl+H` on macOS). This also removes all its references.
 - **Delete one reference**: Use `Backspace` / `Delete` on a body reference. Deleting the last reference also deletes its note.
 
 Copying or moving text preserves its corresponding notes.

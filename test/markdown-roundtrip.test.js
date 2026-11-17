@@ -1444,6 +1444,45 @@ test('footnotes render editable bodies and stable numbers for repeated and named
     assert.equal(convert(markdown).markdown, markdown);
 });
 
+test('identical definitions of one footnote render once while preserving the original Markdown', () => {
+    const source = 'Body[^1] and again[^1].\n\n[^1]: aaa\n\n[^1]: aaa\n';
+    const { html, markdown } = convert(source);
+    const root = require('@mixmark-io/domino').createWindow(html).document;
+    assert.equal(root.querySelectorAll('[data-mdw-footnote-definition]').length, 1);
+    assert.deepEqual(Array.from(root.querySelectorAll('sup a')).map(node => node.textContent), ['1', '1']);
+    assert.equal(root.querySelector('.mdw-footnote-content').textContent.trim(), 'aaa');
+    assert.equal(markdown, source);
+    assert.equal(convert(markdown).markdown, source);
+});
+
+test('saving a duplicated note row cannot add another definition to the Markdown', () => {
+    const source = 'Body[^a].\n\n[^a]: aaa\n';
+    const document = require('@mixmark-io/domino').createWindow(`<div id="root">${convert(source).html}</div>`).document;
+    const root = document.getElementById('root');
+    const note = root.querySelector('[data-mdw-footnote-definition]');
+    root.querySelector('p').firstChild.data = 'Edited';
+    root.appendChild(note.cloneNode(true));
+    const provider = new MarkdownEditorProvider({});
+    const saved = provider.htmlToMarkdown(root.innerHTML, createTextDocument(source));
+    assert.equal(saved, 'Edited[^a].\n\n[^a]: aaa\n');
+    assert.equal(provider.htmlToMarkdown(root.innerHTML, createTextDocument(saved)), saved);
+    assert.equal(convert(saved).markdown, saved);
+});
+
+test('deduplicating notes preserves different bodies, formatting and labels', () => {
+    for (const definitions of [
+        '[^a]: aaa\n\n[^a]: bbb\n',
+        '[^a]: aaa\n\n[^a]: **aaa**\n',
+        '[^a]: aaa\n\n[^b]: aaa\n',
+    ]) {
+        const source = 'Body[^a] and [^b].\n\n' + definitions;
+        const { html, markdown } = convert(source);
+        const root = require('@mixmark-io/domino').createWindow(html).document;
+        assert.equal(root.querySelectorAll('[data-mdw-footnote-definition]').length, 2);
+        assert.equal(markdown, source);
+    }
+});
+
 test('editing a footnote saves rich text and multiple indented paragraphs without navigation labels', () => {
     const source = 'Body[^note].\n\n[^note]: Original.\n';
     const textDocument = createTextDocument(source);

@@ -156,7 +156,7 @@ export class FootnoteManager {
     }
 
     setup() {
-        const getControl = event => event.target.closest?.('[data-mdw-footnote-ref], [data-mdw-footnote-backref], [data-mdw-footnote-delete]');
+        const getControl = event => event.target.closest?.('[data-mdw-footnote-ref], [data-mdw-footnote-backref]');
         this.editor.addEventListener('mousedown', event => {
             if (!getControl(event)) return;
             event.preventDefault();
@@ -167,8 +167,7 @@ export class FootnoteManager {
             if (!control) return;
             event.preventDefault();
             event.stopImmediatePropagation();
-            if (control.hasAttribute('data-mdw-footnote-delete')) this.remove(control.getAttribute('data-mdw-footnote-delete'));
-            else if (control.hasAttribute('data-mdw-footnote-ref')) this.goToDefinition(control);
+            if (control.hasAttribute('data-mdw-footnote-ref')) this.goToDefinition(control);
             else this.goToReference(control.getAttribute('data-mdw-footnote-backref'));
         }, true);
         this.editor.addEventListener('focusin', event => {
@@ -181,7 +180,54 @@ export class FootnoteManager {
         this.refresh();
     }
 
+    removeDuplicateDefinitions() {
+        const definitions = new Map();
+        const range = this.getRange();
+        const activeElement = this.editor.ownerDocument.activeElement;
+        const hasSelection = node => node.contains(activeElement) || !!(range &&
+            (node.contains(range.startContainer) || node.contains(range.endContainer)));
+        const signature = content => {
+            const clone = content.cloneNode(true);
+            clone.querySelectorAll('[data-mdw-footnote-backref], .code-block-toolbar, .row-handle, .col-handle')
+                .forEach(node => node.remove());
+            clone.querySelectorAll('sup[data-mdw-footnote-ref]').forEach(reference => {
+                reference.textContent = '';
+                reference.removeAttribute('id');
+                reference.classList.remove('mdw-footnote-missing');
+            });
+            clone.normalize();
+            return clone.innerHTML;
+        };
+        for (const node of Array.from(this.editor.querySelectorAll('div[data-mdw-footnote-definition]'))) {
+            if (!this.editor.contains(node)) continue;
+            const label = this.decodeLabel(node.getAttribute('data-mdw-footnote-definition'));
+            const content = Array.from(node.children).find(child => child.classList.contains('mdw-footnote-content'));
+            if (!label || !content) continue;
+            const candidates = definitions.get(label) || [];
+            const duplicate = candidates.find(previous => this.editor.contains(previous.node) &&
+                signature(previous.content) === signature(content));
+            if (!duplicate) {
+                candidates.push({ node, content });
+                definitions.set(label, candidates);
+            } else if (hasSelection(node)) {
+                // Keep the browser-owned caret/focus in its existing nodes.
+                // A selection spanning both copies must finish before cleanup.
+                if (hasSelection(duplicate.node)) continue;
+                duplicate.node.remove();
+                duplicate.node = node;
+                duplicate.content = content;
+            } else {
+                node.remove();
+            }
+        }
+    }
+
     refresh() {
+        // Older Undo snapshots can still contain the removed click-delete UI.
+        for (const control of Array.from(this.editor.querySelectorAll('[data-mdw-footnote-definition] > [data-mdw-footnote-delete][data-exclude-from-markdown="true"]'))) {
+            control.remove();
+        }
+        this.removeDuplicateDefinitions();
         const numbers = new Map();
         const counts = new Map();
         const references = Array.from(this.editor.querySelectorAll('sup[data-mdw-footnote-ref]'));
@@ -223,7 +269,7 @@ export class FootnoteManager {
                 const paragraph = this.editor.ownerDocument.createElement('p');
                 paragraph.appendChild(this.editor.ownerDocument.createElement('br'));
                 content.appendChild(paragraph);
-                definition.insertBefore(content, definition.querySelector('[data-mdw-footnote-delete]'));
+                definition.appendChild(content);
             }
             const paragraph = content.firstElementChild;
             if (paragraph?.tagName === 'P' && paragraph.textContent.replace(/[\u200B\u2060\uFEFF]/g, '') === '' && !paragraph.firstElementChild) {
@@ -235,7 +281,7 @@ export class FootnoteManager {
                 !content.querySelector('img, input, pre, code, ul, ol, table, hr, [data-mdw-footnote-ref], [data-mdw-opaque-source]')) {
                 // Chromium can leave a caret outside the body after selecting
                 // and deleting all its text. Keep subsequent edits inside it.
-                this.placeCaret(content, true);
+                this.placeCaret(content, true, { alignToTop: false });
             }
             let backref = definition.querySelector('[data-mdw-footnote-backref]');
             if (!backref) {
@@ -251,18 +297,6 @@ export class FootnoteManager {
             setAttribute(backref, 'href', `#mdw-fnref-${key}-1`);
             setAttribute(backref, 'title', 'Back to reference');
             setAttribute(backref, 'tabindex', '0');
-            if (!definition.querySelector('[data-mdw-footnote-delete]')) {
-                const remove = this.editor.ownerDocument.createElement('a');
-                remove.className = 'mdw-footnote-delete';
-                remove.setAttribute('data-mdw-footnote-delete', key);
-                remove.setAttribute('data-exclude-from-markdown', 'true');
-                remove.setAttribute('contenteditable', 'false');
-                remove.setAttribute('href', `#mdw-fn-${key}`);
-                remove.setAttribute('title', 'Delete footnote and its references');
-                remove.setAttribute('aria-label', `Delete footnote ${label}`);
-                remove.innerHTML = '<span class="md-icon md-icon--close" aria-hidden="true"></span>';
-                definition.appendChild(remove);
-            }
         }
         this.sortDefinitions(definitions, numbers);
     }
@@ -348,7 +382,7 @@ export class FootnoteManager {
         return true;
     }
 
-    placeCaret(node, atStart) {
+    placeCaret(node, atStart, { alignToTop = true } = {}) {
         const document = this.editor.ownerDocument;
         const selection = document.defaultView.getSelection();
         if (!selection) return;
@@ -362,27 +396,27 @@ export class FootnoteManager {
         }
         selection.removeAllRanges();
         selection.addRange(range);
-        this.revealCaretTarget(atStart ? node.firstElementChild || node : node, range);
+        this.revealCaretTarget(atStart ? node.firstElementChild || node : node, range, { alignToTop });
     }
 
     setCaretAtContentEdge(range, content, atStart) {
         let target = content;
         while (target.nodeType === 1) {
+            if (/^(BR|IMG|HR|INPUT)$/.test(target.tagName) || target.getAttribute('contenteditable') === 'false') {
+                if (atStart) range.setStartBefore(target);
+                else range.setStartAfter(target);
+                range.collapse(true);
+                return;
+            }
             const children = Array.from(target.childNodes).filter(child => {
-                if (child.nodeType === 1) return (!atStart || child.getAttribute('contenteditable') !== 'false') &&
-                    child.getAttribute('data-exclude-from-markdown') !== 'true';
+                if (child.nodeType === 1) return child.getAttribute('data-exclude-from-markdown') !== 'true';
                 if (child.nodeType !== 3) return false;
                 if (!child.textContent) return false;
                 // HTML indentation between blocks is not an editing position.
                 return !/^(DIV|UL|OL|BLOCKQUOTE)$/.test(target.tagName) || !/^\s*$/.test(child.textContent);
             });
             const child = atStart ? children[0] : children[children.length - 1];
-            if (!atStart && child?.nodeType === 1 && child.getAttribute('contenteditable') === 'false') {
-                range.setStartAfter(child);
-                range.collapse(true);
-                return;
-            }
-            if (!child || /^(BR|IMG|HR|INPUT)$/.test(child.tagName || '')) break;
+            if (!child) break;
             target = child;
         }
         range.setStart(target, atStart ? 0 : target.nodeType === 3 ? target.textContent.length : target.childNodes.length);
@@ -503,7 +537,7 @@ export class FootnoteManager {
         if (focused) {
             const definition = focused.closest('[data-mdw-footnote-definition]');
             if (direction === 'forward') {
-                this.placeCaret(definition.querySelector('.mdw-footnote-content'), true);
+                this.placeCaret(definition.querySelector('.mdw-footnote-content'), true, { alignToTop: false });
                 return true;
             }
             const previous = definition.previousElementSibling;
@@ -543,8 +577,7 @@ export class FootnoteManager {
             }
             if (!definition) return false;
             if (!next && definition.parentElement === this.editor) return true;
-            // Skip this note's delete control before continuing into ordinary
-            // content (also when a nested note has no following sibling).
+            // Continue outside the note (also when a nested note has no sibling).
             const caret = this.editor.ownerDocument.createRange();
             caret.setStartAfter(definition);
             caret.collapse(true);
@@ -579,22 +612,38 @@ export class FootnoteManager {
             return true;
         }
         const control = element.closest('[contenteditable="false"], [data-exclude-from-markdown="true"]');
-        const layoutBoundary = /^(DIV|UL|OL|BLOCKQUOTE)$/.test(element.tagName) &&
-            (node.nodeType === 1 || /^\s*$/.test(node.textContent));
-        if (content.contains(node) && !control && !layoutBoundary) return false;
+        const insideContent = content.contains(node);
+        // Nested widgets own their readonly controls. Native DIV paragraphs and
+        // their text are editing positions, unlike wrappers around block nodes.
+        if (insideContent && control) return false;
+        const hasBlockChildren = Array.from(element.children).some(child =>
+            /^(P|DIV|UL|OL|LI|BLOCKQUOTE|PRE|TABLE|HR|H[1-6])$/.test(child.tagName));
+        const layoutContainer = /^(UL|OL|BLOCKQUOTE)$/.test(element.tagName) ||
+            (element.tagName === 'DIV' && (element === content || hasBlockChildren));
+        const layoutBoundary = layoutContainer &&
+            (node.nodeType === 1 || (hasBlockChildren && /^[\r\n\t ]*$/.test(node.textContent)));
+        if (insideContent && !layoutBoundary) return false;
 
-        // Generic block navigation can land in the number/delete controls or
+        // Generic block navigation can land in the navigation controls or
         // flex/list wrappers. Chromium cannot paint an editable caret there.
-        let atStart = !element.closest('[data-mdw-footnote-delete]');
+        let atStart = true;
         let target = content;
-        if (content.contains(node) && !control) {
-            target = element;
+        if (insideContent) {
             const children = Array.from(element.childNodes);
-            const next = node.nodeType === 1 ? children[range.startOffset] : node;
-            if (next && (next.nodeType === 1 || (next.nodeType === 3 && !/^\s*$/.test(next.textContent)))) {
+            const index = node.nodeType === 1 ? range.startOffset : children.indexOf(node);
+            const meaningful = child => child.nodeType === 1
+                ? child.getAttribute('data-exclude-from-markdown') !== 'true'
+                : child.nodeType === 3 && !/^[\r\n\t ]*$/.test(child.textContent);
+            const next = children.slice(index + (node.nodeType === 3 ? 1 : 0)).find(meaningful);
+            const previous = children.slice(0, index).reverse().find(meaningful);
+            if (next) {
                 target = next;
+            } else if (previous) {
+                target = previous;
+                atStart = false;
             } else {
-                atStart = range.startOffset < children.length;
+                target = element;
+                atStart = range.startOffset === 0;
             }
         } else if (node === definition) {
             atStart = range.startOffset <= Array.from(definition.childNodes).indexOf(content);
@@ -606,7 +655,7 @@ export class FootnoteManager {
         selection.removeAllRanges();
         selection.addRange(corrected);
         const caretElement = corrected.startContainer.nodeType === 1 ? corrected.startContainer : corrected.startContainer.parentElement;
-        this.revealCaretTarget(caretElement, corrected);
+        this.revealCaretTarget(caretElement, corrected, { alignToTop: false });
         return true;
     }
 
@@ -619,14 +668,15 @@ export class FootnoteManager {
         const topInset = Math.max(16, parseFloat(style.paddingTop) || 0);
         let targetTop = this.editor.scrollTop + targetRect.top - editorRect.top - topInset;
         if (!alignToTop) {
-            const bottomInset = Math.max(16, parseFloat(style.paddingBottom) || 0);
-            const visibleTop = editorRect.top + topInset;
-            const visibleBottom = editorRect.top + this.editor.clientHeight - bottomInset;
+            // Document-end padding is scrollable space, not an obstruction in
+            // the viewport. Keep ordinary movement within a small visible margin.
+            const margin = 16;
+            const visibleTop = editorRect.top + margin;
+            const visibleBottom = editorRect.top + this.editor.clientHeight - margin;
             const targetBottom = targetRect.bottom ?? targetRect.top;
             if (targetRect.top >= visibleTop && targetBottom <= visibleBottom) return;
-            if (targetRect.top >= visibleTop) {
-                targetTop = this.editor.scrollTop + targetBottom - visibleBottom;
-            }
+            targetTop = this.editor.scrollTop + (targetRect.top < visibleTop
+                ? targetRect.top - visibleTop : targetBottom - visibleBottom);
         }
         const maxScrollTop = Math.max(0, this.editor.scrollHeight - this.editor.clientHeight);
         const top = Math.max(0, Math.min(maxScrollTop, targetTop));
@@ -819,7 +869,7 @@ export class FootnoteManager {
                 if (adjacent?.hasAttribute('data-mdw-footnote-definition')) {
                     this.focusNumber(adjacent.querySelector('[data-mdw-footnote-backref]'));
                 } else if (verticalDirection === 'forward') {
-                    this.placeCaret(definition.querySelector('.mdw-footnote-content'), true);
+                    this.placeCaret(definition.querySelector('.mdw-footnote-content'), true, { alignToTop: false });
                 } else {
                     this.moveAcrossBackref(selection, 'backward');
                     return false;
@@ -829,7 +879,7 @@ export class FootnoteManager {
                 return true;
             }
             if (!event.ctrlKey && event.key === 'Escape') {
-                this.placeCaret(focused.closest('[data-mdw-footnote-definition]').querySelector('.mdw-footnote-content'), true);
+                this.placeCaret(focused.closest('[data-mdw-footnote-definition]').querySelector('.mdw-footnote-content'), true, { alignToTop: false });
                 event.preventDefault();
                 event.stopPropagation();
                 return true;
@@ -913,7 +963,7 @@ export class FootnoteManager {
         // Keep the native beforeinput guard when no such handler runs.
         const structuredBlock = element.closest('li, blockquote, pre, h1, h2, h3, h4, h5, h6');
         if (backward && allowBlockConversion && structuredBlock && content.contains(structuredBlock)) return false;
-        // Keep the note body separate from its navigation/delete controls.
+        // Keep the note body separate from its navigation controls.
         event.preventDefault();
         event.stopPropagation();
         this.cancelPendingDelete();

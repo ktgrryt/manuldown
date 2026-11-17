@@ -124,6 +124,25 @@ function keydown(manager, key, modifiers = {}, isMac = false) {
     return { handled, event };
 }
 
+test('notes omit click-delete controls and remove them from older snapshots', async () => {
+    const f = await fixture(`<p>${ref('a')}</p>${note('a')}`);
+    f.manager.setup();
+    assert.equal(f.editor.querySelectorAll('[data-mdw-footnote-delete]').length, 0);
+    const definition = f.editor.querySelector('[data-mdw-footnote-definition]');
+    const legacy = f.window.document.createElement('a');
+    legacy.className = 'mdw-footnote-delete';
+    legacy.setAttribute('data-mdw-footnote-delete', 'a');
+    legacy.setAttribute('data-exclude-from-markdown', 'true');
+    legacy.textContent = '×';
+    definition.appendChild(legacy);
+    f.manager.refresh();
+    assert.equal(f.editor.querySelectorAll('[data-mdw-footnote-delete]').length, 0);
+    assert.equal(f.editor.querySelector('.mdw-footnote-content').textContent, 'Note a');
+    assert.equal(f.editor.querySelectorAll('sup').length, 1);
+    assert.equal(f.changes(), 0);
+    assert.equal(f.history.length, 0);
+});
+
 test('Left selects a note number, Right returns to its text and Enter returns to its reference', async () => {
     const f = await fixture(`<p>Body${ref('a')} after</p>${note('a')}`);
     f.manager.setup();
@@ -402,6 +421,56 @@ test('footnotes use reference order, share repeated numbers and update after del
     assert.equal(editor.querySelectorAll('[data-mdw-footnote-definition]').length, 3);
     assert.deepEqual(Array.from(editor.querySelectorAll('[data-mdw-footnote-definition]'))
         .map(node => node.getAttribute('data-mdw-footnote-definition')), ['a', 'b', 'unused']);
+});
+
+test('refresh keeps one row for identical definitions and retains all repeated references', async () => {
+    const f = await fixture(`<p>${ref('a')}${ref('a')}</p>${note('a')}${note('a')}`);
+    f.manager.refresh();
+    assert.equal(f.editor.querySelectorAll('[data-mdw-footnote-definition]').length, 1);
+    assert.deepEqual(Array.from(f.editor.querySelectorAll('sup a')).map(node => node.textContent), ['1', '1']);
+    f.editor.appendChild(f.editor.querySelector('[data-mdw-footnote-definition]').cloneNode(true));
+    f.manager.refresh();
+    assert.equal(f.editor.querySelectorAll('[data-mdw-footnote-definition]').length, 1);
+    assert.equal(f.editor.querySelectorAll('[data-mdw-footnote-backref]').length, 1);
+    assert.equal(f.editor.querySelector('.mdw-footnote-content').textContent, 'Note a');
+    assert.equal(f.history.length, 0);
+    assert.equal(f.changes(), 0);
+});
+
+test('refresh retains the selected duplicate note so normalization cannot discard the caret', async () => {
+    const f = await fixture(`<p>${ref('a')}</p>${note('a')}${note('a')}`);
+    const selected = f.editor.querySelectorAll('[data-mdw-footnote-definition]')[1];
+    const text = selected.querySelector('p').firstChild;
+    f.select(text, 3);
+    f.manager.refresh();
+    assert.equal(f.editor.querySelectorAll('[data-mdw-footnote-definition]').length, 1);
+    assert.equal(f.editor.querySelector('[data-mdw-footnote-definition]'), selected);
+    assert.equal(f.manager.getRange().startContainer, text);
+    assert.equal(f.manager.getRange().startOffset, 3);
+});
+
+test('refresh ignores derived reference numbers when comparing duplicate note bodies', async () => {
+    const body = `<div data-mdw-footnote-definition="a"><div class="mdw-footnote-content"><p>A${ref('b')}</p></div></div>`;
+    const f = await fixture(`<p>${ref('a')}</p>${body}${body}${note('b')}`);
+    const references = Array.from(f.editor.querySelectorAll('.mdw-footnote-content sup'));
+    references[0].id = 'mdw-fnref-b-1';
+    references[1].id = 'mdw-fnref-b-2';
+    references[0].querySelector('a').textContent = '2';
+    references[1].querySelector('a').textContent = '3';
+    f.manager.refresh();
+    assert.equal(f.editor.querySelectorAll('[data-mdw-footnote-definition="a"]').length, 1);
+    assert.equal(f.editor.querySelectorAll('[data-mdw-footnote-definition]').length, 2);
+    assert.deepEqual(Array.from(f.editor.querySelectorAll('sup a')).map(node => node.textContent), ['1', '2']);
+});
+
+test('refresh preserves different note bodies, rich formatting and distinct labels', async () => {
+    const f = await fixture(`<p>${ref('a')}${ref('b')}</p>${note('a')}` +
+        '<div data-mdw-footnote-definition="a"><div class="mdw-footnote-content"><p>Different</p></div></div>' +
+        '<div data-mdw-footnote-definition="a"><div class="mdw-footnote-content"><p><strong>Note a</strong></p></div></div>' +
+        '<div data-mdw-footnote-definition="b"><div class="mdw-footnote-content"><p>Note a</p></div></div>');
+    f.manager.refresh();
+    assert.equal(f.editor.querySelectorAll('[data-mdw-footnote-definition]').length, 4);
+    assert.equal(f.editor.querySelector('strong').textContent, 'Note a');
 });
 
 test('arrows and Mac Ctrl+B/Ctrl+F focus each reference before moving past it', async () => {
@@ -842,12 +911,12 @@ test('number focus keeps visible references and note numbers stationary and reve
         clientHeight: { value: 500 }, scrollHeight: { value: 2400 }
     });
     f.editor.getBoundingClientRect = () => ({ top: 46 });
-    Object.defineProperty(f.window, 'getComputedStyle', { value: () => ({ paddingTop: '40px', paddingBottom: '40px' }) });
+    Object.defineProperty(f.window, 'getComputedStyle', { value: () => ({ paddingTop: '40px', paddingBottom: '300px' }) });
     const scrolls = [];
     f.editor.scrollTo = ({ top }) => { scrolls.push(top); f.editor.scrollTop = top; };
     for (const number of [f.editor.querySelector('sup'), f.editor.querySelector('[data-mdw-footnote-backref]')]) {
         number.scrollIntoView = () => assert.fail('Number focus must not scroll outer containers');
-        for (const [viewportTop, expectedScroll] of [[246, 400], [30, 344], [530, 440]]) {
+        for (const [viewportTop, expectedScroll] of [[246, 400], [30, 368], [530, 416]]) {
             f.editor.focus();
             f.editor.scrollTop = 400;
             scrolls.length = 0;
@@ -898,7 +967,7 @@ test('missing definitions stay visible without discarding their references', asy
     assert.equal(editor.querySelector('sup').textContent, '1');
 });
 
-test('navigation into note controls focuses numbers and restores editable carets from delete controls', async () => {
+test('navigation into note controls focuses numbers and restores editable carets from wrapper edges', async () => {
     const f = await fixture(`<p>Body${ref('a')}</p>${note('a')}`);
     f.manager.refresh();
     const definition = f.editor.querySelector('[data-mdw-footnote-definition]');
@@ -911,7 +980,7 @@ test('navigation into note controls focuses numbers and restores editable carets
     assert.equal(f.window.document.activeElement, backref);
     assert.equal(f.manager.getRange(), null);
     assert.equal(f.manager.normalizeCaret(), false, 'The focused number is stable');
-    f.select(definition.querySelector('.mdw-footnote-delete').firstChild, 0);
+    f.select(definition, definition.childNodes.length);
     assert.equal(f.manager.normalizeCaret(), true);
     assert.equal(f.manager.getRange().startContainer, content.lastChild.firstChild);
     assert.equal(f.manager.getRange().startOffset, 'Last paragraph'.length);
@@ -958,6 +1027,80 @@ test('normal note editing, text selections and ordinary body carets remain uncha
     content.innerHTML = '<div></div>';
     f.select(content.firstChild, 0);
     assert.equal(f.manager.normalizeCaret(), false, 'Empty native blocks do not schedule endless selection corrections');
+});
+
+test('note layout whitespace resolves to the neighboring paragraph instead of another note edge', async () => {
+    const f = await fixture(`<p>${ref('a')}</p>${note('a')}`);
+    f.manager.refresh();
+    const content = f.editor.querySelector('.mdw-footnote-content');
+    content.innerHTML = '\n<p>First paragraph</p>\n\n<p>Second paragraph</p>\n';
+    const first = content.querySelector('p');
+    const second = first.nextElementSibling;
+    f.select(first.nextSibling, 1);
+    assert.equal(f.manager.normalizeCaret(), true);
+    assert.ok(f.manager.getRange().startContainer === second.firstChild, 'Inter-paragraph whitespace resolves to the following paragraph');
+    assert.equal(f.manager.getRange().startOffset, 0);
+    f.select(content.lastChild, 0);
+    assert.equal(f.manager.normalizeCaret(), true);
+    assert.ok(f.manager.getRange().startContainer === second.firstChild, 'Trailing whitespace resolves to the final paragraph');
+    assert.equal(f.manager.getRange().startOffset, second.textContent.length);
+});
+
+test('native note lines and empty breaks keep valid caret containers and text offsets', async () => {
+    const f = await fixture(`<p>${ref('a')}</p>${note('a')}`);
+    f.manager.refresh();
+    const content = f.editor.querySelector('.mdw-footnote-content');
+    content.innerHTML = '<div>    </div><div><br></div>';
+    for (const [node, offset] of [[content.firstChild.firstChild, 2], [content.lastChild, 0]]) {
+        f.select(node, offset);
+        const range = f.manager.getRange();
+        assert.equal(f.manager.normalizeCaret(), false);
+        assert.equal(f.manager.getRange(), range);
+    }
+    content.innerHTML = '<br>';
+    f.select(content, 0);
+    const range = f.manager.getRange();
+    assert.equal(f.manager.normalizeCaret(), false);
+    assert.equal(f.manager.getRange(), range, 'A caret beside BR must not move inside the BR element');
+});
+
+test('footnote correction leaves nested math and code controls to their own navigation handlers', async () => {
+    const f = await fixture(`<p>${ref('a')}</p>${note('a')}`);
+    f.manager.refresh();
+    const content = f.editor.querySelector('.mdw-footnote-content');
+    content.innerHTML = '<p>Before <span data-mdw-math="inline" contenteditable="false">x+y</span> after</p>' +
+        '<pre><code>code</code><div class="code-block-toolbar" contenteditable="false"><span>js</span></div></pre>';
+    for (const target of Array.from(content.querySelectorAll('span'))) {
+        f.select(target.firstChild, 1);
+        const range = f.manager.getRange();
+        assert.equal(f.manager.normalizeCaret(), false);
+        assert.equal(f.manager.getRange(), range);
+    }
+    content.innerHTML = '<p><span data-mdw-math="inline" contenteditable="false">x+y</span> after</p>';
+    f.manager.goToDefinition(f.editor.querySelector('sup'));
+    assert.ok(f.manager.getRange().startContainer === content.firstChild, 'A leading formula is entered at its outer boundary');
+    assert.equal(f.manager.getRange().startOffset, 0);
+    assert.equal(f.history.length, 0);
+    assert.equal(f.changes(), 0);
+});
+
+test('ordinary movement from a visible note number into its text does not scroll the editor', async () => {
+    const f = await fixture(`<p>${ref('a')}</p>${note('a')}`);
+    f.manager.setup();
+    Object.defineProperties(f.editor, { clientHeight: { value: 500 }, scrollHeight: { value: 2400 } });
+    f.editor.getBoundingClientRect = () => ({ top: 46 });
+    Object.defineProperty(f.window, 'getComputedStyle', { value: () => ({ paddingTop: '40px', paddingBottom: '40px' }) });
+    const paragraph = f.editor.querySelector('.mdw-footnote-content p');
+    paragraph.getBoundingClientRect = () => ({ top: 646 - f.editor.scrollTop, bottom: 666 - f.editor.scrollTop, height: 20 });
+    f.editor.scrollTo = () => assert.fail('A visible note needs no scroll during ordinary cursor movement');
+    for (const key of ['ArrowRight', 'ArrowDown', 'Escape']) {
+        f.editor.scrollTop = 400;
+        f.editor.querySelector('[data-mdw-footnote-backref]').focus();
+        assert.equal(keydown(f.manager, key).handled, true);
+        assert.equal(f.manager.getRange().startContainer, paragraph.firstChild);
+        assert.equal(f.manager.getRange().startOffset, 0);
+        assert.equal(f.editor.scrollTop, 400);
+    }
 });
 
 test('removing a footnote removes every reference, renumbers the remainder and preserves undo snapshots', async () => {
@@ -1095,7 +1238,7 @@ test('refresh restores an editing body if native deletion removed its empty wrap
     f.manager.refresh();
     assert.equal(definition.querySelector('.mdw-footnote-content').innerHTML, '<p><br></p>');
     assert.equal(f.manager.getRange().startContainer, definition.querySelector('.mdw-footnote-content p'));
-    assert.equal(definition.lastChild.getAttribute('data-mdw-footnote-delete'), 'a');
+    assert.equal(definition.lastChild.className, 'mdw-footnote-content');
     assert.equal(f.editor.querySelectorAll('sup').length, 1);
 });
 
