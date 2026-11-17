@@ -3,7 +3,7 @@ import { marked } from 'marked';
 
 const { createWindow } = require('@mixmark-io/domino');
 
-export type MarkdownSourceBlock = { source: string; start: number; end: number; html: string; inline?: boolean };
+export type MarkdownSourceBlock = { source: string; start: number; end: number; html: string; inline?: boolean; literal?: boolean };
 
 // Compare document content, excluding reconstructed Webview controls and styles.
 // No source supplied by the Webview is trusted: all reused text comes from the
@@ -78,6 +78,10 @@ function fingerprint(node: any): string {
 
 function root(html: string): any {
     return createWindow(`<div id="mdw-source-root">${html}</div>`).document.getElementById('mdw-source-root');
+}
+
+export function markdownContentMatches(firstHtml: string, secondHtml: string): boolean {
+    return fingerprint(root(firstHtml)) === fingerprint(root(secondHtml));
 }
 
 function inlineNeighbor(node: any, backwards: boolean): string {
@@ -217,7 +221,7 @@ export function preserveMarkdownSource(html: string, source: string, originalHtm
             inlineNodes.set(signature, candidates);
         }
     }
-    for (const block of sourceBlocks.filter(block => block.inline)) {
+    for (const block of sourceBlocks.filter(block => block.inline && !block.literal)) {
         const original = root(block.html);
         const expected = Array.from<any>(original.childNodes).map(fingerprint).join('');
         const candidate = inlineNodes.get(expected)?.find(node =>

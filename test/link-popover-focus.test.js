@@ -183,6 +183,19 @@ for (const key of ['Escape', 'Enter']) {
     });
 }
 
+test('the link popup displays a preserved destination without making the link navigable', () => {
+    const f = fixture('<p><a data-mdw-preserved-href="tel:123">phone</a></p>');
+    const link = f.editor.querySelector('a');
+    f.select(link.firstChild, 2);
+    const originalHtml = f.editor.innerHTML;
+    const input = f.open(link);
+    assert.equal(input.value, 'tel:123');
+    f.ui.hide(true);
+    assert.equal(link.getAttribute('href'), null);
+    assert.equal(f.editor.innerHTML, originalHtml);
+    assert.equal(f.saveCount, 0);
+});
+
 test('clicking a link with an unrelated editor selection returns to that link on Escape', () => {
     const f = fixture('<p>before<a href="https://example.com">link</a></p>');
     const link = f.editor.querySelector('a');

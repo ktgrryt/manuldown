@@ -652,30 +652,6 @@ export class DOMUtils {
             item.classList.remove('nested-list-only');
         });
 
-        // Remove empty links that have lost their visible text.
-        // Keep links that wrap images.
-        const anchors = clone.querySelectorAll('a');
-        anchors.forEach(anchor => {
-            if (anchor.querySelector('img')) {
-                return;
-            }
-            const text = (anchor.textContent || '').replace(/[^\S\uFEFF]/g, '');
-            if (text !== '') {
-                return;
-            }
-            const hasMeaningfulChild = Array.from(anchor.childNodes || []).some(child => {
-                if (!child) return false;
-                if (child.nodeType === Node.TEXT_NODE) {
-                    return (child.textContent || '').replace(/[^\S\uFEFF]/g, '') !== '';
-                }
-                if (child.nodeType !== Node.ELEMENT_NODE) return false;
-                return child.tagName !== 'BR';
-            });
-            if (!hasMeaningfulChild) {
-                anchor.remove();
-            }
-        });
-
         // 空のリストアイテムのクリーンアップ
         // 注意：ユーザーが意図的に作成した空のリストアイテム（サブリストを含む）は保持する
         // このクリーンアップは、ブラウザが自動生成した不要な空のリストアイテムのみを対象とする

@@ -843,9 +843,6 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
             setMarkdownPath(markdownPath || classification.original);
             image.src = BLOCKED_REMOTE_IMAGE_PLACEHOLDER_DATA_URL;
             image.setAttribute('data-remote-image-blocked', 'true');
-            if (!(image.getAttribute('alt') || '').trim()) {
-                image.alt = 'Remote image blocked';
-            }
             return;
         }
 
@@ -927,6 +924,12 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
                     if (safeHref) {
                         element.setAttribute(attr.name, safeHref);
                     } else {
+                        // Loaded Markdown can contain links that must not be
+                        // navigable here. Keep their destination as inert data
+                        // so saving unrelated edits cannot delete the link.
+                        if (allowInternalMetadata) {
+                            element.setAttribute('data-mdw-preserved-href', attr.value);
+                        }
                         element.removeAttribute(attr.name);
                     }
                     return;
@@ -1003,7 +1006,8 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
 
             Array.from(element.childNodes || []).forEach((child) => sanitizeNode(child));
 
-            if (tag === 'a' && !element.getAttribute('href')) {
+            if (tag === 'a' && !element.hasAttribute('href') &&
+                !(allowInternalMetadata && element.hasAttribute('data-mdw-preserved-href'))) {
                 unwrapElement(element);
                 return;
             }
@@ -3994,69 +3998,10 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
     function normalizeCheckboxListItems(root = editor) {
         if (!root || !root.querySelectorAll) return;
         root.querySelectorAll('li').forEach(li => {
+            // The Markdown parser and explicit typing/paste commands create
+            // task inputs. Rendered text cannot tell an escaped marker or a
+            // literal code sample apart from task syntax.
             if (hasCheckboxAtStart(li)) {
-                ensureCheckboxLeadingSpace(li);
-                return;
-            }
-
-            const parseTaskMarker = (text) => {
-                if (typeof text !== 'string') return null;
-                const match = text.match(/^(\s*)\[( |x|X)\](.*)$/);
-                if (!match) return null;
-                const trailing = match[3] || '';
-                if (trailing !== '' && !/^[ \u00A0]/.test(trailing)) {
-                    return null;
-                }
-                return {
-                    checked: match[2].toLowerCase() === 'x',
-                    restText: trailing.replace(/^[ \u00A0]/, '')
-                };
-            };
-
-            let converted = false;
-            for (const child of Array.from(li.childNodes || [])) {
-                if (child.nodeType === Node.ELEMENT_NODE &&
-                    (child.tagName === 'UL' || child.tagName === 'OL')) {
-                    continue;
-                }
-
-                if (child.nodeType === Node.TEXT_NODE) {
-                    const cleaned = (child.textContent || '').replace(/[\u00A0\u200B\u2060]/g, '').trim();
-                    if (cleaned === '') {
-                        continue;
-                    }
-                    const marker = parseTaskMarker(child.textContent || '');
-                    if (!marker) break;
-                    const checkbox = createCheckboxElement();
-                    if (marker.checked) {
-                        checkbox.checked = true;
-                        checkbox.setAttribute('checked', '');
-                    }
-                    li.insertBefore(checkbox, li.firstChild);
-                    child.textContent = marker.restText;
-                    converted = true;
-                    break;
-                }
-
-                if (child.nodeType === Node.ELEMENT_NODE && child.tagName !== 'INPUT') {
-                    const firstTextNode = domUtils.getFirstTextNode(child);
-                    const marker = firstTextNode ? parseTaskMarker(firstTextNode.textContent || '') : null;
-                    if (!marker) break;
-                    const checkbox = createCheckboxElement();
-                    if (marker.checked) {
-                        checkbox.checked = true;
-                        checkbox.setAttribute('checked', '');
-                    }
-                    li.insertBefore(checkbox, li.firstChild);
-                    firstTextNode.textContent = marker.restText;
-                    converted = true;
-                    break;
-                }
-
-                break;
-            }
-
-            if (converted || hasCheckboxAtStart(li)) {
                 ensureCheckboxLeadingSpace(li);
             }
         });
@@ -23254,7 +23199,7 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
                 currentLink &&
                 normalized &&
                 normalized === linkInputBaselineValue &&
-                normalized === (currentLink.getAttribute('href') || '')
+                normalized === (currentLink.getAttribute('href') ?? currentLink.getAttribute('data-mdw-preserved-href') ?? '')
             );
         }
 
@@ -23715,7 +23660,7 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
             }
             const input = linkPopover.querySelector('.link-popover-input');
             linkInputIsComposing = false;
-            input.value = link.getAttribute('href') || '';
+            input.value = link.getAttribute('href') ?? link.getAttribute('data-mdw-preserved-href') ?? '';
             input.removeAttribute('aria-invalid');
             input.removeAttribute('title');
             linkInputUndoStack = [];
@@ -24019,14 +23964,16 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
             if (!currentLink || !currentLink.isConnected || !editor.contains(currentLink)) {
                 return false;
             }
-            const currentUrl = currentLink.getAttribute('href') || '';
+            const currentUrl = currentLink.getAttribute('href') ?? currentLink.getAttribute('data-mdw-preserved-href') ?? '';
             if (currentUrl === linkInputBaselineValue) {
                 return false;
             }
-            if (linkInputBaselineValue) {
+            if (sanitizeLinkHref(linkInputBaselineValue)) {
                 currentLink.setAttribute('href', linkInputBaselineValue);
+                currentLink.removeAttribute('data-mdw-preserved-href');
             } else {
                 currentLink.removeAttribute('href');
+                currentLink.setAttribute('data-mdw-preserved-href', linkInputBaselineValue);
             }
             notifyChange();
             return true;
@@ -24054,7 +24001,7 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
             if (currentLink && currentLink.isConnected && editor.contains(currentLink) && linkPopover) {
                 const input = linkPopover.querySelector('.link-popover-input');
                 const newUrl = input.value.trim();
-                const oldUrl = currentLink.getAttribute('href') || '';
+                const oldUrl = currentLink.getAttribute('href') ?? currentLink.getAttribute('data-mdw-preserved-href') ?? '';
                 if (newUrl && newUrl !== oldUrl) {
                     if (
                         linkPopoverInputNeedsHostResolution(input.value) ||
@@ -24069,6 +24016,7 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
                         return false;
                     }
                     currentLink.setAttribute('href', newUrl);
+                    currentLink.removeAttribute('data-mdw-preserved-href');
                     if (notify) {
                         notifyChange();
                     }
@@ -24157,7 +24105,7 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
             if (!currentLink || !currentLink.isConnected || !editor.contains(currentLink)) {
                 return false;
             }
-            const currentUrl = currentLink.getAttribute('href') || '';
+            const currentUrl = currentLink.getAttribute('href') ?? currentLink.getAttribute('data-mdw-preserved-href') ?? '';
             if (currentUrl === linkInputBaselineValue) {
                 return false;
             }

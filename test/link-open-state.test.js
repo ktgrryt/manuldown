@@ -55,8 +55,14 @@ function fixture(url = '../outside/notes.md') {
         currentLink = editor.querySelector('a');
         return {
             popover: linkPopover, receive: receiveLinkOpenState, refresh: refreshLinkOpenState, open: openLink,
-            setUrl(url, stored = true) {
-                currentLink.setAttribute('href', url);
+            setUrl(url, stored = true, inert = false) {
+                if (inert) {
+                    currentLink.removeAttribute('href');
+                    currentLink.setAttribute('data-mdw-preserved-href', url);
+                } else {
+                    currentLink.setAttribute('href', url);
+                    currentLink.removeAttribute('data-mdw-preserved-href');
+                }
                 linkInputBaselineValue = stored ? url : '../original.md';
                 linkPopover.querySelector('input').value = url;
                 syncLinkPopoverOpenButtonState(url);
@@ -132,6 +138,53 @@ test('missing files show their own explanation without suggesting a security cha
     f.reply({ allowed: false, message: 'This file does not exist or cannot be accessed.' });
     assert.equal(f.button.disabled, true);
     assert.match(f.status.textContent, /does not exist/);
+});
+
+test('preserved unsupported destinations remain blocked when the link popup is opened', () => {
+    for (const url of ['tel:123', 'javascript:alert(1)', 'vscode://file/a.md']) {
+        const f = fixture();
+        f.setUrl(url, true, true);
+        assert.equal(f.button.disabled, true);
+        assert.match(f.status.textContent, /cannot be opened/);
+        f.open();
+        assert.equal(f.opened, 0);
+        assert.equal(f.saved, 0);
+        assert.equal(f.messages.length, 0);
+        assert.equal(f.popover.ownerDocument.querySelector('a').getAttribute('href'), null);
+    }
+});
+
+test('editing and reverting a preserved link never restores an unsupported URL as a navigable href', () => {
+    const window = domino.createWindow('<div id="editor"><a data-mdw-preserved-href="tel:123">phone</a></div>');
+    const editor = window.document.getElementById('editor');
+    const link = editor.querySelector('a');
+    const input = { value: 'tel:123' };
+    let changes = 0;
+    const ui = new Function('editor', 'currentLink', 'input', 'notifyChange', `
+        const linkInputBaselineValue = 'tel:123';
+        const linkPopover = { querySelector: () => input };
+        const settingsState = { allowFileLinks: false };
+        const linkPopoverInputNeedsHostResolution = () => false;
+        const syncLinkPopoverOpenButtonState = () => {};
+        ${['hasExplicitScheme', 'sanitizeLinkHref'].map(name => extract(name, '    ')).join('\n')}
+        ${['restoreLinkHrefToBaseline', 'saveLinkUrlIfChanged', 'isOpenableLinkUrl'].map(name => extract(name)).join('\n')}
+        return { restore: restoreLinkHrefToBaseline, save: saveLinkUrlIfChanged };
+    `)(editor, link, input, () => changes++);
+    assert.equal(ui.save(), false);
+    assert.equal(changes, 0);
+    input.value = './partial.md';
+    assert.equal(ui.save(), true);
+    assert.equal(link.getAttribute('data-mdw-preserved-href'), null);
+    assert.equal(ui.restore(), true);
+    assert.equal(link.getAttribute('href'), null);
+    assert.equal(link.getAttribute('data-mdw-preserved-href'), 'tel:123');
+    input.value = 'javascript:alert(1)';
+    assert.equal(ui.save({ revertInvalid: false }), false);
+    assert.equal(link.getAttribute('href'), null);
+    input.value = 'https://example.com';
+    assert.equal(ui.save(), true);
+    assert.equal(link.getAttribute('href'), input.value);
+    assert.equal(link.getAttribute('data-mdw-preserved-href'), null);
 });
 
 test('changing settings rechecks a blocked file link and rejects the older permission result', () => {

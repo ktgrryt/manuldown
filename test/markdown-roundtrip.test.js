@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const Module = require('node:module');
 const path = require('node:path');
+const { editorLoading } = require('./helpers/editor-loading');
 
 function createMockUri(uriPath, scheme = 'file', authority = '') {
     return {
@@ -342,21 +343,15 @@ async function withEditableDocument(source, callback) {
     window.getSelection = () => null;
     const editor = window.document.getElementById('editor');
     Object.getPrototypeOf(editor.querySelectorAll('a')).forEach = Array.prototype.forEach;
-    const previous = { Node: global.Node, document: global.document, window: global.window };
-    Object.assign(global, { Node: window.Node, document: window.document, window });
+    const previous = { Node: global.Node, NodeFilter: global.NodeFilter, document: global.document, window: global.window };
+    Object.assign(global, { Node: window.Node, NodeFilter: window.NodeFilter, document: window.document, window });
     try {
-        // Exercise the real loading cleanup as well as the outgoing snapshot.
-        const editorSource = fs.readFileSync(path.join(__dirname, '..', 'media', 'editor.js'), 'utf8');
-        const start = editorSource.indexOf('    function normalizeLoadedEditorBoundaryWhitespace(');
-        const end = editorSource.indexOf('    function stripListPlaceholderCharactersFromTextNode(', start);
+        // Include sanitization and task normalization, which run before the
+        // editor becomes editable and must not change the document's meaning.
         const domUtils = new DOMUtils(editor);
-        const loadCleanup = new Function('editor', 'window', 'document', 'Node', 'NodeFilter', 'domUtils',
-            `${editorSource.slice(start, end)}\nreturn () => { normalizeLoadedEditorBoundaryWhitespace(editor); stripEditorControlCharacters(editor, { preserveSelection: false }); };`
-        )(editor, window, window.document, window.Node, window.NodeFilter, domUtils);
-        loadCleanup();
-        domUtils.cleanupGhostStyles();
-        domUtils.ensureInlineCodeSpaces();
-        return await callback(editor, domUtils, window.document, loadCleanup);
+        const loading = editorLoading(editor, domUtils);
+        loading.initialize();
+        return await callback(editor, domUtils, window.document, loading.cleanup);
     } finally {
         Object.assign(global, previous);
     }
@@ -396,6 +391,153 @@ test('editing prose retains unchanged inline syntax and necessary escaping', asy
         editor.querySelector('p').firstChild.nodeValue = 'After ';
         const output = new MarkdownEditorProvider({}).htmlToMarkdown(domUtils.getCleanedHTML(), createTextDocument(source));
         assert.equal(output, source.replace('Before', 'After'));
+    });
+});
+
+test('loading literal task markers never turns text or inline code into checkboxes', async () => {
+    for (const literal of ['\\[x\\] literal', '`[x] literal`', '**[ ] literal**']) {
+        const source = `- ${literal}\n\nBody\n`;
+        await withEditableDocument(source, (editor, domUtils) => {
+            assert.equal(editor.querySelectorAll('input').length, 0, source);
+            editor.lastElementChild.textContent = 'Changed';
+            const output = new MarkdownEditorProvider({}).htmlToMarkdown(domUtils.getCleanedHTML(), createTextDocument(source));
+            assert.equal(output, source.replace('Body', 'Changed'));
+            assert.equal(convert(output).markdown, output);
+        });
+    }
+});
+
+test('loaded blocked links stay inert and retain their destinations across unrelated edits', async () => {
+    for (const href of ['tel:+8112345678', 'vscode://file/workspace/a.md', 'ftp://example.com/file.zip', 'javascript:alert(1)', 'data:text/html,example']) {
+        for (const reference of [false, true]) {
+            const source = (reference ? `[link][ref]\n\n[ref]: ${href}\n` : `[link](${href})\n`) + '\nBody\n';
+            await withEditableDocument(source, (editor, domUtils) => {
+                const link = editor.querySelector('a');
+                assert.ok(link, source);
+                assert.equal(link.getAttribute('href'), null);
+                assert.equal(link.getAttribute('data-mdw-preserved-href'), href);
+                editor.lastElementChild.textContent = 'Changed';
+                const provider = new MarkdownEditorProvider({});
+                const output = provider.htmlToMarkdown(domUtils.getCleanedHTML(), createTextDocument(source));
+                assert.equal(output, source.replace('Body', 'Changed'));
+                assert.equal(convert(output).markdown, output);
+            });
+        }
+    }
+});
+
+test('untrusted clipboard HTML cannot retain blocked destinations through private metadata', async () => {
+    await withEditableDocument('Body\n', (editor, domUtils, document) => {
+        const fragment = document.createElement('div');
+        fragment.innerHTML = '<a href="javascript:alert(1)" data-mdw-preserved-href="javascript:alert(1)">first</a>' +
+            '<a data-mdw-preserved-href="tel:123">second</a>';
+        editorLoading(editor, domUtils).sanitize(fragment);
+        assert.equal(fragment.querySelectorAll('a,[data-mdw-preserved-href]').length, 0);
+        assert.equal(fragment.textContent, 'firstsecond');
+    });
+});
+
+test('changing a formerly blocked link keeps the newly selected destination', async () => {
+    const source = '[link](tel:123)\n';
+    await withEditableDocument(source, (editor, domUtils) => {
+        editor.querySelector('a').setAttribute('href', 'https://example.com');
+        assert.equal(new MarkdownEditorProvider({}).htmlToMarkdown(domUtils.getCleanedHTML(), createTextDocument(source)),
+            '[link](https://example.com)\n');
+    });
+});
+
+test('existing empty-label and empty-destination links survive loading and editing', async () => {
+    for (const link of ['[](./important.md)', '[ ](./important.md)', '[self]()']) {
+        const source = `${link}\n\nBody\n`;
+        await withEditableDocument(source, (editor, domUtils) => {
+            assert.equal(editor.querySelectorAll('a').length, 1);
+            editor.lastElementChild.textContent = 'Changed';
+            const output = new MarkdownEditorProvider({}).htmlToMarkdown(domUtils.getCleanedHTML(), createTextDocument(source));
+            assert.equal(output, source.replace('Body', 'Changed'));
+        });
+    }
+    const provider = new MarkdownEditorProvider({});
+    assert.equal(provider.htmlToMarkdown('<p>before<a href="./important.md"></a>after</p>', createTextDocument('')),
+        'before[](./important.md)after\n');
+});
+
+test('editing literal dollars and escaped HTML keeps them literal after reopening', async () => {
+    for (const source of ['Literal \\$x\\$ keep\n', 'Literal \\<T> keep\n', 'Literal \\<kbd>Ctrl\\</kbd> keep\n']) {
+        await withEditableDocument(source, (editor, domUtils, document) => {
+            const expected = editor.querySelector('p').textContent + ' changed';
+            editor.querySelector('p').appendChild(document.createTextNode(' changed'));
+            const output = new MarkdownEditorProvider({}).htmlToMarkdown(domUtils.getCleanedHTML(), createTextDocument(source));
+            const root = require('@mixmark-io/domino').createWindow(convert(output).html).document;
+            assert.equal(root.querySelector('p').textContent, expected);
+            assert.equal(root.querySelectorAll('[data-mdw-math],[data-mdw-opaque-source]').length, 0, output);
+            assert.equal(convert(output).markdown, output);
+        });
+    }
+});
+
+test('blocking remote images keeps their original alt text and Markdown paths', async () => {
+    for (const alt of ['', ' ', 'caption']) {
+        const source = `![${alt}](https://example.com/image.png)\n\nBody\n`;
+        await withEditableDocument(source, (editor, domUtils) => {
+            assert.equal(editor.querySelector('img').getAttribute('alt'), alt);
+            editor.lastElementChild.textContent = 'Changed';
+            const output = new MarkdownEditorProvider({}).htmlToMarkdown(domUtils.getCleanedHTML(), createTextDocument(source));
+            assert.equal(output, source.replace('Body', 'Changed'));
+        });
+    }
+});
+
+test('editing link labels retains literal backslashes, quotes and whitespace in titles', async () => {
+    for (const title of ['a\\\\_b', 'a\\\\\\"b', 'a  b', 'a\tb']) {
+        const source = `[link](./a.md "${title}")\n`;
+        await withEditableDocument(source, (editor, domUtils) => {
+            const expected = editor.querySelector('a').getAttribute('title');
+            editor.querySelector('a').textContent = 'Changed';
+            const output = new MarkdownEditorProvider({}).htmlToMarkdown(domUtils.getCleanedHTML(), createTextDocument(source));
+            const root = require('@mixmark-io/domino').createWindow(convert(output).html).document;
+            assert.equal(root.querySelector('a').getAttribute('title'), expected, output);
+            assert.equal(convert(output).markdown, output);
+        });
+    }
+});
+
+test('editing prose keeps existing literal punctuation and Windows paths without added escapes', async () => {
+    for (const [source, updated] of [
+        ['a * b, [x], #tag, 1. word\n', 'a * b, [x], #tag, 1. word changed'],
+        ['a * b, [x], #tag, 1. word\n', 'a * c, [x], #tag, 1. word'],
+        ['C:\\Users\\name\\file.md\n', 'C:\\Users\\name\\file.md changed'],
+        ['C:\\Users\\name\\file.md\n', 'C:\\Users\\name\\other.md'],
+    ]) {
+        await withEditableDocument(source, (editor, domUtils) => {
+            editor.querySelector('p').textContent = updated;
+            const output = new MarkdownEditorProvider({}).htmlToMarkdown(domUtils.getCleanedHTML(), createTextDocument(source));
+            assert.equal(output, `${updated}\n`);
+            assert.equal(convert(output).markdown, output);
+        });
+    }
+});
+
+test('literal spelling preservation keeps required escapes when neighboring text gains syntax', async () => {
+    const source = 'a * b, [x]\n\n[r]: ./target.md\n';
+    for (const updated of ['a *b* [x](u)', '* item', '***', '[r]']) {
+        await withEditableDocument(source, (editor, domUtils) => {
+            editor.querySelector('p').textContent = updated;
+            const output = new MarkdownEditorProvider({}).htmlToMarkdown(domUtils.getCleanedHTML(), createTextDocument(source));
+            const root = require('@mixmark-io/domino').createWindow(convert(output).html).document;
+            assert.equal(root.querySelector('p').textContent, updated, output);
+            assert.equal(root.querySelectorAll('em,strong,a,ul,hr').length, 0, output);
+        });
+    }
+});
+
+test('literal spelling preservation leaves unchanged escaped blocks, inline code and destinations intact', async () => {
+    const source = 'a * b [x] with `literal \\\\Users` and [link](a%5Cb.md)\n\n' +
+        'Keep \\* and \\[x\\] exactly.\n\n```text\n\\\\Users\n```\n';
+    await withEditableDocument(source, (editor, domUtils, document) => {
+        editor.querySelector('p').appendChild(document.createTextNode(' changed'));
+        const output = new MarkdownEditorProvider({}).htmlToMarkdown(domUtils.getCleanedHTML(), createTextDocument(source));
+        assert.equal(output, source.replace('](a%5Cb.md)\n', '](a%5Cb.md) changed\n'));
+        assert.equal(convert(output).markdown, output);
     });
 });
 

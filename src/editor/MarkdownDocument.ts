@@ -567,6 +567,9 @@ export class MarkdownDocument {
             if (['codespan', 'em', 'strong', 'link', 'image', 'del', 'footnoteReference', 'mathSource'].includes(token.type)) {
                 blocks.push({ source: token.raw, start: 0, end: 0, inline: true,
                     html: marked.Parser.parseInline([token]) });
+            } else if (token.type === 'text' && !('tokens' in token) && /[\\*_`\[\]~$#]/.test(token.raw)) {
+                blocks.push({ source: token.raw, start: 0, end: 0, inline: true, literal: true,
+                    html: marked.Parser.parseInline([token]) });
             }
         });
         return blocks;

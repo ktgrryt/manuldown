@@ -14,7 +14,7 @@ import {
     normalizeExternalLinkHref,
 } from '../utils/workspaceLinks';
 import { MAX_EDITABLE_FOOTNOTE_DEPTH, decodeFootnoteLabel, parseFootnoteDefinition, serializeFootnoteDefinition } from './Footnotes';
-import { MarkdownSourceBlock, preserveMarkdownSource } from './MarkdownSource';
+import { MarkdownSourceBlock, markdownContentMatches, preserveMarkdownSource } from './MarkdownSource';
 import { EmphasisBoundarySerializer } from './Emphasis';
 import { protectMarkdownTocs } from './MarkdownToc';
 import { isCalloutTypeChange, parseCallout, serializeCallout } from './Callouts';
@@ -95,7 +95,10 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     // Text of the document being converted by htmlToMarkdown (see escapeHtmlLikeText).
     private currentConversionDocumentText: string | null = null;
     private currentEmphasisSerializer: EmphasisBoundarySerializer | null = null;
-    private sourceCache: { text: string; html: string; blocks?: MarkdownSourceBlock[] } | undefined;
+    private sourceCache: {
+        text: string; html: string; blocks?: MarkdownSourceBlock[];
+        literalSpellings?: Array<{ escaped: string; original: string }>;
+    } | undefined;
     private readonly workspaceLinkPicker = new WorkspaceLinkPicker();
     private pdfPreviewProvider: PdfPreviewProvider | undefined;
     public explicitlyRequested = false;
@@ -111,6 +114,11 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             strongDelimiter: '**',
             // Default nested-list indentation (updated per document on save).
             blankReplacement: (content: string, node: any, options: any) => {
+                // An empty label is valid Markdown and can already exist in a
+                // document. Unlinking is an explicit editing command.
+                if (node.nodeName === 'A' && node.hasAttribute('href')) {
+                    return this.serializeMarkdownLink('', node);
+                }
                 // An empty list item is still an item. Keep its marker so the
                 // list neither loses the item nor, when ordered, splits in two.
                 if (node.nodeName === 'LI') {
@@ -148,6 +156,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         (this.turndownService as any).escape = function (text: string) {
             const escaped = originalEscape.call(this, text);
             return provider.escapeHtmlLikeText(escaped
+                .replace(/\$/g, '\\$')
                 .replace(/~/g, '\\~')
                 .replace(/(?<=[\p{L}\p{N}])\\_(?=[\p{L}\p{N}])/gu, '_')
                 .replace(/(?<=^|\s)\\_(?=$|\s)/gu, '_'));
@@ -274,15 +283,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             }
         });
         this.turndownService.addRule('inlineLink', {
-            filter: (node: any) => node.nodeName === 'A' && !!node.getAttribute('href'),
-            replacement: (content: string, node: any) => {
-                const href = String(node.getAttribute('href'))
-                    .replace(/[\s<>]/g, character => encodeURIComponent(character))
-                    .replace(/([()])/g, '\\$1');
-                const title = String(node.getAttribute('title') || '')
-                    .replace(/\s+/g, ' ').trim().replace(/"/g, '\\"');
-                return `[${content}](${href}${title ? ` "${title}"` : ''})`;
-            }
+            filter: (node: any) => node.nodeName === 'A' && node.hasAttribute('href'),
+            replacement: (content: string, node: any) => this.serializeMarkdownLink(content, node)
         });
         // External tables often have TDs in their first row, or no rows at
         // all. GFM's default table filter assumes a first row exists and keeps
@@ -2915,23 +2917,88 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
      * Text shown literally in the editor must stay literal in the saved
      * Markdown. "&copy;" as text (written "&amp;copy;" in the file) would
      * otherwise render as ©, and "<T>" (written "&lt;T&gt;") would become an
-     * HTML tag that other renderers hide. A tag-like "<...>" that the document
-     * already writes as it is stays unchanged.
+     * HTML tag that other renderers hide. Actual raw HTML is source-backed and
+     * does not pass through literal text escaping.
      */
     private escapeHtmlLikeText(text: string): string {
         const documentText = this.currentConversionDocumentText ?? '';
         return text
             .replace(/&(?=(?:[A-Za-z][A-Za-z0-9]{1,31}|#[0-9]{1,7}|#[xX][0-9A-Fa-f]{1,6});)/g, '&amp;')
             .replace(/<(?=[A-Za-z/!?])[^<>\n]*>?/g, (match) => {
-                if (documentText.includes(match)) {
-                    return match;
-                }
                 const inner = match.slice(1, match.endsWith('>') ? -1 : undefined);
                 // Keep the document's own "&lt;...&gt;" spelling when it has one.
                 return match.endsWith('>') && documentText.includes(`&lt;${inner}&gt;`)
                     ? `&lt;${inner}&gt;`
                     : `&lt;${match.slice(1)}`;
             });
+    }
+
+    private serializeMarkdownLink(content: string, node: any): string {
+        const href = String(node.getAttribute('href') || '')
+            .replace(/[\s<>]/g, character => encodeURIComponent(character))
+            .replace(/([\\()])/g, '\\$1');
+        const title = String(node.getAttribute('title') || '').replace(/([\\"])/g, '\\$1');
+        return `[${content}](${href}${title ? ` "${title}"` : ''})`;
+    }
+
+    private preserveLiteralSourceSpelling(markdown: string, document: vscode.TextDocument,
+        restore: (value: string) => string): string {
+        const restored = restore(markdown);
+        const cache = this.sourceCache;
+        if (!markdown.includes('\\') || !cache?.blocks) {
+            return restored;
+        }
+        if (!cache.literalSpellings) {
+            const spellings = new Map<string, string>();
+            for (const block of cache.blocks.filter(block => block.literal)) {
+                // Keep punctuation and Windows-path spelling even when an edit
+                // changes another word in the same original text node. Index
+                // distinct runs rather than every paragraph's full prose.
+                for (const match of block.source.matchAll(/\\[\p{L}\p{N}]|[*_`\[\]~$#]+/gu)) {
+                    const original = match[0];
+                    spellings.set(original.replace(/([\\`*_\[\]~$#])/g, '\\$1'), original);
+                }
+            }
+            cache.literalSpellings = Array.from(spellings, ([escaped, original]) => ({ escaped, original }))
+                .sort((a, b) => b.escaped.length - a.escaped.length);
+        }
+        let candidate = markdown;
+        for (const { escaped, original } of cache.literalSpellings) {
+            candidate = candidate.split(escaped).join(original);
+        }
+        if (cache.literalSpellings.some(({ original }) => /^\\[\p{L}\p{N}]/u.test(original))) {
+            candidate = candidate.replace(/\\\\(?=[\p{L}\p{N}])/gu, '\\');
+        }
+        if (candidate === markdown) {
+            return restored;
+        }
+        const proposed = restore(candidate);
+        const render = (source: string): string => new MarkdownDocument({
+            getText: () => source, uri: document.uri,
+        } as vscode.TextDocument).toHtml();
+        // Source-backed blocks and inline objects are still placeholders in
+        // `markdown`, so this cannot rewrite their original spelling. Validate
+        // the fully restored result: changed neighbors may now require escapes
+        // to keep brackets, stars or backslashes from becoming new syntax.
+        try {
+            return markdownContentMatches(render(restored), render(proposed)) ? proposed : restored;
+        } catch {
+            // An optional spelling optimization must never prevent saving the
+            // conservative, escaped serialization that already succeeded.
+            return restored;
+        }
+    }
+
+    private restorePreservedLinkTargets(html: string): string {
+        if (!html.includes('data-mdw-preserved-href')) { return html; }
+        const root = createWindow(`<div id="link-target-root">${html}</div>`).document.getElementById('link-target-root');
+        for (const link of Array.from<any>(root.querySelectorAll('a[data-mdw-preserved-href]'))) {
+            if (!link.hasAttribute('href')) {
+                link.setAttribute('href', link.getAttribute('data-mdw-preserved-href'));
+            }
+            link.removeAttribute('data-mdw-preserved-href');
+        }
+        return root.innerHTML;
     }
 
     /** Keep adjacent literal text from joining generated inline Markdown. */
@@ -3440,6 +3507,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             (this.turndownService as any).options.indent = listIndent;
 
             // Pre-process HTML to convert webview URIs back to relative paths
+            html = this.restorePreservedLinkTargets(html);
             html = this.convertWebviewUrisToRelativePaths(html, document);
             html = this.restoreDocumentSpelledLinkTargets(html, documentText);
             let preservedSource = { html, restore: (value: string) => value };
@@ -3509,23 +3577,6 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     return `<p>${normalizedImage}${hardBreakHtml}${imageHardBreakTailMarker}</p>`;
                 }
             );
-
-            // Drop empty anchors left by contenteditable when link text was deleted.
-            // Keep links that wrap images so image links still round-trip.
-            html = html.replace(/<a\b([^>]*)>([\s\S]*?)<\/a>/gi, (match, _attrs, content) => {
-                if (/<img\b/i.test(content)) {
-                    return match;
-                }
-
-                const visibleText = content
-                    .replace(/<br\b[^>]*>/gi, '')
-                    .replace(/&nbsp;|&#160;/gi, '')
-                    .replace(/[\u00A0\u200B\u2060\uFEFF]/g, '')
-                    .replace(/<[^>]*>/g, '')
-                    .trim();
-
-                return visibleText === '' ? '' : match;
-            });
 
             // Remove empty strikethrough tags (e.g. <del><br></del>) to avoid "~~" artifacts
             html = html.replace(/<(del|s|strike)(\s[^>]*)?>\s*(?:<br[^>]*>|&nbsp;|\u00A0|\s)*<\/\1>/gi, '');
@@ -3841,16 +3892,20 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             if (!markdown.endsWith('\n')) {
                 markdown += '\n';
             }
-            const restoredContent = preservedSource.restore(protectedCallouts.restore(protectedFootnotes.restore(
-                protectedOpaqueSources.restore(this.restoreDollarMathBlocks(
-                    protectedFencedMarkdown.restore(markdown),
-                    mathBlockFenceInfo
-                ))
-            )));
-            const restoredMarkdown = protectedTocs.restore(emphasisSerializer.restore(protectedInlineSyntax.restore(restoredContent.replace(
-                new RegExp(`${this.escapeRegExp(zeroWidthNamespace)}(200b|2060|feff)END`, 'g'),
-                (_match, characterCode) => String.fromCharCode(parseInt(characterCode, 16))
-            ))));
+            const restore = (value: string): string => {
+                const restoredContent = preservedSource.restore(protectedCallouts.restore(protectedFootnotes.restore(
+                    protectedOpaqueSources.restore(this.restoreDollarMathBlocks(
+                        protectedFencedMarkdown.restore(value), mathBlockFenceInfo
+                    ))
+                )));
+                return protectedTocs.restore(emphasisSerializer.restore(protectedInlineSyntax.restore(restoredContent.replace(
+                    new RegExp(`${this.escapeRegExp(zeroWidthNamespace)}(200b|2060|feff)END`, 'g'),
+                    (_match, characterCode) => String.fromCharCode(parseInt(characterCode, 16))
+                ))));
+            };
+            const restoredMarkdown = footnoteContext.depth === 0 && footnoteContext.preserveSource !== false
+                ? this.preserveLiteralSourceSpelling(markdown, document, restore)
+                : restore(markdown);
             // Nested note conversion can carry a parent conversion's generated
             // TOC placeholder. Only those exact host-created markers may pass
             // through; the outer conversion restores and validates them later.
