@@ -46,9 +46,7 @@ export function activate(context: vscode.ExtensionContext) {
         async () => {
             const activeEditor = vscode.window.activeTextEditor;
             if (activeEditor && activeEditor.document.languageId === 'markdown') {
-                const uri = activeEditor.document.uri;
-                provider.explicitlyRequested = true;
-                await vscode.commands.executeCommand('vscode.openWith', uri, MANULDOWN_EDITOR_VIEW_TYPE);
+                await provider.openWysiwygEditor(activeEditor);
             } else {
                 vscode.window.showInformationMessage('Please open a Markdown file first');
             }
@@ -63,8 +61,8 @@ export function activate(context: vscode.ExtensionContext) {
         async () => {
             const activeTab = vscode.window.tabGroups.activeTabGroup.activeTab;
             const input = activeTab?.input;
-            if (input instanceof vscode.TabInputCustom) {
-                await vscode.commands.executeCommand('vscode.openWith', input.uri, 'default');
+            if (input instanceof vscode.TabInputCustom && input.viewType === MANULDOWN_EDITOR_VIEW_TYPE) {
+                await provider.openTextEditor(input.uri);
             }
         }
     );
@@ -77,13 +75,12 @@ export function activate(context: vscode.ExtensionContext) {
         async () => {
             const activeTab = vscode.window.tabGroups.activeTabGroup.activeTab;
             const input = activeTab?.input;
-            if (input instanceof vscode.TabInputCustom) {
+            if (input instanceof vscode.TabInputCustom && input.viewType === MANULDOWN_EDITOR_VIEW_TYPE) {
                 // Currently in WYSIWYG editor -> switch to text editor
-                await vscode.commands.executeCommand('vscode.openWith', input.uri, 'default');
-            } else if (input instanceof vscode.TabInputText) {
+                await provider.openTextEditor(input.uri);
+            } else if (input instanceof vscode.TabInputText && vscode.window.activeTextEditor?.document.languageId === 'markdown') {
                 // Currently in text editor -> switch to WYSIWYG editor
-                provider.explicitlyRequested = true;
-                await vscode.commands.executeCommand('vscode.openWith', input.uri, MANULDOWN_EDITOR_VIEW_TYPE);
+                await provider.openWysiwygEditor(vscode.window.activeTextEditor);
             }
         }
     );

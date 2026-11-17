@@ -360,6 +360,18 @@ export class CodeBlockManager {
         return true;
     }
 
+    /** An editor-mode switch must not leave its restored caret in hidden code. */
+    revealSelectionSource(selection) {
+        for (const node of [selection?.anchorNode, selection?.focusNode]) {
+            const element = node?.nodeType === 3 ? node.parentElement : node;
+            const code = element?.closest?.('code');
+            const pre = code?.closest('pre');
+            if (!pre || !this.editor.contains(pre)) continue;
+            if (pre.getAttribute('data-mermaid-view') === 'diagram') this._setMermaidView(pre, 'code');
+            this.revealMathSource(pre);
+        }
+    }
+
     /** Restore only source views opened by caret navigation, once selection leaves. */
     syncTransientMathViews(force = false) {
         if (!this.transientMathSources.size || this.mathSourceCompositionActive) return;

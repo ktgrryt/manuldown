@@ -6,6 +6,9 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 
 ## [Unreleased]
 
+### Fixed
+- Preserve the corresponding caret position and selection when switching between ManulDown and the Markdown source with the editor-title buttons or toggle shortcut. Reveal the restored caret and synchronize pending edits before opening the source editor.
+
 ## [2.3.0] - 2026-11-17
 
 ### Changed

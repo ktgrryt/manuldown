@@ -43,7 +43,7 @@ test('the VSIX ships the bundles instead of node_modules', () => {
     }
 
     assert.doesNotMatch(providerSource, /'node_modules'/);
-    for (const asset of ['prism.bundle.js', 'prism-tomorrow.css', 'mermaid.bundle.js']) {
+    for (const asset of ['prism.bundle.js', 'prism-tomorrow.css', 'mermaid.bundle.js', 'editor-selection.bundle.js']) {
         assert.ok(fs.existsSync(path.join(repositoryRoot, 'media', 'vendor', asset)), asset);
     }
     assert.match(readRepositoryFile('media', 'vendor', 'prism.bundle.js'), /^\/\*! Prism /);

@@ -23,6 +23,8 @@ ManulDown is a VSCode extension for editing Markdown while viewing the rendered 
 
 You can also right-click a file in the Explorer and choose **Open With… → ManulDown**.
 
+Switch between ManulDown and the Markdown source with the code/pencil buttons in the editor title or `Cmd+Option+M` / `Ctrl+Alt+M`. The corresponding caret position and selection are preserved, and the restored caret is brought into view.
+
 ### Basic Editing
 
 Use the toolbar to format text and insert elements. Buttons that do not fit are available in the **…** menu.

@@ -3,6 +3,8 @@ import * as os from 'os';
 import * as path from 'path';
 import * as fs from 'fs/promises';
 import { MarkdownDocument } from './MarkdownDocument';
+import { EditorTextSelection, isEditorTextSelection } from './EditorSelection';
+import { MarkdownSelectionMap } from './MarkdownSelection';
 import { WorkspaceLinkPicker } from './WorkspaceLinkPicker';
 import { resolveToolbarItems, ToolbarItems } from './ToolbarItems';
 import { getNonce } from '../utils/getNonce';
@@ -85,6 +87,11 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     private turndownService: TurndownService;
     private currentListIndent = '  ';
     private webviewPanels = new Map<string, vscode.WebviewPanel>();
+    private initializedPanels = new WeakSet<vscode.WebviewPanel>();
+    private pendingSourceSelections = new Map<string, EditorTextSelection>();
+    private sourceSelectionOrigins = new Map<string, { text: string; source: EditorTextSelection; rendered: EditorTextSelection }>();
+    private editorSwitchHandlers = new Map<string, () => Promise<{ selection: EditorTextSelection | null } | null>>();
+    private editorSwitchInProgress = false;
     private pendingImageSavePaths = new Set<string>();
     private imagePickerOpen = false;
     private lastActivePanel: vscode.WebviewPanel | null = null;
@@ -834,7 +841,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         let externalChangeSequence = 0;
         let unresolvedExternalChangeId = 0;
         let externalConflictPromptActive = false;
-        type WebviewSyncSnapshot = { content: string; revision: number };
+        type WebviewSyncSnapshot = { content: string; revision: number; selection?: EditorTextSelection | null };
         type PendingSyncSnapshotRequest = {
             resolve: (snapshot: WebviewSyncSnapshot | null) => void;
             timeout: NodeJS.Timeout;
@@ -1425,6 +1432,33 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             return isCurrentEditor() && pendingWebviewUpdate === null && unresolvedExternalChangeId === 0;
         };
 
+        const prepareEditorSwitch = async (): Promise<{ selection: EditorTextSelection | null } | null> => {
+            let result: { selection: EditorTextSelection | null } | null = null;
+            await enqueueTerminalAction(async () => {
+                for (let attempt = 0; attempt < 3; attempt++) {
+                    if (!isCurrentEditor() || unresolvedExternalChangeId !== 0) { return; }
+                    const snapshot = await requestWebviewSyncSnapshot('editorSwitch', 15000);
+                    if (!snapshot || !isCurrentEditor() || unresolvedExternalChangeId !== 0) { return; }
+                    queueWebviewUpdate(snapshot.content, snapshot.revision);
+                    if (!await flushPendingWebviewUpdate() || !await flushAllPendingWebviewUpdates()) { return; }
+                    // Input arriving while an edit was applied needs a fresh caret
+                    // snapshot, rather than a position from an older document.
+                    if (snapshot.revision < lastAppliedWebviewRevision) { continue; }
+                    const origin = this.sourceSelectionOrigins.get(documentKey);
+                    // A caret inside source-only syntax (for example a link URL)
+                    // can share a rendered position with other source characters.
+                    // Preserve its exact original position on an unchanged round trip.
+                    const unchanged = origin && origin.text === document.getText() && (!snapshot.selection ||
+                        (origin.rendered.anchor === snapshot.selection.anchor && origin.rendered.active === snapshot.selection.active));
+                    result = { selection: unchanged ? origin.source : snapshot.selection
+                        ? new MarkdownSelectionMap(markdownDocument, document.getText()).toSource(snapshot.selection) : null };
+                    return;
+                }
+            });
+            return result;
+        };
+        this.editorSwitchHandlers.set(documentKey, prepareEditorSwitch);
+
         // Handle messages from the webview
         webviewPanel.webview.onDidReceiveMessage(
             async (message) => {
@@ -1480,6 +1514,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                                 {
                                     content: typeof message.content === 'string' ? message.content : '',
                                     revision: normalizeWebviewRevision(message.revision),
+                                    selection: isEditorTextSelection(message.selection) ? message.selection : null,
                                 }
                             );
                         }
@@ -1557,7 +1592,9 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                             webviewPanel.webview.postMessage({
                                 type: 'init',
                                 content: initialHtml,
+                                selection: this.takePendingSourceSelection(document, markdownDocument),
                             });
+                            this.initializedPanels.add(webviewPanel);
                         }
                         await this.postCustomSlashCommands(webviewPanel.webview);
                         break;
@@ -2290,6 +2327,9 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         // Cleanup
         webviewPanel.onDidDispose(() => {
             editorDisposed = true;
+            if (this.editorSwitchHandlers.get(documentKey) === prepareEditorSwitch) {
+                this.editorSwitchHandlers.delete(documentKey);
+            }
             this.updateMarkdownCopyFocus(webviewPanel, false);
             activePastedPathLinkRequestId = null;
             if (activeWorkspaceLinkRequest) {
@@ -2314,6 +2354,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             clearExpectedWillSaveUpdates();
             if (this.webviewPanels.get(documentKey) === webviewPanel) {
                 this.webviewPanels.delete(documentKey);
+                this.pendingSourceSelections.delete(documentKey);
+                this.sourceSelectionOrigins.delete(documentKey);
             }
             if (this.lastActivePanel === webviewPanel) {
                 this.lastActivePanel = null;
@@ -2345,6 +2387,74 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         }
         panel.webview.postMessage(message);
         return true;
+    }
+
+    private takePendingSourceSelection(document: vscode.TextDocument, markdownDocument: MarkdownDocument): EditorTextSelection | null {
+        const key = document.uri.toString();
+        const selection = this.pendingSourceSelections.get(key);
+        if (!selection) { return null; }
+        this.pendingSourceSelections.delete(key);
+        const text = document.getText();
+        const rendered = new MarkdownSelectionMap(markdownDocument, text).toRendered(selection);
+        this.sourceSelectionOrigins.set(key, { text, source: selection, rendered });
+        return rendered;
+    }
+
+    public async openWysiwygEditor(editor: vscode.TextEditor): Promise<void> {
+        if (this.editorSwitchInProgress) { return; }
+        this.editorSwitchInProgress = true;
+        const { document } = editor;
+        const key = document.uri.toString();
+        const selection = {
+            anchor: document.offsetAt(editor.selection.anchor),
+            active: document.offsetAt(editor.selection.active),
+        };
+        this.pendingSourceSelections.set(key, selection);
+        try {
+            this.explicitlyRequested = true;
+            await vscode.commands.executeCommand('vscode.openWith', document.uri, MarkdownEditorProvider.viewType);
+            const panel = this.webviewPanels.get(key);
+            if (panel && this.initializedPanels.has(panel) && this.pendingSourceSelections.get(key) === selection) {
+                void panel.webview.postMessage({
+                    type: 'restoreEditorSelection',
+                    selection: this.takePendingSourceSelection(document, new MarkdownDocument(document)),
+                });
+            }
+        } catch (error) {
+            if (this.pendingSourceSelections.get(key) === selection) { this.pendingSourceSelections.delete(key); }
+            throw error;
+        } finally {
+            this.editorSwitchInProgress = false;
+        }
+    }
+
+    public async openTextEditor(uri: vscode.Uri): Promise<void> {
+        if (this.editorSwitchInProgress) { return; }
+        const key = uri.toString();
+        const prepare = this.editorSwitchHandlers.get(key);
+        const panel = this.webviewPanels.get(key);
+        if (!prepare || !panel) { return; }
+        this.editorSwitchInProgress = true;
+        try {
+            const snapshot = await prepare();
+            if (!snapshot) {
+                void vscode.window.showErrorMessage('ManulDown could not synchronize the current edit before switching editors. Finish editing and try again.');
+                return;
+            }
+            if (!panel.active) { return; }
+            await vscode.commands.executeCommand('vscode.openWith', uri, 'default');
+            const editor = vscode.window.activeTextEditor;
+            if (snapshot.selection && editor?.document.uri.toString() === key) {
+                editor.selection = new vscode.Selection(
+                    editor.document.positionAt(snapshot.selection.anchor),
+                    editor.document.positionAt(snapshot.selection.active)
+                );
+                editor.revealRange(new vscode.Range(editor.selection.active, editor.selection.active),
+                    vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+            }
+        } finally {
+            this.editorSwitchInProgress = false;
+        }
     }
 
     private normalizeTocPanelWidth(width: unknown): number {

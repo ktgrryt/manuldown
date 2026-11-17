@@ -32,6 +32,8 @@ const vscodeMockState = {
     workspaceFolder: null,
     workspaceEdits: [],
     applyEditHandler: null,
+    activeTextEditor: null,
+    executeCommandHandler: null,
 };
 
 function resetVscodeMockState() {
@@ -60,6 +62,8 @@ function resetVscodeMockState() {
     vscodeMockState.workspaceFolder = null;
     vscodeMockState.workspaceEdits.length = 0;
     vscodeMockState.applyEditHandler = null;
+    vscodeMockState.activeTextEditor = null;
+    vscodeMockState.executeCommandHandler = null;
 }
 
 function addMockListener(listeners, listener) {
@@ -116,6 +120,10 @@ function loadExtensionModules() {
         TextEdit: {
             replace: (range, newText) => ({ range, newText }),
         },
+        Selection: class Selection {
+            constructor(anchor, active) { this.anchor = anchor; this.active = active; }
+        },
+        TextEditorRevealType: { InCenterIfOutsideViewport: 2 },
         WorkspaceEdit: class WorkspaceEdit {
             constructor() {
                 this.edits = [];
@@ -224,6 +232,7 @@ function loadExtensionModules() {
             },
         },
         window: {
+            get activeTextEditor() { return vscodeMockState.activeTextEditor; },
             showQuickPick: async (items, options, token) => {
                 vscodeMockState.quickPickCalls.push({ items, options, token });
                 const response = vscodeMockState.quickPickResponses.shift();
@@ -248,6 +257,7 @@ function loadExtensionModules() {
         commands: {
             executeCommand: async (...args) => {
                 vscodeMockState.executedCommands.push(args);
+                return vscodeMockState.executeCommandHandler?.(...args);
             },
         },
         env: {
@@ -426,6 +436,147 @@ async function createEditorSyncHarness(initialText = 'before', documentUri = nul
     await provider.resolveCustomTextEditor(document, webview.panel, {});
     return { provider, document, webview };
 }
+
+test('opening a new WYSIWYG editor restores source selection after its ready handshake', async () => {
+    const source = '# Heading\n\nSecond **paragraph**.\n';
+    const { provider, document, webview } = await createEditorSyncHarness(source);
+    document.offsetAt = position => position;
+    const active = source.indexOf('paragraph') + 4;
+    try {
+        await provider.openWysiwygEditor({ document, selection: { anchor: active, active } });
+        assert.equal(webview.postedMessages.some(message => message.type === 'restoreEditorSelection'), false,
+            'The selection must wait for initial content, rather than target an empty Webview');
+        await webview.sendMessage({ type: 'ready' });
+        const init = webview.postedMessages.find(message => message.type === 'init');
+        const { MarkdownSelectionMap } = require('../out/editor/MarkdownSelection');
+        assert.deepEqual(new MarkdownSelectionMap(new MarkdownDocument(document), source).toSource(init.selection), { anchor: active, active });
+        assert.equal(document.getText(), source);
+        assert.deepEqual(document.savedTexts, []);
+    } finally { webview.dispose(); }
+});
+
+test('opening a retained WYSIWYG editor sends a new selection without reinitializing content', async () => {
+    const source = 'First.\n\nSecond paragraph.\n';
+    const { provider, document, webview } = await createEditorSyncHarness(source);
+    document.offsetAt = position => position;
+    try {
+        await webview.sendMessage({ type: 'ready' });
+        const active = source.indexOf('Second') + 3;
+        await provider.openWysiwygEditor({ document, selection: { anchor: active + 2, active } });
+        const restore = webview.postedMessages.find(message => message.type === 'restoreEditorSelection');
+        assert.ok(restore);
+        assert.ok(restore.selection.anchor > restore.selection.active, 'Selection direction is preserved');
+        assert.equal(webview.postedMessages.filter(message => message.type === 'init').length, 1);
+    } finally { webview.dispose(); }
+});
+
+test('switching to source waits for the latest edit before opening and revealing its caret', async () => {
+    const { provider, document, webview } = await createEditorSyncHarness('Old.\n\nDraft **word**.\n');
+    const source = 'Old.\n\nDraft **latest**.\n';
+    const { MarkdownSelectionMap } = require('../out/editor/MarkdownSelection');
+    const active = source.indexOf('latest') + 3;
+    const rendered = new MarkdownSelectionMap(new MarkdownDocument(createTextDocument(source)), source).toRendered({ anchor: active, active });
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    provider.updateTextDocument = async (_document, markdown) => {
+        await gate;
+        document.setText(markdown);
+        fireDocumentChange(document);
+        return true;
+    };
+    document.positionAt = offset => ({ line: 0, character: offset });
+    const reveals = [];
+    const textEditor = { document, revealRange: (...args) => reveals.push(args) };
+    vscodeMockState.executeCommandHandler = (command, _uri, viewType) => {
+        if (command === 'vscode.openWith' && viewType === 'default') {
+            assert.equal(document.getText(), source);
+            vscodeMockState.activeTextEditor = textEditor;
+        }
+    };
+    try {
+        const switching = provider.openTextEditor(document.uri);
+        await waitFor(() => webview.postedMessages.some(message => message.type === 'prepareSyncSnapshot'), 'No switch snapshot requested');
+        const request = webview.postedMessages.find(message => message.type === 'prepareSyncSnapshot');
+        assert.equal(request.reason, 'editorSwitch');
+        await webview.sendMessage({ type: 'syncSnapshot', requestId: request.requestId, content: source, revision: 1, selection: rendered });
+        assert.equal(vscodeMockState.executedCommands.some(args => args[0] === 'vscode.openWith'), false);
+        release();
+        await switching;
+        assert.deepEqual(textEditor.selection.active, { line: 0, character: active });
+        assert.equal(reveals.length, 1);
+        assert.deepEqual(document.savedTexts, [], 'Switching updates the buffer without saving to disk');
+    } finally { release(); webview.dispose(); }
+});
+
+test('failed synchronization keeps the WYSIWYG editor open when switching to source', async () => {
+    const { provider, document, webview } = await createEditorSyncHarness('Original.\n');
+    provider.updateTextDocument = async () => false;
+    try {
+        const switching = provider.openTextEditor(document.uri);
+        await waitFor(() => webview.postedMessages.some(message => message.type === 'prepareSyncSnapshot'), 'No switch snapshot requested');
+        const request = webview.postedMessages.find(message => message.type === 'prepareSyncSnapshot');
+        await webview.sendMessage({ type: 'syncSnapshot', requestId: request.requestId, content: 'New edit.\n', revision: 1, selection: { anchor: 4, active: 4 } });
+        await switching;
+        assert.equal(document.getText(), 'Original.\n');
+        assert.equal(vscodeMockState.executedCommands.some(args => args[0] === 'vscode.openWith'), false);
+        assert.match(vscodeMockState.errors.at(-1), /before switching editors/);
+    } finally { webview.dispose(); }
+});
+
+test('switching refreshes the caret snapshot when newer input arrives during synchronization', async () => {
+    const { provider, document, webview } = await createEditorSyncHarness('Before.\n');
+    const source = 'Longer latest **text**.\n';
+    const { MarkdownSelectionMap } = require('../out/editor/MarkdownSelection');
+    const active = source.indexOf('text') + 2;
+    const selection = new MarkdownSelectionMap(new MarkdownDocument(createTextDocument(source)), source).toRendered({ anchor: active, active });
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    provider.updateTextDocument = async (_document, markdown) => {
+        await gate;
+        document.setText(markdown);
+        fireDocumentChange(document);
+        return true;
+    };
+    document.positionAt = offset => ({ line: 0, character: offset });
+    const textEditor = { document, revealRange() {} };
+    vscodeMockState.activeTextEditor = textEditor;
+    try {
+        const switching = provider.openTextEditor(document.uri);
+        await waitFor(() => webview.postedMessages.some(message => message.type === 'prepareSyncSnapshot'), 'No switch snapshot requested');
+        const request = webview.postedMessages.find(message => message.type === 'prepareSyncSnapshot');
+        await webview.sendMessage({ type: 'syncSnapshot', requestId: request.requestId, content: 'First edit.\n', revision: 1, selection: { anchor: 4, active: 4 } });
+        await webview.sendMessage({ type: 'update', content: source, revision: 2 });
+        release();
+        await waitFor(() => webview.postedMessages.filter(message => message.type === 'prepareSyncSnapshot').length === 2, 'The stale caret was not requested again');
+        const refresh = webview.postedMessages.filter(message => message.type === 'prepareSyncSnapshot').at(-1);
+        await webview.sendMessage({ type: 'syncSnapshot', requestId: refresh.requestId, content: source, revision: 2, selection });
+        await switching;
+        assert.equal(document.getText(), source);
+        assert.deepEqual(textEditor.selection.active, { line: 0, character: active });
+    } finally { release(); webview.dispose(); }
+});
+
+test('an unchanged round trip retains the exact source caret inside a link URL', async () => {
+    const source = 'Before [label](https://example.com/path) after.\n';
+    const { provider, document, webview } = await createEditorSyncHarness(source);
+    document.offsetAt = position => position;
+    document.positionAt = offset => ({ line: 0, character: offset });
+    const active = source.indexOf('example.com') + 4;
+    const textEditor = { document, selection: { anchor: active, active }, revealRange() {} };
+    try {
+        await provider.openWysiwygEditor(textEditor);
+        await webview.sendMessage({ type: 'ready' });
+        const init = webview.postedMessages.find(message => message.type === 'init');
+        vscodeMockState.activeTextEditor = textEditor;
+        const switching = provider.openTextEditor(document.uri);
+        await waitFor(() => webview.postedMessages.some(message => message.type === 'prepareSyncSnapshot'), 'No switch snapshot requested');
+        const request = webview.postedMessages.find(message => message.type === 'prepareSyncSnapshot');
+        await webview.sendMessage({ type: 'syncSnapshot', requestId: request.requestId, content: init.content, revision: 0, selection: init.selection });
+        await switching;
+        assert.deepEqual(textEditor.selection.active, { line: 0, character: active });
+        assert.equal(document.getText(), source);
+    } finally { webview.dispose(); }
+});
 
 test('copying Markdown through the host writes text without changing the document', async () => {
     const { provider, document, webview } = await createEditorSyncHarness('Original document\n');

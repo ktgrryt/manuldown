@@ -61,6 +61,7 @@ const { DOMUtils } = await import(`./modules/DOMUtils.js${new URL(import.meta.ur
 const { TableManager } = await import(`./modules/TableManager.js${new URL(import.meta.url).search}`);
 const { CodeBlockManager } = await import(`./modules/CodeBlockManager.js${new URL(import.meta.url).search}`);
 const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js${new URL(import.meta.url).search}`);
+const { captureEditorSelection, restoreEditorSelection } = await import(`./vendor/editor-selection.bundle.js${new URL(import.meta.url).search}`);
 
 (function () {
     // @ts-ignore
@@ -73,6 +74,8 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
     let notifyTimeout = null;
     let localUpdateRevision = 0;
     let acknowledgedUpdateRevision = 0;
+    let lastEditorSelection = null;
+    let pendingInitialSelection = null;
     // Latest revision the host could not synchronize. Until that revision or a
     // newer one is acknowledged, the edit exists only in this Webview.
     let failedUpdateRevision = 0;
@@ -3678,7 +3681,8 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
         const caretRange = force && !selection.isCollapsed && !selectedAtomicElement
             ? (() => {
                 const collapsedRange = range.cloneRange();
-                collapsedRange.collapse(false);
+                collapsedRange.setStart(selection.focusNode, selection.focusOffset);
+                collapsedRange.collapse(true);
                 return collapsedRange;
             })()
             : range;
@@ -7009,8 +7013,16 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
 
         return {
             content: domUtils.getCleanedHTML({ canonicalImages: true }),
-            revision: localUpdateRevision
+            revision: localUpdateRevision,
+            ...(options.includeSelection ? { selection: captureEditorSelection(editor, node => domUtils.getCaretAnchorOffset(node), lastEditorSelection) } : {})
         };
+    }
+
+    function restoreSwitchedEditorSelection(selection) {
+        if (!selection || !restoreEditorSelection(editor, selection, node => domUtils.getCaretAnchorOffset(node))) return;
+        codeBlockManager.revealSelectionSource(window.getSelection());
+        lastCaretIntentSource = 'keyboard';
+        scheduleEnsureCaretVisible(true);
     }
 
     function syncUpdateFailureWarning() {
@@ -25096,6 +25108,8 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
                 element.removeAttribute('aria-hidden');
                 element.setAttribute('aria-busy', 'false');
             });
+            restoreSwitchedEditorSelection(pendingInitialSelection);
+            pendingInitialSelection = null;
         });
     }
 
@@ -25110,6 +25124,17 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
         setupEditor();
         tableManager.wrapTables();
         tocManager.setup();
+
+        document.addEventListener('selectionchange', () => {
+            const selection = window.getSelection();
+            if (selection?.anchorNode && selection.focusNode &&
+                editor.contains(selection.anchorNode) && editor.contains(selection.focusNode)) {
+                lastEditorSelection = {
+                    anchorNode: selection.anchorNode, anchorOffset: selection.anchorOffset,
+                    focusNode: selection.focusNode, focusOffset: selection.focusOffset
+                };
+            }
+        });
 
         vscode.postMessage({ type: 'ready' });
     }
@@ -25133,6 +25158,7 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
 
         switch (message.type) {
             case 'init':
+                pendingInitialSelection = message.selection || null;
                 setEditorLoadFailureState(false);
                 temporarilySuppressImageRemovalSync();
                 isUpdating = true;
@@ -25162,6 +25188,9 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
                         revealEditorAfterInitialLoad();
                     }
                 }, 100);
+                break;
+            case 'restoreEditorSelection':
+                restoreSwitchedEditorSelection(message.selection);
                 break;
             case 'loadError':
                 clearNotifyTimeout();
@@ -25603,7 +25632,7 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
                 break;
             case 'prepareSyncSnapshot':
                 {
-                    if (message.reason === 'pdfExport') {
+                    if (message.reason === 'pdfExport' || message.reason === 'editorSwitch') {
                         if (editorLoadFailed) {
                             vscode.postMessage({ type: 'syncSnapshotFailed', requestId: message.requestId });
                             break;
@@ -25611,10 +25640,14 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
                         void prepareExportSnapshot({
                             isComposing: () => isComposing || compositionUpdateGate.composing || compositionUpdateGate.finalizing,
                             hasPendingImages: () => pendingImageInsertionRanges.size > 0 || pendingPastedDataImages.size > 0,
-                            createSnapshot: () => createSyncSnapshot({ preservePendingUpdate: true })
+                            createSnapshot: () => {
+                                if (message.reason === 'editorSwitch') flushPendingCaretPlacement();
+                                return createSyncSnapshot({ preservePendingUpdate: true, includeSelection: message.reason === 'editorSwitch' });
+                            }
                         }).then(snapshot => vscode.postMessage({
                             type: 'syncSnapshot', requestId: message.requestId,
-                            content: snapshot.content, revision: snapshot.revision
+                            content: snapshot.content, revision: snapshot.revision,
+                            selection: snapshot.selection
                         }), () => vscode.postMessage({ type: 'syncSnapshotFailed', requestId: message.requestId }));
                         break;
                     }
