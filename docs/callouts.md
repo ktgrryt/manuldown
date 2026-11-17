@@ -41,7 +41,10 @@ Quote titles, Obsidian `+`/`-`, Docusaurus `[title]`, VitePress space-separated
 titles, and MkDocs quoted titles are retained. Folded declarations are displayed
 expanded. Titles are displayed as text and edited in the Markdown source view.
 MkDocs `""` retains its empty title. Container fences may have more than three
-colons, including nested containers. Known quoted callouts can also nest.
+colons. Callouts cannot nest. Existing nested callouts are displayed as
+read-only Markdown source inside the outer callout and retain their source on save.
+Ordinary quotations support at most two levels; deeper parts likewise remain
+read-only source. Insertion and paste follow the same nesting limits.
 
 Custom titles and folding signs survive type changes. Enter selects a type,
 Escape cancels the picker, and the normal history restores type changes with

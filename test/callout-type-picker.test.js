@@ -490,7 +490,7 @@ test('copied mixed callout declarations serialize in a different document withou
     const source = ':::note alert\nBody\n:::\n\n> [!warning]- Custom title\n> Body\n\n' +
         ':::message alert\nBody\n:::\n\n::::danger[Custom title]\nBody\n::::\n\n' +
         '???+ warning "Custom title"\n    Body\n\n' +
-        ':::note info\n> :::note warn\n> Inner body\n> :::\n:::\n';
+        ':::note info\nOuter body\n:::\n\n> :::note warn\n> Inner body\n> :::\n';
     const f = await fixture(source);
     try {
         const prepared = f.manager.prepareClipboardImport(f.editor.innerHTML, false);
@@ -807,18 +807,19 @@ test('type changes participate in the existing Undo and Redo history', async () 
     } finally { f.restore(); }
 });
 
-test('nested type labels remain reachable in order before entering their body', async () => {
+test('nested type declarations remain read-only and are not entered as editable text', async () => {
     const source = '> [!NOTE]\n> > [!TIP]\n> > Body\n';
     const f = await fixture(source);
     try {
         const blocks = f.editor.querySelectorAll('[data-mdw-callout="true"]');
-        const outerTitle = blocks[0].querySelector('.mdw-callout-title');
-        const innerTitle = blocks[1].querySelector('.mdw-callout-title');
+        assert.equal(blocks.length, 1);
+        assert.ok(f.editor.querySelector('[data-mdw-opaque-kind="callout-source"]'));
         f.manager.selectTypeLabel(blocks[0]);
         f.cursor.moveCursorDown();
-        assert.equal(f.manager.getSelectedTypeLabel(), innerTitle);
-        f.cursor.moveCursorUp();
-        assert.equal(f.manager.getSelectedTypeLabel(), outerTitle);
+        assert.ok(!f.manager.getSelectedTypeLabel());
+        const node = f.range().startContainer;
+        const element = node.nodeType === 1 ? node : node.parentElement;
+        assert.ok(!element.closest('[data-mdw-opaque-source]'));
         assert.equal(save(f.editor.innerHTML, source), source);
     } finally { f.restore(); }
 });
@@ -829,31 +830,22 @@ for (const source of [
     ':::note info\n> - > [!TIP]\n>   > Inner body\n:::\n',
 ]) {
     for (const method of ['moveCursorDown', 'moveCursorForward']) {
-        test(`${method} visits nested type labels through quote and list wrappers: ${source.split('\n')[1]}`, async () => {
+        test(`${method} skips read-only nested declarations through quote and list wrappers: ${source.split('\n')[1]}`, async () => {
             const f = await fixture(source);
             try {
                 const blocks = f.editor.querySelectorAll('[data-mdw-callout="true"]');
-                assert.equal(blocks.length, 2);
-                const inner = blocks[1], innerTitle = inner.querySelector('.mdw-callout-title');
-                const text = inner.querySelector('.mdw-callout-content p').firstChild;
+                assert.equal(blocks.length, 1);
+                assert.ok(f.editor.querySelector('[data-mdw-opaque-kind="callout-source"]'));
                 f.manager.selectTypeLabel(f.block);
                 if (method === 'moveCursorForward') {
                     f.cursor.moveCursorForward();
                     assert.equal(f.manager.getFocusedFormatButton()?.parentElement, f.block);
                 }
                 f.cursor[method]();
-                assert.equal(f.manager.getSelectedTypeLabel(), innerTitle);
-                if (method === 'moveCursorForward') {
-                    f.cursor.moveCursorForward();
-                    assert.equal(f.manager.getFocusedFormatButton()?.parentElement, inner);
-                }
-                f.cursor[method]();
-                assert.equal(f.range().startContainer, text);
-                assert.equal(f.range().startOffset, 0);
-                f.cursor.moveCursorUp();
-                assert.equal(f.manager.getSelectedTypeLabel(), innerTitle);
-                f.cursor.moveCursorUp();
-                assert.equal(f.manager.getSelectedTypeLabel(), f.title);
+                assert.ok(!f.manager.getSelectedTypeLabel());
+                const node = f.range().startContainer;
+                const element = node.nodeType === 1 ? node : node.parentElement;
+                assert.ok(!element.closest('[data-mdw-opaque-source]'));
                 assert.equal(save(f.editor.innerHTML, source), source);
                 assert.equal(f.before.length, 0); assert.equal(f.after.length, 0);
             } finally { f.restore(); }
@@ -861,12 +853,11 @@ for (const source of [
     }
 }
 
-test('leaving a type label stops in a leading empty quoted paragraph before a nested callout', async () => {
+test('leaving a type label stops in an editable paragraph before preserved nested source', async () => {
     const f = await fixture(':::note info\n> :::note warn\n> Inner body\n> :::\n:::\n');
     try {
-        const quote = f.block.querySelector('.mdw-callout-content > blockquote');
-        const empty = f.document.createElement('p'); empty.appendChild(f.document.createElement('br'));
-        quote.insertBefore(empty, quote.firstChild);
+        const empty = f.block.querySelector('.mdw-callout-content > p');
+        assert.ok(empty);
         f.manager.selectTypeLabel(f.block);
         f.cursor.moveCursorDown();
         assert.equal(f.manager.getSelectedTypeLabel(), null);

@@ -153,6 +153,8 @@ function clipboardPasteFixture({ editor, document, window, range, copy, calloutM
         codeBlockGapManager: { reconcile() {} },
         normalizeListRenderingAfterStructureChange() {}, scheduleEditorOverflowStateUpdate() {},
         domUtils: {
+            canInsertQuote: value => domUtils.canInsertQuote(value),
+            normalizeBlockNesting: (root, node) => domUtils.normalizeBlockNesting(root, node),
             getParentElement(node, tag) {
                 const element = node.nodeType === 3 ? node.parentElement : node;
                 return element.closest(tag);

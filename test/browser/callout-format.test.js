@@ -188,13 +188,14 @@ test('callout format controls align with the title and preserve editing, history
         ['code', '```js\nconst value = 1;\n```'], ['quote', '> First\n> Second'],
         ['nested callout', '> [!TIP]\n> Inner body.'], ['table', '| Head |\n| --- |\n| Cell |'],
     ]) {
-        await t.test(`the format control leads to editable ${name} content`, async () => {
+        await t.test(`the format control leads to editable content${name === 'nested callout' ? ' beside read-only nested source' : ': ' + name}`, async () => {
             await reset(`:::note warn\n${body}\n:::\n`);
             await click('.mdw-callout-format-toggle'); await key('Escape', 'Escape', 27);
             await key('ArrowDown', 'ArrowDown', 40);
             if (name === 'nested callout') {
-                assert.equal(await evaluate(`document.querySelectorAll('.mdw-callout-title.nav-selected').length`), 1);
-                await key('ArrowDown', 'ArrowDown', 40);
+                assert.equal(await evaluate(`document.querySelectorAll('.mdw-callout-title.nav-selected').length`), 0);
+                assert.equal(await evaluate(`document.querySelectorAll('[data-mdw-callout="true"]').length`), 1);
+                assert.equal(await evaluate(`!!document.querySelector('[data-mdw-opaque-kind="callout-source"]')`), true);
             }
             const state = await evaluate(`(()=>{const selection=getSelection(),editor=document.getElementById('editor'),node=selection.anchorNode,element=node?.nodeType===1?node:node?.parentElement;return {focused:document.activeElement.id,tag:element?.tagName,usable:document.activeElement===editor&&selection.isCollapsed&&!!element?.closest('.mdw-callout-content')&&!element?.closest('[contenteditable="false"]')};})()`);
             assert.equal(state.usable, true, JSON.stringify(state));
@@ -297,6 +298,44 @@ test('callout format controls align with the title and preserve editing, history
             assert.equal(await evaluate(`Array.from(document.querySelectorAll('.slash-command-menu:not(.insert-command-menu) .slash-command-name')).some(item=>item.textContent==='/callout'&&item.closest('.slash-command-menu').style.display!=='none')`), false);
             assert.equal(await evaluate(`document.querySelectorAll('.mdw-callout').length`), 0);
         }
+    });
+    await connection.send('Emulation.setDeviceMetricsOverride', { width: 1000, height: 650, deviceScaleFactor: 1, mobile: false }, sessionId);
+    await t.test('callouts cannot be inserted inside another callout', async () => {
+        await reset(':::note warn\nBody.\n:::\n');
+        await selectBodyStart();
+        await connection.send('Input.insertText', { text: '/callout' }, sessionId);
+        await settle();
+        assert.equal(await evaluate(`Array.from(document.querySelectorAll('.slash-command-name')).some(item=>item.textContent==='/callout'&&item.closest('.slash-command-menu').style.display!=='none')`), false);
+        assert.equal(await evaluate(`document.querySelectorAll('[data-mdw-callout="true"]').length`), 1);
+        await evaluate(`window.postMessage({type:'openInsertMenu'},'*')`);
+        await waitFor(`document.querySelector('.insert-command-menu')?.style.display==='flex'`);
+        await connection.send('Input.insertText', { text: 'callout' }, sessionId);
+        await settle();
+        assert.equal(await evaluate(`document.querySelectorAll('.insert-command-menu .slash-command-item').length`), 0);
+        await key('Escape', 'Escape', 27);
+    });
+    await t.test('quote shortcuts stop at two levels and toolbar wrapping cannot add a third', async () => {
+        for (const depth of [1, 2]) {
+            await reset(`${'> '.repeat(depth)}Body.\n`);
+            await evaluate(`(()=>{const editor=document.getElementById('editor'),node=editor.querySelector('p').firstChild,range=document.createRange();range.setStart(node,0);range.collapse(true);editor.focus();getSelection().removeAllRanges();getSelection().addRange(range);})()`);
+            await connection.send('Input.insertText', { text: '>' }, sessionId);
+            await connection.send('Input.insertText', { text: ' ' }, sessionId);
+            await settle();
+            assert.equal(await evaluate(`document.querySelectorAll('#editor blockquote').length`), 2);
+            assert.equal(await evaluate(`!!document.querySelector('#editor blockquote blockquote blockquote')`), false);
+            if (depth === 2) {
+                assert.match(await evaluate(`document.getElementById('editor').textContent`), /> Body\./);
+                await click('[data-command="quote"]'); await settle();
+                assert.equal(await evaluate(`document.querySelectorAll('#editor blockquote').length`), 2);
+            }
+        }
+    });
+    await t.test('rich paste into a second-level quotation retains text without adding more levels', async () => {
+        await reset('> > Body.\n');
+        await evaluate(`(()=>{const editor=document.getElementById('editor'),paragraph=editor.querySelector('p'),range=document.createRange();range.selectNodeContents(paragraph);range.collapse(false);editor.focus();getSelection().removeAllRanges();getSelection().addRange(range);const data=new DataTransfer();data.setData('text/html','<blockquote><blockquote><p><strong>Inserted.</strong></p></blockquote></blockquote>');data.setData('text/plain','Inserted.');editor.dispatchEvent(new ClipboardEvent('paste',{clipboardData:data,bubbles:true,cancelable:true}));})()`);
+        await settle();
+        assert.equal(await evaluate(`!!document.querySelector('#editor blockquote blockquote blockquote')`), false);
+        assert.match(await evaluate(`document.getElementById('editor').textContent`), /Inserted\./);
     });
     assert.deepEqual(await evaluate('window.editorErrors'), []);
     t.diagnostic(`Callout screenshots: ${artifacts}`);

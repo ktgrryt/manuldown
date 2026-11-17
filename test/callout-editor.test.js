@@ -216,7 +216,7 @@ test('callout bodies form an editing root and cannot reach an enclosing quote', 
     assert.equal(utils.getParentElement(f.editor.querySelector('li').firstChild, 'UL'), f.editor.querySelector('ul'));
 });
 
-test('local rich clipboard import survives metadata stripping and retains nested callouts safely', async () => {
+test('local rich clipboard import retains only the outer callout and preserves nested visible content', async () => {
     const f = await fixture('');
     const outer = f.manager.createBlock({ header: ':::note warn', footer: ':::', format: 'container', type: 'warn', variant: 'warning', title: '<img src=x>' });
     const inner = f.manager.createBlock({ header: '> [!TIP]', footer: '', format: 'quote', type: 'TIP', variant: 'tip', title: 'Tip' });
@@ -231,11 +231,27 @@ test('local rich clipboard import survives metadata stripping and retains nested
     f.manager.restoreClipboardImport(container, prepared);
     const restored = container.querySelector('[data-mdw-callout]');
     assert.equal(decode(restored, 'header'), ':::note warn');
-    assert.equal(restored.querySelectorAll('[data-mdw-callout]').length, 1);
+    assert.equal(restored.querySelectorAll('[data-mdw-callout]').length, 0);
     assert.equal(restored.querySelector('.mdw-callout-title').textContent, '<img src=x>');
     assert.equal(restored.querySelectorAll('img').length, 0);
     assert.equal(restored.querySelector('strong').textContent, 'Body');
     assert.equal(f.manager.prepareClipboardImport(outer.outerHTML, false).blocks.length, 0);
+});
+
+test('typing declarations inside an existing callout never creates a nested callout', async () => {
+    for (const body of [
+        '<blockquote><p>[!TIP]</p><p>Body</p></blockquote>',
+        '<p>:::warning</p><p>Body</p><p>:::</p>',
+        '<p>!!! note</p><p>    Body</p>',
+    ]) {
+        const f = await fixture(`<div data-mdw-callout="true"><div class="mdw-callout-content">${body}</div></div>`);
+        const paragraph = f.editor.querySelector('.mdw-callout-content').lastElementChild;
+        f.caret(paragraph.firstChild);
+        const original = f.editor.innerHTML;
+        assert.equal(f.manager.handleKeydown(key('Enter')), false);
+        assert.equal(f.manager.handleInput(input('insertText', ':')), false);
+        assert.equal(f.editor.innerHTML, original);
+    }
 });
 
 test('Undo and Redo restore callout metadata and edited rich content with the normal history manager', async () => {

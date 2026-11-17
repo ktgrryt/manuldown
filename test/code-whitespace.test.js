@@ -2859,6 +2859,7 @@ test('oversized data URL images are rejected before any file is created', async 
 });
 
 test('a valid data URL image is saved and inserted on a remote filesystem', async () => {
+    const image = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6SAAAAABJRU5ErkJggg==', 'base64');
     const provider = new MarkdownEditorProvider({});
     const webviewMessages = [];
     const webview = {
@@ -2874,7 +2875,7 @@ test('a valid data URL image is saved and inserted on a remote filesystem', asyn
     document.uri = createMockUri('/workspace/document.md', 'vscode-remote', 'test');
 
     const saved = await provider.saveImageFromDataUrl(
-        `data:image/png;base64,${Buffer.from([1, 2, 3]).toString('base64')}`,
+        `data:image/png;base64,${image.toString('base64')}`,
         'image/png',
         document,
         webview,
@@ -2884,7 +2885,7 @@ test('a valid data URL image is saved and inserted on a remote filesystem', asyn
     assert.equal(saved, true);
     assert.equal(vscodeMockState.errors.length, 0);
     assert.equal(vscodeMockState.writes.length, 1);
-    assert.deepEqual(Array.from(vscodeMockState.writes[0].bytes), [1, 2, 3]);
+    assert.deepEqual(Buffer.from(vscodeMockState.writes[0].bytes), image);
     assert.equal(webviewMessages[0].type, 'insertImage');
     assert.equal(webviewMessages[0].requestId, 'image-request-1');
     assert.match(webviewMessages[0].markdown, /^!\[diagram\]\(images\/document\/document\.png\)$/);
@@ -2906,8 +2907,8 @@ test('concurrent image saves reserve distinct filenames on a remote filesystem',
     const document = createTextDocument('');
     document.uri = createMockUri('/workspace/document.md', 'vscode-remote', 'test');
 
-    const firstData = Buffer.from([1, 2, 3]);
-    const secondData = Buffer.from([4, 5, 6]);
+    const firstData = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6SAAAAABJRU5ErkJggg==', 'base64');
+    const secondData = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
     const [firstSaved, secondSaved] = await Promise.all([
         provider.saveImageFromDataUrl(
             `data:image/png;base64,${firstData.toString('base64')}`,

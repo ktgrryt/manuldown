@@ -1057,7 +1057,7 @@ export class MarkdownConverter {
 
         // 引用構文をチェック > text（テキストが必要）
         const blockquoteMatch = rawText.match(/^\s*>\s+(.*)$/);
-        if (!isInTableCell && !isInListItem && blockquoteMatch &&
+        if (!isInTableCell && !isInListItem && this.domUtils.getQuoteDepth(textNode) < 2 && blockquoteMatch &&
             (blockquoteMatch[1] !== '' || this.hasMeaningfulNodes(this.getLineContentAfter(textNode))) &&
             blockMarkerTyped(/^\s*>\s+$/)) {
             const content = blockquoteMatch[1];

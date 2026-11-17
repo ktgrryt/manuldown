@@ -1,4 +1,5 @@
 import { marked } from 'marked';
+import { createBoundedTokenizer } from './MarkdownNesting';
 
 export type CalloutVariant = 'note' | 'tip' | 'important' | 'warning' | 'caution';
 export type CalloutService = 'github' | 'qiita' | 'zenn' | 'obsidian' | 'container' | 'mkdocs';
@@ -133,7 +134,7 @@ function literalMarkdownRanges(source: string): Array<{ start: number; end: numb
     const ranges: Array<{ start: number; end: number }> = [];
     let cursor = 0;
     // Disable extensions to avoid recursion while inspecting Markdown contexts.
-    const lexer = new marked.Lexer({ ...marked.defaults, tokenizer: new marked.Tokenizer(), extensions: null });
+    const lexer = new marked.Lexer({ ...marked.defaults, tokenizer: createBoundedTokenizer(), extensions: null });
     for (const token of lexer.lex(source)) {
         const start = source.indexOf(token.raw, cursor);
         if (start < 0) {break;}
@@ -319,6 +320,16 @@ function escape(value: string): string {
     return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 export function renderCallout(callout: Callout, bodyHtml: string): string {
+    if (bodyHtml.includes('data-mdw-opaque-source=')) {
+        const { createWindow } = require('@mixmark-io/domino');
+        const root = createWindow(bodyHtml).document;
+        const editable = Array.from<any>(root.querySelectorAll('p, pre, td, th, img, input, hr'))
+            .some(node => !node.closest('[contenteditable="false"]'));
+        // A body made entirely of preserved source still needs a real text
+        // position. A DOM boundary before a read-only PRE is not a stable
+        // Chromium caret and can jump outside the callout on the next key.
+        if (!editable) { bodyHtml = '<p><br></p>' + bodyHtml; }
+    }
     const base64 = (value: string): string => Buffer.from(value, 'utf8').toString('base64');
     return `<div class="mdw-callout" data-mdw-callout="true" data-mdw-callout-source="${base64(callout.raw)}" data-mdw-callout-header="${base64(callout.header)}" data-mdw-callout-footer="${base64(callout.footer)}" data-mdw-callout-format="${callout.format}" data-mdw-callout-type="${escape(callout.sourceType)}" data-mdw-callout-variant="${callout.variant}"><div class="mdw-callout-title" contenteditable="false" role="button" tabindex="-1" aria-haspopup="listbox" aria-expanded="false" aria-label="Change callout type (${escape(callout.sourceType)})">${escape(callout.title)}</div><div class="mdw-callout-content">${bodyHtml || '<p><br></p>'}</div></div>\n`;
 }

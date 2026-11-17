@@ -36,7 +36,7 @@ function fixture() {
             wrapTables() {},
         },
         normalizeCheckboxListItems() {}, updateListItemClasses() {},
-        domUtils: { getLastTextNode: lastText },
+        domUtils: { getLastTextNode: lastText, normalizeBlockNesting() {} },
         placeCollapsedCaret() {}, setCaretAfterNode() {}, notifyChange() {},
         findUrlLikeRanges: () => [],
         isPastedBlankLine: line => line.trim() === '',

@@ -155,6 +155,40 @@ test('data URL images still save and insert normally on the local filesystem', a
     assert.equal(f.provider.pendingImageSavePaths.size, 0);
 });
 
+test('forged image MIME types and non-image payloads create no files', async t => {
+    const f = await fixture(t);
+    const log = console.error;
+    console.error = () => {};
+    const script = Buffer.from('Security review marker. Not image data.');
+    try {
+        for (const mime of ['image/cmd', 'image/ps1', 'image/html', 'image/exe', 'image/unknown', 'image/constructor']) {
+            assert.equal(await f.provider.saveImageFromDataUrl(
+                `data:${mime};base64,${script.toString('base64')}`, mime, f.document, f.webview), false, mime);
+        }
+        for (const mime of ['image/png', 'image/jpeg', 'image/gif', 'image/svg+xml']) {
+            assert.equal(await f.provider.saveImageFromDataUrl(
+                `data:${mime};base64,${script.toString('base64')}`, mime, f.document, f.webview), false, mime);
+        }
+        assert.equal(await f.provider.saveImageFromDataUrl(
+            `data:image/gif;base64,${imageBytes.toString('base64')}`, 'image/gif', f.document, f.webview), false);
+        assert.deepEqual(await fs.readdir(f.workspace), []);
+        assert.equal(f.provider.pendingImageSavePaths.size, 0);
+    } finally { console.error = log; }
+});
+
+test('remote imports use the same format validation as clipboard images', async t => {
+    const f = await fixture(t);
+    f.state.settings['security.allowRemoteImageImport'] = true;
+    f.provider.fetchRemoteImage = async () => ({ bytes: Buffer.from('not an image'), mimeType: 'image/ps1' });
+    const log = console.error;
+    console.error = () => {};
+    try {
+        await f.provider.saveImageFromUri('https://example.com/photo.png', f.document, f.webview);
+        assert.deepEqual(await fs.readdir(f.workspace), []);
+        assert.ok(f.state.errors.some(message => /not supported/.test(message)));
+    } finally { console.error = log; }
+});
+
 test('percent-encoded image bytes and textual SVG data URLs decode without UTF-8 corruption', async t => {
     for (const [url, mime, expected] of [
         ['data:image/png,' + Array.from(imageBytes, byte => '%' + byte.toString(16).padStart(2, '0')).join(''), 'image/png', imageBytes],
@@ -430,14 +464,15 @@ test('existing image files and dangling file symlinks are never overwritten or f
 test('independent editor providers create distinct files during simultaneous image imports', async t => {
     const f = await fixture(t);
     const other = new MarkdownEditorProvider({});
+    const otherImage = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
     await Promise.all([
         f.provider.saveImageBytes(imageBytes, 'image/png', f.document, f.webview),
-        other.saveImageBytes(Buffer.from([1, 2, 3]), 'image/png', f.document, f.webview),
+        other.saveImageBytes(otherImage, 'image/png', f.document, f.webview),
     ]);
     assert.deepEqual((await fs.readdir(f.imageDirectory)).sort(), ['doc-2.png', 'doc.png']);
     const contents = await Promise.all(['doc.png', 'doc-2.png'].map(name => fs.readFile(path.join(f.imageDirectory, name))));
     assert.ok(contents.some(bytes => bytes.equals(imageBytes)));
-    assert.ok(contents.some(bytes => bytes.equals(Buffer.from([1, 2, 3]))));
+    assert.ok(contents.some(bytes => bytes.equals(otherImage)));
     assert.equal(new Set(f.messages.filter(message => message.type === 'insertImage').map(message => message.markdown)).size, 2);
     assert.equal(f.provider.pendingImageSavePaths.size, 0);
     assert.equal(other.pendingImageSavePaths.size, 0);

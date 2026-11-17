@@ -7,6 +7,7 @@ import { WorkspaceLinkPicker } from './WorkspaceLinkPicker';
 import { resolveToolbarItems, ToolbarItems } from './ToolbarItems';
 import { getNonce } from '../utils/getNonce';
 import { getLoadingSpinnerCss } from '../utils/loadingSpinner';
+import { imageExtension, imageMatchesMimeType, normalizeImageMimeType } from '../utils/importedImages';
 import {
     encodeMarkdownRelativePath,
     isUriLexicallyWithinDirectory,
@@ -3219,12 +3220,14 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             'callout-source',
             'footnote-definition',
             'front-matter',
+            'quote-source',
             'raw-html-block',
             'raw-html-inline',
             'reference-definition',
             'reference-image',
             'reference-link',
         ]);
+        let renderedNestingSources: Set<string> | undefined;
         const privateAttributePattern = /\sdata-mdw-opaque-(?:kind|source)\s*=\s*(["'])[^"']*\1/gi;
 
         const getAttribute = (attributes: string, name: string): string | null => {
@@ -3247,13 +3250,26 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             }
 
             const decoded = Buffer.from(encoded, 'base64').toString('utf8');
+            const isRenderedNestingSource = (): boolean => {
+                if (kind !== 'quote-source' && kind !== 'callout-source') { return false; }
+                if (!renderedNestingSources) {
+                    // Dequoting a nested source changes every line's prefix.
+                    // Authorize it against our own rendering, never pasted metadata.
+                    const original = new MarkdownDocument({ getText: () => documentText } as vscode.TextDocument).toHtml();
+                    const root = createWindow(original).document;
+                    renderedNestingSources = new Set(Array.from<any>(root.querySelectorAll('[data-mdw-opaque-source]'))
+                        .map(node => `${node.getAttribute('data-mdw-opaque-kind')}:${node.getAttribute('data-mdw-opaque-source')}`));
+                }
+                return renderedNestingSources.has(`${kind}:${encoded}`);
+            };
             if (
                 decoded === '' ||
                 Buffer.from(decoded, 'utf8').toString('base64') !== encoded ||
                 (
                     !documentText.includes(decoded) &&
                     !normalizedDocumentText.includes(decoded) &&
-                    !trustedBodySource?.includes(decoded)
+                    !trustedBodySource?.includes(decoded) &&
+                    !isRenderedNestingSource()
                 )
             ) {
                 return null;
@@ -3304,10 +3320,19 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                     const trailingPattern = preserved.block
                         ? '(?:\\r?\\n){0,2}'
                         : '';
-                    restored = restored.replace(
-                        new RegExp(`${this.escapeRegExp(preserved.marker)}${trailingPattern}`, 'g'),
-                        () => preserved.source
-                    );
+                    if (preserved.block) {
+                        restored = restored.replace(
+                            new RegExp(`(^|\\n)([^\\n]*)${this.escapeRegExp(preserved.marker)}${trailingPattern}`, 'g'),
+                            (_match, boundary: string, prefix: string) => {
+                                const continuation = prefix.replace(/(?:[*+-]|\d+[.)])([ \t]+)/g, value => ' '.repeat(value.length));
+                                const lines = preserved.source.split('\n');
+                                return boundary + lines.map((line, index) => index === lines.length - 1 && line === '' ? ''
+                                    : (index === 0 ? prefix : continuation) + line).join('\n');
+                            }
+                        );
+                    } else {
+                        restored = restored.split(preserved.marker).join(preserved.source);
+                    }
                 }
                 return restored;
             }
@@ -3321,8 +3346,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         if (!/data-mdw-callout=/i.test(html)) {
             return { html, restore: markdown => markdown };
         }
-        if ((context.calloutDepth ?? 0) >= 32) {
-            throw new Error('Callout nesting is too deep to save safely');
+        if ((context.calloutDepth ?? 0) >= 1) {
+            throw new Error('Nested callouts are not supported');
         }
         const root = createWindow(`<div id="callouts-root">${html}</div>`).document.getElementById('callouts-root');
         const namespace = this.createPlaceholderNamespace(html + document.getText(), 'CALLOUT');
@@ -3545,6 +3570,12 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     }
 
     private htmlToMarkdown(html: string, document: vscode.TextDocument, footnoteContext: MarkdownConversionContext = { depth: 0 }): string {
+        if (/<blockquote\b|data-mdw-callout=/i.test(html)) {
+            const root = createWindow(html).document;
+            if (root.querySelector('blockquote blockquote blockquote, [data-mdw-callout="true"] [data-mdw-callout="true"]')) {
+                throw new Error('Callouts cannot nest, and quotations support at most two levels');
+            }
+        }
         html = deduplicateFootnotes(html);
         html = this.normalizeTableGrid(html);
         // Use Turndown for reliable HTML to Markdown conversion
@@ -4036,37 +4067,15 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     }
 
     private normalizeImportedImageMimeType(mimeType: string): string {
-        const normalized = String(mimeType || '')
-            .split(';')[0]
-            .trim()
-            .toLowerCase();
-        if (!/^image\/[a-z0-9][a-z0-9.+-]*$/.test(normalized)) {
-            throw new ImageImportError('The selected data is not an image.');
+        const normalized = normalizeImageMimeType(mimeType);
+        if (!normalized) {
+            throw new ImageImportError('The selected image format is not supported.');
         }
         return normalized;
     }
 
     private getImportedImageExtension(mimeType: string): string {
-        const knownExtensions = new Map<string, string>([
-            ['image/jpeg', 'jpg'],
-            ['image/jpg', 'jpg'],
-            ['image/png', 'png'],
-            ['image/gif', 'gif'],
-            ['image/bmp', 'bmp'],
-            ['image/webp', 'webp'],
-            ['image/svg+xml', 'svg'],
-            ['image/avif', 'avif'],
-            ['image/x-icon', 'ico'],
-            ['image/heic', 'heic'],
-            ['image/heif', 'heif'],
-            ['image/tiff', 'tiff']
-        ]);
-        const knownExtension = knownExtensions.get(mimeType);
-        if (knownExtension) {
-            return knownExtension;
-        }
-        const subtype = mimeType.slice('image/'.length).replace(/\+.*$/, '');
-        return /^[a-z0-9]{1,10}$/.test(subtype) ? subtype : 'img';
+        return imageExtension(mimeType);
     }
 
     private async assertImageSaveDirectory(directory: vscode.Uri, documentDirectory: vscode.Uri): Promise<void> {
@@ -4205,6 +4214,9 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     ): Promise<void> {
         this.assertImportedImageSize(bytes.byteLength);
         const normalizedMimeType = this.normalizeImportedImageMimeType(mimeType);
+        if (!imageMatchesMimeType(bytes, normalizedMimeType)) {
+            throw new ImageImportError('The image data does not match its declared format.');
+        }
         const extension = this.getImportedImageExtension(normalizedMimeType);
         const documentFileName = this.getDocumentFileName(document);
 

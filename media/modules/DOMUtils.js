@@ -10,6 +10,65 @@ export class DOMUtils {
         this.pendingCaretAnchorInputs = new Map();
     }
 
+    getQuoteDepth(node) {
+        let depth = 0;
+        for (let element = node?.nodeType === 1 ? node : node?.parentElement;
+            element && element !== this.editor; element = element.parentElement) {
+            if (element.tagName === 'BLOCKQUOTE') depth++;
+        }
+        return depth;
+    }
+
+    canInsertQuote(range) {
+        if (!range || this.getQuoteDepth(range.startContainer) >= 2 ||
+            this.getQuoteDepth(range.endContainer) >= 2) return false;
+        if (!range.collapsed) {
+            for (const quote of Array.from(this.editor.querySelectorAll('blockquote'))) {
+                if (this.getQuoteDepth(quote) >= 2 && range.intersectsNode(quote)) return false;
+            }
+        }
+        return true;
+    }
+
+    /** Flatten pasted structure that cannot be inserted at this position. */
+    normalizeBlockNesting(root, contextNode = null) {
+        const quotes = this.getQuoteDepth(contextNode);
+        const context = contextNode?.nodeType === 1 ? contextNode : contextNode?.parentElement;
+        const callouts = context?.closest?.('[data-mdw-callout="true"]') ? 1 : 0;
+        const stack = Array.from(root.children || []).reverse().map(node => ({ node, quotes, callouts }));
+        while (stack.length) {
+            const item = stack.pop();
+            let { node, quotes, callouts } = item;
+            if (node.tagName === 'BLOCKQUOTE') {
+                if (quotes >= 2) {
+                    const children = Array.from(node.children);
+                    while (node.firstChild) node.parentNode.insertBefore(node.firstChild, node);
+                    node.remove();
+                    children.reverse().forEach(child => stack.push({ node: child, quotes, callouts }));
+                    continue;
+                }
+                quotes++;
+            }
+            if (node.matches('[data-mdw-callout="true"]')) {
+                if (callouts) {
+                    const replacement = node.ownerDocument.createElement('div');
+                    const title = Array.from(node.children).find(child => child.classList.contains('mdw-callout-title'));
+                    const body = Array.from(node.children).find(child => child.classList.contains('mdw-callout-content'));
+                    if (title) {
+                        const label = node.ownerDocument.createElement('p');
+                        label.textContent = title.textContent;
+                        replacement.appendChild(label);
+                    }
+                    if (body) while (body.firstChild) replacement.appendChild(body.firstChild);
+                    else replacement.textContent = node.textContent;
+                    node.replaceWith(replacement);
+                    node = replacement;
+                } else callouts++;
+            }
+            Array.from(node.children).reverse().forEach(child => stack.push({ node: child, quotes, callouts }));
+        }
+    }
+
     /** The editable document containing a node, excluding generated controls. */
     getEditingRoot(node) {
         const element = node?.nodeType === 3 ? node.parentElement : node;

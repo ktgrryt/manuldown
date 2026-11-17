@@ -5245,6 +5245,7 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
         if (!selection || selection.rangeCount !== 1 || isSelectionInListItem()) return false;
         const range = selection.getRangeAt(0);
         if (!canOpenInsertCommandMenu(range)) return false;
+        if (calloutManager.getTypeBlock(range.startContainer) || calloutManager.getTypeBlock(range.endContainer)) return false;
         const block = calloutManager.createEmptyBlock(settingsState.calloutDefaultService);
         calloutManager.beforeChange();
         tableManager._insertNodeAsBlock(range, block);
@@ -5262,6 +5263,7 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
         if (!selection || !selection.rangeCount) return;
 
         const range = selection.getRangeAt(0);
+        if (!domUtils.canInsertQuote(range)) return;
         stateManager.saveState();
 
         const blockquote = document.createElement('blockquote');
@@ -5285,6 +5287,7 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
         if (!selection || !selection.rangeCount || !selection.isCollapsed) return false;
 
         const range = selection.getRangeAt(0);
+        if (!domUtils.canInsertQuote(range)) return false;
         if (!editor.contains(range.startContainer)) return false;
         const cursorInfo = getActiveTextNodeAtCursor(range);
         let block = range.startContainer.nodeType === Node.ELEMENT_NODE
@@ -5461,6 +5464,7 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
         if (!selection || !selection.rangeCount || selection.isCollapsed) return false;
 
         const range = selection.getRangeAt(0);
+        if (!domUtils.canInsertQuote(range)) return false;
         if (!editor.contains(range.startContainer) || !editor.contains(range.endContainer)) {
             return false;
         }
@@ -6250,7 +6254,14 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
 
     function getFilteredSlashCommands(query, insertionRange = null) {
         const q = (query || '').toLowerCase();
+        const selection = window.getSelection();
+        const targetRange = insertionRange || (selection?.rangeCount ? selection.getRangeAt(0) : null);
         const allSlashCommands = getAllSlashCommands().filter((cmd) => {
+            if (targetRange && cmd.source === 'builtin') {
+                if (cmd.id === 'quote' && !domUtils.canInsertQuote(targetRange)) return false;
+                if (cmd.id === 'callout' && (calloutManager.getTypeBlock(targetRange.startContainer) ||
+                    calloutManager.getTypeBlock(targetRange.endContainer))) return false;
+            }
             if (insertionRange && cmd.source === 'builtin') {
                 if (cmd.id === 'footnote' && !footnoteManager.canInsert(insertionRange)) return false;
                 if (cmd.id === 'inline-math' && !mathManager.canInsert(insertionRange)) return false;
@@ -20835,6 +20846,8 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
             mathManager.restoreClipboardImport(container, preparedMath);
             calloutManager.restoreClipboardImport(container, preparedCallouts);
             importedFootnotes.forEach(note => calloutManager.restoreClipboardImport(note, preparedCallouts));
+            domUtils.normalizeBlockNesting(container, range.startContainer);
+            importedFootnotes.forEach(note => domUtils.normalizeBlockNesting(note));
             for (const id of tocPlaceholders) {
                 container.querySelector(`[id="${id}"]`)?.replaceWith(inlineTocManager.createBlock());
             }
@@ -21331,6 +21344,7 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
             const ctx = getSelectionRangeForPaste();
             if (!ctx) return false;
             const { selection, range } = ctx;
+            if (!domUtils.canInsertQuote(range)) return false;
             if (isRangeInsideCodeBlock(range)) {
                 return false;
             }
@@ -22093,6 +22107,8 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
                 fragment.appendChild(node);
                 lastInsertedNode = node;
             });
+            domUtils.normalizeBlockNesting(fragment, range.startContainer);
+            lastInsertedNode = fragment.lastChild;
             tableManager._insertNodeAsBlock(range, fragment);
 
             normalizeCheckboxListItems();

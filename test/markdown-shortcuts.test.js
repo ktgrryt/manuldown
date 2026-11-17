@@ -50,6 +50,17 @@ const markdownConverterModulePromise = importModule('MarkdownConverter.js');
 const domUtilsModulePromise = importModule('DOMUtils.js');
 const typingUndoGroupModulePromise = importModule('TypingUndoGroup.js');
 
+test('quote shortcuts allow a second level and leave a third marker as text', async () => {
+    for (const depth of [1, 2]) {
+        const html = '<blockquote>'.repeat(depth) + '<p>&gt; quoted</p>' + '</blockquote>'.repeat(depth);
+        const result = await convertAt(html, editor => editor.querySelector('p').firstChild, 2, ' ');
+        assert.equal(result.converted, depth === 1);
+        assert.equal(result.editor.querySelectorAll('blockquote').length, 2);
+        assert.ok(!result.editor.querySelector('blockquote blockquote blockquote'));
+        assert.equal(result.editor.textContent, depth === 1 ? 'quoted' : '> quoted');
+    }
+});
+
 class CaretRange {
     constructor(container = null, offset = 0) {
         this.startContainer = container;

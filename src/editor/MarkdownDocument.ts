@@ -5,6 +5,7 @@ import { MAX_EDITABLE_FOOTNOTE_DEPTH, numberFootnotes, parseFootnoteDefinition }
 import { MarkdownSourceBlock } from './MarkdownSource';
 import { emptyMarkdownTocHtml, markdownTocRanges, matchMarkdownTocBlock, renderMarkdownTocs } from './MarkdownToc';
 import { calloutRanges, parseCallout, renderCallout, unsupportedCalloutSource } from './Callouts';
+import { boundedBlockquote, markdownNesting, MAX_CALLOUT_DEPTH, withMarkdownNesting } from './MarkdownNesting';
 
 function escapeOpaqueSourceForHtml(value: string): string {
     return value
@@ -87,6 +88,15 @@ marked.use({
     pedantic: false,
     extensions: [
         {
+            name: 'nestingSource',
+            renderer(token) { return renderOpaqueSource(token.raw, token.kind, true); }
+        },
+        {
+            name: 'blockquote',
+            level: 'block',
+            tokenizer(source: string) { return boundedBlockquote((this.lexer as any).tokenizer, source); }
+        },
+        {
             name: 'callout',
             level: 'block',
             // Deliberately do not interrupt paragraphs: their inline syntax can
@@ -94,14 +104,23 @@ marked.use({
             tokenizer(source: string) {
                 const callout = parseCallout(source);
                 if (callout) {
-                    if (callout.format === 'quote') {
-                        // Let Marked determine the whole quote's boundary. Lazy
-                        // continuation and adjacent quote constructs that cannot
-                        // be represented exactly remain ordinary blockquotes.
-                        const quote = (this.lexer as any).tokenizer.blockquote(source) as Tokens.Blockquote | undefined;
-                        if (!quote || quote.raw.replace(/\n+$/, '') !== callout.raw.replace(/\n+$/, '')) {return;}
+                    const nesting = markdownNesting(this.lexer);
+                    if (nesting.callouts >= MAX_CALLOUT_DEPTH) {
+                        return { type: 'nestingSource', raw: callout.raw, kind: 'callout-source' };
                     }
-                    return { type: 'callout', raw: callout.raw, callout, tokens: this.lexer.blockTokens(callout.body) };
+                    nesting.callouts++;
+                    try {
+                        if (callout.format === 'quote') {
+                            // Let Marked determine the whole quote's boundary. Lazy
+                            // continuation and adjacent quote constructs that cannot
+                            // be represented exactly remain ordinary blockquotes.
+                            const quote = (this.lexer as any).tokenizer.blockquote(source) as Tokens.Blockquote | undefined;
+                            if (!quote || quote.raw.replace(/\n+$/, '') !== callout.raw.replace(/\n+$/, '')) {return;}
+                        }
+                        return { type: 'callout', raw: callout.raw, callout, tokens: this.lexer.blockTokens(callout.body) };
+                    } finally {
+                        nesting.callouts--;
+                    }
                 }
                 const raw = unsupportedCalloutSource(source);
                 return raw ? { type: 'callout', raw, unsupported: true } : undefined;
@@ -315,10 +334,14 @@ export class MarkdownDocument {
     constructor(
         private readonly document: vscode.TextDocument,
         private readonly webview?: vscode.Webview,
-        private readonly footnoteContext: { depth: number; links: Links } | undefined = undefined
+        private readonly footnoteContext: { depth: number; links: Links; calloutDepth?: number } | undefined = undefined
     ) { }
 
     public toHtml(): string {
+        return withMarkdownNesting(this.footnoteContext?.calloutDepth ?? 0, () => this.renderHtml());
+    }
+
+    private renderHtml(): string {
         const markdown = this.document.getText();
         try {
             const opaqueBlockProtection = this.protectNonRenderedMarkdown(markdown);
@@ -1092,7 +1115,8 @@ export class MarkdownDocument {
         // source, and body rendering uses the ordinary document pipeline.
         for (const range of calloutRanges(protectedMarkdown).reverse()) {
             const source = protectedMarkdown.slice(range.start, range.end);
-            const marker = addProtectedBlock(source, 'callout');
+            const marker = addProtectedBlock(source, (this.footnoteContext?.calloutDepth ?? 0) >= MAX_CALLOUT_DEPTH
+                ? 'callout-source' : 'callout');
             const before = protectedMarkdown.slice(0, range.start);
             const after = protectedMarkdown.slice(range.end);
             protectedMarkdown = before + (endsWithBlankLine(before) ? '' : '\n') + marker + '\n\n' + after;
@@ -1274,6 +1298,7 @@ export class MarkdownDocument {
         const bodyDocument = { getText: () => content, uri: this.document.uri } as vscode.TextDocument;
         return new MarkdownDocument(bodyDocument, undefined, {
             depth: this.footnoteContext?.depth ?? 0,
+            calloutDepth: (this.footnoteContext?.calloutDepth ?? 0) + 1,
             links: this.referenceLinks || this.footnoteContext?.links || {}
         }).toHtml();
     }
@@ -1302,7 +1327,9 @@ export class MarkdownDocument {
         } as vscode.TextDocument;
         // Use the normal renderer so raw HTML, code, images and links receive
         // exactly the same protection as they do in the document body.
-        return new MarkdownDocument(bodyDocument, undefined, { depth: depth + 1, links: this.referenceLinks }).toHtml();
+        return new MarkdownDocument(bodyDocument, undefined, {
+            depth: depth + 1, links: this.referenceLinks, calloutDepth: this.footnoteContext?.calloutDepth,
+        }).toHtml();
     }
 
     private stripBlockquotePrefix(line: string, limit = Number.POSITIVE_INFINITY): {

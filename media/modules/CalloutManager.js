@@ -484,11 +484,18 @@ export class CalloutManager {
         const leadingType = this.getLeadingTypeBlock(first);
         if (leadingType) return this.selectTypeLabel(leadingType, selection);
         if ((first.tagName === 'UL' || first.tagName === 'OL') && this.cursorManager?._placeCursorInFirstListItem(first, selection)) {
-            this.refresh(); return true;
+            // Lists containing only preserved source have no editable text.
+            // A generic list cursor must not enter their read-only PRE/code.
+            if (!elementOf(selection.getRangeAt(0).startContainer)?.closest('[contenteditable="false"]')) {
+                this.refresh(); return true;
+            }
         }
         if (this.cursorManager?.placeCursorAtLeadingImageLine(first, selection)) { this.refresh(); return true; }
-        const text = this.cursorManager?._getFirstNavigableTextNode(first) || this.document.createTreeWalker(first, 4).nextNode();
-        const range = this.document.createRange(); range.setStart(text || first, 0); range.collapse(true);
+        const text = this.cursorManager?._getFirstNavigableTextNode(first) || this.document.createTreeWalker(first, 4, {
+            acceptNode: node => elementOf(node)?.closest('[contenteditable="false"]') ? 2 : 1
+        }).nextNode();
+        const boundary = !text && /^(UL|OL)$/.test(first.tagName) ? first.firstElementChild || first : first;
+        const range = this.document.createRange(); range.setStart(text || boundary, 0); range.collapse(true);
         selection.removeAllRanges(); selection.addRange(range); this.refresh();
         return true;
     }
@@ -589,6 +596,7 @@ export class CalloutManager {
 
     canRecognize(range = this.getRange()) {
         return !this.isComposing() && range?.collapsed && this.editor.contains(range.startContainer) &&
+            !this.getTypeBlock(range.startContainer) &&
             !elementOf(range.startContainer)?.closest('pre, code, [contenteditable="false"], td, th');
     }
 
@@ -655,6 +663,7 @@ export class CalloutManager {
                 groups[groups.length - 1].push({ raw, text: match[1] });
             }
         }
+        if (this.getTypeBlock(this.getRange()?.startContainer)) return null;
         const declarations = groups.map(group => /^\[!/.test(group[0]?.text || '') ? quoteHeader(group[0].raw) : null);
         if (!declarations.some(Boolean)) return null;
         const fragment = this.document.createDocumentFragment();
@@ -689,6 +698,7 @@ export class CalloutManager {
         if (line === null || (!quoted && !/^ {0,3}>/.test(line)) || !this.atEdge(range, paragraph, true)) return false;
         const spec = quoteHeader(line);
         if (!spec) return false;
+        if (quote?.querySelector('[data-mdw-callout="true"]')) return false;
         const block = this.createBlock(spec), content = block.lastElementChild;
         this.beforeChange();
         const original = quoted ? quote : paragraph;
@@ -727,7 +737,7 @@ export class CalloutManager {
         // needs the full parser rather than this local DOM shortcut.
         if (nodes.some(node => node.nodeType === 1 &&
             ((/^(P|DIV)$/.test(node.tagName) && /(?:^|\n) {0,3}(?::::|`{3,}|~{3,})/.test(node.textContent)) ||
-                node.querySelector('[data-mdw-callout]')))) return false;
+                node.matches('[data-mdw-callout]') || node.querySelector('[data-mdw-callout]')))) return false;
         spec.footer = footer;
         const block = this.createBlock(spec), content = block.lastElementChild;
         this.beforeChange();
@@ -900,6 +910,9 @@ export class CalloutManager {
         template.innerHTML = html;
         const blocks = [];
         for (const block of Array.from(template.content.querySelectorAll('[data-mdw-callout="true"]')).reverse()) {
+            // Only the outer callout retains metadata. Nested visible content
+            // passes through the ordinary clipboard sanitizer as prose.
+            if (block.parentElement?.closest('[data-mdw-callout="true"]')) continue;
             const content = Array.from(block.children).find(node => node.classList.contains('mdw-callout-content'));
             if (!content) continue;
             // Live/history HTML can include the generated format control.

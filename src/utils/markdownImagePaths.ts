@@ -1,4 +1,5 @@
 import { marked, Token } from 'marked';
+import { createBoundedTokenizer } from '../editor/MarkdownNesting';
 
 const { createWindow } = require('@mixmark-io/domino');
 
@@ -160,7 +161,7 @@ function decodeEntities(value: string): string {
 
 function collectPaths(markdown: string, includeLinks: boolean): PathReference[] {
     const input = sourceText(markdown);
-    const tokenizer = new marked.Tokenizer();
+    const tokenizer = createBoundedTokenizer();
     const lexer = new marked.Lexer({ tokenizer, gfm: true });
     const tokens = lexer.lex(input.text);
     const references: PathReference[] = [];
@@ -278,7 +279,7 @@ function collectPaths(markdown: string, includeLinks: boolean): PathReference[] 
             }
             const body: SourceText = { text: parts.map(part => part.text).join(''),
                 offsets: parts.flatMap(part => part.offsets) };
-            const noteLexer = new marked.Lexer({ gfm: true });
+            const noteLexer = new marked.Lexer({ gfm: true, tokenizer: createBoundedTokenizer() });
             // Notes can use reference definitions from the surrounding document.
             noteLexer.tokens.links = tokens.links;
             visit(noteLexer.lex(body.text), body, true, depth + 1);

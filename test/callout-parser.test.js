@@ -65,7 +65,7 @@ test('code fence colon delimiters do not terminate or widen a container', () => 
     assert.equal(dom(source).querySelectorAll('[data-mdw-callout]').length, 1);
 });
 
-test('nested equal and longer delimiters stay structured without changing headers', () => {
+test('nested containers remain read-only source inside a single editable callout', () => {
     for (const source of [
         ':::note\nBefore\n\n:::tip\nNested\n:::\n\nAfter\n:::\n',
         '::::warning Title\nBefore\n\n:::tip\nNested\n:::\n\nAfter\n::::\n',
@@ -74,9 +74,32 @@ test('nested equal and longer delimiters stay structured without changing header
         assert.equal(parsed.raw, source);
         assert.equal(serializeCallout(parsed, parsed.body), source);
         const document = dom(source);
-        assert.equal(document.querySelectorAll('[data-mdw-callout]').length, 2);
+        assert.equal(document.querySelectorAll('[data-mdw-callout]').length, 1);
+        assert.ok(document.querySelector('[data-mdw-opaque-kind="callout-source"]'));
         assert.match(document.body.textContent, /Before[\s\S]*Nested[\s\S]*After/);
     }
+});
+
+test('deep callouts and quotations stop before recursive parsing can block the host', () => {
+    const { spawnSync } = require('node:child_process');
+    const result = spawnSync(process.execPath, ['-e', `
+        const assert = require('node:assert/strict');
+        const { MarkdownDocument } = require('./out/editor/MarkdownDocument');
+        const { createWindow } = require('@mixmark-io/domino');
+        for (const source of [
+            ':::note\\n'.repeat(400) + 'x\\n' + ':::\\n'.repeat(400),
+            '>'.repeat(10000) + ' quoted\\n',
+            ':::note\\n' + '>'.repeat(10000) + ' quoted\\n:::\\n',
+        ]) {
+            const document = new MarkdownDocument({ getText: () => source, uri: {} });
+            const root = createWindow(document.toHtml()).document;
+            assert.ok(!root.querySelector('blockquote blockquote blockquote'));
+            assert.ok(!root.querySelector('[data-mdw-callout] [data-mdw-callout]'));
+            document.getSourceBlocks();
+        }
+    `], { cwd: require('node:path').join(__dirname, '..'), timeout: 5000, encoding: 'utf8' });
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, result.stderr);
 });
 
 test('ordinary quote context and nested callout body retain all inline text', () => {

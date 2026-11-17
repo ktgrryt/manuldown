@@ -6,7 +6,10 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-11-17
+
 ### Changed
+- Disallow nested callouts and limit quotations to two levels during editing, insertion, and paste. Preserve deeper content in existing documents as read-only Markdown source without recursively rendering it.
 - Show the shared ManulDown startup spinner while preparing PDF previews, centered on first load and compact during regeneration. Keep loading feedback visible in narrow panels and stop it on completion or errors.
 - Match PDF footer page numbers to the document font and increase their size from 9px to 11px.
 - Center the PDF manual-break removal action using the shared preview button design. Hide insertion lines at existing page starts and track the current page at the viewport's top edge, including when several pages fit on screen.
@@ -27,6 +30,10 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 - Preserve inline-code formatting when copying or cutting a single line, including selections inside the code and text around it.
 - Keep cursor entry into a table of contents stable from wrapped text, formatted text, and blank lines.
 - Open pasted images by double-clicking when Markdown filenames contain Japanese, spaces, or other URL-encoded characters.
+
+### Security
+- Restrict imported images to supported formats and validate their file headers before saving. Reject fabricated image MIME types that would otherwise create script or HTML files.
+- Bound callout and quotation parsing before recursion so deeply nested Markdown cannot monopolize the extension host.
 
 ## [2.2.7] - 2026-11-15
 

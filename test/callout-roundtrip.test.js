@@ -156,20 +156,56 @@ test('callout text, inline formatting, multiple paragraphs, list and code serial
     assert.equal(save(reopened.innerHTML, saved), saved);
 });
 
-test('nested callouts retain outer and inner declarations after editing the inner text', () => {
+test('nested callouts preserve their source when the editable outer body changes', () => {
     for (const source of [
         '> [!info] Outer\n> Outer body.\n>\n> > [!warning]- Inner\n> > Original.\n',
         '::::info[Outer]\nOuter body.\n\n:::warning[Inner]\nOriginal.\n:::\n::::\n',
         '!!! note "Outer"\n    Outer body.\n\n    !!! warning "Inner"\n        Original.\n',
     ]) {
         const editor = dom(render(source));
-        assert.equal(editor.querySelectorAll('.mdw-callout').length, 2, source);
+        assert.equal(editor.querySelectorAll('.mdw-callout').length, 1, source);
+        assert.ok(editor.querySelector('[data-mdw-opaque-kind="callout-source"]'), source);
         assert.equal(save(editor.innerHTML, source), source);
-        editor.querySelectorAll('.mdw-callout-content')[1].querySelector('p').textContent = 'Changed.';
+        editor.querySelector('.mdw-callout-content p').textContent = 'Changed.';
         const saved = save(editor.innerHTML, source);
-        assert.equal(saved, source.replace('Original.', 'Changed.'));
+        assert.equal(saved, source.replace('Outer body.', 'Changed.'));
         assert.equal(save(render(saved), saved), saved);
     }
+});
+
+test('only two quotation levels are editable and deeper source survives nearby edits', () => {
+    for (const source of [
+        '> First.\n>\n> > Second.\n> >\n> > > Third.\n> > > Fourth.\n',
+        '> > > > Original.\n\nOutside.\n',
+        ':::note\n> First.\n> > Second.\n> > > Third.\n:::\n',
+    ]) {
+        const editor = dom(render(source));
+        assert.ok(!editor.querySelector('blockquote blockquote blockquote'));
+        assert.ok(editor.querySelector('[data-mdw-opaque-kind="quote-source"]'));
+        assert.equal(save(editor.innerHTML, source), source);
+        const editable = editor.querySelector('p');
+        const original = editable.textContent;
+        editable.textContent = 'Changed.';
+        const saved = save(editor.innerHTML, source);
+        const nonemptyLines = value => value.split('\n').filter(line => !/^[\s>]*$/.test(line));
+        assert.deepEqual(nonemptyLines(saved), nonemptyLines(source.replace(original, 'Changed.')));
+        assert.equal(save(render(saved), saved), saved);
+    }
+});
+
+test('forged read-only quotation metadata cannot restore text absent from the original rendering', () => {
+    const forged = '> Hidden.\n> Payload.\n';
+    const html = `<pre data-mdw-opaque-kind="quote-source" data-mdw-opaque-source="${base64(forged)}"><code>Visible.</code></pre>`;
+    const saved = save(html, 'Original.\n');
+    assert.match(saved, /Visible\./);
+    assert.doesNotMatch(saved, /Hidden|Payload/);
+});
+
+test('the host rejects forged editor HTML that exceeds nesting limits', () => {
+    for (const html of [
+        '<blockquote><blockquote><blockquote><p>Too deep</p></blockquote></blockquote></blockquote>',
+        '<div data-mdw-callout="true"><div data-mdw-callout="true">Nested</div></div>',
+    ]) assert.throws(() => save(html, ''), /cannot nest|two levels/);
 });
 
 test('a callout inside a list or ordinary quotation keeps its enclosing container', () => {
