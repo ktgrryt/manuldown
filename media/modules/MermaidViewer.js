@@ -37,7 +37,7 @@ export class MermaidViewer {
             <div class="mermaid-viewer-toolbar md-preview-toolbar">
                 <strong class="mermaid-viewer-title md-preview-title">Mermaid preview</strong>
                 <button type="button" class="mermaid-viewer-close md-preview-icon" data-action="close" aria-label="Close preview" title="Close preview (Esc)">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="m6 6 12 12M18 6 6 18"/></svg>
+                    <span class="md-icon md-icon--close" aria-hidden="true"></span>
                 </button>
             </div>
             <div class="mermaid-viewer-viewport" tabindex="0" role="region" aria-label="Diagram. Scroll or press + and - to zoom. Drag or use arrow keys to pan. Press 0 for actual size, F to fit, and Esc to close.">
@@ -48,11 +48,11 @@ export class MermaidViewer {
                 <div class="mermaid-viewer-actions md-preview-actions" role="group" aria-label="Diagram controls">
                     <div class="mermaid-viewer-zoom md-preview-zoom" role="group" aria-label="Zoom">
                         <button type="button" data-action="zoom-out" aria-label="Zoom out" title="Zoom out (−)">
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M5 12h14"/></svg>
+                            <span class="md-icon md-icon--subtract" aria-hidden="true"></span>
                         </button>
                         <output class="mermaid-viewer-scale md-preview-scale" aria-label="Zoom level" aria-live="polite"></output>
                         <button type="button" data-action="zoom-in" aria-label="Zoom in" title="Zoom in (+)">
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M5 12h14M12 5v14"/></svg>
+                            <span class="md-icon md-icon--add" aria-hidden="true"></span>
                         </button>
                     </div>
                     <span class="mermaid-viewer-divider md-preview-divider" aria-hidden="true"></span>

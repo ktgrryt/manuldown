@@ -53,11 +53,9 @@ export class PdfPageBreakControls {
             button.disabled = !enabled;
             if (manual) {
                 pageNodes[boundary.page - 1].classList.add('has-manual-break');
-                const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-                for (const [name, value] of Object.entries({ width: '16', height: '16', viewBox: '0 0 24 24',
-                    fill: 'none', stroke: 'currentColor', 'stroke-width': '1.75', 'stroke-linecap': 'round',
-                    'stroke-linejoin': 'round', 'aria-hidden': 'true', focusable: 'false' })) icon.setAttribute(name, value);
-                icon.innerHTML = '<path d="m9 5-5 5 5 5M4 10h10a6 6 0 0 1 6 6v3"/>';
+                const icon = document.createElement('span');
+                icon.className = 'md-icon md-icon--undo';
+                icon.setAttribute('aria-hidden', 'true');
                 const label = document.createElement('span');
                 label.textContent = 'Remove page break';
                 button.className = 'break-remove';

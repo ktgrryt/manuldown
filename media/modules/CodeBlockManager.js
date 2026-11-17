@@ -5,16 +5,16 @@
  */
 
 const CODE_BLOCK_TOOLBAR_ICONS = {
-    copy: '<rect x="4" y="7" width="13" height="14" rx="3"/><path d="M8 7V5a3 3 0 0 1 3-3h6a3 3 0 0 1 3 3v9a3 3 0 0 1-3 3"/>',
-    download: '<path d="M12 3v12m-5-5 5 5 5-5M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/>',
-    expand: '<path d="M15 3h6v6m0-6-7 7M9 21H3v-6m0 6 7-7"/>',
-    success: '<path d="m5 12 4 4L19 6"/>',
-    error: '<path d="m6 6 12 12M18 6 6 18"/>',
-    busy: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>'
+    copy: 'copy',
+    download: 'download',
+    expand: 'maximize',
+    success: 'checkmark',
+    error: 'close',
+    busy: 'time'
 };
 
 function codeBlockToolbarIcon(name) {
-    return `<svg class="code-block-toolbar-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${CODE_BLOCK_TOOLBAR_ICONS[name]}</svg>`;
+    return `<span class="code-block-toolbar-icon md-icon md-icon--${CODE_BLOCK_TOOLBAR_ICONS[name]}" aria-hidden="true"></span>`;
 }
 
 export class CodeBlockManager {

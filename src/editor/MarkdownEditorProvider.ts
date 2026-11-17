@@ -5001,7 +5001,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             <s>S</s>
         </button>
         <button class="toolbar-btn" data-command="inlinecode" title="Inline Code" aria-label="Inline Code">
-            &lt;/&gt;
+            <span class="md-icon md-icon--code" aria-hidden="true"></span>
         </button>
         <div class="toolbar-separator"></div>
         <button class="toolbar-btn" data-command="h1" title="Heading 1">H1</button>
@@ -5015,7 +5015,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             1.
         </button>
         <button class="toolbar-btn toolbar-btn-list" data-command="checkbox" title="Task List" aria-label="Task List">
-            &#9745;&#65038;
+            <span class="md-icon md-icon--checkbox--checked" aria-hidden="true"></span>
         </button>
         <div class="toolbar-separator"></div>
         <button class="toolbar-btn" data-command="quote" title="Quote">

@@ -397,10 +397,10 @@ test('the icon copy button copies source and restores its icon after feedback', 
     assert.deepEqual(writes, ['graph TD\nA-->B']);
     assert.equal(button.getAttribute('data-copy-state'), 'success');
     assert.equal(button.getAttribute('aria-label'), 'Copied!');
-    assert.ok(button.querySelector('svg'));
+    assert.ok(button.querySelector('.md-icon--checkmark'));
     f.manager._resetCopyButtonState(button);
     assert.equal(button.getAttribute('aria-label'), 'Copy source');
-    assert.ok(button.querySelector('svg'));
+    assert.ok(button.querySelector('.md-icon--copy'));
     assert.equal(button.textContent, '');
 });
 

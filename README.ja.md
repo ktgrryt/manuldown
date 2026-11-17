@@ -218,3 +218,5 @@ npm run lint
 ## ライセンス
 
 [MIT](./LICENSE)
+
+UIアイコンにはApache 2.0のIBM [Carbon Icons](https://github.com/carbon-design-system/carbon/tree/main/packages/icons)を使用しています。[第三者ライセンスの表記](./THIRD_PARTY_NOTICES.md)を参照してください。

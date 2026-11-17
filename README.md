@@ -216,3 +216,5 @@ Use `npm run watch` to watch TypeScript changes. Extension code is in `src/`, ed
 ## License
 
 [MIT](./LICENSE)
+
+UI icons use IBM [Carbon Icons](https://github.com/carbon-design-system/carbon/tree/main/packages/icons) under Apache 2.0. See [third-party notices](./THIRD_PARTY_NOTICES.md).

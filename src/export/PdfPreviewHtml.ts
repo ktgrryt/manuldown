@@ -6,21 +6,21 @@ import { escapePdfHtml } from './PdfHtmlBuilder';
 export function getPdfPreviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
     const nonce = getNonce();
     const asset = (relative: string) => escapePdfHtml(webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', relative)).toString());
-    const paths = {
-        sidebar: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18M6 7h0M6 12h0M6 17h0"/>',
-        layout: '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9zM14 3v6h6M8 13h8M8 17h5"/>',
-        pagebreak: '<path d="M6 10V3h9l3 3v4M15 3v4h3M6 17v4h12v-4M3 13h3m3 0h3m3 0h3m3 0h0"/>',
-        refresh: '<path d="M20 7v5h-5M4 17v-5h5M6 7a7 7 0 0 1 12-1l2 3M4 15l2 3a7 7 0 0 0 12-1"/>',
-        download: '<path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5"/>',
-        undo: '<path d="m9 5-5 5 5 5M4 10h10a6 6 0 0 1 6 6v3"/>',
-        redo: '<path d="m15 5 5 5-5 5M20 10H10a6 6 0 0 0-6 6v3"/>',
-        check: '<path d="m5 12 4 4L19 6"/>',
-        previous: '<path d="m15 6-6 6 6 6"/>',
-        next: '<path d="m9 6 6 6-6 6"/>',
-        minus: '<path d="M5 12h14"/>',
-        plus: '<path d="M5 12h14M12 5v14"/>',
+    const icons = {
+        sidebar: 'side-panel--open',
+        layout: 'document',
+        pagebreak: 'page-break',
+        refresh: 'renew',
+        download: 'download',
+        undo: 'undo',
+        redo: 'redo',
+        check: 'checkmark',
+        previous: 'chevron--left',
+        next: 'chevron--right',
+        minus: 'subtract',
+        plus: 'add',
     };
-    const icon = (name: keyof typeof paths) => `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${paths[name]}</svg>`;
+    const icon = (name: keyof typeof icons) => `<span class="md-icon md-icon--${icons[name]}" aria-hidden="true"></span>`;
     return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource} data: blob:; style-src ${webview.cspSource} 'unsafe-inline'; font-src ${webview.cspSource} blob: data:; script-src 'nonce-${nonce}' ${webview.cspSource} 'wasm-unsafe-eval'; worker-src blob:; connect-src ${webview.cspSource}; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">

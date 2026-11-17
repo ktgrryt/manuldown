@@ -260,7 +260,7 @@ export class FootnoteManager {
                 remove.setAttribute('href', `#mdw-fn-${key}`);
                 remove.setAttribute('title', 'Delete footnote and its references');
                 remove.setAttribute('aria-label', `Delete footnote ${label}`);
-                remove.textContent = '×';
+                remove.innerHTML = '<span class="md-icon md-icon--close" aria-hidden="true"></span>';
                 definition.appendChild(remove);
             }
         }

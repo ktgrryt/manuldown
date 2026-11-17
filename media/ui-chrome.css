@@ -1,3 +1,5 @@
+@import url('./vendor/carbon-icons/icons.css');
+
 /* Shared theme and preview controls for the editor, Mermaid and PDF views. */
 body {
     --md-ui-font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
@@ -59,8 +61,8 @@ body.vscode-high-contrast-light {
     outline-offset: -1px;
 }
 
-.md-preview button svg,
-.md-preview .viewer-control svg {
+.md-preview button .md-icon,
+.md-preview .viewer-control .md-icon {
     width: var(--md-ui-icon-size);
     height: var(--md-ui-icon-size);
     flex-shrink: 0;

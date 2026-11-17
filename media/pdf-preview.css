@@ -15,7 +15,7 @@ body.pdf-preview {
 .pdf-preview .icon-button { flex-shrink: 0; }
 .pdf-preview .export-action { color: var(--md-ui-foreground); white-space: nowrap; }
 #break-panel[aria-pressed=true] { border-color: var(--vscode-contrastActiveBorder, transparent); }
-#break-panel[aria-pressed=true] svg { color: var(--vscode-focusBorder, #007fd4); }
+#break-panel[aria-pressed=true] .md-icon { color: var(--vscode-focusBorder, #007fd4); }
 button, input, select { font: inherit; }
 input, select { min-height: var(--md-ui-control-size); padding: 3px 7px; border: 1px solid var(--md-ui-border); border-radius: var(--md-ui-radius); background: var(--vscode-dropdown-background, var(--md-ui-surface)); color: var(--vscode-dropdown-foreground, var(--md-ui-foreground)); font-size: 12px; }
 select { cursor: pointer; }
@@ -84,7 +84,7 @@ input[type=checkbox] { min-height: 0; accent-color: var(--vscode-focusBorder, #0
 .manual-break { display: flex; align-items: center; justify-content: center; height: var(--md-ui-control-size); }
 .manual-break::before { border-top-style: dashed; }
 .pdf-preview .break-remove { position: relative; max-width: 100%; background: var(--pdf-workspace-background); pointer-events: auto; }
-.break-remove span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.break-remove span:not(.md-icon) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .editing-breaks .has-manual-break .page-caption { left: auto; right: 0; }
 .breaks-pending .break-guide { opacity: .6; }
 #break-feedback { position: absolute; z-index: 4; right: 16px; bottom: 16px; display: flex; align-items: center; gap: 12px; max-width: calc(100% - 32px); padding: 5px 6px 5px 12px; border: 1px solid var(--md-ui-border); border-radius: var(--md-ui-menu-radius); background: var(--md-ui-surface); color: var(--md-ui-foreground); box-shadow: var(--md-ui-shadow); font-size: 12px; }
