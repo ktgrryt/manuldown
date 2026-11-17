@@ -180,6 +180,23 @@ test('inline settings cannot close their script element', () => {
     );
 });
 
+test('toolbar checkbox preferences reach the Webview without carrying unknown setting values', () => {
+    const provider = loadProviderWithConfiguration({
+        'toolbar.items': { bold: false, h4: true, link: true, math: 'true',
+            unknown: '</script><img src=https://evil.example/p.png>' },
+    });
+    const html = renderWebviewHtml(provider);
+    const settings = getInlineSettings(html);
+    assert.equal(settings.toolbarItems.bold, false);
+    assert.equal(settings.toolbarItems.h4, true);
+    assert.equal(settings.toolbarItems.link, true);
+    assert.equal(settings.toolbarItems.math, false);
+    assert.equal(settings.toolbarItems.image, false);
+    assert.equal(settings.toolbarItems.unknown, undefined);
+    assert.doesNotMatch(html, /evil\.example/);
+    assert.match(html, /data-command="h4"/);
+});
+
 test('security settings can only be configured in user settings', () => {
     const properties = packageJson.contributes.configuration.properties;
     for (const key of [

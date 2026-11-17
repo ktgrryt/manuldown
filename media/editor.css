@@ -151,10 +151,11 @@ body.toc-resizing {
 }
 
 .toolbar-overflow-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     min-width: 30px;
     padding: 6px;
-    font-size: 18px;
-    line-height: 15px;
 }
 
 .toolbar-overflow-menu {

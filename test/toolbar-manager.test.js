@@ -86,6 +86,25 @@ test('clicking a different heading level still changes the heading level', async
     assert.deepEqual(formattedBlocks, ['h2']);
 });
 
+for (const command of ['h4', 'h5', 'h6']) {
+    test(`${command} formats text, toggles the active heading, and respects list and table restrictions`, async () => {
+        const { manager } = await createToolbarManager();
+        const formatted = [];
+        manager.getActiveHeadingCommand = () => null;
+        manager.formatBlock = tag => formatted.push(tag);
+        manager.executeCommand(command);
+        manager.getActiveHeadingCommand = () => command;
+        manager.executeCommand(command);
+        manager.isSelectionInListContext = () => true;
+        manager.executeCommand(command);
+        manager.isSelectionInListContext = () => false;
+        manager.isSelectionInTableCellContext = () => true;
+        manager.executeCommand(command);
+        assert.deepEqual(formatted, [command, 'p']);
+        assert.ok(manager.headingLevelCommands.has(command));
+    });
+}
+
 test('the footnote toolbar command dispatches insertion only in an allowed context', async () => {
     const { manager, savedStates } = await createToolbarManager();
     let inserted = 0;

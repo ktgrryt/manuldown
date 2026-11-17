@@ -142,6 +142,7 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
     const initialSettings = window.__manulDownSettings || {};
     const settingsState = {
         toolbarVisible: initialSettings.toolbarVisible !== false,
+        toolbarItems: initialSettings.toolbarItems,
         tocEnabled: initialSettings.tocEnabled !== false,
         tocPanelWidth: normalizeTocPanelWidth(initialSettings.tocPanelWidth),
         useVsCodeCtrlP: initialSettings.useVsCodeCtrlP !== false,
@@ -1774,6 +1775,7 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
     const blockObjectSelection = new BlockObjectSelection(editor);
     const toolbarManager = new ToolbarManager(editor, stateManager, {
         isMac,
+        toolbarItems: settingsState.toolbarItems,
         onFormatSelectedCells: (command) => tableManager.formatSelectedCells(command),
         getSelectedCellFormatState: (command) => tableManager.getSelectedCellFormatState(command),
         onInsertTable: () => tableManager.openTableDialog(),
@@ -1980,6 +1982,10 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
         if (typeof nextSettings.toolbarVisible === 'boolean') {
             settingsState.toolbarVisible = nextSettings.toolbarVisible;
         }
+        if (nextSettings.toolbarItems && typeof nextSettings.toolbarItems === 'object' &&
+            !Array.isArray(nextSettings.toolbarItems)) {
+            settingsState.toolbarItems = nextSettings.toolbarItems;
+        }
         if (typeof nextSettings.tocEnabled === 'boolean') {
             settingsState.tocEnabled = nextSettings.tocEnabled;
         }
@@ -2004,7 +2010,7 @@ const { BlockObjectSelection } = await import(`./modules/BlockObjectSelection.js
         syncBodySettings();
         applyTocPanelWidth();
         syncToolbarBulletLabel();
-        toolbarManager.updateOverflowLayout();
+        toolbarManager.setToolbarItems(settingsState.toolbarItems);
         tocManager.setEnabled(settingsState.tocEnabled);
         if (shouldRefreshImagePolicy) {
             reapplyImageSecurityPolicy();

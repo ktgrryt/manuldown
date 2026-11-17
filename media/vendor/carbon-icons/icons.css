@@ -10,6 +10,7 @@ body {
     --md-icon-copy: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2032%2032%22%3E%3Cpath%20d%3D%22M28%2C10V28H10V10H28m0-2H10a2%2C2%2C0%2C0%2C0-2%2C2V28a2%2C2%2C0%2C0%2C0%2C2%2C2H28a2%2C2%2C0%2C0%2C0%2C2-2V10a2%2C2%2C0%2C0%2C0-2-2Z%22%2F%3E%3Cpath%20d%3D%22M4%2C18H2V4A2%2C2%2C0%2C0%2C1%2C4%2C2H18V4H4Z%22%2F%3E%3C%2Fsvg%3E");
     --md-icon-download: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2016%2016%22%3E%3Cpath%20d%3D%22M13%207%2012.3%206.3%208.5%2010.1%208.5%201%207.5%201%207.5%2010.1%203.7%206.3%203%207%208%2012z%22%2F%3E%3Cpath%20d%3D%22M13%2C12v2H3v-2H2v2l0%2C0c0%2C0.6%2C0.4%2C1%2C1%2C1h10c0.6%2C0%2C1-0.4%2C1-1l0%2C0v-2H13z%22%2F%3E%3C%2Fsvg%3E");
     --md-icon-maximize: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2016%2016%22%3E%3Cpath%20d%3D%22M6%2015%206%2014%202.7%2014%207%209.7%206.3%209%202%2013.3%202%2010%201%2010%201%2015z%22%2F%3E%3Cpath%20d%3D%22M10%201%2010%202%2013.3%202%209%206.3%209.7%207%2014%202.7%2014%206%2015%206%2015%201z%22%2F%3E%3C%2Fsvg%3E");
+    --md-icon-overflow-menu--horizontal: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2032%2032%22%3E%3Ccircle%20cx%3D%228%22%20cy%3D%2216%22%20r%3D%222%22%2F%3E%3Ccircle%20cx%3D%2216%22%20cy%3D%2216%22%20r%3D%222%22%2F%3E%3Ccircle%20cx%3D%2224%22%20cy%3D%2216%22%20r%3D%222%22%2F%3E%3C%2Fsvg%3E");
     --md-icon-checkmark: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2032%2032%22%3E%3Cpath%20d%3D%22M13%2024%204%2015%205.414%2013.586%2013%2021.171%2026.586%207.586%2028%209%2013%2024z%22%2F%3E%3C%2Fsvg%3E");
     --md-icon-close: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2032%2032%22%3E%3Cpath%20d%3D%22M17.4141%2016%2024%209.4141%2022.5859%208%2016%2014.5859%209.4143%208%208%209.4141%2014.5859%2016%208%2022.5859%209.4143%2024%2016%2017.4141%2022.5859%2024%2024%2022.5859%2017.4141%2016z%22%2F%3E%3C%2Fsvg%3E");
     --md-icon-time: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2032%2032%22%3E%3Cpath%20d%3D%22M16%2C30A14%2C14%2C0%2C1%2C1%2C30%2C16%2C14%2C14%2C0%2C0%2C1%2C16%2C30ZM16%2C4A12%2C12%2C0%2C1%2C0%2C28%2C16%2C12%2C12%2C0%2C0%2C0%2C16%2C4Z%22%2F%3E%3Cpath%20d%3D%22M20.59%2022%2015%2016.41%2015%207%2017%207%2017%2015.58%2022%2020.59%2020.59%2022z%22%2F%3E%3C%2Fsvg%3E");
@@ -51,6 +52,7 @@ body {
 .md-icon--copy { --md-icon: var(--md-icon-copy); }
 .md-icon--download { --md-icon: var(--md-icon-download); }
 .md-icon--maximize { --md-icon: var(--md-icon-maximize); }
+.md-icon--overflow-menu--horizontal { --md-icon: var(--md-icon-overflow-menu--horizontal); }
 .md-icon--checkmark { --md-icon: var(--md-icon-checkmark); }
 .md-icon--close { --md-icon: var(--md-icon-close); }
 .md-icon--time { --md-icon: var(--md-icon-time); }

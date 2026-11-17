@@ -24,6 +24,7 @@ export class ToolbarManager {
         this.onExportPdf = options.onExportPdf || null;
         this.onFormatSelectedCells = options.onFormatSelectedCells || null;
         this.getSelectedCellFormatState = options.getSelectedCellFormatState || (() => null);
+        this.toolbarItemVisibility = options.toolbarItems || {};
         this.commandButtons = new Map();
         this.overflowButtons = new Map();
         this.overflowSelection = null;
@@ -44,10 +45,9 @@ export class ToolbarManager {
             'codeblock',
             'table',
         ]);
+        this.headingLevelCommands = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']);
         this.tableCellRestrictedCommands = new Set([
-            'h1',
-            'h2',
-            'h3',
+            ...this.headingLevelCommands,
             'ul',
             'ol',
             'checkbox',
@@ -56,15 +56,8 @@ export class ToolbarManager {
             'mathblock',
             'table',
         ]);
-        this.headingLevelCommands = new Set([
-            'h1',
-            'h2',
-            'h3',
-        ]);
         this.listRestrictedCommands = new Set([
-            'h1',
-            'h2',
-            'h3',
+            ...this.headingLevelCommands,
             'quote',
             'codeblock',
             'mathblock',
@@ -142,10 +135,6 @@ export class ToolbarManager {
         this.toolbarItems = Array.from(this.toolbar.children).filter((item) =>
             item.hasAttribute('data-command') || item.classList.contains('toolbar-separator')
         );
-        this.toolbarButtons = this.toolbarItems.filter((item) =>
-            item.hasAttribute('data-command') && !item.hasAttribute('data-overflow-only')
-        );
-        this.hasOverflowOnlyCommands = this.toolbarItems.some((item) => item.hasAttribute('data-overflow-only'));
         this.overflowSeparators = new Map();
         this.toolbarItems.forEach((item) => {
             if (item.classList.contains('toolbar-separator')) {
@@ -233,17 +222,49 @@ export class ToolbarManager {
         this.updateOverflowLayout();
     }
 
+    isToolbarCommandEnabled(command) {
+        return command === 'settings' || command === 'exportPdf' || this.toolbarItemVisibility?.[command] !== false;
+    }
+
+    setToolbarItems(visibility) {
+        this.toolbarItemVisibility = visibility && typeof visibility === 'object' && !Array.isArray(visibility)
+            ? visibility : {};
+        const focused = document.activeElement;
+        this.updateOverflowLayout();
+        if (focused?.hidden && this.toolbar?.contains(focused)) {
+            this.closeOverflowMenu({ focusToggle: true });
+        }
+    }
+
+    getGroupedToolbarItems(buttons) {
+        const visible = new Set(buttons);
+        const items = [];
+        let separator = null;
+        for (const item of this.toolbarItems || []) {
+            if (item.classList.contains('toolbar-separator')) {
+                if (items.length) separator = item;
+            } else if (visible.has(item)) {
+                if (separator) items.push(separator);
+                items.push(item);
+                separator = null;
+            }
+        }
+        return items;
+    }
+
     getVisibleToolbarItems(buttonCount) {
-        const visible = new Set(this.toolbarButtons.slice(0, buttonCount));
-        return this.toolbarItems.filter((item, index) => {
-            if (item.hasAttribute('data-command')) return visible.has(item);
-            return this.toolbarItems.slice(0, index).some((before) => visible.has(before)) &&
-                this.toolbarItems.slice(index + 1).some((after) => visible.has(after));
-        });
+        return this.getGroupedToolbarItems(this.toolbarButtons.slice(0, buttonCount));
     }
 
     updateOverflowLayout() {
         if (!this.overflowToggle) return;
+        this.toolbarButtons = this.toolbarItems.filter((item) =>
+            item.hasAttribute('data-command') && !item.hasAttribute('data-overflow-only') &&
+            this.isToolbarCommandEnabled(item.getAttribute('data-command'))
+        );
+        const hasOverflowOnlyCommands = this.toolbarItems.some((item) =>
+            item.hasAttribute('data-overflow-only') && this.isToolbarCommandEnabled(item.getAttribute('data-command'))
+        );
         if (this.toolbar.clientWidth === 0) {
             this.closeOverflowMenu();
             return;
@@ -253,7 +274,8 @@ export class ToolbarManager {
         const gap = parseFloat(style.columnGap) || 0;
         const widths = new Map();
         this.toolbarItems.forEach((item) => {
-            item.hidden = item.hasAttribute('data-overflow-only');
+            item.hidden = item.hasAttribute('data-overflow-only') ||
+                (item.hasAttribute('data-command') && !this.isToolbarCommandEnabled(item.getAttribute('data-command')));
             if (item.hidden) return;
             const itemStyle = window.getComputedStyle(item);
             widths.set(item, item.getBoundingClientRect().width +
@@ -261,7 +283,7 @@ export class ToolbarManager {
         });
         const widthOf = (items) => items.reduce((width, item) => width + widths.get(item), 0) +
             Math.max(0, items.length - 1) * gap;
-        const needsOverflow = this.hasOverflowOnlyCommands ||
+        const needsOverflow = hasOverflowOnlyCommands ||
             widthOf(this.getVisibleToolbarItems(this.toolbarButtons.length)) > available;
         this.overflowToggle.hidden = !needsOverflow;
         let count = this.toolbarButtons.length;
@@ -280,10 +302,12 @@ export class ToolbarManager {
 
     updateOverflowMenuState() {
         let hasCheckableItems = false;
+        const overflowButtons = [];
         this.overflowButtons.forEach((menuItem, command) => {
             const button = this.commandButtons.get(command);
             if (!button) return;
-            menuItem.hidden = !button.hidden;
+            menuItem.hidden = !button.hidden || !this.isToolbarCommandEnabled(command);
+            if (!menuItem.hidden) overflowButtons.push(button);
             menuItem.disabled = button.disabled;
             menuItem.title = button.title;
             menuItem.textContent = (button.getAttribute('aria-label') || button.title || button.textContent.trim())
@@ -296,12 +320,9 @@ export class ToolbarManager {
             else menuItem.setAttribute('aria-checked', pressed);
         });
         this.overflowMenu?.classList.toggle('has-checkable-items', hasCheckableItems);
+        const visibleItems = new Set(this.getGroupedToolbarItems(overflowButtons));
         this.overflowSeparators?.forEach((separator, original) => {
-            const index = this.toolbarItems.indexOf(original);
-            separator.hidden = !(
-                this.toolbarItems.slice(0, index).some((item) => item.hasAttribute('data-command') && item.hidden) &&
-                this.toolbarItems.slice(index + 1).some((item) => item.hasAttribute('data-command') && item.hidden)
-            );
+            separator.hidden = !visibleItems.has(original);
         });
     }
 
@@ -481,13 +502,12 @@ export class ToolbarManager {
                 document.execCommand('strikeThrough', false, null);
                 break;
             case 'h1':
-                this.formatBlock(this.getActiveHeadingCommand() === command ? 'p' : 'h1');
-                break;
             case 'h2':
-                this.formatBlock(this.getActiveHeadingCommand() === command ? 'p' : 'h2');
-                break;
             case 'h3':
-                this.formatBlock(this.getActiveHeadingCommand() === command ? 'p' : 'h3');
+            case 'h4':
+            case 'h5':
+            case 'h6':
+                this.formatBlock(this.getActiveHeadingCommand() === command ? 'p' : command);
                 break;
             case 'ul':
                 if (this.isSelectionInHeadingContext()) {

@@ -3,19 +3,23 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 const domino = require('@mixmark-io/domino');
+const { toolbarItemDefaults } = require('../out/editor/ToolbarItems');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'media/modules/ToolbarManager.js'), 'utf8');
 const modulePromise = import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 
-async function fixture(t, initialWidth, { withFootnote = false, withToc = false, withPdf = false } = {}) {
+async function fixture(t, initialWidth, { withFootnote = false, withToc = false, withPdf = false,
+    extraTools = false, toolbarItems } = {}) {
     const window = domino.createWindow(`
         <div class="toolbar">
             <button class="toolbar-btn" data-command="bold" title="Bold (Ctrl+B)">B</button>
             <button class="toolbar-btn" data-command="italic" title="Italic (Ctrl+I)">I</button>
             <div class="toolbar-separator"></div>
             <button class="toolbar-btn" data-command="h1" title="Heading 1">H1</button>
+            ${extraTools ? ['h2', 'h3', 'h4', 'h5', 'h6'].map(command => `<button class="toolbar-btn" data-command="${command}" title="Heading ${command.slice(1)}">${command}</button>`).join('') + '<div class="toolbar-separator"></div><div class="toolbar-separator"></div>' : ''}
             <button class="toolbar-btn" data-command="image" title="Insert Image">Image</button>
-            ${withFootnote || withToc ? '<button class="toolbar-btn" data-command="settings" title="Settings">Settings</button>' : ''}
+            ${extraTools ? ['link', 'footnote', 'math', 'mathblock'].map(command => `<button class="toolbar-btn" data-command="${command}" title="${command}">${command}</button>`).join('') + '<div class="toolbar-separator"></div>' : ''}
+            ${withFootnote || withToc || extraTools ? `<button class="toolbar-btn" data-command="settings" title="Settings"${extraTools ? ' data-overflow-only' : ''}>Settings</button>` : ''}
             ${withPdf ? '<button class="toolbar-btn" data-command="exportPdf" data-overflow-only title="Export as PDF…" hidden>PDF</button>' : ''}
             <button class="toolbar-btn toolbar-overflow-toggle" hidden>…</button>
             <div class="toolbar-overflow-menu" hidden></div>
@@ -65,7 +69,7 @@ async function fixture(t, initialWidth, { withFootnote = false, withToc = false,
         }
     });
     const { ToolbarManager } = await modulePromise;
-    const manager = new ToolbarManager(editor, { saveState() {} });
+    const manager = new ToolbarManager(editor, { saveState() {} }, { toolbarItems });
     manager.setup();
     for (const button of [manager.overflowToggle, ...manager.overflowButtons.values()]) {
         Object.defineProperty(button, 'focus', { value: () => { activeElement = button; } });
@@ -94,6 +98,66 @@ async function fixture(t, initialWidth, { withFootnote = false, withToc = false,
         get range() { return range; }, get focused() { return activeElement; },
     };
 }
+
+test('default preferences hide optional insertions and higher headings from the bar and overflow', async t => {
+    const f = await fixture(t, 2000, { extraTools: true, withPdf: true, toolbarItems: toolbarItemDefaults });
+    assert.deepEqual(f.visible(), ['bold', 'italic', 'h1', 'h2', 'h3']);
+    assert.deepEqual(f.overflow(), ['settings', 'exportPdf']);
+    f.resize(80);
+    assert.deepEqual(f.overflow(), ['bold', 'italic', 'h1', 'h2', 'h3', 'settings', 'exportPdf']);
+    f.resize(2000);
+    assert.deepEqual(f.visible(), ['bold', 'italic', 'h1', 'h2', 'h3']);
+});
+
+test('checkbox changes show only chosen headings and keep their narrow-width commands reachable', async t => {
+    const allHidden = Object.fromEntries(Object.keys(toolbarItemDefaults).map(key => [key, false]));
+    const f = await fixture(t, 2000, { extraTools: true, withPdf: true, toolbarItems: toolbarItemDefaults });
+    const original = f.editor.innerHTML;
+    f.manager.setToolbarItems({ ...allHidden, h1: true, h2: true, h3: true, h4: true });
+    assert.deepEqual(f.visible(), ['h1', 'h2', 'h3', 'h4']);
+    assert.equal(f.toolbar.querySelectorAll('.toolbar-separator:not([hidden])').length, 0);
+    f.resize(80);
+    assert.deepEqual(f.overflow(), ['h1', 'h2', 'h3', 'h4', 'settings', 'exportPdf']);
+    f.resize(2000);
+    f.manager.setToolbarItems({ ...allHidden, link: true, image: true, footnote: true, math: true, mathblock: true });
+    assert.deepEqual(f.visible(), ['image', 'link', 'footnote', 'math', 'mathblock']);
+    assert.deepEqual(f.overflow(), ['settings', 'exportPdf']);
+    assert.equal(f.editor.innerHTML, original, 'Toolbar customization never changes the document');
+});
+
+test('hiding every editing tool leaves PDF and Settings available with no empty separators', async t => {
+    const allHidden = Object.fromEntries(Object.keys(toolbarItemDefaults).map(key => [key, false]));
+    const f = await fixture(t, 2000, { extraTools: true, withPdf: true });
+    f.manager.setToolbarItems({ ...allHidden, exportPdf: false, settings: false });
+    assert.deepEqual(f.visible(), []);
+    assert.deepEqual(f.overflow(), ['settings', 'exportPdf']);
+    assert.equal(f.manager.overflowToggle.hidden, false);
+    assert.equal(f.toolbar.querySelectorAll('.toolbar-separator:not([hidden])').length, 0);
+    assert.equal(f.manager.overflowMenu.querySelectorAll('.toolbar-overflow-separator:not([hidden])').length, 0);
+});
+
+test('empty toolbar groups collapse to one separator on the bar and in the overflow', async t => {
+    const allHidden = Object.fromEntries(Object.keys(toolbarItemDefaults).map(key => [key, false]));
+    const f = await fixture(t, 2000, { extraTools: true });
+    f.manager.setToolbarItems({ ...allHidden, bold: true, image: true });
+    assert.equal(f.toolbar.querySelectorAll('.toolbar-separator:not([hidden])').length, 1);
+    f.resize(80);
+    const items = Array.from(f.manager.overflowMenu.children).filter(item => !item.hidden);
+    const separator = item => item.classList.contains('toolbar-overflow-separator');
+    assert.equal(separator(items[0]), false);
+    assert.equal(separator(items.at(-1)), false);
+    assert.equal(items.some((item, index) => separator(item) && separator(items[index + 1] || items[0])), false);
+});
+
+test('removing the focused overflow command returns keyboard focus to the menu toggle', async t => {
+    const f = await fixture(t, 80, { extraTools: true, withPdf: true });
+    f.manager.openOverflowMenu(true);
+    assert.equal(f.focused, f.manager.overflowButtons.get('bold'));
+    f.manager.setToolbarItems({ bold: false });
+    assert.equal(f.focused, f.manager.overflowToggle);
+    assert.equal(f.manager.overflowMenu.hidden, true);
+    assert.ok(!f.overflow().includes('bold'));
+});
 
 test('PDF export remains in the ellipsis even when every editing button fits', async t => {
     const f = await fixture(t, 2000, { withPdf: true });

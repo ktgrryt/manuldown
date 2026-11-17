@@ -9,6 +9,7 @@
     "copy": "svg/32/copy.svg",
     "download": "svg/16/download.svg",
     "maximize": "svg/16/maximize.svg",
+    "overflow-menu--horizontal": "svg/32/overflow-menu--horizontal.svg",
     "checkmark": "svg/32/checkmark.svg",
     "close": "svg/32/close.svg",
     "time": "svg/32/time.svg",

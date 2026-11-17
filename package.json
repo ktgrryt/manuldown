@@ -305,6 +305,141 @@
           "default": true,
           "description": "Show the toolbar."
         },
+        "manulDown.toolbar.items": {
+          "type": "object",
+          "additionalProperties": false,
+          "default": {
+            "bold": true,
+            "italic": true,
+            "strikethrough": true,
+            "inlinecode": true,
+            "h1": true,
+            "h2": true,
+            "h3": true,
+            "h4": false,
+            "h5": false,
+            "h6": false,
+            "ul": true,
+            "ol": true,
+            "checkbox": true,
+            "quote": true,
+            "codeblock": true,
+            "table": true,
+            "link": false,
+            "image": false,
+            "footnote": false,
+            "math": false,
+            "mathblock": false
+          },
+          "properties": {
+            "bold": {
+              "type": "boolean",
+              "default": true,
+              "description": "Bold"
+            },
+            "italic": {
+              "type": "boolean",
+              "default": true,
+              "description": "Italic"
+            },
+            "strikethrough": {
+              "type": "boolean",
+              "default": true,
+              "description": "Strikethrough"
+            },
+            "inlinecode": {
+              "type": "boolean",
+              "default": true,
+              "description": "Inline Code"
+            },
+            "h1": {
+              "type": "boolean",
+              "default": true,
+              "description": "H1"
+            },
+            "h2": {
+              "type": "boolean",
+              "default": true,
+              "description": "H2"
+            },
+            "h3": {
+              "type": "boolean",
+              "default": true,
+              "description": "H3"
+            },
+            "h4": {
+              "type": "boolean",
+              "default": false,
+              "description": "H4"
+            },
+            "h5": {
+              "type": "boolean",
+              "default": false,
+              "description": "H5"
+            },
+            "h6": {
+              "type": "boolean",
+              "default": false,
+              "description": "H6"
+            },
+            "ul": {
+              "type": "boolean",
+              "default": true,
+              "description": "Bullet List"
+            },
+            "ol": {
+              "type": "boolean",
+              "default": true,
+              "description": "Numbered List"
+            },
+            "checkbox": {
+              "type": "boolean",
+              "default": true,
+              "description": "Task List"
+            },
+            "quote": {
+              "type": "boolean",
+              "default": true,
+              "description": "Quote"
+            },
+            "codeblock": {
+              "type": "boolean",
+              "default": true,
+              "description": "Code Block"
+            },
+            "table": {
+              "type": "boolean",
+              "default": true,
+              "description": "Table"
+            },
+            "link": {
+              "type": "boolean",
+              "default": false,
+              "description": "Link"
+            },
+            "image": {
+              "type": "boolean",
+              "default": false,
+              "description": "Image"
+            },
+            "footnote": {
+              "type": "boolean",
+              "default": false,
+              "description": "Footnote"
+            },
+            "math": {
+              "type": "boolean",
+              "default": false,
+              "description": "Inline Math"
+            },
+            "mathblock": {
+              "type": "boolean",
+              "default": false,
+              "description": "Math Block"
+            }
+          },
+          "markdownDescription": "Choose the buttons shown in the toolbar. Changes apply immediately. Unchecked buttons are also hidden from the **…** menu; their slash commands and keyboard shortcuts remain available. PDF export and Settings always remain in **…**."
+        },
         "manulDown.toc.enabled": {
           "type": "boolean",
           "default": true,

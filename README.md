@@ -27,15 +27,17 @@ You can also right-click a file in the Explorer and choose **Open With… → Ma
 
 Use the toolbar to format text and insert elements. Buttons that do not fit are available in the **…** menu.
 
+Open **… → Settings** and search for `manulDown.toolbar.items` (**Toolbar: Items**) to choose the buttons with checkboxes. Changes apply immediately to open editors. H1–H6 can be selected individually. Link, Image, Footnote, Inline Math, Math Block, and H4–H6 are hidden by default. Unchecked tools are also hidden from **…**; slash commands and shortcuts remain available. PDF export and Settings always stay in **…**.
+
 | Button | Action |
 | --- | --- |
 | **B** / **I** / **&lt;/&gt;** | Toggle bold, italic, or inline code |
-| **H1, H2, H3** | Change heading level |
+| **H1–H6** | Change heading level (H1–H3 enabled by default) |
 | **• / 1. / ☑** | Switch to an unordered, ordered, or task list |
 | **Link** | Insert or edit a link |
 | **Footnote** | Add a footnote |
 | **Code** | Insert a code block |
-| **Math** / **Math Block** (in **…**) | Insert an inline formula or math block |
+| **Math** / **Math Block** | Insert an inline formula or math block |
 | **Image** | Import and insert an image file |
 
 Markdown patterns such as `# Heading`, `**bold**`, `*italic*`, `- item`, and `1. item` convert as you type. To create a code block, type a language fence such as `` ```javascript `` and press `Enter`.
@@ -184,6 +186,7 @@ Use **… → Settings** in the toolbar or `/settings` to open ManulDown setting
 | Setting | Default | Description |
 | --- | --- | --- |
 | `manulDown.toolbar.visible` | `true` | Show the toolbar |
+| `manulDown.toolbar.items` | Per-button defaults | Select toolbar buttons with checkboxes; H1–H6 are available |
 | `manulDown.toc.enabled` | `true` | Automatically show a table of contents when headings exist |
 | `manulDown.openByDefault` | `true` | Open Markdown with ManulDown by default |
 | `manulDown.list.dashStyle` | `false` | Use `-` for bullet markers |

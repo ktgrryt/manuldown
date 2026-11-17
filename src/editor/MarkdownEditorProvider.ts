@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as fs from 'fs/promises';
 import { MarkdownDocument } from './MarkdownDocument';
 import { WorkspaceLinkPicker } from './WorkspaceLinkPicker';
+import { resolveToolbarItems, ToolbarItems } from './ToolbarItems';
 import { getNonce } from '../utils/getNonce';
 import { getLoadingSpinnerCss } from '../utils/loadingSpinner';
 import {
@@ -4829,6 +4830,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
 
     private getWebviewSettings(): {
         toolbarVisible: boolean;
+        toolbarItems: ToolbarItems;
         tocEnabled: boolean;
         tocPanelWidth: number;
         useVsCodeCtrlP: boolean;
@@ -4839,6 +4841,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     } {
         return {
             toolbarVisible: this.getBooleanSetting('toolbar.visible', true),
+            toolbarItems: resolveToolbarItems(vscode.workspace.getConfiguration('manulDown').get<unknown>('toolbar.items')),
             tocEnabled: this.getBooleanSetting('toc.enabled', true),
             tocPanelWidth: this.tocPanelWidthPx,
             useVsCodeCtrlP: true,
@@ -5007,6 +5010,9 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         <button class="toolbar-btn" data-command="h1" title="Heading 1">H1</button>
         <button class="toolbar-btn" data-command="h2" title="Heading 2">H2</button>
         <button class="toolbar-btn" data-command="h3" title="Heading 3">H3</button>
+        <button class="toolbar-btn" data-command="h4" title="Heading 4" hidden>H4</button>
+        <button class="toolbar-btn" data-command="h5" title="Heading 5" hidden>H5</button>
+        <button class="toolbar-btn" data-command="h6" title="Heading 6" hidden>H6</button>
         <div class="toolbar-separator"></div>
         <button class="toolbar-btn toolbar-btn-list" data-command="ul" title="${settings.listDashStyle ? 'Dash List' : 'Bullet List'}" aria-label="${settings.listDashStyle ? 'Dash List' : 'Bullet List'}">
             ${settings.listDashStyle ? '–' : '•'}
@@ -5028,20 +5034,20 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             Table
         </button>
         <div class="toolbar-separator"></div>
-        <button class="toolbar-btn" data-command="link" data-shortcut-key="K" data-overflow-only title="Insert Link" hidden>
+        <button class="toolbar-btn" data-command="link" data-shortcut-key="K" title="Insert Link" hidden>
             Link
         </button>
-        <button class="toolbar-btn" data-command="image" data-overflow-only title="Insert Image" hidden>
+        <button class="toolbar-btn" data-command="image" title="Insert Image" hidden>
             Image
         </button>
-        <button class="toolbar-btn" data-command="footnote" data-overflow-only title="Insert Footnote" aria-label="Insert Footnote" hidden>
+        <button class="toolbar-btn" data-command="footnote" title="Insert Footnote" aria-label="Insert Footnote" hidden>
             Footnote
         </button>
         <div class="toolbar-separator"></div>
-        <button class="toolbar-btn" data-command="math" data-overflow-only title="Insert Inline Math ($…$)" aria-label="Insert Inline Math" hidden>
+        <button class="toolbar-btn" data-command="math" title="Insert Inline Math ($…$)" aria-label="Insert Inline Math" hidden>
             Math
         </button>
-        <button class="toolbar-btn" data-command="mathblock" data-overflow-only title="Insert Math Block ($$…$$)" aria-label="Insert Math Block" hidden>
+        <button class="toolbar-btn" data-command="mathblock" title="Insert Math Block ($$…$$)" aria-label="Insert Math Block" hidden>
             Math Block
         </button>
         <div class="toolbar-separator"></div>
@@ -5053,7 +5059,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             Settings
         </button>
         <button class="toolbar-btn toolbar-overflow-toggle" type="button" title="More tools" aria-label="More tools" aria-haspopup="menu" aria-expanded="false" aria-controls="toolbar-overflow-menu" hidden>
-            &hellip;
+            <span class="md-icon md-icon--overflow-menu--horizontal" aria-hidden="true"></span>
         </button>
         <div id="toolbar-overflow-menu" class="toolbar-overflow-menu" role="menu" aria-label="More tools" hidden></div>
     </div>

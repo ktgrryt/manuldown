@@ -27,15 +27,17 @@ ManulDownは、Markdownの表示結果を見ながら編集できるVSCode拡張
 
 ツールバーから書式の変更や要素の挿入ができます。幅に収まらないボタンは **…** メニューに表示します。
 
+**… → Settings** から設定画面を開き、`manulDown.toolbar.items`（**Toolbar: Items**）を検索すると、チェックボックスで表示する項目を選べます。変更は開いているエディターに即時反映されます。見出しはH1〜H6を個別に選択できます。Link、Image、Footnote、Inline Math、Math Block、H4〜H6は初期状態では非表示です。チェックを外した項目は **…** からも非表示になり、スラッシュコマンドやショートカットで利用できます。PDF出力と設定は常に **…** に残ります。
+
 | ボタン | 操作 |
 | --- | --- |
 | **B** / **I** / **&lt;/&gt;** | 太字・斜体・インラインコードを切り替え |
-| **H1, H2, H3** | 見出しレベルを変更 |
+| **H1〜H6** | 見出しレベルを変更（初期状態はH1〜H3） |
 | **• / 1. / ☑** | 箇条書き・番号付きリスト・タスクリストに切り替え |
 | **Link** | リンクを挿入・編集 |
 | **Footnote** | 脚注を追加 |
 | **Code** | コードブロックを挿入 |
-| **Math** / **Math Block**（**…** 内） | インライン数式・数式ブロックを挿入 |
+| **Math** / **Math Block** | インライン数式・数式ブロックを挿入 |
 | **Image** | 画像ファイルを取り込んで挿入 |
 
 `# 見出し`、`**太字**`、`*斜体*`、`- 項目`、`1. 項目` などのMarkdown記法も入力中に変換します。コードブロックは `` ```javascript `` のように言語を指定して `Enter` で作成できます。
@@ -186,6 +188,7 @@ PDF出力はVS Code Desktopのローカル環境に対応し、Google Chromeま�
 | 設定 | 既定値 | 説明 |
 | --- | --- | --- |
 | `manulDown.toolbar.visible` | `true` | ツールバーを表示 |
+| `manulDown.toolbar.items` | 項目ごとの初期値 | チェックボックスで表示項目を選択。H1〜H6に対応 |
 | `manulDown.toc.enabled` | `true` | 見出しがある場合に目次を自動表示 |
 | `manulDown.openByDefault` | `true` | Markdownを既定でManulDownで開く |
 | `manulDown.list.dashStyle` | `false` | 箇条書きのマーカーに `-` を使用 |
