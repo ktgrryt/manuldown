@@ -179,6 +179,8 @@ export class CalloutManager {
         this.onNavigate = options.onNavigate || (() => {});
         this.isComposing = options.isComposing || (() => false);
         this.cursorManager = options.cursorManager || null;
+        this.moveToBlockGap = options.moveToBlockGap || null;
+        this.deleteBlock = options.deleteBlock || null;
         this.typePicker = null;
         // Delegate handlers so controls restored by Undo/Redo remain usable.
         this.editor.addEventListener('mousedown', event => {
@@ -481,8 +483,11 @@ export class CalloutManager {
             if (!child) break;
             first = child;
         }
-        const leadingType = this.getLeadingTypeBlock(first);
+        const leadingType = this.getBoundaryCallout(first);
         if (leadingType) return this.selectTypeLabel(leadingType, selection);
+        if (first.matches('table, .md-table-wrapper')) {
+            first = first.querySelector('th, td') || first;
+        }
         if ((first.tagName === 'UL' || first.tagName === 'OL') && this.cursorManager?._placeCursorInFirstListItem(first, selection)) {
             // Lists containing only preserved source have no editable text.
             // A generic list cursor must not enter their read-only PRE/code.
@@ -500,15 +505,145 @@ export class CalloutManager {
         return true;
     }
 
-    getLeadingTypeBlock(node) {
+    getBoundaryCallout(node, backwards = false) {
         let current = node;
         while (current?.nodeType === 1) {
             if (current.matches('[data-mdw-callout="true"]')) return current;
             if (!/^(BLOCKQUOTE|UL|OL|LI)$/.test(current.tagName)) return null;
-            current = Array.from(current.childNodes).find(child => child.nodeType === 3
-                ? child.textContent.trim() !== '' : child.nodeType === 1 && child.getAttribute('contenteditable') !== 'false');
+            current = this.navigableSibling(backwards ? current.lastChild : current.firstChild, backwards);
         }
         return null;
+    }
+
+    navigableSibling(node, backwards = false) {
+        for (; node; node = backwards ? node.previousSibling : node.nextSibling) {
+            if (node.nodeType === 3 ? node.textContent.trim() !== '' : node.nodeType === 1 &&
+                !node.matches('[contenteditable="false"], [data-exclude-from-markdown="true"], [aria-hidden="true"]')) return node;
+        }
+        return null;
+    }
+
+    moveToBlockBoundary(node, selection, direction) {
+        if (!node) return false;
+        const backwards = direction === 'up' || direction === 'backward' || direction === 'left';
+        const incoming = !backwards && this.getBoundaryCallout(node);
+        if (incoming) return this.selectTypeLabel(incoming, selection);
+        if (node.nodeType === 1) {
+            node = this.cursorManager?._getCalloutBoundaryBlock(node, backwards ? 'up' : 'down') || node;
+            while (node.tagName === 'BLOCKQUOTE') {
+                const child = this.navigableSibling(backwards ? node.lastChild : node.firstChild, backwards);
+                if (!child) break;
+                node = child;
+            }
+            if (node.tagName === 'PRE' && node.querySelector('code')) {
+                if (direction === 'down' && this.cursorManager?._selectCodeBlockLanguageLabel(node, selection)) { this.refresh(); return true; }
+                const code = node.querySelector('code'), text = this.cursorManager?.getCodeBlockText(code);
+                if (text !== undefined && this.cursorManager.setCodeBlockCursorOffset(code, selection,
+                    backwards ? text.length - Number(text.endsWith('\n')) : 0)) { this.refresh(); return true; }
+                node = code;
+            }
+            if (backwards && ((direction === 'up' && this.cursorManager?.placeCursorAtLastVisualLineStart(node, selection)) ||
+                this.cursorManager?.placeCursorAtBlockEnd(node, selection))) { this.refresh(); return true; }
+            if (!backwards && (/^(UL|OL)$/.test(node.tagName) && this.cursorManager?._placeCursorInFirstListItem(node, selection) ||
+                this.cursorManager?.placeCursorAtLeadingImageLine(node, selection) ||
+                this.cursorManager?._placeCursorBeforeLeadingInlineCode(node, selection))) { this.refresh(); return true; }
+            if (!backwards && node.matches('table, .md-table-wrapper')) {
+                const entry = direction === 'down' ? 'th, td' : '.md-table-edge-left';
+                node = node.querySelector(entry) || node;
+            }
+        }
+        const text = node.nodeType === 3 ? node : backwards
+            ? this.cursorManager?._getLastNavigableTextNode(node) : this.cursorManager?._getFirstNavigableTextNode(node);
+        const range = this.document.createRange();
+        if (node.tagName === 'HR') range.selectNode(node);
+        else {
+            const target = text || node;
+            range.setStart(target, backwards ? (target.nodeType === 3 ? target.textContent.length : target.childNodes.length) : 0);
+            range.collapse(true);
+        }
+        selection.removeAllRanges(); selection.addRange(range); this.refresh();
+        return true;
+    }
+
+    movePastCallout(block, selection, direction) {
+        if (this.moveToBlockGap?.(block, 'down', selection)) { this.refresh(); return true; }
+        for (let current = block; current && current !== this.editor; current = current.parentElement) {
+            const next = this.navigableSibling(current.nextSibling);
+            if (next) return this.moveToBlockBoundary(next, selection, direction);
+        }
+        const content = Array.from(block.children).find(child => child.classList.contains('mdw-callout-content'));
+        return this.moveToBlockBoundary(this.navigableSibling(content?.lastChild, true), selection, 'backward');
+    }
+
+    moveVerticallyFromTable(wrapper, selection, direction) {
+        const backwards = direction === 'up';
+        const content = this.getContent(wrapper);
+        for (let block = wrapper; block && block !== this.editor; block = block.parentElement) {
+            const neighbor = this.navigableSibling(backwards ? block.previousSibling : block.nextSibling, backwards);
+            if (neighbor) {
+                const callout = this.getBoundaryCallout(neighbor, backwards);
+                if (callout) return this.moveToBlockBoundary(callout, selection, direction);
+                // Table navigation handles siblings in the same container.
+                return !!content && block !== wrapper && this.moveToBlockBoundary(neighbor, selection, direction);
+            }
+            if (!content) return false;
+            if (block.parentElement === content) {
+                return backwards ? this.selectTypeLabel(content.parentElement, selection)
+                    : this.movePastCallout(content.parentElement, selection, direction);
+            }
+        }
+        return false;
+    }
+
+    handleBoundaryNavigation(selection, direction) {
+        const range = selection.getRangeAt(0), node = range.startContainer;
+        const container = elementOf(node);
+        if (!range.collapsed || !container || !this.editor.contains(container) ||
+            (node.nodeType === 3 && node.textContent.trim() !== '')) return false;
+        const backwards = direction === 'up' || direction === 'backward' || direction === 'left';
+        if (container.matches('[data-mdw-callout="true"]')) {
+            const content = Array.from(container.children).find(child => child.classList.contains('mdw-callout-content'));
+            if (!content) return false;
+            const index = Array.prototype.indexOf.call(container.childNodes, content);
+            const offset = node === container ? range.startOffset : Array.prototype.indexOf.call(container.childNodes, node);
+            if (offset <= index) return backwards ? this.selectTypeLabel(container, selection) : this.moveToBody(container, selection);
+            return backwards ? this.moveToBlockBoundary(this.navigableSibling(content.lastChild, true), selection, direction)
+                : this.movePastCallout(container, selection, direction);
+        }
+        const content = container.classList.contains('mdw-callout-content') && this.getContent(container);
+        if (!content && container !== this.editor) return false;
+        const previous = this.navigableSibling(node.nodeType === 3 ? node.previousSibling : container.childNodes[range.startOffset - 1], true);
+        const next = this.navigableSibling(node.nodeType === 3 ? node.nextSibling : container.childNodes[range.startOffset]);
+        if (!content && ![previous, next].some(sibling => sibling?.nodeType === 1 && sibling.matches('[data-mdw-callout="true"]'))) return false;
+        const target = backwards ? previous : next;
+        if (target) return this.moveToBlockBoundary(target, selection, direction);
+        if (content) return backwards ? this.selectTypeLabel(content.parentElement, selection)
+            : this.movePastCallout(content.parentElement, selection, direction);
+        const block = backwards ? next : previous;
+        if (block?.nodeType === 1 && block.matches('[data-mdw-callout="true"]') &&
+            this.moveToBlockGap?.(block, backwards ? 'up' : 'down', selection)) { this.refresh(); return true; }
+        return false;
+    }
+
+    normalizeCaret(selection = this.selection) {
+        if (this.isComposing() || !selection?.rangeCount || !selection.isCollapsed) return false;
+        const range = selection.getRangeAt(0), node = range.startContainer;
+        const container = elementOf(node), block = this.getTypeBlock(node);
+        if (!block) return false;
+        const content = Array.from(block.children).find(child => child.classList.contains('mdw-callout-content'));
+        if (!content) return false;
+        if (container === block) {
+            const index = Array.prototype.indexOf.call(block.childNodes, content);
+            const offset = node === block ? range.startOffset : Array.prototype.indexOf.call(block.childNodes, node);
+            return offset <= index ? this.moveToBody(block, selection)
+                : this.moveToBlockBoundary(this.navigableSibling(content.lastChild, true), selection, 'backward');
+        }
+        if (container?.closest('.mdw-callout-title[contenteditable="false"]')) return this.moveToBody(block, selection);
+        if (container !== content || (node.nodeType === 3 && node.textContent.trim() !== '')) return false;
+        const previous = this.navigableSibling(node.nodeType === 3 ? node.previousSibling : content.childNodes[range.startOffset - 1], true);
+        const next = this.navigableSibling(node.nodeType === 3 ? node.nextSibling : content.childNodes[range.startOffset]);
+        return next ? this.moveToBlockBoundary(next, selection, 'forward')
+            : this.moveToBlockBoundary(previous, selection, 'backward');
     }
 
     handleTypeNavigation(selection, direction) {
@@ -526,18 +661,13 @@ export class CalloutManager {
         if (selected) {
             if (!backwards && !vertical) return this.focusFormatButton(selected, selection);
             if (!backwards) return this.moveToBody(selected.parentElement, selection, direction);
+            if (this.moveToBlockGap?.(selected.parentElement, 'up', selection, true)) {
+                this.refresh(); return true;
+            }
             let current = selected.parentElement;
             while (current && current !== this.editor) {
-                let previous = current.previousSibling;
-                while (previous && ((previous.nodeType === 3 && previous.textContent.trim() === '') ||
-                    (previous.nodeType === 1 && previous.getAttribute('contenteditable') === 'false'))) previous = previous.previousSibling;
-                if (previous) {
-                    if (previous.nodeType === 1 && vertical && this.cursorManager?.placeCursorAtLastVisualLineStart(previous, selection)) { this.refresh(); return true; }
-                    if (previous.nodeType === 1 && this.cursorManager?.placeCursorAtBlockEnd(previous, selection)) { this.refresh(); return true; }
-                    const text = previous.nodeType === 3 ? previous : this.document.createTreeWalker(previous, 4).nextNode();
-                    const range = this.document.createRange(); range.setStart(text || previous, text ? text.textContent.length : previous.childNodes.length); range.collapse(true);
-                    selection.removeAllRanges(); selection.addRange(range); this.refresh(); return true;
-                }
+                const previous = this.navigableSibling(current.previousSibling, true);
+                if (previous) return this.moveToBlockBoundary(previous, selection, direction);
                 current = current.parentElement;
                 if (current?.classList.contains('mdw-callout-content')) return this.selectTypeLabel(current.parentElement, selection);
             }
@@ -555,13 +685,29 @@ export class CalloutManager {
                 if (this.atEdge(edge, content, false)) return this.selectTypeLabel(content.parentElement, selection);
             }
         }
+        const element = elementOf(range.startContainer);
         if (!range.collapsed || !this.editor.contains(range.startContainer) ||
-            elementOf(range.startContainer)?.closest('[contenteditable="false"]')) return false;
+            element?.closest('[contenteditable="false"]')) return false;
+        // TableManager keeps movement inside the table until its row boundary.
+        if (vertical && element?.closest('table, .md-table-wrapper')) return false;
+        // Chromium can put a caret on a DIV boundary or parser whitespace after
+        // a padding click/native arrow. Those are not visual text lines; handing
+        // them to generic vertical hit-testing can skip the body or leave the editor.
+        if (this.handleBoundaryNavigation(selection, direction)) return true;
+        const inlineCode = !vertical && element?.closest('code');
+        if (inlineCode && !inlineCode.closest('pre')) return false;
         const content = this.getContent(range.startContainer);
         if (backwards && content && this.isVisualEdge(range, content, false, vertical)) return this.selectTypeLabel(content.parentElement, selection);
-        if (backwards) return false;
-        let current = elementOf(range.startContainer)?.closest('p, li, pre, h1, h2, h3, h4, h5, h6') || elementOf(range.startContainer);
+        let current = element?.closest('p, li, pre, h1, h2, h3, h4, h5, h6') || element;
         if (!current) return false;
+        if (backwards) {
+            // An empty line below a callout belongs to the outer document. Enter
+            // the callout's last body line before code/table navigation treats it
+            // as an empty line above the next block.
+            if (!vertical || !this.cursorManager?._isEffectivelyEmptyBlock(current)) return false;
+            const previous = this.getBoundaryCallout(this.navigableSibling(current.previousSibling, true), true);
+            return !!previous && this.moveToBlockBoundary(previous, selection, 'up');
+        }
         if (current.tagName === 'PRE') {
             const code = current.querySelector('code');
             const offset = code && this.cursorManager?.getCodeBlockCursorOffset(code, range);
@@ -571,11 +717,22 @@ export class CalloutManager {
             if (vertical ? text.slice(offset, end).includes('\n') : offset < end) return false;
         } else if (!this.isVisualEdge(range, current, true, vertical)) return false;
         while (current && current !== this.editor) {
-            let next = current.nextSibling;
-            while (next && ((next.nodeType === 3 && next.textContent.trim() === '') ||
-                (next.nodeType === 1 && next.getAttribute('contenteditable') === 'false'))) next = next.nextSibling;
+            if (current.matches('[data-mdw-callout="true"]') && this.moveToBlockGap?.(current, 'down', selection)) {
+                this.refresh(); return true;
+            }
+            const next = this.navigableSibling(current.nextSibling);
             if (next) {
-                const incoming = this.getLeadingTypeBlock(next);
+                const incoming = this.getBoundaryCallout(next);
+                // The code-block exit normally owns this boundary. Type-label
+                // navigation runs first, so preserve its intermediate input line.
+                if (incoming && current.tagName === 'PRE' && this.moveToBlockGap?.(current, 'down', selection)) {
+                    this.refresh(); return true;
+                }
+                if (content && vertical && element.closest('pre') &&
+                    next.nodeType === 1 && next.matches('table, .md-table-wrapper')) {
+                    return this.moveToBlockBoundary(next, selection, direction);
+                }
+                if (content && !vertical && !incoming) return this.moveToBlockBoundary(next, selection, direction);
                 return incoming ? this.selectTypeLabel(incoming, selection) : false;
             }
             current = current.parentElement;
@@ -649,7 +806,7 @@ export class CalloutManager {
         this.selection.addRange(range);
     }
 
-    finishChange() { this.onChange(); }
+    finishChange(options) { this.onChange(options); }
 
     /** Quote lines are already isolated by the existing Markdown paste parser. */
     createPastedQuoteCallouts(lines, appendInline) {
@@ -822,6 +979,32 @@ export class CalloutManager {
         return false;
     }
 
+    deleteEmptyBlock() {
+        const range = this.getRange();
+        const title = this.getSelectedTypeLabel();
+        const block = title?.parentElement || (range?.collapsed && this.getContent(range.startContainer)?.parentElement);
+        const content = block && Array.from(block.children).find(child => child.classList.contains('mdw-callout-content'));
+        if (!content || !this.deleteBlock ||
+            content.textContent.replace(/[\u200B\u2060\uFEFF]/g, '').trim() !== '' ||
+            content.querySelector('img, input, code, pre, hr, table, ul, ol, blockquote, [data-mdw-callout], [data-mdw-math], [contenteditable="false"]')) return false;
+        this.beforeChange();
+        this.deleteBlock(block, this.selection);
+        this.refresh();
+        this.finishChange({ preferLiveSelection: true });
+        return true;
+    }
+
+    handleDeletion(event, backwards) {
+        if (this.deleteEmptyBlock() || this.getSelectedTypeLabel() || this.protectBoundary(event, backwards)) {
+            event.preventDefault(); return true;
+        }
+        if (this.normalizeCaret()) {
+            this.deleteEmptyBlock();
+            event.preventDefault(); return true;
+        }
+        return false;
+    }
+
     exitEmptyParagraph() {
         const range = this.getRange();
         const content = this.getContent(range?.startContainer);
@@ -845,6 +1028,10 @@ export class CalloutManager {
             return !!event.defaultPrevented;
         }
         const title = this.getSelectedTypeLabel();
+        const ctrlH = isMac && event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && event.key?.toLowerCase() === 'h';
+        const deletion = ctrlH || (!event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey &&
+            (event.key === 'Backspace' || event.key === 'Delete'));
+        if (deletion) return this.handleDeletion(event, event.key !== 'Delete');
         const navigation = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'backward', ArrowRight: 'forward' };
         const macNavigation = { p: 'up', n: 'down', b: 'backward', f: 'forward' };
         const direction = !event.shiftKey && !event.altKey && !event.metaKey &&
@@ -866,16 +1053,11 @@ export class CalloutManager {
             if (event.key === 'Enter' || event.key === ' ' || event.key?.length === 1) {
                 event.preventDefault(); this.openTypePicker(title); return true;
             }
-            if (event.key === 'Backspace' || event.key === 'Delete') {
-                event.preventDefault(); return true;
-            }
             if (event.key === 'Escape') {
                 event.preventDefault(); this.moveToBody(title.parentElement, this.selection); return true;
             }
         }
         if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return false;
-        if (event.key === 'Backspace') return this.protectBoundary(event, true);
-        if (event.key === 'Delete') return this.protectBoundary(event, false);
         if (event.key === 'Enter' && (this.convertQuote() || this.convertContainer() ||
             this.convertMkdocs() || this.exitEmptyParagraph())) {
             event.preventDefault();
@@ -886,13 +1068,15 @@ export class CalloutManager {
 
     handleBeforeInput(event) {
         if (this.isComposing() || event.isComposing || event.inputType === 'insertCompositionText') return false;
+        if (event.inputType === 'deleteContentBackward' || event.inputType === 'deleteContentForward') {
+            return this.handleDeletion(event, event.inputType === 'deleteContentBackward');
+        }
+        this.normalizeCaret();
         if (this.getSelectedTypeLabel() && /^(?:insert|delete|format)/.test(event.inputType || '')) {
             event.preventDefault();
             if (event.inputType.startsWith('insert')) this.openTypePicker(this.getSelectedTypeLabel());
             return true;
         }
-        if (event.inputType === 'deleteContentBackward') return this.protectBoundary(event, true);
-        if (event.inputType === 'deleteContentForward') return this.protectBoundary(event, false);
         if (event.inputType === 'insertParagraph') return this.handleKeydown({ key: 'Enter', preventDefault: () => event.preventDefault() });
         return false;
     }

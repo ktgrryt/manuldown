@@ -1,8 +1,15 @@
 // @ts-nocheck
-// Empty code-block boundary paragraphs are caret positions, not document edits.
+// Empty block boundary paragraphs are caret positions, not document edits.
 export class CodeBlockGapManager {
     constructor(editor) {
         this.editor = editor;
+    }
+
+    isBoundaryBlock(node) {
+        return node?.nodeType === Node.ELEMENT_NODE && (
+            (node.tagName === 'PRE' && !!node.querySelector('code')) ||
+            node.getAttribute('data-mdw-callout') === 'true'
+        );
     }
 
     isEmpty(paragraph) {
@@ -34,7 +41,7 @@ export class CodeBlockGapManager {
     }
 
     isFootnoteBoundary(anchor, adjacent, direction) {
-        // Top-level footnotes follow the body, so a last body code block still
+        // Top-level footnotes follow the body, so a last body block still
         // needs an input position before them. Do not split two note bodies.
         return direction === 'down' && anchor.parentElement === this.editor &&
             !anchor.hasAttribute('data-mdw-footnote-definition') &&
@@ -60,39 +67,39 @@ export class CodeBlockGapManager {
             return isFirstLine(range, content) && this.placeCaret(previous, selection);
         }
 
-        const blocks = previous.querySelectorAll('pre');
-        const pre = previous.tagName === 'PRE' ? previous : blocks[blocks.length - 1];
-        if (!pre?.querySelector('code') || pre.closest('[data-mdw-footnote-definition]')) return false;
-        // A code block nested in a quote/list must be the final body content.
+        const blocks = previous.querySelectorAll('pre, [data-mdw-callout="true"]');
+        const last = blocks[blocks.length - 1];
+        // A callout remains the boundary even when its body contains code.
+        const block = this.isBoundaryBlock(previous) ? previous : last?.closest('[data-mdw-callout="true"]') || last;
+        if (!this.isBoundaryBlock(block) || block.closest('[data-mdw-footnote-definition]')) return false;
+        // A block nested in a quote/list must be the final body content.
         // Otherwise Up should visit the text that follows it.
-        let anchor = pre;
+        let anchor = block;
         while (anchor !== previous) {
             if (this.adjacentNode(anchor, 'down')) return false;
             anchor = anchor.parentElement;
         }
-        return isFirstLine(range, content) && this.moveToGap(pre, 'down', selection);
+        return isFirstLine(range, content) && this.moveToGap(block, 'down', selection);
     }
 
-    moveToGap(pre, direction, selection, allowLabelSelection = false) {
-        if (!pre || pre.tagName !== 'PRE' || !pre.querySelector('code') ||
-            !this.editor.contains(pre) || !selection || (!selection.isCollapsed && !allowLabelSelection)) {
+    moveToGap(block, direction, selection, allowLabelSelection = false) {
+        if (!this.isBoundaryBlock(block) || !this.editor.contains(block) ||
+            !selection || (!selection.isCollapsed && !allowLabelSelection)) {
             return false;
         }
-        const adjacent = this.adjacentNode(pre, direction);
+        const adjacent = this.adjacentNode(block, direction);
         if (adjacent && adjacent.nodeType === Node.ELEMENT_NODE &&
             adjacent.getAttribute('data-mdw-code-gap') === 'true' && this.isEmpty(adjacent)) {
             return this.placeCaret(adjacent, selection);
         }
 
-        let anchor = pre;
+        let anchor = block;
         if (adjacent) {
             // Existing empty paragraphs are already valid input positions. Only
-            // adjacent code, read-only content or footnotes need a new boundary paragraph.
-            const isCode = adjacent.nodeType === Node.ELEMENT_NODE &&
-                adjacent.tagName === 'PRE' && adjacent.querySelector('code');
+            // adjacent blocks, read-only content or footnotes need a new boundary paragraph.
             const isReadOnly = adjacent.nodeType === Node.ELEMENT_NODE &&
                 adjacent.getAttribute('contenteditable') === 'false';
-            if (!isCode && !isReadOnly && !this.isFootnoteBoundary(anchor, adjacent, direction)) return false;
+            if (!this.isBoundaryBlock(adjacent) && !isReadOnly && !this.isFootnoteBoundary(anchor, adjacent, direction)) return false;
         } else {
             // A nested container boundary is not a document boundary if content
             // follows/precedes that container anywhere on the way to the editor.

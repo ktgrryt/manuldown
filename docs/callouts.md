@@ -26,6 +26,14 @@ Default labels use the original type spelling and case: Qiita `alert` stays
 note/tip/important/warning/caution variants determine only color and icons.
 Custom titles remain as written in the source.
 
+Backspace or Delete removes a callout once its body is empty; macOS Ctrl+H also
+works. Undo restores the removed callout. At a nonempty body's boundaries,
+deletion keeps the callout and surrounding content separate.
+Arrow navigation offers temporary input lines between consecutive callouts or
+code blocks, and at the start or end of the document. Leave a temporary line
+without typing to remove it, or type to keep it as a normal paragraph. Untouched
+temporary lines do not change saved Markdown or Undo/Redo history.
+
 ## Supported syntax
 
 | Syntax | Types |

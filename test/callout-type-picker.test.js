@@ -9,7 +9,10 @@ function importModule(name) {
     const source = fs.readFileSync(path.join(__dirname, '../media/modules', name), 'utf8');
     return import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 }
-const modules = Promise.all(['CalloutManager.js', 'DOMUtils.js', 'CursorManager.js', 'StateManager.js'].map(importModule));
+const modules = Promise.all(['CalloutManager.js', 'DOMUtils.js', 'CursorManager.js', 'StateManager.js', 'CodeBlockGapManager.js'].map(importModule));
+const editorSource = fs.readFileSync(path.join(__dirname, '../media/editor.js'), 'utf8');
+const deleteBlockSource = editorSource.slice(editorSource.indexOf('    function deleteCodeBlock('),
+    editorSource.indexOf('    // Native block merging can move the following line into the math preview,'));
 const uri = { fsPath: '/workspace/callouts.md', path: '/workspace/callouts.md', scheme: 'file', authority: '' };
 const documentFor = source => ({ getText: () => source, uri });
 const originalLoad = Module._load;
@@ -68,7 +71,7 @@ CaretRange.START_TO_START = 0;
 CaretRange.END_TO_END = 2;
 
 async function fixture(source, { surround = false } = {}) {
-    const [{ CalloutManager }, { DOMUtils }, { CursorManager }, { StateManager }] = await modules;
+    const [{ CalloutManager }, { DOMUtils }, { CursorManager }, { StateManager }, { CodeBlockGapManager }] = await modules;
     const html = render(source);
     const window = domino.createWindow(`<div id="editor" contenteditable="true">${surround ? '<p>Before</p>' : ''}${html}${surround ? '<p>After</p>' : ''}</div>`);
     const document = window.document, editor = document.getElementById('editor');
@@ -106,11 +109,18 @@ async function fixture(source, { surround = false } = {}) {
         beforeChange: () => before.push(editor.innerHTML), onChange: () => after.push(editor.innerHTML),
     });
     const domUtils = new DOMUtils(editor), cursor = new CursorManager(editor, domUtils);
+    const gaps = new CodeBlockGapManager(editor);
     manager.cursorManager = cursor;
+    manager.moveToBlockGap = (block, direction, currentSelection, allowLabelSelection) =>
+        gaps.moveToGap(block, direction, currentSelection, allowLabelSelection);
+    cursor.moveToCodeBlockGap = (block, direction, currentSelection) => gaps.moveToGap(block, direction, currentSelection);
+    manager.deleteBlock = new Function('document', 'domUtils', 'cursorManager', 'getNextElementSibling', 'getPreviousElementSibling',
+        `${deleteBlockSource}\nreturn deleteCodeBlock;`)(document, domUtils, cursor,
+        node => node.nextElementSibling, node => node.previousElementSibling);
     cursor.moveAcrossCalloutType = (currentSelection, direction) => manager.handleTypeNavigation(currentSelection, direction);
     manager.refresh();
     const block = editor.querySelector('[data-mdw-callout="true"]'), title = block.querySelector('.mdw-callout-title');
-    return { window, document, editor, block, title, manager, cursor, domUtils, StateManager, before, after, selection,
+    return { window, document, editor, block, title, manager, cursor, gaps, domUtils, StateManager, before, after, selection,
         caret(node, offset = 0) { range = new CaretRange(); range.setStart(node, offset); range.collapse(true); },
         range: () => range,
         popup: () => document.querySelector('.mdw-callout-type-picker'),
@@ -807,6 +817,290 @@ test('type changes participate in the existing Undo and Redo history', async () 
     } finally { f.restore(); }
 });
 
+for (const source of ['> [!NOTE]\n', ':::note info\n:::\n', ':::message\n:::\n',
+    '> [!note]\n', ':::info\n:::\n', '!!! note\n']) {
+    test(`empty ${source.split('\n')[0]} callouts can be deleted through keyboard and beforeinput`, async () => {
+        for (const action of ['Backspace', 'Delete', 'Ctrl+H', 'deleteContentBackward', 'deleteContentForward']) {
+            const f = await fixture(source.startsWith('!!!') ? source + '    Body\n' : source);
+            try {
+                const paragraph = f.block.querySelector('.mdw-callout-content p');
+                paragraph.textContent = '\u200B \u2060\uFEFF';
+                f.caret(paragraph.firstChild, paragraph.firstChild.length);
+                const event = action.startsWith('deleteContent')
+                    ? { inputType: action, preventDefault() { this.defaultPrevented = true; } }
+                    : key(action === 'Ctrl+H' ? 'h' : action, { ctrlKey: action === 'Ctrl+H' });
+                const handled = event.inputType ? f.manager.handleBeforeInput(event) : f.manager.handleKeydown(event, true);
+                assert.equal(handled, true, action);
+                assert.equal(event.defaultPrevented, true);
+                assert.ok(!f.editor.querySelector('[data-mdw-callout]'));
+                assert.equal(f.editor.children.length, 1);
+                assert.equal(f.editor.firstElementChild.tagName, 'P');
+                assert.ok(f.editor.firstElementChild.contains(f.range().startContainer));
+                assert.equal(f.before.length, 1); assert.equal(f.after.length, 1);
+            } finally { f.restore(); }
+        }
+    });
+}
+
+test('deleting an empty callout returns to adjacent editable content and participates in Undo/Redo', async () => {
+    const source = 'Before.\n\n:::note warn\n:::\n\n:::info\nAfter.\n:::\n';
+    const f = await fixture(source);
+    try {
+        const history = new f.StateManager(f.editor, {}, {
+            getComparableHtml: () => f.domUtils.getCleanedHTML({ historyComparable: true }),
+        });
+        history.saveSelection = () => null; history.restoreSelection = () => true;
+        history.finishHistoryRestore = () => history.rebaseCurrentHistoryStateComparable();
+        f.manager.beforeChange = () => history.saveState();
+        f.manager.onChange = options => history.commitStateAfterChange(options);
+        history.seedState();
+        f.manager.selectTypeLabel(f.block);
+        assert.equal(f.manager.handleKeydown(key('Backspace')), true);
+        const remaining = f.editor.querySelector('[data-mdw-callout]');
+        assert.ok(remaining.querySelector('.mdw-callout-content').contains(f.range().startContainer));
+        assert.equal(f.range().collapsed, true);
+        assert.equal(save(f.editor.innerHTML, source), 'Before.\n\n:::info\nAfter.\n:::\n');
+        assert.equal(history.performUndo(), true);
+        assert.equal(save(f.editor.innerHTML, source), source);
+        assert.equal(history.performRedo(), true);
+        assert.equal(f.editor.querySelectorAll('[data-mdw-callout]').length, 1);
+    } finally { f.restore(); }
+});
+
+test('deleting the last empty callout returns to the preceding paragraph', async () => {
+    const f = await fixture('Before.\n\n:::info\n:::\n');
+    try {
+        f.caret(f.block.querySelector('.mdw-callout-content p'), 0);
+        assert.equal(f.manager.handleKeydown(key('Backspace')), true);
+        assert.equal(f.range().startContainer, f.editor.firstElementChild.firstChild);
+        assert.equal(f.range().startOffset, 'Before.'.length);
+    } finally { f.restore(); }
+});
+
+test('deleting an empty callout beside code places the caret in its code instead of its toolbar', async () => {
+    const f = await fixture(':::info\n:::\n\n```js\nBody\n```\n');
+    try {
+        const pre = f.editor.querySelector('pre'), code = pre.querySelector('code');
+        const toolbar = f.document.createElement('div');
+        toolbar.setAttribute('contenteditable', 'false');
+        toolbar.innerHTML = '<span class="code-block-language">javascript</span>';
+        pre.insertBefore(toolbar, code);
+        f.manager.selectTypeLabel(f.block);
+        assert.equal(f.manager.handleKeydown(key('Backspace')), true);
+        assert.ok(code.contains(f.range().startContainer));
+        assert.equal(f.range().startOffset, 0);
+    } finally { f.restore(); }
+});
+
+test('callouts containing text or non-text blocks retain boundary protection', async () => {
+    for (const body of ['Body', '![image](image.png)', '- [ ] Task', '```js\n\n```',
+        '| Head |\n| --- |\n| Cell |', '---', '$$\nx\n$$', '> Quoted']) {
+        const f = await fixture(`:::note warn\n${body}\n:::\n`);
+        try {
+            const content = f.block.querySelector('.mdw-callout-content');
+            f.caret(content, 0);
+            const original = f.domUtils.getCleanedHTML();
+            assert.equal(f.manager.handleKeydown(key('Backspace')), true, body);
+            assert.equal(f.manager.handleKeydown(key('h', { ctrlKey: true }), true), true, body);
+            f.manager.selectTypeLabel(f.block);
+            assert.equal(f.manager.handleKeydown(key('h', { ctrlKey: true }), true), true, body);
+            assert.equal(f.domUtils.getCleanedHTML(), original);
+            assert.equal(f.before.length, 0); assert.equal(f.after.length, 0);
+        } finally { f.restore(); }
+    }
+});
+
+test('IME input and partial selections do not delete an empty callout', async () => {
+    const f = await fixture(':::info\n:::\n');
+    try {
+        const content = f.block.querySelector('.mdw-callout-content');
+        f.caret(content, 0);
+        assert.equal(f.manager.handleKeydown(key('Backspace', { isComposing: true })), false);
+        assert.equal(f.manager.handleBeforeInput({ inputType: 'deleteContentBackward', isComposing: true }), false);
+        f.range().setEnd(content, content.childNodes.length);
+        assert.equal(f.manager.handleKeydown(key('Backspace')), false);
+        assert.equal(f.before.length, 0); assert.equal(f.after.length, 0);
+        assert.ok(f.editor.contains(f.block));
+    } finally { f.restore(); }
+});
+
+const gapCallout = ':::note warn\nBody\n:::\n';
+const gapCode = '```js\none\n```\n';
+for (const [method, inBody] of [
+    ['moveCursorUp', true], ['moveCursorBackward', true],
+    ['moveCursorDown', false], ['moveCursorForward', false],
+]) {
+    test(`${method} skips the formatting newline after a callout body without jumping past its contents`, async () => {
+        const f = await fixture(gapCallout, { surround: true });
+        try {
+            const content = f.block.querySelector('.mdw-callout-content');
+            const whitespace = content.lastChild;
+            assert.equal(whitespace.nodeType, 3);
+            assert.equal(whitespace.textContent.trim(), '');
+            const baseline = f.domUtils.getCleanedHTML();
+            f.caret(whitespace, 0);
+            f.cursor[method]();
+            const target = inBody ? content.querySelector('p') : f.editor.lastElementChild;
+            assert.ok(target.contains(f.range().startContainer), 'visit the nearest editable body line or following paragraph');
+            assert.equal(f.domUtils.getCleanedHTML(), baseline);
+            assert.equal(f.before.length, 0); assert.equal(f.after.length, 0);
+        } finally { f.restore(); }
+    });
+}
+
+test('navigation from the callout frame enters its body or type without skipping the entire callout', async () => {
+    const f = await fixture(gapCallout, { surround: true });
+    try {
+        const content = f.block.querySelector('.mdw-callout-content');
+        const bodyIndex = childIndex(content);
+        for (let offset = 0; offset <= bodyIndex; offset++) {
+            f.caret(f.block, offset);
+            f.cursor.moveCursorDown();
+            assert.ok(content.contains(f.range().startContainer), 'Down from the header frame enters the body');
+            f.caret(f.block, offset);
+            f.cursor.moveCursorUp();
+            assert.ok(f.manager.getSelectedTypeLabel(), 'Up from the header frame visits the type');
+        }
+        f.caret(f.block, f.block.childNodes.length);
+        f.cursor.moveCursorUp();
+        assert.ok(content.contains(f.range().startContainer), 'Up after the body returns to its last line');
+        assert.equal(f.before.length, 0); assert.equal(f.after.length, 0);
+    } finally { f.restore(); }
+});
+
+test('editor boundaries beside a callout remain inside the editor and visit its nearest content', async () => {
+    const f = await fixture(gapCallout, { surround: true });
+    try {
+        f.caret(f.editor, childIndex(f.block));
+        f.cursor.moveCursorDown();
+        assert.ok(f.manager.getSelectedTypeLabel(), 'Down immediately before a callout visits its type');
+        f.caret(f.editor, childIndex(f.block) + 1);
+        f.cursor.moveCursorUp();
+        assert.ok(f.block.querySelector('.mdw-callout-content').contains(f.range().startContainer),
+            'Up immediately after a callout returns to its body');
+    } finally { f.restore(); }
+});
+
+test('Right at the end of a callout reaches the following paragraph without a hidden whitespace stop', async () => {
+    const f = await fixture(gapCallout, { surround: true });
+    try {
+        const text = f.block.querySelector('.mdw-callout-content p').firstChild;
+        f.caret(text, text.length);
+        f.cursor.moveCursorForward();
+        assert.ok(f.editor.lastElementChild.contains(f.range().startContainer));
+        assert.equal(f.range().startOffset, 0);
+    } finally { f.restore(); }
+});
+
+test('typing from a restored callout frame or formatting newline resolves to its editable body', async () => {
+    const f = await fixture(gapCallout, { surround: true });
+    try {
+        const content = f.block.querySelector('.mdw-callout-content');
+        for (const [node, offset] of [[f.block, 1], [f.block, f.block.childNodes.length], [content.lastChild, 0]]) {
+            f.caret(node, offset);
+            assert.equal(f.manager.handleBeforeInput({ inputType: 'insertText' }), false);
+            assert.ok(content.querySelector('p').contains(f.range().startContainer));
+        }
+        f.caret(f.block, 1);
+        f.manager.handleBeforeInput({ inputType: 'insertCompositionText', isComposing: true });
+        assert.ok(f.range().startContainer === f.block, 'active IME ranges remain owned by the browser');
+        assert.equal(f.before.length, 0); assert.equal(f.after.length, 0);
+    } finally { f.restore(); }
+});
+
+test('existing paragraphs beside callouts remain the navigation stops without adding temporary lines', async () => {
+    const f = await fixture(gapCallout, { surround: true });
+    try {
+        const baseline = f.domUtils.getCleanedHTML();
+        f.manager.selectTypeLabel(f.block);
+        f.cursor.moveCursorUp();
+        assert.ok(f.editor.firstElementChild.contains(f.range().startContainer));
+        const text = f.block.querySelector('.mdw-callout-content p').firstChild;
+        f.caret(text, text.length);
+        f.cursor.moveCursorDown();
+        assert.ok(f.editor.lastElementChild.contains(f.range().startContainer));
+        assert.ok(!f.editor.querySelector('[data-mdw-code-gap]'));
+        assert.equal(f.domUtils.getCleanedHTML(), baseline);
+    } finally { f.restore(); }
+});
+
+for (const [name, source] of [
+    ['callout/callout', gapCallout + '\n:::info\nSecond\n:::\n'],
+    ['callout/code', gapCallout + '\n' + gapCode],
+    ['code/callout', gapCode + '\n' + gapCallout],
+]) {
+    for (const method of ['moveCursorDown', 'moveCursorForward']) {
+        test(`${method} visits a reusable temporary line between ${name} blocks`, async () => {
+            const f = await fixture(source);
+            try {
+                const [first, second] = Array.from(f.editor.children);
+                const text = first.querySelector(first.tagName === 'PRE' ? 'code' : '.mdw-callout-content p').firstChild;
+                const baseline = f.domUtils.getCleanedHTML({ historyComparable: true });
+                f.caret(text, text.length - Number(text.textContent.endsWith('\n')));
+                f.cursor[method]();
+                const gap = f.editor.querySelector('[data-mdw-code-gap]');
+                assert.ok(gap, name);
+                assert.equal(gap.previousElementSibling, first);
+                assert.equal(gap.nextElementSibling, second);
+                assert.ok(gap.contains(f.range().startContainer));
+                if (second.tagName === 'PRE') f.caret(second.querySelector('code').firstChild, 0);
+                else f.manager.selectTypeLabel(second);
+                f.cursor.moveCursorUp();
+                assert.equal(f.editor.querySelectorAll('[data-mdw-code-gap]').length, 1);
+                assert.ok(gap.contains(f.range().startContainer));
+                assert.equal(f.domUtils.getCleanedHTML({ historyComparable: true }), baseline);
+                f.cursor.moveCursorDown();
+                assert.ok(second.contains(f.range().startContainer));
+                f.gaps.reconcile(f.selection);
+                assert.equal(gap.parentNode, null);
+                assert.equal(f.domUtils.getCleanedHTML({ historyComparable: true }), baseline);
+                assert.equal(f.before.length, 0); assert.equal(f.after.length, 0);
+            } finally { f.restore(); }
+        });
+    }
+}
+
+for (const direction of ['up', 'down']) {
+    test(`the document ${direction === 'up' ? 'start' : 'end'} beside a callout provides a temporary input line`, async () => {
+        const f = await fixture(gapCallout);
+        try {
+            const baseline = f.domUtils.getCleanedHTML();
+            if (direction === 'up') f.manager.selectTypeLabel(f.block);
+            else {
+                const text = f.block.querySelector('.mdw-callout-content p').firstChild;
+                f.caret(text, text.length);
+            }
+            f.cursor[direction === 'up' ? 'moveCursorUp' : 'moveCursorDown']();
+            const gap = f.editor.querySelector('[data-mdw-code-gap]');
+            assert.ok(gap?.contains(f.range().startContainer));
+            assert.equal(gap.parentElement, f.editor);
+            assert.equal(f.domUtils.getCleanedHTML(), baseline);
+            f.manager.selectTypeLabel(f.block);
+            f.gaps.reconcile(f.selection);
+            assert.equal(gap.parentNode, null);
+            assert.equal(f.domUtils.getCleanedHTML(), baseline);
+        } finally { f.restore(); }
+    });
+}
+
+test('typing between callouts keeps the new paragraph outside both bodies', async () => {
+    const source = gapCallout + '\n:::info\nSecond\n:::\n';
+    const f = await fixture(source);
+    try {
+        const text = f.block.querySelector('.mdw-callout-content p').firstChild;
+        f.caret(text, text.length);
+        f.cursor.moveCursorDown();
+        const gap = f.editor.querySelector('[data-mdw-code-gap]');
+        gap.firstChild.appendData('Between.');
+        f.gaps.reconcile(f.selection);
+        assert.equal(gap.hasAttribute('data-mdw-code-gap'), false);
+        f.manager.selectTypeLabel(f.block);
+        f.gaps.reconcile(f.selection);
+        assert.equal(gap.parentElement, f.editor);
+        assert.equal(save(f.domUtils.getCleanedHTML(), source), gapCallout + '\nBetween.\n\n:::info\nSecond\n:::\n');
+    } finally { f.restore(); }
+});
+
 test('nested type declarations remain read-only and are not entered as editable text', async () => {
     const source = '> [!NOTE]\n> > [!TIP]\n> > Body\n';
     const f = await fixture(source);
@@ -884,11 +1178,13 @@ test('the type label before a code body leads to editable code rather than its t
     } finally { f.restore(); }
 });
 
-test('moving down from the final line of preceding code reaches the type label', async () => {
+test('moving down from preceding code visits a temporary line before the type label', async () => {
     const f = await fixture('```js\ncode\n```\n\n:::note warn\nBody\n:::\n');
     try {
         const code = f.editor.querySelector('pre code').firstChild;
         f.caret(code, code.length);
+        f.cursor.moveCursorDown();
+        assert.ok(f.editor.querySelector('[data-mdw-code-gap]')?.contains(f.range().startContainer));
         f.cursor.moveCursorDown();
         assert.equal(f.manager.getSelectedTypeLabel(), f.title);
     } finally { f.restore(); }

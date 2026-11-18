@@ -91,7 +91,7 @@ test('callout format controls align with the title and preserve editing, history
     const settle = () => evaluate(`new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))`);
     const reset = async (value = source) => {
         const rendered = new MarkdownDocument({ ...document, getText: () => value }).toHtml();
-        await evaluate(`window.postMessage({type:'init',content:${JSON.stringify(rendered)}},'*')`);
+        await evaluate(`window.postMessage({type:'refresh',content:${JSON.stringify(rendered)}},'*')`);
         await settle();
         await evaluate(`document.getElementById('editor').scrollTop=0`);
     };
@@ -99,6 +99,29 @@ test('callout format controls align with the title and preserve editing, history
         await evaluate(`(()=>{const paragraph=document.querySelector('.mdw-callout-content p'),range=document.createRange();range.setStart(paragraph.firstChild,0);range.collapse(true);document.getElementById('editor').focus();getSelection().removeAllRanges();getSelection().addRange(range);})()`);
         await settle();
     };
+    const placeTextCaret = async (selector, offset = 0) => {
+        await evaluate(`(() => {
+            const editor = document.getElementById('editor');
+            const text = editor.querySelector(${JSON.stringify(selector)}).firstChild;
+            const range = document.createRange();
+            range.setStart(text, ${offset});
+            range.collapse(true);
+            editor.focus({ preventScroll: true });
+            getSelection().removeAllRanges();
+            getSelection().addRange(range);
+        })()`);
+        await settle();
+    };
+    const moveVertical = async direction => {
+        const name = direction === 'up' ? 'ArrowUp' : 'ArrowDown';
+        await key(name, name, direction === 'up' ? 38 : 40);
+        await settle();
+    };
+    const currentCell = () => evaluate(`(() => {
+        const anchor = getSelection().anchorNode;
+        const element = anchor.nodeType === 1 ? anchor : anchor.parentElement;
+        return element.closest('th, td')?.textContent;
+    })()`);
     await connection.send('Emulation.setDeviceMetricsOverride', { width: 1000, height: 650, deviceScaleFactor: 1, mobile: false }, sessionId);
     await connection.send('Page.navigate', { url: origin }, sessionId);
     await waitFor(`document.body.dataset.editorState==='ready'&&document.querySelectorAll('.mdw-callout-format-toggle').length===2`);
@@ -139,6 +162,8 @@ test('callout format controls align with the title and preserve editing, history
     await key('ArrowLeft', 'ArrowLeft', 37);
     assert.equal(await evaluate(`!!document.querySelector('.mdw-callout-title.nav-selected')`), true);
     await key('ArrowRight', 'ArrowRight', 39);
+    // Keep the earlier click's pointer away from the keyboard-driven menu.
+    await connection.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 1, y: 1 }, sessionId);
     await key('Enter', 'Enter', 13);
     await waitFor(`!!document.querySelector('.mdw-callout-format-picker')`);
     await key('ArrowDown', 'ArrowDown', 40);
@@ -181,6 +206,224 @@ test('callout format controls align with the title and preserve editing, history
         await key('Backspace', 'Backspace', 8); await key('Delete', 'Delete', 46);
         await connection.send('Input.insertText', { text: 'X' }, sessionId);
         assert.equal(await evaluate(`document.querySelector('.mdw-callout').outerHTML`), before);
+        assert.deepEqual(await evaluate('window.editorErrors'), []);
+    });
+    await t.test('empty callouts can be deleted and immediately restored with Undo/Redo', async () => {
+        const actions = [['Backspace', 'Backspace', 8], ['Delete', 'Delete', 46]];
+        if (await evaluate(`document.body.dataset.platform==='mac'`)) actions.push(['h', 'KeyH', 72, 2]);
+        for (const action of actions) {
+            await reset('Before.\n\n:::note warn\n:::\n\nAfter.\n');
+            await selectBodyStart();
+            await key(...action);
+            assert.equal(await evaluate(`document.querySelectorAll('.mdw-callout').length`), 0);
+            assert.equal(await evaluate(`getSelection().isCollapsed&&document.activeElement.id==='editor'&&getSelection().anchorNode.textContent==='After.'`), true);
+            await evaluate(`window.postMessage({type:'historyCommand',direction:'undo'},'*')`);
+            await waitFor(`document.querySelectorAll('.mdw-callout').length===1`);
+            await evaluate(`window.postMessage({type:'historyCommand',direction:'redo'},'*')`);
+            await waitFor(`document.querySelectorAll('.mdw-callout').length===0`);
+            await connection.send('Input.insertText', { text: 'Editable ' }, sessionId);
+            const afterRedo = await evaluate(`(()=>{const editor=document.getElementById('editor'),selection=getSelection();return {paragraphs:Array.from(editor.querySelectorAll(':scope > p'),node=>node.textContent),html:editor.innerHTML,anchor:selection.anchorNode?.parentElement?.outerHTML,offset:selection.anchorOffset,focused:document.activeElement.id};})()`);
+            assert.ok(afterRedo.paragraphs.includes('Editable After.'), JSON.stringify(afterRedo));
+        }
+        await reset(':::info\n:::\n'); await selectBodyStart();
+        await key('ArrowUp', 'ArrowUp', 38);
+        await key('Backspace', 'Backspace', 8);
+        assert.equal(await evaluate(`!document.querySelector('.mdw-callout')&&getSelection().isCollapsed&&document.getElementById('editor').contains(getSelection().anchorNode)`), true);
+        await connection.send('Input.insertText', { text: 'New paragraph.' }, sessionId);
+        assert.equal(await evaluate(`document.getElementById('editor').textContent`), 'New paragraph.');
+        await evaluate(`window.postMessage({type:'historyCommand',direction:'undo'},'*')`);
+        await waitFor(`!document.getElementById('editor').textContent.includes('New paragraph.')`);
+        await evaluate(`window.postMessage({type:'historyCommand',direction:'undo'},'*')`);
+        await waitFor(`!!document.querySelector('.mdw-callout')`);
+        await connection.send('Input.insertText', { text: 'Restored body.' }, sessionId);
+        const restored = await evaluate(`(()=>{const selection=getSelection();return {body:document.querySelector('.mdw-callout-content').textContent,html:document.getElementById('editor').innerHTML,anchor:selection.anchorNode?.parentElement?.outerHTML};})()`);
+        assert.equal(restored.body, 'Restored body.', JSON.stringify(restored));
+    });
+    await t.test('arrows visit temporary lines between callouts and keep typed paragraphs outside their bodies', async () => {
+        const markdown = ':::note warn\nFirst.\n:::\n\n:::info\nSecond.\n:::\n';
+        const atGap = `!!document.querySelector('[data-mdw-code-gap]')?.contains(getSelection().anchorNode)`;
+        await reset(markdown);
+        await selectBodyStart();
+        await key('End', 'End', 35); await key('ArrowDown', 'ArrowDown', 40); await settle();
+        assert.equal(await evaluate(atGap), true);
+        await key('ArrowDown', 'ArrowDown', 40); await settle();
+        assert.equal(await evaluate(`document.querySelectorAll('.mdw-callout')[1].querySelector('.mdw-callout-title').classList.contains('nav-selected')`), true);
+        assert.equal(await evaluate(`document.querySelectorAll('[data-mdw-code-gap]').length`), 0);
+        await key('ArrowUp', 'ArrowUp', 38); await settle();
+        assert.equal(await evaluate(atGap), true);
+        await connection.send('Input.insertText', { text: 'Between.' }, sessionId);
+        await waitFor(`document.querySelectorAll('[data-mdw-code-gap]').length===0`);
+        await waitFor(`hostMessages.filter(message=>message.type==='update').at(-1)?.content.includes('Between.')`);
+        const saved = await evaluate(`hostMessages.filter(message=>message.type==='update').at(-1).content`);
+        assert.equal(provider.htmlToMarkdown(saved, document), markdown.replace('\n\n:::info', '\n\nBetween.\n\n:::info'));
+        assert.deepEqual(await evaluate(`Array.from(document.querySelectorAll('.mdw-callout-content'),node=>node.textContent.trim())`), ['First.', 'Second.']);
+        await evaluate(`window.postMessage({type:'historyCommand',direction:'undo'},'*')`);
+        await waitFor(`!document.getElementById('editor').textContent.includes('Between.')`);
+        assert.equal(await evaluate(`document.querySelectorAll('.mdw-callout').length`), 2);
+        await evaluate(`window.postMessage({type:'historyCommand',direction:'redo'},'*')`);
+        await waitFor(`document.getElementById('editor').textContent.includes('Between.')`);
+    });
+    await t.test('mixed code and callout boundaries and document edges expose temporary input lines', async () => {
+        for (const codeFirst of [false, true]) {
+            const callout = ':::note warn\nBody.\n:::\n', code = '```js\nconst value = 1;\n```\n';
+            await reset(codeFirst ? code + '\n' + callout : callout + '\n' + code);
+            await evaluate(`(()=>{const editor=document.getElementById('editor'),block=editor.firstElementChild,node=block.querySelector(${JSON.stringify(codeFirst ? 'code' : '.mdw-callout-content p')}).firstChild,range=document.createRange();range.setStart(node,node.length-(node.textContent.endsWith('\\n')?1:0));range.collapse(true);editor.focus();getSelection().removeAllRanges();getSelection().addRange(range);})()`);
+            await key('ArrowDown', 'ArrowDown', 40); await settle();
+            assert.equal(await evaluate(`!!document.querySelector('[data-mdw-code-gap]')?.contains(getSelection().anchorNode)`), true);
+            await key('ArrowDown', 'ArrowDown', 40); await settle();
+            assert.equal(await evaluate(`document.querySelectorAll('[data-mdw-code-gap]').length`), 0);
+            await key('ArrowUp', 'ArrowUp', 38); await settle();
+            assert.equal(await evaluate(`!!document.querySelector('[data-mdw-code-gap]')?.contains(getSelection().anchorNode)`), true);
+        }
+        await reset(':::info\nBody.\n:::\n'); await selectBodyStart();
+        await key('ArrowUp', 'ArrowUp', 38); await key('ArrowUp', 'ArrowUp', 38); await settle();
+        assert.equal(await evaluate(`document.getElementById('editor').firstElementChild.matches('[data-mdw-code-gap]')&&getSelection().isCollapsed`), true);
+        await key('ArrowDown', 'ArrowDown', 40); await key('ArrowDown', 'ArrowDown', 40);
+        await key('End', 'End', 35); await key('ArrowDown', 'ArrowDown', 40); await settle();
+        assert.equal(await evaluate(`!!document.querySelector('[data-mdw-code-gap]')?.contains(getSelection().anchorNode)&&document.querySelector('[data-mdw-code-gap]').previousElementSibling.matches('.mdw-callout')`), true);
+        assert.deepEqual(await evaluate('window.editorErrors'), []);
+    });
+    await t.test('Up from a temporary line below a callout returns to the last line of its code', async () => {
+        const code = 'First code line.\nLast code line.';
+        const fence = '```';
+        for (const next of [':::tip\nNext callout.\n:::\n', fence + 'text\nNext code.\n' + fence + '\n']) {
+            await reset(':::note warn\n' + fence + 'text\n' + code + '\n' + fence + '\n:::\n\n' + next);
+            await placeTextCaret('.mdw-callout-content code', code.length);
+            await moveVertical('down');
+            assert.equal(await evaluate(`!!document.querySelector('[data-mdw-code-gap]')?.contains(getSelection().anchorNode)`), true);
+            await moveVertical('up');
+            const textBeforeCaret = () => evaluate(`(() => {
+                const code = document.querySelector('.mdw-callout-content code');
+                const selection = getSelection();
+                if (!selection.isCollapsed || !code.contains(selection.anchorNode)) return null;
+                const prefix = document.createRange();
+                prefix.setStart(code, 0);
+                prefix.setEnd(selection.anchorNode, selection.anchorOffset);
+                return prefix.toString();
+            })()`);
+            assert.equal(await textBeforeCaret(), code);
+            await moveVertical('up');
+            const prefix = await textBeforeCaret();
+            assert.ok(prefix !== null && !prefix.includes('\n'), JSON.stringify(prefix));
+        }
+    });
+    await t.test('Down through a callout with a table visits the cells and the outside input line in order', async () => {
+        const table = '| Header | Details |\n| --- | --- |\n| First row | First detail |\n| Last row | Last detail |\n';
+        await reset('Before.\n\n:::note warn\n' + table + ':::\n\n:::tip\nNext callout.\n:::\n');
+        await placeTextCaret(':scope > p');
+        await moveVertical('down');
+        assert.equal(await evaluate(`document.querySelector('.mdw-callout-title.nav-selected')?.textContent`), 'warn');
+        for (const expected of ['Header', 'First row', 'Last row']) {
+            await moveVertical('down');
+            assert.equal(await currentCell(), expected);
+        }
+        await moveVertical('down');
+        assert.equal(await evaluate(`!!document.querySelector('#editor > [data-mdw-code-gap]')?.contains(getSelection().anchorNode)`), true);
+        await moveVertical('up');
+        assert.equal(await currentCell(), 'Last row');
+        await moveVertical('down');
+        await moveVertical('down');
+        assert.equal(await evaluate(`document.querySelector('.mdw-callout-title.nav-selected')?.textContent`), 'tip');
+        assert.equal(await evaluate(`document.querySelectorAll('.mdw-callout-content [data-mdw-code-gap]').length`), 0);
+    });
+    await t.test('Down from code in a callout enters a following table in its first row', async () => {
+        const code = ':::note warn\n```text\nFirst line.\nLast line.\n```\n';
+        const table = '| Header | Details |\n| --- | --- |\n| Last row | Last detail |\n';
+        for (const markdown of [code + '\n' + table + ':::\n', code + ':::\n\n' + table]) {
+            await reset(markdown);
+            await placeTextCaret('.mdw-callout-content code', 'First line.\nLast line.'.length);
+            await moveVertical('down');
+            assert.equal(await currentCell(), 'Header');
+            await moveVertical('down');
+            assert.equal(await currentCell(), 'Last row');
+        }
+    });
+    await t.test('Down from a table directly above a callout enters the callout without jumping backward', async () => {
+        const table = '| Header | Details |\n| --- | --- |\n| Last row | Last detail |\n';
+        await reset('Before.\n\n' + table + '\n:::note warn\nBody.\n:::\n\nAfter.\n');
+        await placeTextCaret('tbody td');
+        await moveVertical('down');
+        assert.equal(await evaluate(`document.querySelector('.mdw-callout-title.nav-selected')?.textContent`), 'warn');
+        await moveVertical('down');
+        assert.equal(await evaluate(`getSelection().anchorNode.parentElement.closest('.mdw-callout-content p')?.textContent`), 'Body.');
+    });
+    await t.test('Down out of a nested list item enters the next item on its first visible line', async () => {
+        await reset(':::note warn\n- Parent item.\n  - Child item.\n- ' + 'A wrapped list item with several words. '.repeat(4) + '\n:::\n');
+        await placeTextCaret('.mdw-callout-content li li', 3);
+        await moveVertical('down');
+        const lines = await evaluate(`(() => {
+            const item = document.querySelector('.mdw-callout-content > ul > li:last-child');
+            const first = document.createRange();
+            first.setStart(item.firstChild, 0);
+            first.setEnd(item.firstChild, 1);
+            const range = getSelection().getRangeAt(0);
+            return { inItem: item.contains(range.startContainer), firstY: first.getBoundingClientRect().top, caretY: range.getBoundingClientRect().top };
+        })()`);
+        assert.ok(lines.inItem && Math.abs(lines.caretY - lines.firstY) <= 2, JSON.stringify(lines));
+    });
+    await t.test('clicking callout padding keeps the next arrow in the nearby type or body', async () => {
+        await reset('Before.\n\n:::note warn\n' + 'Wrapped body text. '.repeat(12) + '\n\nLast paragraph.\n:::\n\nAfter.\n');
+        const body = await evaluate(`document.querySelector('.mdw-callout-content').innerHTML`);
+        const clickTopPadding = async () => {
+            const point = await evaluate(`(()=>{const r=document.querySelector('.mdw-callout').getBoundingClientRect();return {x:r.left+4,y:r.top+3};})()`);
+            await connection.send('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', clickCount: 1, ...point }, sessionId);
+            await connection.send('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: 1, ...point }, sessionId);
+            await settle();
+        };
+        await clickTopPadding(); await key('ArrowDown', 'ArrowDown', 40); await settle();
+        assert.equal(await evaluate(`document.querySelector('.mdw-callout-content p').contains(getSelection().anchorNode)&&getSelection().anchorOffset===0`), true);
+        await key('ArrowDown', 'ArrowDown', 40); await settle();
+        assert.equal(await evaluate(`document.querySelector('.mdw-callout-content p').contains(getSelection().anchorNode)&&getSelection().anchorOffset>0`), true);
+        await clickTopPadding(); await key('ArrowUp', 'ArrowUp', 38); await settle();
+        assert.equal(await evaluate(`!!document.querySelector('.mdw-callout-title.nav-selected')`), true);
+        assert.equal(await evaluate(`document.querySelector('.mdw-callout-content').innerHTML`), body);
+    });
+    await t.test('Right from a callout bottom followed by Up returns to its body without a hidden newline jump', async () => {
+        await reset('Before.\n\n:::note warn\nFirst paragraph.\n\nLast paragraph.\n:::\n\nAfter.\n');
+        const point = await evaluate(`(()=>{const r=document.querySelector('.mdw-callout').getBoundingClientRect(),p=document.querySelector('.mdw-callout-content p:last-of-type').getBoundingClientRect();return {x:r.right-3,y:p.top+p.height/2};})()`);
+        await connection.send('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', clickCount: 1, ...point }, sessionId);
+        await connection.send('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: 1, ...point }, sessionId);
+        await settle(); await key('ArrowRight', 'ArrowRight', 39); await settle();
+        assert.equal(await evaluate(`getSelection().anchorNode.textContent==='After.'&&getSelection().anchorOffset===0`), true);
+        await key('ArrowUp', 'ArrowUp', 38); await settle();
+        assert.equal(await evaluate(`document.querySelector('.mdw-callout-content p:last-of-type').contains(getSelection().anchorNode)`), true);
+    });
+    await t.test('restored editor boundaries beside callouts never send the caret into toolbar controls', async () => {
+        await reset('Before.\n\n:::note warn\nFirst paragraph.\n\nLast paragraph.\n:::\n\nAfter.\n');
+        const atBoundary = async after => {
+            await evaluate(`(()=>{const editor=document.getElementById('editor'),block=editor.querySelector('.mdw-callout'),range=document.createRange();range.setStart(editor,Array.from(editor.childNodes).indexOf(block)+${Number(after)});range.collapse(true);editor.focus();getSelection().removeAllRanges();getSelection().addRange(range);})()`);
+            await settle();
+        };
+        await atBoundary(false); await key('ArrowUp', 'ArrowUp', 38); await settle();
+        assert.equal(await evaluate(`document.getElementById('editor').contains(getSelection().anchorNode)&&getSelection().anchorNode.textContent==='Before.'`), true);
+        await atBoundary(false); await key('ArrowDown', 'ArrowDown', 40); await settle();
+        assert.equal(await evaluate(`!!document.querySelector('.mdw-callout-title.nav-selected')`), true);
+        await atBoundary(true); await key('ArrowUp', 'ArrowUp', 38); await settle();
+        assert.equal(await evaluate(`document.querySelector('.mdw-callout-content p:last-of-type').contains(getSelection().anchorNode)`), true);
+        assert.deepEqual(await evaluate('window.editorErrors'), []);
+    });
+    await t.test('inline code at a callout edge retains its inside and outside cursor positions', async () => {
+        await reset('Before.\n\n:::note warn\n`code`\n:::\n\nAfter.\n');
+        const atCodeEdge = async end => {
+            await evaluate(`(()=>{const code=document.querySelector('.mdw-callout-content code'),walker=document.createTreeWalker(code,NodeFilter.SHOW_TEXT),range=document.createRange();let node;while(node=walker.nextNode())if(node.textContent==='code')break;range.setStart(node,${end ? 'node.length' : '0'});range.collapse(true);document.getElementById('editor').focus();getSelection().removeAllRanges();getSelection().addRange(range);})()`);
+            await settle();
+        };
+        await atCodeEdge(true); await key('ArrowRight', 'ArrowRight', 39); await settle();
+        assert.equal(await evaluate(`document.querySelector('.mdw-callout-content p').contains(getSelection().anchorNode)&&!document.querySelector('.mdw-callout-content code').contains(getSelection().anchorNode)`), true);
+        await key('ArrowRight', 'ArrowRight', 39); await settle();
+        assert.equal(await evaluate(`getSelection().anchorNode.textContent==='After.'&&getSelection().anchorOffset===0`), true);
+        await atCodeEdge(false); await key('ArrowLeft', 'ArrowLeft', 37); await settle();
+        assert.equal(await evaluate(`document.querySelector('.mdw-callout-content p').contains(getSelection().anchorNode)&&!document.querySelector('.mdw-callout-title.nav-selected')`), true);
+    });
+    await t.test('IME input from a callout frame stays in its editable body', async () => {
+        await reset(':::note warn\nBody.\n:::\n');
+        await evaluate(`(()=>{const block=document.querySelector('.mdw-callout'),range=document.createRange();range.setStart(block,1);range.collapse(true);document.getElementById('editor').focus();getSelection().removeAllRanges();getSelection().addRange(range);})()`);
+        await settle();
+        await connection.send('Input.imeSetComposition', { text: 'あ', selectionStart: 1, selectionEnd: 1 }, sessionId);
+        await connection.send('Input.insertText', { text: 'あ' }, sessionId);
+        await settle();
+        assert.equal(await evaluate(`document.querySelector('.mdw-callout-content').textContent.trim()`), 'あBody.');
+        assert.equal(await evaluate(`document.querySelector('.mdw-callout-title').textContent`), 'warn');
         assert.deepEqual(await evaluate('window.editorErrors'), []);
     });
     for (const [name, body] of [
@@ -275,7 +518,7 @@ test('callout format controls align with the title and preserve editing, history
     await t.test('changing the default affects the next insertion while keeping existing callouts and Undo/Redo', async () => {
         await reset(':::note warn\nExisting body.\n:::\n\nAfter.\n');
         await evaluate(`window.postMessage({type:'settings',settings:{calloutDefaultService:'zenn'}},'*')`); await settle();
-        await evaluate(`(()=>{const editor=document.getElementById('editor'),paragraph=editor.lastElementChild,range=document.createRange();range.selectNodeContents(paragraph);range.collapse(false);editor.focus();getSelection().removeAllRanges();getSelection().addRange(range);window.postMessage({type:'openInsertMenu'},'*');})()`);
+        await evaluate(`(()=>{const editor=document.getElementById('editor'),paragraph=editor.querySelector(':scope > p:last-of-type'),range=document.createRange();range.selectNodeContents(paragraph);range.collapse(false);editor.focus();getSelection().removeAllRanges();getSelection().addRange(range);window.postMessage({type:'openInsertMenu'},'*');})()`);
         await waitFor(`document.querySelector('.insert-command-menu')?.style.display==='flex'`);
         await connection.send('Input.insertText', { text: 'callout' }, sessionId);
         await key('Enter', 'Enter', 13); await settle();

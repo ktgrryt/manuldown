@@ -31,6 +31,8 @@ export class TableManager {
         this.selectCodeBlockLanguageLabel = options.selectCodeBlockLanguageLabel || null;
         // (block, selection) => boolean. The left edge of an image on the block's first line.
         this.placeCaretAtLeadingImageLine = options.placeCaretAtLeadingImageLine || null;
+        // (wrapper, selection, direction) => boolean. Leave a table at a callout boundary.
+        this.moveVerticallyFromTable = options.moveVerticallyFromTable || null;
         // (event, { anchorCell, direction, wholeCell, startX, startY }) => boolean.
         // Hand a cell drag to the editor when it reaches text outside the table.
         this.extendSelectionOutsideTable = options.extendSelectionOutsideTable || null;
@@ -3592,9 +3594,10 @@ export class TableManager {
     }
 
     _moveCursorBeforeWrapper(wrapper, placeAtStart = false) {
-        const prev = this._getPrevNavigableSiblingNode(wrapper);
         const selection = window.getSelection();
         if (!selection) return;
+        if (placeAtStart && this.moveVerticallyFromTable?.(wrapper, selection, 'up')) return;
+        const prev = this._getPrevNavigableSiblingNode(wrapper);
         const range = document.createRange();
 
         if (prev) {
@@ -3636,9 +3639,10 @@ export class TableManager {
     }
 
     _moveCursorAfterWrapper(wrapper, direction = 'right') {
-        const next = this._getNextNavigableSiblingNode(wrapper);
         const selection = window.getSelection();
         if (!selection) return;
+        if (direction === 'down' && this.moveVerticallyFromTable?.(wrapper, selection, 'down')) return;
+        const next = this._getNextNavigableSiblingNode(wrapper);
         const range = document.createRange();
 
         if (next && next.nodeType === Node.ELEMENT_NODE && next.classList?.contains('md-table-wrapper')) {

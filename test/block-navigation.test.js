@@ -2517,15 +2517,19 @@ function loadCodeBlockDownNavigation(fixture) {
 }
 
 const SIMPLE_CODE = '<pre><code>one\ntwo\n</code></pre>';
+const SIMPLE_CALLOUT = '<div data-mdw-callout="true"><div class="mdw-callout-title" contenteditable="false">NOTE</div>' +
+    '<div class="mdw-callout-content"><p>Body</p></div></div>';
 const READ_ONLY = '<pre class="mdw-opaque-source" contenteditable="false"><code>&lt;div&gt;HTML&lt;/div&gt;</code></pre>';
 
 test('ArrowUp, Ctrl+P and the host Up command open the same body gap from the first footnote', async () => {
     for (const route of ['arrow', 'ctrl', 'command']) {
-        for (const body of [SIMPLE_CODE, '<blockquote>' + SIMPLE_CODE + '</blockquote>', '<ul><li>' + SIMPLE_CODE + '</li></ul>']) {
+        for (const body of [SIMPLE_CODE, '<blockquote>' + SIMPLE_CODE + '</blockquote>', '<ul><li>' + SIMPLE_CODE + '</li></ul>',
+            SIMPLE_CALLOUT, '<blockquote>' + SIMPLE_CALLOUT + '</blockquote>', '<ul><li>' + SIMPLE_CALLOUT + '</li></ul>',
+            '<blockquote>' + SIMPLE_CALLOUT.replace('<p>Body</p>', SIMPLE_CODE + '<p>Body</p>') + '</blockquote>']) {
             const fixture = await createFixture(body + editableNote('<p>Note</p>'));
             try {
                 const navigation = loadCheckboxNavigation(fixture);
-                const pre = fixture.editor.querySelector('pre');
+                const block = fixture.editor.querySelector('pre, [data-mdw-callout]');
                 const definition = fixture.editor.querySelector('[data-mdw-footnote-definition]');
                 const noteText = definition.querySelector('p').firstChild;
                 const original = fixture.domUtils.getCleanedHTML();
@@ -2552,7 +2556,7 @@ test('ArrowUp, Ctrl+P and the host Up command open the same body gap from the fi
                 pressUp();
                 assert.equal(fixture.editor.querySelector('[data-mdw-code-gap]'), gap, 'Up reuses the empty body line');
                 assert.equal(fixture.editor.querySelectorAll('[data-mdw-code-gap]').length, 1);
-                fixture.placeCaret(pre.querySelector('code').firstChild, 0);
+                fixture.placeCaret(block.querySelector('code, p').firstChild, 0);
                 fixture.codeBlockGapManager.reconcile(fixture.selection);
                 assert.equal(gap.parentNode, null, 'leaving without typing removes the gap');
                 assert.equal(fixture.domUtils.getCleanedHTML(), original);
@@ -2624,10 +2628,11 @@ test('upward footnote exit requires code at the end of the preceding body and ne
 
 // Check both entry points: editor.js's primary exit and CursorManager's fallback.
 for (const route of ['editor', 'cursor']) {
-    test(`${route}: document edges, footnotes, code/code and code/read-only boundaries get temporary paragraphs`, async () => {
+    test(`${route}: document edges, footnotes, code/code, code/callout and read-only boundaries get temporary paragraphs`, async () => {
         const cases = [
             [SIMPLE_CODE, true],
             [SIMPLE_CODE + SIMPLE_CODE, true],
+            [SIMPLE_CODE + SIMPLE_CALLOUT, true],
             [SIMPLE_CODE + READ_ONLY, true],
             [SIMPLE_CODE + READ_ONLY + '<p><br></p>', true],
             [SIMPLE_CODE + editableNote('<p>Note</p>'), true],
@@ -2720,9 +2725,9 @@ for (const route of ['editor', 'cursor']) {
     });
 }
 
-test('a gap before a code block exists only at the document start or next to code/read-only content', async () => {
+test('a gap before a code block exists only at the document start or next to code, callouts or read-only content', async () => {
     for (const [before, expectedGap] of [
-        ['', true], [SIMPLE_CODE, true], [READ_ONLY, true],
+        ['', true], [SIMPLE_CODE, true], [SIMPLE_CALLOUT, true], [READ_ONLY, true],
         ['<p>before</p>', false], ['<p><br></p>', false], ['<hr>', false],
         ['<blockquote><p>before</p></blockquote>', false],
     ]) {

@@ -2712,6 +2712,26 @@ export class CursorManager {
         fullRange.setEnd(lastNode, lastNode.textContent.length);
         const fullRect = fullRange.getBoundingClientRect();
 
+        // Crossing items always enters the nearest visual line. Probing the
+        // middle of a wrapped item can skip its first line when moving down.
+        const lines = this._getVisualLinesForRange(fullRange);
+        if (lines.length > 1) {
+            const line = direction === 'up' ? lines[lines.length - 1] : lines[0];
+            const inset = Math.min(1, (line.right - line.left) / 2);
+            const x = Math.max(line.left + inset, Math.min(currentX, line.right - inset));
+            const caret = document.caretRangeFromPoint?.(x, (line.top + line.bottom) / 2);
+            if (caret && effectiveTextNodes.includes(caret.startContainer) &&
+                this._isSameVisualLine(line, this._getVisualCaretRectForRange(caret))) {
+                this._placeCollapsedCaret(selection, caret.startContainer, caret.startOffset);
+                return true;
+            }
+            const lineStart = this._findLineStartCaretInListItem(listItem, effectiveTextNodes, line);
+            if (lineStart) {
+                this._placeCollapsedCaret(selection, lineStart.node, lineStart.offset);
+                return true;
+            }
+        }
+
         const hasHorizontalBounds = !!(fullRect && fullRect.width > 0);
         const isRightOfText = hasHorizontalBounds && currentX >= (fullRect.right - 1);
         const isLeftOfText = hasHorizontalBounds && currentX <= (fullRect.left + 1);

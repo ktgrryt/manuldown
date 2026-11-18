@@ -1749,6 +1749,8 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
         selectCodeBlockLanguageLabel: (pre) => selectCodeBlockLanguageLabel(pre),
         placeCaretAtLeadingImageLine: (block, selection) =>
             cursorManager.placeCursorAtLeadingImageLine(block, selection),
+        moveVerticallyFromTable: (wrapper, selection, direction) =>
+            calloutManager.moveVerticallyFromTable(wrapper, selection, direction),
         extendSelectionOutsideTable: extendTableSelectionToText
     });
     const searchManager = new SearchManager(editor, {
@@ -1766,10 +1768,13 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
     const footnoteManager = new FootnoteManager(editor, stateManager, { onChange: () => notifyChange() });
     const calloutManager = new CalloutManager(editor, {
         cursorManager,
+        moveToBlockGap: (block, direction, selection, allowLabelSelection) =>
+            codeBlockGapManager.moveToGap(block, direction, selection, allowLabelSelection),
+        deleteBlock: (block, selection) => deleteCodeBlock(block, selection),
         isComposing: () => isUpdating || isComposing || compositionUpdateGate.composing ||
             (lastCompositionEndTs > 0 && Date.now() - lastCompositionEndTs <= IME_ENTER_CONFIRM_GRACE_MS),
         beforeChange: () => { typingUndoGroup.break(); stateManager.saveState(); },
-        onChange: () => { notifyChange(); stateManager.commitStateAfterChange(); },
+        onChange: (options) => { notifyChange(); stateManager.commitStateAfterChange(options); },
         onNavigate: () => revealCaretAfterKeyboardNavigation()
     });
     cursorManager.moveAcrossCalloutType = (selection, direction) =>
@@ -7907,16 +7912,17 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
         return true;
     }
 
-    function deleteCodeBlock(pre, selection) {
-        const parent = pre.parentElement;
+    // Empty callouts share code-block removal and its caret fallback.
+    function deleteCodeBlock(block, selection) {
+        const parent = block.parentElement;
         if (!parent) return;
 
-        const nextElement = getNextElementSibling(pre);
-        const prevElement = getPreviousElementSibling(pre);
+        const nextElement = getNextElementSibling(block);
+        const prevElement = getPreviousElementSibling(block);
         const targetElement = nextElement || prevElement;
         const useNext = !!nextElement;
 
-        pre.remove();
+        block.remove();
 
         let focusTarget = targetElement;
         if (!focusTarget) {
@@ -7927,8 +7933,8 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
         }
         if (focusTarget.matches('[data-mdw-callout="true"]') || focusTarget.querySelector('[data-mdw-callout="true"]')) {
             focusTarget = cursorManager._getCalloutBoundaryBlock(focusTarget, useNext ? 'down' : 'up');
-            if (focusTarget.tagName === 'PRE') focusTarget = focusTarget.querySelector('code') || focusTarget;
         }
+        if (focusTarget.tagName === 'PRE') focusTarget = focusTarget.querySelector('code') || focusTarget;
 
         const newRange = document.createRange();
         if (useNext) {
@@ -19156,6 +19162,7 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
             // Compositions without a keydown (e.g. dictation) still have to
             // start where the previous edit put the caret.
             flushPendingCaretPlacement();
+            calloutManager.normalizeCaret();
             cursorManager.prepareBlockBoundaryComposition();
             typingUndoGroup.break();
             // Record the committed text before the composition changes the DOM,
