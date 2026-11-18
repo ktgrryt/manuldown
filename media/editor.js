@@ -4035,6 +4035,8 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
 
     function getDirectNodesFromEditor(range, root = editor) {
         if (!range || !root) return [];
+        const isBoundary = node => isBlockElement(node) ||
+            node.matches?.('[data-exclude-from-markdown="true"], [aria-hidden="true"], [data-mdw-math="display"]');
         let startNode = null;
 
         if (range.startContainer === root) {
@@ -4054,26 +4056,26 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
                     startNode = current;
                     break;
                 }
-                if (isBlockElement(current)) return [];
+                if (isBoundary(current)) return [];
                 current = current.parentElement;
             }
         }
 
         if (!startNode) return [];
-        if (startNode.nodeType === Node.ELEMENT_NODE && isBlockElement(startNode)) return [];
+        if (isBoundary(startNode)) return [];
 
         let startIndex = Array.prototype.indexOf.call(root.childNodes, startNode);
         if (startIndex < 0) return [];
         while (startIndex > 0) {
             const prev = root.childNodes[startIndex - 1];
-            if (prev.nodeType === Node.ELEMENT_NODE && isBlockElement(prev)) break;
+            if (isBoundary(prev)) break;
             startIndex -= 1;
         }
 
         const nodes = [];
         for (let i = startIndex; i < root.childNodes.length; i++) {
             const node = root.childNodes[i];
-            if (node.nodeType === Node.ELEMENT_NODE && isBlockElement(node)) break;
+            if (isBoundary(node)) break;
             nodes.push(node);
         }
         return nodes;
@@ -7611,12 +7613,13 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
         cleanupEmptyStrikes();
         unwrapStrikeAtSelection();
 
-        // Remove a <br> at caret position if present
+        // Replace a trailing browser placeholder, keeping authored line breaks.
         if (range.startContainer && range.startContainer.nodeType === Node.ELEMENT_NODE) {
             const container = range.startContainer;
             const offset = range.startOffset;
             const child = container.childNodes[offset];
-            if (child && child.nodeType === Node.ELEMENT_NODE && child.tagName === 'BR') {
+            if (child?.nodeName === 'BR' && child === container.lastChild && !child.hasAttributes() &&
+                /^(P|DIV|H[1-6]|LI|TD|TH|BLOCKQUOTE)$/.test(container.nodeName)) {
                 child.remove();
             }
         }
@@ -10549,14 +10552,20 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
     function isCtrlKTargetBlockquoteEmpty(blockquote) {
         if (!blockquote) return false;
 
-        const normalizedText = (blockquote.textContent || '').replace(/[\u200B\u2060\u00A0\uFEFF]/g, '').trim();
-        if (normalizedText !== '') {
+        const normalizedText = (blockquote.textContent || '').replace(/[\u200B\u2060\uFEFF]/g, '');
+        if (normalizedText !== '' || blockquote.querySelectorAll('p').length > 1 || blockquote.querySelectorAll('br').length > 1) {
             return false;
         }
 
         // Treat structural content as non-empty even when textContent is blank.
         const hasStructuralContent = !!blockquote.querySelector('img, hr, table, pre, ul, ol, input');
         return !hasStructuralContent;
+    }
+
+    function isEmptyCtrlKLineBlock(block) {
+        return block && /^(P|DIV|H[1-6])$/.test(block.tagName) &&
+            !(block.textContent || '').replace(/[\u200B\u2060\uFEFF]/g, '') &&
+            block.querySelectorAll('br').length <= 1 && isEffectivelyEmptyBlock(block);
     }
 
     function replaceBlockquoteWithEmptyParagraph(blockquote, selection) {
@@ -10591,7 +10600,7 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
         }
 
         if (!paragraph || paragraph.parentElement !== blockquote) return null;
-        if (!isEffectivelyEmptyBlock(paragraph)) return null;
+        if (!isEmptyCtrlKLineBlock(paragraph)) return null;
 
         const nextElement = getNextElementSibling(paragraph);
         const prevElement = getPreviousElementSibling(paragraph);
@@ -10648,141 +10657,56 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
         return true;
     }
 
-    function handleCtrlKEmptyLineBeforeTableKeydown(e, context) {
-        if (!isMac) return false;
-        if (!e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return false;
-        if (e.key.toLowerCase() !== 'k') return false;
-        if (tableManager.isSelectionInTableContext()) return false;
+    function deleteEmptyLineForCtrlK(selection, range) {
+        const root = domUtils.getEditingRoot(range.startContainer);
+        const quote = getTopLevelBlockquoteForCtrlK(range);
+        const emptyQuote = isCtrlKTargetBlockquoteEmpty(quote);
+        const quoteLine = quote && !emptyQuote && getCtrlKTargetEmptyBlockquoteParagraph(range);
+        const block = getCtrlKLineContainerFromRange(range);
+        if (!emptyQuote && !quoteLine && (!block || block.parentElement !== root ||
+            isNavigationExcludedElement(block) || !isEmptyCtrlKLineBlock(block) ||
+            (range.startContainer !== root && !block.contains(range.startContainer)))) return false;
 
-        const { range, container } = context;
-        if (!range || !range.collapsed) return false;
-
-        let block = container.nodeType === 3 ? container.parentElement : container;
-        while (block && block !== editor && !domUtils.isBlockElement(block)) {
-            block = block.parentElement;
-        }
-        if (!block) return false;
-        if (block === editor) {
-            const children = Array.from(editor.childNodes || []);
-            const direct = children[range.startOffset] || null;
-            if (direct && direct.nodeType === Node.ELEMENT_NODE && domUtils.isBlockElement(direct)) {
-                block = direct;
-            } else if (range.startOffset > 0) {
-                const prev = children[range.startOffset - 1];
-                if (prev && prev.nodeType === Node.ELEMENT_NODE && domUtils.isBlockElement(prev)) {
-                    block = prev;
-                }
-            }
-            if (block === editor) return false;
-        }
-
-        // 空の引用ブロック → 空のパラグラフに変換
-        const blockquote = getTopLevelBlockquoteForCtrlK(range);
-        if (isCtrlKTargetBlockquoteEmpty(blockquote)) {
-            e.preventDefault();
-            stateManager.saveState();
-            emacsKillBuffer = '\n';
-            replaceBlockquoteWithEmptyParagraph(blockquote, window.getSelection());
-            finalizeCtrlKDeleteTurn();
-            notifyChangeImmediate();
-            return true;
-        }
-
-        const emptyBlockquoteParagraph = getCtrlKTargetEmptyBlockquoteParagraph(range);
-        if (emptyBlockquoteParagraph) {
-            e.preventDefault();
-            stateManager.saveState();
-            emacsKillBuffer = '\n';
-            if (deleteEmptyBlockquoteParagraphForCtrlK(emptyBlockquoteParagraph, window.getSelection())) {
-                finalizeCtrlKDeleteTurn();
-                notifyChangeImmediate();
-                return true;
-            }
-        }
-
-        const isEmptyBlock = /^(P|DIV|H[1-6])$/.test(block.tagName);
-        if (!isEmptyBlock) return false;
-        if (!isEffectivelyEmptyBlock(block)) return false;
-
-        const isHeading = /^H[1-6]$/.test(block.tagName);
-        const editingRoot = domUtils.getEditingRoot(block);
-        const nextElement = getNextElementSibling(block);
-        if (!nextElement && !isHeading && editingRoot === editor) return false;
-
-        let wrapper = null;
-        const nextIsRawTable = !!(nextElement && nextElement.tagName === 'TABLE');
-        if (nextElement) {
-            if (nextElement.classList?.contains('md-table-wrapper')) {
-                wrapper = nextElement;
-            } else if (nextElement.tagName === 'TABLE') {
-                wrapper = nextElement.closest('.md-table-wrapper');
-            }
-        }
-
-        e.preventDefault();
         stateManager.saveState();
-
-        const prevElement = getPreviousElementSibling(block);
-        block.remove();
-
-        // If the next block is a raw table, ensure wrapper/edges exist so caret can stay visible.
-        if (!wrapper && nextIsRawTable) {
-            tableManager.wrapTables();
-            wrapper = nextElement.closest('.md-table-wrapper');
-        }
-
-        if (nextElement) {
-            if (wrapper) {
-                const leftEdge = wrapper.querySelector('.md-table-edge-left');
-                if (leftEdge) {
-                    tableManager._setCursorToEdge(leftEdge, false);
-                } else {
-                    const selection = window.getSelection();
-                    if (selection) {
-                        placeCollapsedCaret(selection, wrapper, 0);
-                    }
-                }
-            } else {
-                const selection = window.getSelection();
-                if (selection) {
-                    const newRange = document.createRange();
-                    const firstNode = getPreferredFirstTextNodeForElement(nextElement);
-                    if (firstNode) {
-                        newRange.setStart(firstNode, 0);
-                    } else {
-                        newRange.setStart(nextElement, 0);
-                    }
-                    newRange.collapse(true);
-                    selection.removeAllRanges();
-                    selection.addRange(newRange);
-                }
-            }
-        } else if (prevElement) {
-            const selection = window.getSelection();
-            if (selection) {
-                const newRange = document.createRange();
-                const lastNode = domUtils.getLastTextNode(prevElement);
-                if (lastNode) {
-                    newRange.setStart(lastNode, lastNode.textContent.length);
-                } else {
-                    newRange.setStart(prevElement, prevElement.childNodes.length);
-                }
-                newRange.collapse(true);
-                selection.removeAllRanges();
-                selection.addRange(newRange);
-            }
+        emacsKillBuffer = '\n';
+        if (emptyQuote) {
+            replaceBlockquoteWithEmptyParagraph(quote, selection);
+        } else if (quoteLine) {
+            deleteEmptyBlockquoteParagraphForCtrlK(quoteLine, selection);
         } else {
-            // Keep a visible caret when the removed block was the only block in the editor.
-            const selection = window.getSelection();
-            const p = document.createElement('p');
-            p.appendChild(document.createElement('br'));
-            editingRoot.appendChild(p);
-            if (selection) {
+            const previous = getPreviousTopLevelNavigableSibling(block);
+            const next = getNextNavigableSibling(block);
+            // Keep the caret at the next item's editable start across list normalization.
+            const mergingLists = next && (next.tagName === 'UL' || next.tagName === 'OL') &&
+                previous?.tagName === next.tagName;
+            const nextItem = mergingLists && Array.from(next.children).find(child => child.tagName === 'LI');
+            block.remove();
+
+            if (next?.tagName === 'TABLE') tableManager.wrapTables();
+            const wrapper = next?.closest?.('.md-table-wrapper');
+            const edge = wrapper?.querySelector('.md-table-edge-left');
+            if (next?.tagName === 'HR') {
+                const hrRange = document.createRange();
+                hrRange.selectNode(next);
+                applySelectionRange(selection, hrRange);
+            } else if (edge) {
+                tableManager._setCursorToEdge(edge, false);
+            } else if (next) {
+                placeCollapsedCaret(selection, wrapper || getPreferredFirstTextNodeForElement(next) || next, 0);
+            } else if (previous) {
+                const last = previous.nodeType === Node.TEXT_NODE ? previous : domUtils.getLastTextNode(previous) || previous;
+                placeCollapsedCaret(selection, last, last.nodeType === Node.TEXT_NODE ? last.length : last.childNodes.length);
+            } else {
+                const p = document.createElement('p');
+                p.appendChild(document.createElement('br'));
+                root.appendChild(p);
                 placeCollapsedCaret(selection, p, 0);
             }
+            finishCtrlKDocumentChange();
+            if (nextItem && editor.contains(nextItem)) placeCursorAtListItemStart(nextItem);
+            return true;
         }
-
-        notifyChangeImmediate();
+        finishCtrlKDocumentChange();
         return true;
     }
 
@@ -12006,18 +11930,19 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
         return editingRoot !== editor ? editingRoot.firstElementChild : getTopLevelLineContainer(node);
     }
 
-    function getNearestTopLevelElementFromIndex(nodes, startIndex, step) {
+    function getNearestTopLevelElementFromIndex(nodes, startIndex, step, includeText = false) {
         if (!nodes || !Number.isFinite(startIndex) || !step) return null;
         for (let i = startIndex; i >= 0 && i < nodes.length; i += step) {
             const node = nodes[i];
             if (!node) continue;
             if (node.nodeType === Node.ELEMENT_NODE) {
+                if (node.matches('[data-exclude-from-markdown="true"], [aria-hidden="true"]')) continue;
                 return node;
             }
             if (node.nodeType === Node.TEXT_NODE) {
                 const normalized = (node.textContent || '').replace(/[\u200B\u2060\uFEFF\u00A0\s]/g, '');
                 if (normalized !== '') {
-                    return null;
+                    return includeText ? node : null;
                 }
                 continue;
             }
@@ -12033,12 +11958,13 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
         if (!nodes) return null;
 
         if (container === editingRoot && container.nodeType === Node.ELEMENT_NODE) {
-            return getNearestTopLevelElementFromIndex(nodes, range.startOffset, 1) ||
-                getNearestTopLevelElementFromIndex(nodes, range.startOffset - 1, -1);
+            return getNearestTopLevelElementFromIndex(nodes, range.startOffset, 1, true) ||
+                getNearestTopLevelElementFromIndex(nodes, range.startOffset - 1, -1, true);
         }
 
         if (container && container.nodeType === Node.TEXT_NODE && container.parentElement === editingRoot) {
             const text = container.textContent || '';
+            if (/[^\u200B\u2060\uFEFF\s]/u.test(text)) return container;
             const textIndex = Array.prototype.indexOf.call(nodes, container);
             if (textIndex !== -1) {
                 const preferForward = range.startOffset >= text.length;
@@ -15974,7 +15900,7 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
         const hasMeaningfulChild = Array.from(block.childNodes || []).some((child) => {
             if (!child) return false;
             if (child.nodeType === Node.TEXT_NODE) {
-                return (child.textContent || '').replace(/[\u200B\u2060\uFEFF\u00A0]/g, '').trim() !== '';
+                return (child.textContent || '').replace(/[\u200B\u2060\uFEFF]/g, '') !== '';
             }
             if (child.nodeType !== Node.ELEMENT_NODE) return false;
             if (child.tagName === 'BR') return true;
@@ -16027,11 +15953,21 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
         }, 0);
     }
 
+    function finishCtrlKDocumentChange() {
+        domUtils.ensureInlineCodeSpaces();
+        domUtils.cleanupGhostStyles();
+        tableManager.wrapTables();
+        applyImageRenderSizes();
+        hideImageResizeOverlaySafely();
+        finalizeCtrlKDeleteTurn();
+        notifyChangeImmediate();
+    }
+
     function getCtrlKBlockEndBoundary(targetRange, block) {
         if (!block || block.nodeType !== Node.ELEMENT_NODE) {
             return {
                 container: block,
-                offset: block && block.childNodes ? block.childNodes.length : 0
+                offset: block?.textContent?.length || 0
             };
         }
 
@@ -16053,6 +15989,57 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
             container: block,
             offset: nestedListIndex >= 0 ? nestedListIndex : childNodes.length
         };
+    }
+
+    function getCtrlKLineSuffix(caret, block, inlineNodes) {
+        const contents = document.createRange();
+        if (inlineNodes.length) {
+            // Chromium can type the first paragraph directly into the editor.
+            // Its inline siblings belong to the same line, up to the next block.
+            contents.setStartBefore(inlineNodes[0]);
+            contents.setEndAfter(inlineNodes[inlineNodes.length - 1]);
+        } else {
+            contents.selectNodeContents(block);
+            const end = getCtrlKBlockEndBoundary(caret, block);
+            contents.setEnd(end.container, end.offset);
+        }
+        const suffix = contents.cloneRange();
+        const position = contents.comparePoint(caret.startContainer, caret.startOffset);
+        if (position === 0) suffix.setStart(caret.startContainer, caret.startOffset);
+        if (position > 0) suffix.collapse(false);
+
+        const boundaries = 'br, p, div, h1, h2, h3, h4, h5, h6, ul, ol, pre, table, hr, blockquote, .md-table-structure-handle';
+        const candidates = inlineNodes.length
+            ? inlineNodes.flatMap(node => node.nodeName === 'BR' ? [node] : Array.from(node.querySelectorAll?.(boundaries) || []))
+            : block.querySelectorAll?.(boundaries) || [];
+        const inlineRun = inlineNodes.length ? contents : null;
+        let previousBoundary = null;
+        for (const boundary of candidates) {
+            if (!contents.intersectsNode(boundary) || boundary.contains(suffix.startContainer) ||
+                boundary.parentElement.closest('[contenteditable="false"]')) continue;
+            if (!suffix.intersectsNode(boundary)) {
+                previousBoundary = boundary;
+                continue;
+            }
+            suffix.setEndBefore(boundary);
+            if (boundary.tagName === 'BR' && !suffix.toString()) {
+                // On an empty line a second kill consumes the newline.
+                // A lone trailing BR keeps the last line editable.
+                const line = contents.cloneRange();
+                if (previousBoundary) line.setStartAfter(previousBoundary);
+                line.setEndBefore(boundary);
+                const after = contents.cloneRange();
+                after.setStartAfter(boundary);
+                const atoms = 'img, input, [contenteditable="false"]:not([data-exclude-from-markdown="true"])';
+                const hasLineAfter = after.toString() || after.cloneContents().querySelector('br, ' + atoms);
+                if (hasLineAfter && !line.toString() && !line.cloneContents().querySelector(atoms)) {
+                    suffix.setEndAfter(boundary);
+                    return { suffix, inlineRun, text: '\n' };
+                }
+            }
+            break;
+        }
+        return { suffix, inlineRun, text: suffix.toString() };
     }
 
     function isCollapsedRangeAtImageLeftEdge(targetRange, image) {
@@ -16790,7 +16777,7 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
             const lineTextRange = document.createRange();
             lineTextRange.setStart(lineStartRange.startContainer, lineStartRange.startOffset);
             lineTextRange.setEnd(lineEndRange.startContainer, lineEndRange.startOffset);
-            const lineText = (lineTextRange.toString() || '').replace(/[\u200B\u2060\uFEFF\u00A0\s]/g, '');
+            const lineText = (lineTextRange.toString() || '').replace(/[\u200B\u2060\uFEFF]/g, '');
             return lineText.length === 0;
         } catch (e) {
             applySelectionRange(selection, originalRange);
@@ -16798,11 +16785,58 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
         }
     }
 
+    function deleteCtrlKTextLineSuffix(selection, caret) {
+        const element = caret.startContainer.nodeType === Node.ELEMENT_NODE
+            ? caret.startContainer : caret.startContainer.parentElement;
+        if (element.closest('pre')) return false;
+
+        const root = domUtils.getEditingRoot(element);
+        const inlineNodes = getDirectNodesFromEditor(caret, root);
+        let block = inlineNodes.length ? root : getCtrlKLineContainerFromRange(caret);
+        if (!block || block.tagName === 'PRE' || (block === root && !inlineNodes.length)) return false;
+
+        const { suffix, inlineRun, text } = getCtrlKLineSuffix(caret, block, inlineNodes);
+        if (!text.replace(/[\u200B\u2060\uFEFF]/g, '')) {
+            finalizeCtrlKDeleteTurn();
+            return true;
+        }
+
+        stateManager.saveState();
+        emacsKillBuffer = text;
+        let target = suffix.startContainer;
+        let offset = suffix.startOffset;
+        if (inlineRun && target === root) offset -= inlineRun.startOffset;
+        suffix.deleteContents();
+        if (inlineRun) {
+            // Keep an editable paragraph when the entire first line is killed.
+            // The live range still brackets just the remaining inline siblings.
+            block = document.createElement('p');
+            inlineRun.surroundContents(block);
+            if (target === root) target = block;
+        }
+        cleanupEmptyAnchorsInBlock(block);
+        ensureBlockHasCaretPlaceholder(block);
+
+        const nestedList = block.tagName === 'LI' && Array.from(block.children).find(
+            child => child.tagName === 'UL' || child.tagName === 'OL'
+        );
+        if (nestedList && !hasDirectTextContent(block)) {
+            target = block;
+            offset = Array.prototype.indexOf.call(block.childNodes, nestedList);
+        } else if (!block.contains(target)) {
+            target = getPreferredFirstTextNodeForElement(block) || block;
+            offset = 0;
+        }
+        const limit = target.nodeType === Node.TEXT_NODE ? target.length : target.childNodes.length;
+        placeCollapsedCaret(selection, target, Math.max(0, Math.min(offset, limit)));
+        finishCtrlKDocumentChange();
+        return true;
+    }
+
     function performCtrlKDeleteFromRange(selection, range) {
         if (!selection || !range || !editor.contains(range.commonAncestorContainer)) {
             return false;
         }
-        const editingRootForCtrlK = domUtils.getEditingRoot(range.startContainer);
 
         const selectedLabel = getSelectedCodeBlockLanguageLabel();
         if (selectedLabel) {
@@ -16819,13 +16853,7 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
                 }
 
                 deleteCodeBlock(pre, selection);
-                domUtils.ensureInlineCodeSpaces();
-                domUtils.cleanupGhostStyles();
-                tableManager.wrapTables();
-                applyImageRenderSizes();
-                hideImageResizeOverlaySafely();
-                finalizeCtrlKDeleteTurn();
-                notifyChangeImmediate();
+                finishCtrlKDocumentChange();
                 return true;
             }
         }
@@ -16836,47 +16864,12 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
                 stateManager.saveState();
                 emacsKillBuffer = createMarkdownImageSyntaxFromElement(imageAtLeftEdge);
                 if (deleteImageAtCaretForCtrlK(imageAtLeftEdge, selection)) {
-                    domUtils.ensureInlineCodeSpaces();
-                    domUtils.cleanupGhostStyles();
-                    tableManager.wrapTables();
-                    applyImageRenderSizes();
-                    hideImageResizeOverlaySafely();
-                    finalizeCtrlKDeleteTurn();
-                    notifyChangeImmediate();
+                    finishCtrlKDocumentChange();
                     return true;
                 }
             }
 
-            const emptyTopLevelBlockquote = getTopLevelBlockquoteForCtrlK(range);
-            if (isCtrlKTargetBlockquoteEmpty(emptyTopLevelBlockquote)) {
-                stateManager.saveState();
-                emacsKillBuffer = '\n';
-                replaceBlockquoteWithEmptyParagraph(emptyTopLevelBlockquote, selection);
-                domUtils.ensureInlineCodeSpaces();
-                domUtils.cleanupGhostStyles();
-                tableManager.wrapTables();
-                applyImageRenderSizes();
-                hideImageResizeOverlaySafely();
-                finalizeCtrlKDeleteTurn();
-                notifyChangeImmediate();
-                return true;
-            }
-
-            const emptyBlockquoteParagraph = getCtrlKTargetEmptyBlockquoteParagraph(range);
-            if (emptyBlockquoteParagraph) {
-                stateManager.saveState();
-                emacsKillBuffer = '\n';
-                if (deleteEmptyBlockquoteParagraphForCtrlK(emptyBlockquoteParagraph, selection)) {
-                    domUtils.ensureInlineCodeSpaces();
-                    domUtils.cleanupGhostStyles();
-                    tableManager.wrapTables();
-                    applyImageRenderSizes();
-                    hideImageResizeOverlaySafely();
-                    finalizeCtrlKDeleteTurn();
-                    notifyChangeImmediate();
-                    return true;
-                }
-            }
+            if (deleteEmptyLineForCtrlK(selection, range)) return true;
 
             if (isCollapsedSelectionOnEmptyLineInTableCell(selection, range)) {
                 stateManager.saveState();
@@ -16932,291 +16925,7 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
                 }
             }
 
-            const startBlock = getCtrlKLineContainerFromRange(range);
-            const tableCellForCtrlK =
-                domUtils.getParentElement(range.startContainer, 'TD') ||
-                domUtils.getParentElement(range.startContainer, 'TH');
-            const supportsLinePreserve = !!(
-                startBlock &&
-                startBlock !== editor &&
-                startBlock.tagName !== 'PRE' &&
-                !tableCellForCtrlK
-            );
-            if (supportsLinePreserve) {
-                try {
-                    const blockEndRange = document.createRange();
-                    const rangeStartsInsideBlock =
-                        range.startContainer === startBlock ||
-                        startBlock.contains(range.startContainer);
-                    if (rangeStartsInsideBlock) {
-                        blockEndRange.setStart(range.startContainer, range.startOffset);
-                    } else {
-                        blockEndRange.setStart(startBlock, 0);
-                    }
-                    const ctrlKEndBoundary = getCtrlKBlockEndBoundary(range, startBlock);
-                    blockEndRange.setEnd(ctrlKEndBoundary.container, ctrlKEndBoundary.offset);
-                    const blockEndText = blockEndRange.toString().replace(/[\u200B\u2060\uFEFF\u00A0\s]/g, '');
-                    if (blockEndText.length === 0) {
-                        const isRemovableEmptyLineBlock =
-                            startBlock.parentElement === editingRootForCtrlK &&
-                            /^(P|DIV|H[1-6])$/.test(startBlock.tagName) &&
-                            isEffectivelyEmptyBlock(startBlock);
-                        const cellForCtrlK =
-                            domUtils.getParentElement(range.startContainer, 'TD') ||
-                            domUtils.getParentElement(range.startContainer, 'TH');
-                        const isRemovableEmptyLineInTableCell = !!(
-                            cellForCtrlK &&
-                            startBlock &&
-                            startBlock !== cellForCtrlK &&
-                            cellForCtrlK.contains(startBlock) &&
-                            /^(P|DIV)$/.test(startBlock.tagName) &&
-                            isEffectivelyEmptyBlock(startBlock)
-                        );
-
-                        if (isRemovableEmptyLineBlock) {
-                            stateManager.saveState();
-                            emacsKillBuffer = '\n';
-
-                            const prevElement = getPreviousElementSibling(startBlock);
-                            const nextElement = getNextElementSibling(startBlock);
-                            const nextListItemForCaretAfterMerge = !!(
-                                prevElement &&
-                                nextElement &&
-                                (nextElement.tagName === 'UL' || nextElement.tagName === 'OL') &&
-                                prevElement.tagName === nextElement.tagName
-                            )
-                                ? Array.from(nextElement.children || []).find(
-                                    (child) => child && child.tagName === 'LI'
-                                )
-                                : null;
-                            let wrapper = null;
-                            const nextIsRawTable = !!(nextElement && nextElement.tagName === 'TABLE');
-                            if (nextElement) {
-                                if (nextElement.classList?.contains('md-table-wrapper')) {
-                                    wrapper = nextElement;
-                                } else if (nextElement.tagName === 'TABLE') {
-                                    wrapper = nextElement.closest('.md-table-wrapper');
-                                }
-                            }
-
-                            startBlock.remove();
-
-                            if (!wrapper && nextIsRawTable) {
-                                tableManager.wrapTables();
-                                wrapper = nextElement.closest('.md-table-wrapper');
-                            }
-
-                            if (nextElement) {
-                                if (nextElement.tagName === 'HR') {
-                                    const hrRange = document.createRange();
-                                    hrRange.selectNode(nextElement);
-                                    applySelectionRange(selection, hrRange);
-                                } else if (wrapper) {
-                                    const leftEdge = wrapper.querySelector('.md-table-edge-left');
-                                    if (leftEdge) {
-                                        tableManager._setCursorToEdge(leftEdge, false);
-                                    } else {
-                                        const newRange = document.createRange();
-                                        newRange.setStart(wrapper, 0);
-                                        newRange.collapse(true);
-                                        applySelectionRange(selection, newRange);
-                                    }
-                                } else {
-                                    const newRange = document.createRange();
-                                    const firstNode = getPreferredFirstTextNodeForElement(nextElement);
-                                    if (firstNode) {
-                                        newRange.setStart(firstNode, 0);
-                                    } else {
-                                        newRange.setStart(nextElement, 0);
-                                    }
-                                    newRange.collapse(true);
-                                    applySelectionRange(selection, newRange);
-                                }
-                            } else if (prevElement) {
-                                const newRange = document.createRange();
-                                const lastNode = domUtils.getLastTextNode(prevElement);
-                                if (lastNode) {
-                                    newRange.setStart(lastNode, lastNode.textContent.length);
-                                } else {
-                                    newRange.setStart(prevElement, prevElement.childNodes.length);
-                                }
-                                newRange.collapse(true);
-                                applySelectionRange(selection, newRange);
-                            } else {
-                                const p = document.createElement('p');
-                                p.appendChild(document.createElement('br'));
-                                editingRootForCtrlK.appendChild(p);
-                                const newRange = document.createRange();
-                                newRange.setStart(p, 0);
-                                newRange.collapse(true);
-                                applySelectionRange(selection, newRange);
-                            }
-
-                            domUtils.ensureInlineCodeSpaces();
-                            domUtils.cleanupGhostStyles();
-                            tableManager.wrapTables();
-                            applyImageRenderSizes();
-                            hideImageResizeOverlaySafely();
-                            pendingDeleteListItem = null;
-                            pendingCtrlKDeleteSync = false;
-                            suppressNextNativeCtrlKDelete = true;
-                            notifyChangeImmediate();
-                            // notifyChangeImmediate merges adjacent lists. Moving the next
-                            // list's LI nodes can relocate a live Selection to the old list
-                            // boundary, so restore the caret after that merge has finished.
-                            if (nextListItemForCaretAfterMerge &&
-                                editor.contains(nextListItemForCaretAfterMerge)) {
-                                placeCursorAtListItemStart(nextListItemForCaretAfterMerge);
-                            }
-                            setTimeout(() => {
-                                suppressNextNativeCtrlKDelete = false;
-                            }, 0);
-                            return true;
-                        }
-
-                        if (isRemovableEmptyLineInTableCell) {
-                            stateManager.saveState();
-                            emacsKillBuffer = '\n';
-
-                            const prevElement = getPreviousElementSibling(startBlock);
-                            const nextElement = getNextElementSibling(startBlock);
-
-                            startBlock.remove();
-
-                            const newRange = document.createRange();
-                            let placed = false;
-
-                            if (prevElement && cellForCtrlK.contains(prevElement)) {
-                                const lastNode = domUtils.getLastTextNode(prevElement);
-                                if (lastNode) {
-                                    newRange.setStart(lastNode, lastNode.textContent.length);
-                                } else {
-                                    newRange.setStart(prevElement, prevElement.childNodes.length);
-                                }
-                                placed = true;
-                            } else if (nextElement && cellForCtrlK.contains(nextElement)) {
-                                const firstNode = domUtils.getFirstTextNode(nextElement);
-                                if (firstNode) {
-                                    newRange.setStart(firstNode, 0);
-                                } else {
-                                    newRange.setStart(nextElement, 0);
-                                }
-                                placed = true;
-                            }
-
-                            if (!placed) {
-                                if (!cellForCtrlK.childNodes.length) {
-                                    cellForCtrlK.appendChild(document.createElement('br'));
-                                }
-                                const firstNodeInCell = domUtils.getFirstTextNode(cellForCtrlK);
-                                if (firstNodeInCell) {
-                                    newRange.setStart(firstNodeInCell, 0);
-                                } else {
-                                    newRange.setStart(cellForCtrlK, 0);
-                                }
-                            }
-
-                            newRange.collapse(true);
-                            applySelectionRange(selection, newRange);
-
-                            domUtils.ensureInlineCodeSpaces();
-                            domUtils.cleanupGhostStyles();
-                            tableManager.wrapTables();
-                            applyImageRenderSizes();
-                            hideImageResizeOverlaySafely();
-                            finalizeCtrlKDeleteTurn();
-                            notifyChangeImmediate();
-                            return true;
-                        }
-
-                        pendingCtrlKDeleteSync = false;
-                        suppressNextNativeCtrlKDelete = true;
-                        setTimeout(() => {
-                            suppressNextNativeCtrlKDelete = false;
-                        }, 0);
-                        return true;
-                    }
-
-                    const payload = createClipboardPayloadFromRange(blockEndRange);
-                    let killedText = blockEndRange.toString();
-                    if (!killedText) {
-                        killedText = payload && typeof payload.text === 'string'
-                            ? payload.text
-                            : '';
-                    }
-
-                    stateManager.saveState();
-                    emacsKillBuffer = killedText;
-                    const deleteStartContainer = blockEndRange.startContainer;
-                    const deleteStartOffset = blockEndRange.startOffset;
-                    blockEndRange.deleteContents();
-                    cleanupEmptyAnchorsInBlock(startBlock);
-                    ensureBlockHasCaretPlaceholder(startBlock);
-
-                    const caretRange = document.createRange();
-                    const nestedListForCaret = startBlock.tagName === 'LI'
-                        ? Array.from(startBlock.childNodes || []).find(
-                            (child) => child &&
-                                child.nodeType === Node.ELEMENT_NODE &&
-                                (child.tagName === 'UL' || child.tagName === 'OL')
-                        )
-                        : null;
-                    const shouldPlaceCaretAtNestedListBoundary = !!(
-                        nestedListForCaret &&
-                        !hasDirectTextContent(startBlock)
-                    );
-                    if (shouldPlaceCaretAtNestedListBoundary) {
-                        const boundaryOffset = Array.prototype.indexOf.call(startBlock.childNodes, nestedListForCaret);
-                        caretRange.setStart(startBlock, Math.max(0, boundaryOffset));
-                    } else {
-                        let restoredAtDeleteStart = false;
-                        if (deleteStartContainer && editor.contains(deleteStartContainer)) {
-                            try {
-                                if (deleteStartContainer.nodeType === Node.TEXT_NODE) {
-                                    const textLength = (deleteStartContainer.textContent || '').length;
-                                    caretRange.setStart(deleteStartContainer, Math.max(0, Math.min(deleteStartOffset, textLength)));
-                                    restoredAtDeleteStart = true;
-                                } else if (deleteStartContainer.nodeType === Node.ELEMENT_NODE) {
-                                    const childCount = deleteStartContainer.childNodes ? deleteStartContainer.childNodes.length : 0;
-                                    caretRange.setStart(deleteStartContainer, Math.max(0, Math.min(deleteStartOffset, childCount)));
-                                    restoredAtDeleteStart = true;
-                                }
-                            } catch (restoreError) {
-                                restoredAtDeleteStart = false;
-                            }
-                        }
-
-                        if (!restoredAtDeleteStart) {
-                            const firstNode = getPreferredFirstTextNodeForElement(startBlock);
-                            if (firstNode) {
-                                caretRange.setStart(firstNode, 0);
-                            } else {
-                                const anchor = document.createTextNode('');
-                                startBlock.insertBefore(anchor, startBlock.firstChild || null);
-                                caretRange.setStart(anchor, 0);
-                            }
-                        }
-                    }
-                    caretRange.collapse(true);
-                    applySelectionRange(selection, caretRange);
-
-                    domUtils.ensureInlineCodeSpaces();
-                    domUtils.cleanupGhostStyles();
-                    tableManager.wrapTables();
-                    applyImageRenderSizes();
-                    hideImageResizeOverlaySafely();
-                    pendingDeleteListItem = null;
-                    pendingCtrlKDeleteSync = false;
-                    suppressNextNativeCtrlKDelete = true;
-                    notifyChangeImmediate();
-                    setTimeout(() => {
-                        suppressNextNativeCtrlKDelete = false;
-                    }, 0);
-                    return true;
-                } catch (e) {
-                    // Fall through to the default Ctrl+K kill logic.
-                }
-            }
+            if (deleteCtrlKTextLineSuffix(selection, range)) return true;
         }
 
         const killRange = buildCtrlKKillRange(selection, range);
@@ -17271,7 +16980,7 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
         if (killPreBlock && killCodeBlock) {
             const remainingText = cursorManager.getCodeBlockText(killCodeBlock);
             const normalizedRemaining = remainingText.replace(/[\u200B\u2060\uFEFF]/g, '');
-            if (normalizedRemaining.trim() === '') {
+            if (normalizedRemaining === '' || normalizedRemaining === '\n') {
                 killCodeBlock.textContent = '\n';
                 cursorManager.setCodeBlockCursorOffset(killCodeBlock, selection, 0);
                 if (killCodeBlock.className.match(/language-\w+/)) {
@@ -17279,18 +16988,7 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
                         codeBlockManager.highlightSingleCodeBlock(killCodeBlock);
                     });
                 }
-                domUtils.ensureInlineCodeSpaces();
-                domUtils.cleanupGhostStyles();
-                tableManager.wrapTables();
-                applyImageRenderSizes();
-                hideImageResizeOverlaySafely();
-                pendingDeleteListItem = null;
-                pendingCtrlKDeleteSync = false;
-                suppressNextNativeCtrlKDelete = true;
-                notifyChangeImmediate();
-                setTimeout(() => {
-                    suppressNextNativeCtrlKDelete = false;
-                }, 0);
+                finishCtrlKDocumentChange();
                 return true;
             }
         }
@@ -17332,18 +17030,7 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
             placeCaretAtEditorStart();
         }
 
-        domUtils.ensureInlineCodeSpaces();
-        domUtils.cleanupGhostStyles();
-        tableManager.wrapTables();
-        applyImageRenderSizes();
-        hideImageResizeOverlaySafely();
-        pendingDeleteListItem = null;
-        pendingCtrlKDeleteSync = false;
-        suppressNextNativeCtrlKDelete = true;
-        notifyChangeImmediate();
-        setTimeout(() => {
-            suppressNextNativeCtrlKDelete = false;
-        }, 0);
+        finishCtrlKDocumentChange();
         return true;
     }
 
@@ -17362,11 +17049,6 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
 
             const range = selection.getRangeAt(0);
             if (!editor.contains(range.commonAncestorContainer)) return false;
-
-            if (tableManager.handleDeleteTableKeydown(e)) {
-                finalizeCtrlKDeleteTurn();
-                return true;
-            }
 
             // Always intercept native Ctrl+K behavior inside the editor.
             // If our custom range build fails, we keep the current line instead of letting
@@ -17388,7 +17070,9 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
             e.stopPropagation();
 
             stateManager.saveState();
-            const inserted = insertPlainTextAtSelection(emacsKillBuffer);
+            const inserted = emacsKillBuffer.includes('\n') && !domUtils.getParentElement(range.startContainer, 'PRE')
+                ? insertPlainTextWithLineBreaksAtSelection(emacsKillBuffer)
+                : insertPlainTextAtSelection(emacsKillBuffer);
             if (!inserted) return true;
 
             domUtils.ensureInlineCodeSpaces();
@@ -18305,6 +17989,7 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
             !e.shiftKey &&
             (e.key || '').toLowerCase() === 'k';
         if (ctrlKChord) {
+            cursorManager.normalizeTextBlockCaret();
             pendingCtrlKDeleteSync = true;
             // Native Ctrl+K deletion can bypass custom handlers in some WebView paths.
             // If no notification occurs in this turn, force a sync once.
@@ -18456,6 +18141,8 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
         }
 
         if (tableManager.handleDeleteTableKeydown(e)) {
+            finalizeCtrlKDeleteTurn();
+            e.stopPropagation();
             return;
         }
 
@@ -18610,10 +18297,6 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
                 return;
             }
             pendingDeleteListItem = ctrlKListItem;
-        }
-
-        if (handleCtrlKEmptyLineBeforeTableKeydown(e, context)) {
-            return;
         }
 
         if (handleEmacsKillYankKeydown(e)) {
@@ -19016,28 +18699,6 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
             });
         }
 
-        document.addEventListener('keydown', (e) => {
-            const isCtrlK =
-                isMac &&
-                e.ctrlKey &&
-                !e.metaKey &&
-                !e.altKey &&
-                !e.shiftKey &&
-                (e.key || '').toLowerCase() === 'k';
-            if (!isCtrlK || isUpdating) return;
-            if (e.target?.classList?.contains('insert-command-search')) return;
-
-            const selection = window.getSelection();
-            if (!selection || !selection.rangeCount) return;
-            const range = selection.getRangeAt(0);
-            if (!editor.contains(range.commonAncestorContainer)) return;
-
-            pendingCtrlKDeleteSync = true;
-            if (handleEmacsKillYankKeydown(e)) {
-                return;
-            }
-        }, true);
-
         // Ensure table cell range deletion works even if editor doesn't have focus
         document.addEventListener('keydown', (e) => {
             if (editor.contains(e.target)) return;
@@ -19167,7 +18828,7 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
             // start where the previous edit put the caret.
             flushPendingCaretPlacement();
             calloutManager.normalizeCaret();
-            cursorManager.prepareBlockBoundaryComposition();
+            cursorManager.normalizeTextBlockCaret();
             typingUndoGroup.break();
             // Record the committed text before the composition changes the DOM,
             // so undo never lands on half-typed (uncommitted) IME text.
@@ -22656,7 +22317,12 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
 
         // キーボードイベント
         editor.addEventListener('keydown', (e) => {
+            // A native delete following a new key belongs to this keystroke.
+            suppressNextNativeCtrlKDelete = false;
             const key = typeof e.key === 'string' ? e.key.toLowerCase() : '';
+            if (isMac && e.ctrlKey && (key === 'k' || key === 'y') &&
+                (isUpdating || editorLoadFailed ||
+                    e.target.closest?.('input:not([type="checkbox"]), textarea, select, button'))) return;
             const shouldRevealAfterSearchClose = !!searchCloseSelection && !isImeInteractionKeydown(e) && (
                 ['ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown'].includes(e.key) ||
                 (isMac && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey &&

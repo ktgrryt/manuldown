@@ -245,7 +245,7 @@ test('IME at the editor boundary starts inside the same paragraph, past hidden U
     const html = f.editor.innerHTML;
     for (const rootOffset of [1, f.editor.childNodes.length]) {
         f.placeCaret(f.editor, rootOffset);
-        assert.equal(f.cursorManager.prepareBlockBoundaryComposition(), true);
+        assert.equal(f.cursorManager.normalizeTextBlockCaret(), true);
         const range = f.selection.getRangeAt(0);
         assert.equal(range.startContainer, p);
         assert.equal(range.startOffset, p.childNodes.length);
@@ -258,12 +258,12 @@ test('IME preparation preserves the start and inter-paragraph insertion position
     const f = await fixture(t, '<p>最初</p><p>次</p>');
     const first = f.editor.firstChild;
     f.placeCaret(f.editor, 0);
-    assert.equal(f.cursorManager.prepareBlockBoundaryComposition(), true);
+    assert.equal(f.cursorManager.normalizeTextBlockCaret(), true);
     assert.equal(f.selection.getRangeAt(0).startContainer, first);
     assert.equal(f.selection.getRangeAt(0).startOffset, 0);
 
     f.placeCaret(f.editor, 1);
-    assert.equal(f.cursorManager.prepareBlockBoundaryComposition(), true);
+    assert.equal(f.cursorManager.normalizeTextBlockCaret(), true);
     assert.equal(f.selection.getRangeAt(0).startContainer, first);
     assert.equal(f.selection.getRangeAt(0).startOffset, first.childNodes.length);
 });
@@ -273,7 +273,7 @@ test('IME preparation resolves a root text boundary without adding wrapper nodes
     const text = f.editor.firstChild;
     const html = f.editor.innerHTML;
     f.placeCaret(f.editor, f.editor.childNodes.length);
-    assert.equal(f.cursorManager.prepareBlockBoundaryComposition(), true);
+    assert.equal(f.cursorManager.normalizeTextBlockCaret(), true);
     assert.equal(f.selection.getRangeAt(0).startContainer, text);
     assert.equal(f.selection.getRangeAt(0).startOffset, text.length);
     assert.equal(f.editor.innerHTML, html);
@@ -291,7 +291,7 @@ test('IME starts before the trailing empty-line BR and preserves soft breaks', a
         [second, 3, second, 2],
     ]) {
         f.placeCaret(container, offset);
-        assert.equal(f.cursorManager.prepareBlockBoundaryComposition(), true);
+        assert.equal(f.cursorManager.normalizeTextBlockCaret(), true);
         assert.equal(f.selection.getRangeAt(0).startContainer, expectedBlock);
         assert.equal(f.selection.getRangeAt(0).startOffset, expectedOffset);
         assert.equal(f.editor.innerHTML, html);
@@ -302,11 +302,11 @@ test('IME preparation keeps an existing text caret and a text selection', async 
     const f = await fixture(t, '<p>通常の本文です。</p>');
     const text = f.editor.firstChild.firstChild;
     const caret = f.placeCaret(text, 2);
-    assert.equal(f.cursorManager.prepareBlockBoundaryComposition(), false);
+    assert.equal(f.cursorManager.normalizeTextBlockCaret(), false);
     assert.equal(f.selection.getRangeAt(0), caret);
 
     caret.setEnd(text, 4);
-    assert.equal(f.cursorManager.prepareBlockBoundaryComposition(), false);
+    assert.equal(f.cursorManager.normalizeTextBlockCaret(), false);
     assert.equal(f.selection.getRangeAt(0), caret);
     assert.equal(caret.endOffset, 4);
 });
@@ -315,7 +315,7 @@ test('IME preparation leaves code, table and other structural gaps outside the b
     const f = await fixture(t, '<pre><code>code</code></pre><table><tr><td>cell</td></tr></table><ul><li>item</li></ul>');
     for (const offset of [0, 1, 2, 3]) {
         const caret = f.placeCaret(f.editor, offset);
-        assert.equal(f.cursorManager.prepareBlockBoundaryComposition(), false);
+        assert.equal(f.cursorManager.normalizeTextBlockCaret(), false);
         assert.equal(f.selection.getRangeAt(0), caret);
     }
 });

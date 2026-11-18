@@ -1793,12 +1793,14 @@ export class CursorManager {
         return true;
     }
 
-    prepareBlockBoundaryComposition(selection = window.getSelection()) {
+    /** Resolve a root or placeholder boundary to a caret inside the same text line. */
+    normalizeTextBlockCaret(selection = window.getSelection()) {
         if (!selection?.rangeCount || !selection.isCollapsed) return false;
         const range = selection.getRangeAt(0);
         const isTextBlock = (node) => node?.nodeType === Node.ELEMENT_NODE &&
             /^(?:P|DIV|H[1-6])$/.test(node.tagName) &&
-            node.getAttribute('contenteditable') !== 'false';
+            node.getAttribute('contenteditable') !== 'false' &&
+            !(node.tagName === 'DIV' && node.querySelector('p, div, pre, blockquote, ul, ol, table, hr'));
         let target = range.startContainer;
         let offset = range.startOffset;
         if (target === this.editor) {
@@ -1814,7 +1816,8 @@ export class CursorManager {
             target = previous || children[after];
             if (target?.nodeType === Node.TEXT_NODE) {
                 offset = previous ? target.textContent.length : 0;
-            } else if (isTextBlock(target)) {
+            } else if (isTextBlock(target) || (target?.matches?.('a, b, strong, em, i, s, del, code, span') &&
+                !this._isNavigationExcludedElement(target))) {
                 offset = previous ? target.childNodes.length : 0;
             } else {
                 // Code blocks, tables and other atomic content have their own
@@ -1834,9 +1837,6 @@ export class CursorManager {
             offset--;
         }
 
-        // Chromium can abandon the first IME character at a root/block edge,
-        // even though the same caret inside the paragraph composes normally.
-        // Resolve the equivalent position before the browser inserts that text.
         this._placeCollapsedCaret(selection, target, offset);
         return true;
     }
@@ -9448,6 +9448,20 @@ export class CursorManager {
         return true;
     }
 
+    _moveToCodeLineBoundary(selection, atStart) {
+        const range = selection.getRangeAt(0);
+        const code = this.domUtils.getParentElement(range.startContainer, 'CODE');
+        if (!code || !this.domUtils.getParentElement(code, 'PRE')) return false;
+
+        const offset = this.getCodeBlockCursorOffset(code, range);
+        if (offset === null) return false;
+        const text = this.getCodeBlockText(code);
+        const { lines, lineStartOffsets, currentLineIndex } = this.getCodeBlockLineInfo(text, offset);
+        const lineStart = lineStartOffsets[currentLineIndex];
+        const target = atStart ? lineStart : lineStart + lines[currentLineIndex].length;
+        return this.setCodeBlockCursorOffset(code, selection, target);
+    }
+
     /**
      * カーソルを行頭に移動
      */
@@ -9456,6 +9470,7 @@ export class CursorManager {
         const selection = window.getSelection();
         if (!selection || !selection.rangeCount) return;
         if (this._moveToMathLineBoundary(selection, true)) return;
+        if (this._moveToCodeLineBoundary(selection, true)) return;
 
         const range = selection.getRangeAt(0);
         const node = range.startContainer;
@@ -9510,82 +9525,6 @@ export class CursorManager {
 
             this._placeCursorBeforeInlineCodeElement(inlineCode, selection);
         };
-
-        // コードブロック内かチェック
-        const codeBlock = this.domUtils.getParentElement(node, 'CODE');
-        const preBlock = codeBlock ? this.domUtils.getParentElement(codeBlock, 'PRE') : null;
-
-        if (preBlock && codeBlock) {
-            // コードブロック内 - 現在の行の先頭に移動
-            let text = '';
-            const walker = document.createTreeWalker(
-                codeBlock,
-                NodeFilter.SHOW_TEXT,
-                null
-            );
-            let textNode;
-            while (textNode = walker.nextNode()) {
-                text += textNode.textContent;
-            }
-
-            // コードブロック全体でのカーソル位置を計算
-            let totalOffset = 0;
-            const walker2 = document.createTreeWalker(
-                codeBlock,
-                NodeFilter.SHOW_TEXT,
-                null
-            );
-            let foundCursor = false;
-            const cursorContainer = node.nodeType === 3 ? node : null;
-
-            if (cursorContainer) {
-                while (textNode = walker2.nextNode()) {
-                    if (textNode === cursorContainer) {
-                        totalOffset += range.startOffset;
-                        foundCursor = true;
-                        break;
-                    }
-                    totalOffset += textNode.textContent.length;
-                }
-            } else {
-                totalOffset = 0;
-                foundCursor = true;
-            }
-
-            if (foundCursor) {
-                // 現在の行の開始位置を見つける
-                const lines = text.split('\n');
-                let lineStartOffset = 0;
-                let charCount = 0;
-
-                for (let i = 0; i < lines.length; i++) {
-                    const lineLength = lines[i].length + (i < lines.length - 1 ? 1 : 0);
-                    if (totalOffset <= charCount + lineLength) {
-                        lineStartOffset = charCount;
-                        break;
-                    }
-                    charCount += lineLength;
-                }
-
-                // 行の開始位置のテキストノードとオフセットを見つける
-                const walker3 = document.createTreeWalker(
-                    codeBlock,
-                    NodeFilter.SHOW_TEXT,
-                    null
-                );
-                let currentOffset = 0;
-                while (textNode = walker3.nextNode()) {
-                    const nodeLength = textNode.textContent.length;
-                    if (currentOffset + nodeLength >= lineStartOffset) {
-                        const offsetInNode = lineStartOffset - currentOffset;
-                        this._placeCollapsedCaret(selection, textNode, offsetInNode);
-                        return;
-                    }
-                    currentOffset += nodeLength;
-                }
-            }
-            return;
-        }
 
         // 行頭が画像のとき、画像右エッジからのCtrl+Aで文書先頭へ飛ばないようにする。
         const selectedImage = this._getSelectedImageNode(range);
@@ -9657,6 +9596,7 @@ export class CursorManager {
         const selection = window.getSelection();
         if (!selection || !selection.rangeCount) return;
         if (this._moveToMathLineBoundary(selection, false)) return;
+        if (this._moveToCodeLineBoundary(selection, false)) return;
 
         const range = selection.getRangeAt(0);
         const node = range.startContainer;
@@ -9691,82 +9631,6 @@ export class CursorManager {
             selection.addRange(imageRange);
             return true;
         };
-
-        // コードブロック内かチェック
-        const codeBlock = this.domUtils.getParentElement(node, 'CODE');
-        const preBlock = codeBlock ? this.domUtils.getParentElement(codeBlock, 'PRE') : null;
-
-        if (preBlock && codeBlock) {
-            // コードブロック内 - 現在の行の末尾に移動
-            let text = '';
-            const walker = document.createTreeWalker(
-                codeBlock,
-                NodeFilter.SHOW_TEXT,
-                null
-            );
-            let textNode;
-            while (textNode = walker.nextNode()) {
-                text += textNode.textContent;
-            }
-
-            // コードブロック全体でのカーソル位置を計算
-            let totalOffset = 0;
-            const walker2 = document.createTreeWalker(
-                codeBlock,
-                NodeFilter.SHOW_TEXT,
-                null
-            );
-            let foundCursor = false;
-            const cursorContainer = node.nodeType === 3 ? node : null;
-
-            if (cursorContainer) {
-                while (textNode = walker2.nextNode()) {
-                    if (textNode === cursorContainer) {
-                        totalOffset += range.startOffset;
-                        foundCursor = true;
-                        break;
-                    }
-                    totalOffset += textNode.textContent.length;
-                }
-            } else {
-                totalOffset = text.length;
-                foundCursor = true;
-            }
-
-            if (foundCursor) {
-                // 現在の行の終了位置を見つける
-                const lines = text.split('\n');
-                let lineEndOffset = 0;
-                let charCount = 0;
-
-                for (let i = 0; i < lines.length; i++) {
-                    const lineLength = lines[i].length;
-                    if (totalOffset <= charCount + lineLength) {
-                        lineEndOffset = charCount + lineLength;
-                        break;
-                    }
-                    charCount += lineLength + 1; // +1 for \n
-                }
-
-                // 行の終了位置のテキストノードとオフセットを見つける
-                const walker3 = document.createTreeWalker(
-                    codeBlock,
-                    NodeFilter.SHOW_TEXT,
-                    null
-                );
-                let currentOffset = 0;
-                while (textNode = walker3.nextNode()) {
-                    const nodeLength = textNode.textContent.length;
-                    if (currentOffset + nodeLength >= lineEndOffset) {
-                        const offsetInNode = lineEndOffset - currentOffset;
-                        this._placeCollapsedCaret(selection, textNode, offsetInNode);
-                        return;
-                    }
-                    currentOffset += nodeLength;
-                }
-            }
-            return;
-        }
 
         // 行頭が画像のとき、画像左エッジでのCtrl+Eは同じ行の画像右エッジへ移動する。
         if (range.collapsed) {

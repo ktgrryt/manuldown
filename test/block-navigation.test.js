@@ -514,13 +514,14 @@ function loadFootnoteEditing(fixture) {
     const snapshots = [];
     const changes = [];
     const methods = loadEditorFunctions(fixture, [
-        'getTopLevelBlockquoteForCtrlK', 'isCtrlKTargetBlockquoteEmpty',
+        'getTopLevelBlockquoteForCtrlK', 'isCtrlKTargetBlockquoteEmpty', 'isEmptyCtrlKLineBlock',
         'replaceBlockquoteWithEmptyParagraph', 'getCtrlKTargetEmptyBlockquoteParagraph',
-        'deleteEmptyBlockquoteParagraphForCtrlK', 'handleCtrlKEmptyLineBeforeTableKeydown',
+        'deleteEmptyBlockquoteParagraphForCtrlK', 'deleteEmptyLineForCtrlK',
         'getClosestBlockElement', 'getTopLevelLineContainer', 'getCtrlKLineContainer',
         'getCtrlKLineContainerFromRange', 'getNearestTopLevelElementFromIndex',
         'isRangeAtTopLevelBoundaryBeforeBlock', 'isEffectivelyEmptyBlock',
-        'getNextElementSibling', 'getPreviousElementSibling', 'isNavigationExcludedElement',
+        'getNextElementSibling', 'getPreviousElementSibling', 'getNextNavigableSibling',
+        'getPreviousTopLevelNavigableSibling', 'isNavigationExcludedElement',
         'getPreferredFirstTextNodeForElement', 'placeCollapsedCaret', 'applySelectionRange',
         'deleteCheckboxListItem', 'buildCtrlKKillRange', 'getCtrlKBlockEndBoundary',
     ], {
@@ -528,6 +529,7 @@ function loadFootnoteEditing(fixture) {
         tableManager: { isSelectionInTableContext: () => false, wrapTables() {} },
         stateManager: { saveState: () => snapshots.push(fixture.editor.innerHTML) },
         notifyChangeImmediate: () => changes.push(fixture.editor.innerHTML),
+        finishCtrlKDocumentChange: () => changes.push(fixture.editor.innerHTML),
         emacsKillBuffer: '',
         finalizeCtrlKDeleteTurn() {},
         isEditorEffectivelyEmpty: () => false,
@@ -720,8 +722,7 @@ test('Ctrl+K removes a first, middle or last empty footnote line and keeps its c
             const blank = content.querySelector('#blank');
             const definition = content.parentElement;
             const range = fixture.placeCaret(blank, 0);
-            const event = navigationKey('k', true);
-            assert.equal(editing.handleCtrlKEmptyLineBeforeTableKeydown(event, { range, container: blank }), true);
+            assert.equal(editing.deleteEmptyLineForCtrlK(fixture.selection, range), true);
             assert.equal(content.contains(blank), false);
             assert.equal(fixture.editor.querySelector('[data-mdw-footnote-definition="a"]'), definition);
             assert.equal(definition.querySelectorAll('a').length, 2);
@@ -745,7 +746,7 @@ test('Ctrl+K keeps a sole empty footnote editable and converts an empty quote in
             const content = fixture.editor.querySelector('.mdw-footnote-content');
             const paragraph = content.querySelector('p');
             const range = fixture.placeCaret(paragraph, 0);
-            assert.equal(editing.handleCtrlKEmptyLineBeforeTableKeydown(navigationKey('k', true), { range, container: paragraph }), true);
+            assert.equal(editing.deleteEmptyLineForCtrlK(fixture.selection, range), true);
             assert.equal(content.innerHTML, '<p><br></p>');
             assert.equal(fixture.editor.children.length, 2, 'No paragraph is appended to the main body');
             assert.equal(fixture.selection.getRangeAt(0).startContainer, content.firstChild);
@@ -3078,6 +3079,26 @@ function codeCaretPosition(fixture, code) {
     );
     return [currentLineIndex, column];
 }
+
+test('logical code line boundaries use the current line at element and text offsets', async () => {
+    const fixture = await createFixture('<pre><code>first<br><span>second\nthird</span>\n</code></pre>');
+    try {
+        const code = fixture.editor.querySelector('code');
+        const span = code.querySelector('span');
+        for (const [node, offset, line, length] of [
+            [code, 0, 0, 5], [span, 0, 1, 6], [span.firstChild, 7, 2, 5],
+        ]) {
+            fixture.placeCaret(node, offset);
+            fixture.cursorManager.moveCursorToLineStart();
+            assert.deepEqual(codeCaretPosition(fixture, code), [line, 0]);
+            fixture.placeCaret(node, offset);
+            fixture.cursorManager.moveCursorToLineEnd();
+            assert.deepEqual(codeCaretPosition(fixture, code), [line, length]);
+        }
+    } finally {
+        fixture.restoreGlobals();
+    }
+});
 
 test('vertical code navigation visits whitespace-only lines without changing the document', async () => {
     for (const text of ['\n\n\n', '  \n  \n  \n']) {
