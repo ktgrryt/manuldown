@@ -61,10 +61,10 @@ test.beforeEach(() => {
 });
 test.after(() => { renderer.renderPdf = originalRenderer; });
 
-async function fixture(t, capture = async () => ({ source, version: capturedVersion })) {
+async function fixture(t, capture = async () => ({ source, version: capturedVersion }), resolveImage = async () => null) {
     const provider = new PdfPreviewProvider(context);
     t.after(() => provider.dispose());
-    await provider.open(document, capture, async () => null);
+    await provider.open(document, capture, resolveImage);
     const entry = provider.previews.get(document.uri.toString());
     await provider.handleMessage(entry, { type: 'ready' });
     const message = (type, extra = {}) => provider.handleMessage(entry, {
@@ -85,6 +85,37 @@ test('PDF preview saves the displayed PDF bytes without regenerating at export t
     assert.equal(writes[0][1], bytes);
     assert.equal(renames[0][1].path, '/workspace/export.pdf');
     assert.deepEqual(renames[0][2], { overwrite: true });
+});
+
+test('exporting again captures a pending image resize before reusing the preview', async t => {
+    const imagePath = encodeURI('images/手順書/設定画面.png');
+    source = `![設定画面](${imagePath})\n`;
+    const resolveImage = async source => {
+        assert.equal(source, imagePath);
+        return 'data:image/png;base64,aGVsbG8=';
+    };
+    const { provider, entry, message } = await fixture(t, undefined, resolveImage);
+    await message('displayed');
+    const previous = entry.session.pdf.bytes;
+    const captureResize = async () => {
+        source = `![設定画面|96x48](${imagePath})\n`;
+        capturedVersion++;
+        changeListener({ document });
+        return { source, version: capturedVersion };
+    };
+    await provider.open(document, captureResize, resolveImage);
+    assert.match(calls.at(-1).html, /<img\b[^>]* width="96"/);
+    await message('export');
+    assert.equal(writes.length, 0);
+    await message('displayed');
+    await message('export');
+    assert.notDeepEqual(writes[0][1], previous);
+    assert.equal(writes[0][1], entry.session.pdf.bytes);
+
+    const session = entry.session;
+    await provider.open(document, async () => ({ source, version: capturedVersion }), resolveImage);
+    assert.equal(entry.session, session);
+    assert.equal(calls.length, 2, 'Reopening the same snapshot retains its preview and adjustment history');
 });
 
 test('PDF preview uses English controls even when VS Code is Japanese', async t => {

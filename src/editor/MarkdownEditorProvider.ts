@@ -28,6 +28,12 @@ import TurndownService from 'turndown';
 const { createWindow } = require('@mixmark-io/domino');
 const { gfm } = require('turndown-plugin-gfm');
 
+function imageReferenceLabel(node: any): string | undefined {
+    const label = node.getAttribute('data-mdw-reference-label')?.replace(/\s+/g, ' ');
+    // Only serialize a single Markdown label, including escaped brackets.
+    return label && /^(?:\\.|[^\\\[\]])+$/.test(label) ? label : undefined;
+}
+
 type CustomSlashCommandTemplate = {
     id: string;
     description: string;
@@ -286,6 +292,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             replacement: (_content: string, node: any) => {
                 const src = String(node.getAttribute('src') || '');
                 const alt = String(node.getAttribute('alt') || '').replace(/([\\[\]])/g, '\\$1');
+                const reference = imageReferenceLabel(node);
+                if (reference) { return `![${alt}][${reference}]`; }
                 const title = String(node.getAttribute('title') || '').replace(/([\\"])/g, '\\$1');
                 const destination = src.replace(/[\s<>]/g, character => encodeURIComponent(character))
                     .replace(/([\\()])/g, '\\$1');
@@ -3147,6 +3155,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     }
 
     private serializeMarkdownLink(content: string, node: any): string {
+        const reference = imageReferenceLabel(node);
+        if (reference) { return `[${content}][${reference}]`; }
         const href = String(node.getAttribute('href') || '')
             .replace(/[\s<>]/g, character => encodeURIComponent(character))
             .replace(/([\\()])/g, '\\$1');
@@ -3683,6 +3693,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             node.removeAttribute('data-mdw-opaque-kind');
             node.removeAttribute('data-mdw-opaque-source');
         });
+        root.querySelectorAll('[data-mdw-reference-label]').forEach((node: any) => node.removeAttribute('data-mdw-reference-label'));
         root.querySelectorAll('[data-mdw-footnote-source]').forEach((node: any) => node.removeAttribute('data-mdw-footnote-source'));
         // A clipboard fragment may contain just the TOC, without its headings.
         // Export the visible links as ordinary Markdown rather than regenerating

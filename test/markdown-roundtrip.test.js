@@ -323,6 +323,33 @@ test('Markdown clipboard links and images are self-contained even when the docum
     assert.doesNotMatch(markdown, /\[ref\]|\[img\]|MDW/);
 });
 
+test('resizing reference images keeps their sizes and original targets across editor snapshots', async () => {
+    const imagePath = encodeURI('images/手順書/日本語の画面.png');
+    for (const [original, resized] of [
+        ['![図][画像]', '![図|96x48][画像]'],
+        ['![画像][]', '![画像|96x48][画像]'],
+        ['![画像]', '![画像|96x48][画像]'],
+        ['[![図][画像]][資料]', '[![図|96x48][画像]][資料]'],
+        ['| 列 |\n| --- |\n| ![図][画像] |', '| 列 |\n| --- |\n| ![図\\|96x48][画像] |'],
+    ]) {
+        const definitions = `\n\n[画像]: ${imagePath} "設定画面"\n[資料]: https://example.com/\n`;
+        const source = original + definitions;
+        await withEditableDocument(source, (editor, domUtils) => {
+            const image = editor.querySelector('img');
+            image.alt += '|96x48';
+            image.setAttribute('width', '96');
+            const provider = new MarkdownEditorProvider({});
+            const snapshot = domUtils.getCleanedHTML({ canonicalImages: true });
+            const saved = provider.htmlToMarkdown(snapshot, createTextDocument(source));
+            assert.equal(saved, resized + definitions);
+            assert.equal(provider.htmlToMarkdown(snapshot, createTextDocument(saved)), saved);
+            const reopened = convert(saved);
+            assert.match(reopened.html, /alt="[^"]*\|96x48"/);
+            assert.equal(reopened.markdown, saved);
+        });
+    }
+});
+
 test('Markdown clipboard footnotes keep their body and inline reference links', () => {
     const source = 'body[^a]\n\n[^a]: see [link][ref]\n\n[ref]: ./note.md\n';
     const document = createTextDocument(source);

@@ -111,7 +111,7 @@ function locate(text: string, source: SourceText, from = 0): { source: SourceTex
     return { source: { text, offsets }, start: Math.max(0, first), end: cursor };
 }
 
-function closingBracket(text: string, opening: number): number {
+export function closingBracket(text: string, opening: number): number {
     let depth = 0;
     for (let index = opening; index < text.length; index++) {
         if (text[index] === '\\') {

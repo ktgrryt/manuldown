@@ -58,13 +58,9 @@ export class PdfPreviewProvider implements vscode.Disposable {
             existing.document = document;
             existing.capture = capture;
             existing.resolveImage = resolveImage;
-            if (existing.session && (document.version !== existing.version || document.getText() !== existing.source)) {
-                existing.session.markStale();
-                existing.controller?.abort();
-                existing.busy = false;
-                this.postState(existing);
-            }
             existing.panel.reveal();
+            // The editor can still have a resize queued when Export is clicked again.
+            await this.reload(existing, true);
             return;
         }
         const panel = vscode.window.createWebviewPanel('manulDown.pdfPreview', `PDF — ${path.basename(document.uri.path)}`,
@@ -74,7 +70,7 @@ export class PdfPreviewProvider implements vscode.Disposable {
             });
         const entry: Preview = {
             panel, document, capture, resolveImage, sessionId: getNonce(), version: document.version,
-            ready: false, disposed: false, reloading: true, busy: true, saving: false,
+            ready: false, disposed: false, reloading: true, busy: false, saving: false,
             loadId: 0, displayedRevision: -1, error: '', persistenceError: '',
         };
         this.previews.set(key, entry);
@@ -137,18 +133,22 @@ export class PdfPreviewProvider implements vscode.Disposable {
         return this.persistence;
     }
 
-    private async reload(entry: Preview): Promise<void> {
+    private async reload(entry: Preview, reuseCurrent = false): Promise<void> {
         if (entry.disposed || entry.saving) { return; }
         const loadId = ++entry.loadId;
-        entry.controller?.abort();
-        entry.busy = true;
         entry.reloading = true;
-        entry.error = '';
-        entry.displayedRevision = -1;
         this.postState(entry);
         try {
             const snapshot = await entry.capture();
             if (entry.disposed || loadId !== entry.loadId) { return; }
+            const current = entry.session;
+            const rendering = entry.busy && !entry.controller?.signal.aborted;
+            if (reuseCurrent && current && !current.stale && (current.canExport || rendering) && !entry.error &&
+                snapshot.version === entry.version && snapshot.source === entry.source &&
+                snapshot.version === entry.document.version) { return; }
+            entry.controller?.abort();
+            entry.error = '';
+            entry.displayedRevision = -1;
             const content = await buildPdfContent(snapshot.source, entry.document.uri, entry.resolveImage);
             if (entry.disposed || loadId !== entry.loadId) { return; }
             const layout = entry.session?.layout || this.context.globalState.get('manulDown.pdf.layout');
@@ -172,13 +172,13 @@ export class PdfPreviewProvider implements vscode.Disposable {
         } catch (error) {
             if (!entry.disposed && loadId === entry.loadId) {
                 // A failed refresh must not enable export of the old document.
+                entry.controller?.abort();
                 entry.session?.markStale();
                 entry.error = this.errorMessage(error);
             }
         } finally {
             if (!entry.disposed && loadId === entry.loadId) {
                 entry.reloading = false;
-                entry.busy = false;
                 this.postState(entry);
             }
         }
@@ -228,7 +228,7 @@ export class PdfPreviewProvider implements vscode.Disposable {
             return;
         }
         const session = entry.session;
-        if (!session || message.sessionId !== entry.sessionId || entry.reloading) { return; }
+        if (!session || message.sessionId !== entry.sessionId) { return; }
         if (message.type === 'displayed' && message.revision === session.revision) {
             entry.displayedRevision = message.revision;
             this.postState(entry);
@@ -240,6 +240,7 @@ export class PdfPreviewProvider implements vscode.Disposable {
             this.postState(entry);
             return;
         }
+        if (entry.reloading) { return; }
         if (message.type === 'export') { await this.save(entry, message.revision); return; }
         if (session.stale || entry.saving) { return; }
         let changed = false;

@@ -58,7 +58,7 @@ function fingerprint(node: any): string {
         return `footnote:${node.getAttribute('data-mdw-footnote-ref')}`;
     }
     const attributes = ['href', 'src', 'alt', 'title', 'start', 'type', 'checked',
-        'data-mdw-soft-break', 'data-mdw-break-prefix', 'data-mdw-image-hardbreak',
+        'data-mdw-reference-label', 'data-mdw-soft-break', 'data-mdw-break-prefix', 'data-mdw-image-hardbreak',
         'data-mdw-image-hardbreak-prefix', 'data-mdw-opaque-source', 'data-mdw-footnote-definition',
         'data-mdw-math-delimiter', 'data-mdw-callout', 'data-mdw-callout-format',
         'data-mdw-callout-type', 'data-mdw-callout-header', 'data-mdw-callout-footer'];

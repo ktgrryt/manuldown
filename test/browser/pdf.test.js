@@ -129,6 +129,35 @@ test('PDF prints a resized image at its selected width and intrinsic aspect rati
     }
 });
 
+test('PDF draws an unlinked PNG from a percent-encoded Japanese path at its Markdown size', async t => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'manuldown-image-size-'));
+    t.after(() => fs.rm(directory, { recursive: true, force: true }));
+    const relative = '手順書/設定 画面.png';
+    await fs.mkdir(path.join(directory, '手順書'));
+    await fs.copyFile(path.join(repository, 'images/icon.png'), path.join(directory, relative));
+    const content = await buildPdfContent(`# 手順書\n\n![設定画面&#124;96x96][図]\n\n[図]: ${encodeURI(relative)}`,
+        uri(path.join(directory, '手順書.md')), async source => {
+            const bytes = await fs.readFile(path.join(directory, decodeURIComponent(source)));
+            return 'data:image/png;base64,' + bytes.toString('base64');
+        });
+    const result = await generate(content.html);
+    assert.deepEqual([...content.warnings, ...result.warnings], []);
+    const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
+    const task = pdfjs.getDocument({ data: new Uint8Array(result.bytes), isEvalSupported: false });
+    t.after(() => task.destroy());
+    const pdf = await task.promise;
+    const page = await pdf.getPage(1);
+    const viewport = page.getViewport({ scale: 1 });
+    const { canvas } = pdf.canvasFactory.create(Math.ceil(viewport.width), Math.ceil(viewport.height));
+    await page.render({ canvas, viewport, recordImages: true }).promise;
+    // PDF.js records three image corners in normalized page coordinates.
+    const corners = page.imageCoordinates;
+    assert.equal(corners.length, 6);
+    const width = Math.abs(corners[4] - corners[0]) * canvas.width;
+    const height = Math.abs(corners[3] - corners[1]) * canvas.height;
+    assert.ok(Math.abs(width - 72) < 1 && Math.abs(height - 72) < 1, `Printed ${width} × ${height} pt`);
+});
+
 test('manual breaks at an automatic page boundary do not add empty pages, including after paper/font changes', async () => {
     const content = await buildPdfContent('# First page\n\n## New page\n\nFollowing text.\n', uri('/workspace/pages.md'), async () => null);
     const target = content.blocks[1];

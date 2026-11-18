@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { marked, Tokens, Links } from 'marked';
 import { getNonce } from '../utils/getNonce';
+import { closingBracket } from '../utils/markdownImagePaths';
 import { MAX_EDITABLE_FOOTNOTE_DEPTH, numberFootnotes, parseFootnoteDefinition } from './Footnotes';
 import { MarkdownSourceBlock } from './MarkdownSource';
 import { emptyMarkdownTocHtml, markdownTocRanges, matchMarkdownTocBlock, renderMarkdownTocs } from './MarkdownToc';
@@ -29,8 +30,12 @@ function renderOpaqueSource(value: string, kind: string, block: boolean): string
     return `<code class="mdw-opaque-source" contenteditable="false" title="Preserved Markdown source (read-only)" data-mdw-opaque-kind="${kind}" data-mdw-opaque-source="${encodedSource}">${escapedSource}</code>`;
 }
 
-function isReferenceStyleLink(raw: string): boolean {
-    return /^!?\[/.test(raw) && /\]$/.test(raw) && !/\]\(/.test(raw);
+function referenceLabel(raw: string): string | undefined {
+    if (!/^!?\[/.test(raw) || !raw.endsWith(']') || raw.includes('](')) { return; }
+    const opening = raw.indexOf('[');
+    const closing = closingBracket(raw, opening);
+    if (closing < 0) { return; }
+    return raw.slice(closing + 2, -1) || raw.slice(opening + 1, closing);
 }
 
 function escapeAttribute(value: string): string {
@@ -42,22 +47,12 @@ function escapeMarkdownAttribute(value: string): string {
 }
 
 function imageAltAttribute(raw: string, fallback: string): string {
-    let depth = 0;
-    for (let index = 2; raw.startsWith('![') && index < raw.length; index++) {
-        if (raw[index] === '\\') {
-            index++;
-        } else if (raw[index] === '[') {
-            depth++;
-        } else if (raw[index] === ']') {
-            if (depth-- === 0) {
-                const alt = raw.slice(2, index).replace(/\\([!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~])/g, '$1');
-                // Decode Markdown entity references when HTML reads the attribute,
-                // while still escaping quotes and angle brackets for HTML safety.
-                return escapeMarkdownAttribute(alt);
-            }
-        }
-    }
-    return escapeAttribute(fallback);
+    const closing = raw.startsWith('![') ? closingBracket(raw, 1) : -1;
+    if (closing < 0) { return escapeAttribute(fallback); }
+    const alt = raw.slice(2, closing).replace(/\\([!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~])/g, '$1');
+    // Decode Markdown entity references when HTML reads the attribute,
+    // while still escaping quotes and angle brackets for HTML safety.
+    return escapeMarkdownAttribute(alt);
 }
 
 // "$$" on a line of its own (up to three spaces of indentation) opens a display
@@ -252,7 +247,8 @@ marked.use({
             name: 'link',
             renderer(token) {
                 const linkToken = token as Tokens.Link;
-                if (!isReferenceStyleLink(linkToken.raw)) {
+                const reference = referenceLabel(linkToken.raw);
+                if (!reference) {
                     // Keep local heading fragments readable in the link field,
                     // including links inserted by earlier encoded versions.
                     if (linkToken.href.startsWith('#')) {
@@ -276,6 +272,9 @@ marked.use({
                 const title = linkToken.title
                     ? ` title="${escapeAttribute(linkToken.title)}"`
                     : '';
+                if (content.includes('<img ')) {
+                    return `<a href="${escapeAttribute(linkToken.href)}"${title} contenteditable="false" data-mdw-reference-label="${escapeAttribute(reference)}">${content}</a>`;
+                }
                 return `<a href="${escapeAttribute(linkToken.href)}"${title} contenteditable="false" data-mdw-opaque-kind="reference-link" data-mdw-opaque-source="${encodeOpaqueSource(linkToken.raw)}">${content}</a>`;
             }
         },
@@ -283,7 +282,8 @@ marked.use({
             name: 'image',
             renderer(token) {
                 const imageToken = token as Tokens.Image;
-                if (!isReferenceStyleLink(imageToken.raw)) {
+                const reference = referenceLabel(imageToken.raw);
+                if (!reference) {
                     let href: string;
                     try {
                         href = encodeURI(imageToken.href).replace(/%25/g, '%');
@@ -296,7 +296,8 @@ marked.use({
                 const title = imageToken.title
                     ? ` title="${escapeAttribute(imageToken.title)}"`
                     : '';
-                return `<img src="${escapeAttribute(imageToken.href)}" alt="${escapeAttribute(imageToken.text)}"${title} data-mdw-opaque-kind="reference-image" data-mdw-opaque-source="${encodeOpaqueSource(imageToken.raw)}">`;
+                // Keep the reference separate from the editable size in the description.
+                return `<img src="${escapeAttribute(imageToken.href)}" alt="${imageAltAttribute(imageToken.raw, imageToken.text)}"${title} data-mdw-reference-label="${escapeAttribute(reference)}">`;
             }
         }
     ]
