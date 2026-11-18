@@ -1,0 +1,1 @@
+var o=820;function s(i=""){let e=Number(i);return Number.isFinite(e)&&e>0?e:null}function u(i){let e=i.lastIndexOf("|");if(e>=0){let n=/^(\d*)(?:x(\d*))?$/i.exec(i.slice(e+1).trim()),t=s(n?.[1]),r=s(n?.[2]);if(t||r)return{altText:i.slice(0,e),width:t,height:r}}return{altText:i,width:null,height:null}}export{o as imageRenderMaxWidthPx,u as parseImageAltSizeSpec};

@@ -22,7 +22,7 @@ ul, ol { padding-left: 1.8em; } li > p { margin-bottom: .35em; } li > ul, li > o
 input[type=checkbox] { width: .9em; height: .9em; vertical-align: -.05em; accent-color: #57606a; }
 a { color: #0969da; text-decoration: underline; }
 hr { border: 0; border-top: 1px solid #d0d7de; margin: 1.5em 0; }
-img { max-width: 100%; max-height: calc(var(--pdf-height) - 12mm); width: auto; height: auto; object-fit: contain; break-inside: avoid; }
+img { max-width: 100%; max-height: calc(var(--pdf-height) - 12mm); object-fit: contain; break-inside: avoid; }
 table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: .92em; }
 thead { display: table-header-group; } tfoot { display: table-footer-group; }
 tr { break-inside: avoid; } td, th { padding: .45em .6em; border: 1px solid #d0d7de; vertical-align: top; overflow-wrap: anywhere; }

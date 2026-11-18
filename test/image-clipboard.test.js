@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 const domino = require('@mixmark-io/domino');
+const { parseImageAltSizeSpec } = require('../out/editor/ImageSize');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'media/modules/ImageClipboard.js'), 'utf8');
 const clipboardModule = import(`data:text/javascript;base64,${Buffer.from(`${source}\n//# sourceURL=ImageClipboard.js`).toString('base64')}`);
@@ -18,11 +19,10 @@ async function fixture(html, overrides = {}) {
     const { createImageClipboardSnapshot, writeImageClipboard } = await clipboardModule;
     const document = domino.createWindow().document;
     Object.getPrototypeOf(document.querySelectorAll('img')).forEach = Array.prototype.forEach;
-    const { parseImageAltSizeSpec, fragmentToClipboardPlainText } = new Function('Node', `
+    const fragmentToClipboardPlainText = new Function('Node', `
         const mathManager = { toMarkdown: element => element.textContent };
-        ${extractFunction('parseImageAltSizeSpec')}
         ${extractFunction('fragmentToClipboardPlainText')}
-        return { parseImageAltSizeSpec, fragmentToClipboardPlainText };
+        return fragmentToClipboardPlainText;
     `)(document.defaultView.Node);
     const snapshot = createImageClipboardSnapshot(html, {
         document,

@@ -8,6 +8,7 @@ import { ToolbarManager } from './modules/ToolbarManager.js';
 import { SearchManager } from './modules/SearchManager.js';
 import { createMarkdownClipboardHtml } from './modules/MarkdownClipboard.js';
 import { createImageClipboardSnapshot, writeImageClipboard } from './modules/ImageClipboard.js';
+import { imageRenderMaxWidthPx, parseImageAltSizeSpec } from './vendor/image-size.bundle.js';
 import { InsertCommandMenu, isInsertMenuShortcut } from './modules/InsertCommandMenu.js';
 import { CompositionUpdateGate } from './modules/CompositionUpdateGate.js';
 import { prepareExportSnapshot } from './modules/ExportPreparation.js';
@@ -160,7 +161,6 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
     // at load time. Enabling the setting later takes effect after reopening;
     // until then keep showing the blocked placeholder instead of a broken image.
     const remoteImagesPermittedByCsp = settingsState.allowRemoteImages;
-    const imageRenderMaxWidthPx = 820;
     let imageResolveRequestSeq = 0;
     let imageInsertionRequestSeq = 0;
     const pendingImageInsertionRanges = new Map();
@@ -2706,59 +2706,6 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
         return !!(listItem && hasCheckboxAtStart(listItem) && !hasDirectTextContent(listItem));
     }
 
-    function parseImageAltSizeSpec(rawAlt) {
-        const altText = typeof rawAlt === 'string' ? rawAlt : '';
-        const pipeIndex = altText.lastIndexOf('|');
-        if (pipeIndex === -1) {
-            return { hasSize: false, altText };
-        }
-
-        const baseAlt = altText.slice(0, pipeIndex);
-        const sizeToken = altText.slice(pipeIndex + 1).trim();
-        if (!sizeToken) {
-            return { hasSize: false, altText };
-        }
-
-        const toPositiveInt = (value) => {
-            const num = Number.parseInt(value, 10);
-            if (!Number.isFinite(num) || num <= 0) {
-                return null;
-            }
-            return num;
-        };
-
-        if (/^\d+$/.test(sizeToken)) {
-            const width = toPositiveInt(sizeToken);
-            if (width) {
-                return {
-                    hasSize: true,
-                    altText: baseAlt,
-                    width,
-                    height: null
-                };
-            }
-            return { hasSize: false, altText };
-        }
-
-        const match = sizeToken.match(/^(\d*)x(\d*)$/i);
-        if (!match || (!match[1] && !match[2])) {
-            return { hasSize: false, altText };
-        }
-
-        const width = match[1] ? toPositiveInt(match[1]) : null;
-        const height = match[2] ? toPositiveInt(match[2]) : null;
-        if (!width && !height) {
-            return { hasSize: false, altText };
-        }
-
-        return {
-            hasSize: true,
-            altText: baseAlt,
-            width,
-            height
-        };
-    }
-
     function getImageRenderMaxWidth() {
         if (!editor) {
             return imageRenderMaxWidthPx;
@@ -2779,17 +2726,9 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
         const beforeHeightAttr = image.getAttribute('height');
 
         const parsed = parseImageAltSizeSpec(image.getAttribute('alt') || '');
-        if (parsed.hasSize) {
-            let targetWidth = parsed.width;
-            let targetHeight = parsed.height;
-            const maxWidth = getImageRenderMaxWidth();
-            if (targetWidth && targetWidth > maxWidth) {
-                const scale = maxWidth / targetWidth;
-                targetWidth = maxWidth;
-                if (targetHeight) {
-                    targetHeight = Math.max(1, Math.round(targetHeight * scale));
-                }
-            }
+        if (parsed.width || parsed.height) {
+            const targetWidth = parsed.width && Math.min(parsed.width, getImageRenderMaxWidth());
+            const targetHeight = parsed.height;
 
             if (targetWidth) {
                 image.style.width = `${targetWidth}px`;
@@ -2846,8 +2785,7 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
     }
 
     function buildImageAltWithSizeSpec(rawAlt, width, height) {
-        const parsed = parseImageAltSizeSpec(rawAlt || '');
-        const baseAlt = parsed.hasSize ? parsed.altText : (rawAlt || '');
+        const { altText: baseAlt } = parseImageAltSizeSpec(rawAlt || '');
         const safeWidth = Math.max(1, Math.round(width || 1));
         const safeHeight = Math.max(1, Math.round(height || 1));
         return `${baseAlt}|${safeWidth}x${safeHeight}`;

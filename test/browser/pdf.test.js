@@ -114,6 +114,21 @@ test('PDF browser fits a very tall image on one page without a blank trailing pa
     assert.equal((await readPdf(result.bytes)).length, 1);
 });
 
+test('PDF prints a resized image at its selected width and intrinsic aspect ratio', async () => {
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="600" height="300"><rect width="600" height="300" fill="#0969da"/></svg>';
+    const content = await buildPdfContent('[![図|160x80](image.svg)](https://example.com/width)\n\n' +
+        '[![図|x60](image.svg)](https://example.com/height)',
+        uri('/workspace/image.md'), async () => 'data:image/svg+xml;base64,' + Buffer.from(svg).toString('base64'));
+    const result = await generate(content.html);
+    assert.deepEqual(result.warnings, []);
+    const [page] = await readPdf(result.bytes);
+    // An inline link spans its image's width. PDF points are 3/4 of a CSS pixel.
+    for (const [link, expectedWidth] of [['width', 160], ['height', 120]]) {
+        const { rect } = page.annotations.find(annotation => annotation.url === 'https://example.com/' + link);
+        assert.ok(Math.abs(rect[2] - rect[0] - expectedWidth * 0.75) < 1, `Printed width: ${rect[2] - rect[0]} pt`);
+    }
+});
+
 test('manual breaks at an automatic page boundary do not add empty pages, including after paper/font changes', async () => {
     const content = await buildPdfContent('# First page\n\n## New page\n\nFollowing text.\n', uri('/workspace/pages.md'), async () => null);
     const target = content.blocks[1];

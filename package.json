@@ -498,7 +498,7 @@
   },
   "scripts": {
     "vscode:prepublish": "npm run bundle:webview && tsc -p ./ && node scripts/bundle-host.js --minify",
-    "bundle:webview": "esbuild media/vendor/mermaid-entry.js --bundle --platform=browser --format=iife --minify --legal-comments=inline --outfile=media/vendor/mermaid.bundle.js && esbuild src/editor/EditorSelection.ts --bundle --platform=browser --format=esm --minify --outfile=media/vendor/editor-selection.bundle.js && node scripts/bundle-prism.js && node scripts/bundle-katex.js && node scripts/bundle-pdfjs.js && node scripts/bundle-icons.js",
+    "bundle:webview": "esbuild media/vendor/mermaid-entry.js --bundle --platform=browser --format=iife --minify --legal-comments=inline --outfile=media/vendor/mermaid.bundle.js && esbuild editor-selection.bundle=src/editor/EditorSelection.ts image-size.bundle=src/editor/ImageSize.ts --bundle --platform=browser --format=esm --minify --outdir=media/vendor && node scripts/bundle-prism.js && node scripts/bundle-katex.js && node scripts/bundle-pdfjs.js && node scripts/bundle-icons.js",
     "bundle:host": "node scripts/bundle-host.js",
     "compile": "npm run bundle:webview && tsc -p ./ && npm run bundle:host",
     "watch": "npm run bundle:webview && tsc -watch -p ./",

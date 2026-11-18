@@ -90,6 +90,25 @@ test('PDF content resolves repeated images once and makes missing images visible
     assert.equal(content.warnings.length, 1);
 });
 
+test('exported images use the editor size suffix and keep only the description in alt text', async () => {
+    const source = [
+        '![a|b|160x90](image.png)', '![width|120](image.png)', '![width|80x](image.png)',
+        '![height|x60][picture]', '![oversized|1200](image.png)', '![plain](image.png)',
+        '![literal|12px](image.png)', '![zero|0x0](image.png)', '![missing|40x20](missing.png)',
+        '[picture]: image.png',
+    ].join('\n\n');
+    const content = await buildPdfContent(source, sourceUri,
+        async source => source === 'image.png' ? 'data:image/png;base64,aGVsbG8=' : null);
+    const root = createWindow(content.html).document;
+    assert.deepEqual(Array.from(root.querySelectorAll('img'), image =>
+        ['alt', 'width', 'height'].map(name => image.getAttribute(name))), [
+        ['a|b', '160', null], ['width', '120', null], ['width', '80', null],
+        ['height', null, '60'], ['oversized', '820', null], ['plain', null, null],
+        ['literal|12px', null, null], ['zero|0x0', null, null],
+    ]);
+    assert.equal(root.querySelector('.export-missing-image').textContent, '[Image unavailable: missing]');
+});
+
 test('PDF footnotes become endnotes with matching internal links', async () => {
     const content = await prepare('Body[^note].\n\n[^note]: A footnote with **formatting**.\n\n## Later\n\nText.\n');
     const root = createWindow(content.html).document;

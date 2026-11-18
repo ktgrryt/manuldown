@@ -1,6 +1,7 @@
 import type * as vscode from 'vscode';
 import { createHash } from 'crypto';
 import { MarkdownDocument } from '../editor/MarkdownDocument';
+import { imageRenderMaxWidthPx, parseImageAltSizeSpec } from '../editor/ImageSize';
 import { normalizeExternalLinkHref } from '../utils/workspaceLinks';
 import { ExportBlock, ExportContent } from './PdfExportSession';
 const { createWindow } = require('@mixmark-io/domino');
@@ -89,6 +90,14 @@ export async function buildPdfContent(
     }
     const resources = new Map<string, Promise<string | null>>();
     for (const image of Array.from<any>(root.querySelectorAll('img'))) {
+        const { altText, width, height } = parseImageAltSizeSpec(image.getAttribute('alt') || '');
+        image.setAttribute('alt', altText);
+        // With a width, the editor derives height from the image's intrinsic aspect ratio.
+        if (width) {
+            image.setAttribute('width', String(Math.min(width, imageRenderMaxWidthPx)));
+        } else if (height) {
+            image.setAttribute('height', String(height));
+        }
         const path = image.getAttribute('src') || '';
         if (!resources.has(path)) { resources.set(path, resolveImage(path)); }
         let resolved: string | null = null;
@@ -96,7 +105,7 @@ export async function buildPdfContent(
         if (resolved && /^data:image\/[a-z0-9.+-]+[;,]/i.test(resolved) && resolved.length <= 30 * 1024 * 1024) {
             image.setAttribute('src', resolved);
         } else {
-            const label = image.getAttribute('alt') || path || 'Image';
+            const label = altText || path || 'Image';
             const placeholder = root.ownerDocument.createElement('span');
             placeholder.className = 'export-missing-image';
             placeholder.textContent = `[Image unavailable: ${label}]`;

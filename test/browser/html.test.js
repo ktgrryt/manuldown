@@ -13,7 +13,8 @@ test('standalone HTML renders offline from a file at desktop and mobile widths w
     try {
         const content = await buildPdfContent('# 日本語のHTML\n\n[見出し](#日本語のhtml)\n\n$x^2$\n\n' +
             '```mermaid\ngraph LR; A-->B\n```\n\n```js\nconst answer = 42;\n```\n\n' +
-            '| Header | Value |\n|---|---|\n| Long row | ' + 'Content '.repeat(1200) + ' |\n\n![図](./local.svg)',
+            '| Header | Value |\n|---|---|\n| Long row | ' + 'Content '.repeat(1200) + ' |\n\n' +
+            '![図|160x80](./local.svg)\n\n![Wide|480x240](./local.svg)',
         uri('/workspace/document.md'), async () => 'data:image/svg+xml;base64,' +
             Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100"><rect width="200" height="100" fill="blue"/></svg>').toString('base64'));
         const html = await buildHtmlPage(path.resolve(__dirname, '../../media'), content.html, '日本語のHTML');
@@ -46,6 +47,8 @@ test('standalone HTML renders offline from a file at desktop and mobile widths w
         for (const width of [1200, 360]) {
             await cdp.send('Emulation.setDeviceMetricsOverride', { width, height: 800, deviceScaleFactor: 1, mobile: false }, sessionId);
             assert.ok(await evaluate('document.documentElement.scrollWidth <= window.innerWidth'), `Content fits at ${width}px`);
+            assert.deepEqual(await evaluate('Array.from(document.images, img => [img.width, img.height])'),
+                [[160, 80], width === 1200 ? [480, 240] : [328, 164]]);
         }
     } finally {
         await browser.dispose();
