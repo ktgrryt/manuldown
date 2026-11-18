@@ -500,9 +500,21 @@ export class CalloutManager {
             acceptNode: node => elementOf(node)?.closest('[contenteditable="false"]') ? 2 : 1
         }).nextNode();
         const boundary = !text && /^(UL|OL)$/.test(first.tagName) ? first.firstElementChild || first : first;
-        const range = this.document.createRange(); range.setStart(text || boundary, 0); range.collapse(true);
+        const range = this.document.createRange();
+        this.setStartOfBlock(range, boundary, text);
+        range.collapse(true);
         selection.removeAllRanges(); selection.addRange(range); this.refresh();
         return true;
+    }
+
+    setStartOfBlock(range, block, text) {
+        // Searching only for a text node skips an empty line before that text.
+        const lineBreak = text && block.querySelector?.('br');
+        if (lineBreak && (lineBreak.compareDocumentPosition(text) & this.document.defaultView.Node.DOCUMENT_POSITION_FOLLOWING)) {
+            range.setStartBefore(lineBreak);
+        } else {
+            range.setStart(text || block, 0);
+        }
     }
 
     getBoundaryCallout(node, backwards = false) {
@@ -557,8 +569,12 @@ export class CalloutManager {
         const range = this.document.createRange();
         if (node.tagName === 'HR') range.selectNode(node);
         else {
-            const target = text || node;
-            range.setStart(target, backwards ? (target.nodeType === 3 ? target.textContent.length : target.childNodes.length) : 0);
+            if (backwards) {
+                const target = text || node;
+                range.setStart(target, target.nodeType === 3 ? target.textContent.length : target.childNodes.length);
+            } else {
+                this.setStartOfBlock(range, node, text);
+            }
             range.collapse(true);
         }
         selection.removeAllRanges(); selection.addRange(range); this.refresh();
@@ -947,7 +963,9 @@ export class CalloutManager {
         if (!range?.collapsed || !root.contains(range.startContainer)) return false;
         const meaningful = node => {
             if (node.nodeType === 3) return !/^[\r\n\u200B\u2060\uFEFF]*$/.test(node.textContent);
-            return node.nodeType === 1 && node.tagName !== 'BR';
+            // Chromium keeps a terminal BR as a placeholder. A BR before
+            // another line separates two distinct editable positions.
+            return node.nodeType === 1 && (node.tagName !== 'BR' || !!this.navigableSibling(node.nextSibling));
         };
         let node = range.startContainer;
         if (node.nodeType === 3) {

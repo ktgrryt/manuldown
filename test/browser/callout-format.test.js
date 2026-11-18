@@ -552,6 +552,41 @@ test('callout format controls align with the title and preserve editing, history
             assert.equal(await evaluate(`document.querySelector('.mdw-callout-content').textContent`), 'New body.');
         });
     }
+    await t.test('arrows reach the empty first line of a newly inserted callout', async () => {
+        await reset('\n');
+        await evaluate(`(() => {
+            const editor = document.getElementById('editor');
+            editor.focus();
+            getSelection().collapse(editor, 0);
+        })()`);
+        await connection.send('Input.insertText', { text: '/callout' }, sessionId);
+        await waitFor(`Array.from(document.querySelectorAll('.slash-command-name')).some(item => item.textContent === '/callout')`);
+        await key('Enter', 'Enter', 13);
+        await settle();
+        await connection.send('Input.dispatchKeyEvent', {
+            type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, modifiers: 8, text: '\r',
+        }, sessionId);
+        await connection.send('Input.dispatchKeyEvent', {
+            type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, modifiers: 8,
+        }, sessionId);
+        await connection.send('Input.insertText', { text: 'Second line.' }, sessionId);
+        const paragraph = '.mdw-callout-content p';
+        assert.equal(await evaluate(`document.querySelector('${paragraph}').innerHTML`), '<br>Second line.');
+        const atFirstLine = `(() => {
+            const selection = getSelection();
+            return selection.isCollapsed && selection.anchorNode === document.querySelector('${paragraph}') &&
+                selection.anchorOffset === 0;
+        })()`;
+        await evaluate(`getSelection().collapse(document.querySelector('${paragraph}').lastChild, 0)`);
+        await moveVertical('up');
+        assert.equal(await evaluate(atFirstLine), true, 'Up from the second line reaches the first line');
+        await moveVertical('up');
+        assert.equal(await evaluate(`!!document.querySelector('.mdw-callout-title.nav-selected')`), true);
+        await moveVertical('down');
+        assert.equal(await evaluate(atFirstLine), true, 'Down from the header reaches the first line');
+        await connection.send('Input.insertText', { text: 'First line.' }, sessionId);
+        assert.equal(await evaluate(`document.querySelector('${paragraph}').innerHTML`), 'First line.<br>Second line.');
+    });
     await t.test('changing the default affects the next insertion while keeping existing callouts and Undo/Redo', async () => {
         await reset(':::note warn\nExisting body.\n:::\n\nAfter.\n');
         await evaluate(`window.postMessage({type:'settings',settings:{calloutDefaultService:'zenn'}},'*')`); await settle();
