@@ -6,8 +6,15 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-11-18
+
+### Added
+- Export a standalone HTML file from the toolbar's **…** menu. The file embeds images, styles, syntax highlighting, math rendering, and Mermaid rendering for offline viewing.
+- Use **Preview** on an HTML code block to view its HTML and CSS in a sandbox.
+
 ### Fixed
 - Preserve the corresponding caret position and selection when switching between ManulDown and the Markdown source with the editor-title buttons or toggle shortcut. Reveal the restored caret and synchronize pending edits before opening the source editor.
+- Improve caret placement when clicking callout headers or navigating around callouts, and support deleting empty callouts with Undo/Redo.
 
 ## [2.3.0] - 2026-11-17
 

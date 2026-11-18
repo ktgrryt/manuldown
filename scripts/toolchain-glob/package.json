@@ -1,0 +1,9 @@
+{
+  "name": "@manuldown/toolchain-glob",
+  "version": "1.0.0",
+  "private": true,
+  "main": "index.cjs",
+  "dependencies": {
+    "glob": "14.0.6"
+  }
+}
