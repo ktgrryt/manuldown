@@ -6,8 +6,14 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 
 ## [Unreleased]
 
+## [2.4.3] - 2026-11-18
+
 ### Added
 - Export an editable Word document (`.docx`) from the toolbar's **…** menu.
+
+### Fixed
+- Keep the selected size of reference-style images when exporting to PDF, including when reopening the preview immediately after a resize.
+- Restore keyboard caret navigation to the first line of a callout.
 
 ## [2.4.2] - 2026-11-18
 
