@@ -29,7 +29,7 @@ Switch between ManulDown and the Markdown source with the code/pencil buttons in
 
 Use the toolbar to format text and insert elements. Buttons that do not fit are available in the **…** menu.
 
-Open **… → Settings** and search for `manulDown.toolbar.items` (**Toolbar: Items**) to choose the buttons with checkboxes. Changes apply immediately to open editors. H1–H6 can be selected individually. Link, Image, Footnote, Inline Math, Math Block, and H4–H6 are hidden by default. Unchecked tools are also hidden from **…**; slash commands and shortcuts remain available. HTML export, PDF export, and Settings always stay in **…**.
+Open **… → Settings** and search for `manulDown.toolbar.items` (**Toolbar: Items**) to choose the buttons with checkboxes. Changes apply immediately to open editors. H1–H6 can be selected individually. Link, Image, Footnote, Inline Math, Math Block, and H4–H6 are hidden by default. Unchecked tools are also hidden from **…**; slash commands and shortcuts remain available. HTML, PDF, and Word export and Settings always stay in **…**.
 
 | Button | Action |
 | --- | --- |
@@ -103,6 +103,10 @@ The expand icon opens the diagram across the editor. Scroll to zoom, drag or use
 Choose **… → Export as HTML…** to save a standalone `.html` file. Styles, images, syntax highlighting, math fonts, and Mermaid rendering are embedded, so the file can be opened offline in a browser without installing Chrome or Edge for export. Formulas and diagrams render when opened with JavaScript enabled. The layout adapts to the browser width.
 
 Remote images follow `manulDown.security.allowRemoteImages`; unavailable or blocked images show alternative text. As with PDF output, external web links and document anchors are preserved; workspace file links are omitted.
+
+### Exporting Word documents
+
+Choose **… → Export as Word…** to save the current edits as a `.docx` file. Headings, tables, lists, footnotes, and supported equations are editable in Word. Images are embedded and remote images follow the same setting as HTML and PDF export. Mermaid diagrams are saved as code blocks.
 
 ### Exporting PDF
 

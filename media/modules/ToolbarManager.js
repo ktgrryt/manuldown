@@ -4,6 +4,13 @@
  * ツールバーボタンのイベント処理とコマンド実行を担当
  */
 
+const documentCommands = new Set(['settings', 'exportHtml', 'exportPdf', 'exportWord']);
+
+function shouldRefocusEditor(command) {
+    return command !== 'table' && command !== 'link' && command !== 'image' && command !== 'footnote' &&
+        command !== 'math' && !documentCommands.has(command);
+}
+
 export class ToolbarManager {
     constructor(editor, stateManager, options = {}) {
         this.editor = editor;
@@ -22,6 +29,7 @@ export class ToolbarManager {
         this.onInsertMathBlock = options.onInsertMathBlock || null;
         this.onOpenSettings = options.onOpenSettings || null;
         this.onExportHtml = options.onExportHtml || null;
+        this.onExportWord = options.onExportWord || null;
         this.onExportPdf = options.onExportPdf || null;
         this.onFormatSelectedCells = options.onFormatSelectedCells || null;
         this.getSelectedCellFormatState = options.getSelectedCellFormatState || (() => null);
@@ -96,8 +104,7 @@ export class ToolbarManager {
                 const command = button.getAttribute('data-command');
                 this.executeCommand(command);
                 // ダイアログを開くコマンドはダイアログ側でフォーカスを管理するため、ここではスキップ
-                if (command !== 'table' && command !== 'link' && command !== 'image' && command !== 'footnote' &&
-                    command !== 'math' && command !== 'settings' && command !== 'exportPdf' && command !== 'exportHtml') {
+                if (shouldRefocusEditor(command)) {
                     setTimeout(() => this.editor.focus(), 0);
                 }
             });
@@ -158,8 +165,7 @@ export class ToolbarManager {
                 if (menuItem.disabled) return;
                 this.closeOverflowMenu({ restoreSelection: true });
                 this.executeCommand(command);
-                if (command !== 'table' && command !== 'link' && command !== 'image' && command !== 'footnote' &&
-                    command !== 'math' && command !== 'settings' && command !== 'exportPdf' && command !== 'exportHtml') {
+                if (shouldRefocusEditor(command)) {
                     setTimeout(() => this.editor.focus(), 0);
                 }
             });
@@ -224,7 +230,7 @@ export class ToolbarManager {
     }
 
     isToolbarCommandEnabled(command) {
-        return command === 'settings' || command === 'exportPdf' || command === 'exportHtml' || this.toolbarItemVisibility?.[command] !== false;
+        return documentCommands.has(command) || this.toolbarItemVisibility?.[command] !== false;
     }
 
     setToolbarItems(visibility) {
@@ -382,6 +388,10 @@ export class ToolbarManager {
     executeCommand(command) {
         if (command === 'exportHtml') {
             if (this.onExportHtml) this.onExportHtml();
+            return;
+        }
+        if (command === 'exportWord') {
+            this.onExportWord?.();
             return;
         }
         if (command === 'exportPdf') {
@@ -570,7 +580,7 @@ export class ToolbarManager {
             const disabledFootnote = command === 'footnote' && !this.canInsertFootnote();
             const disabledMath = command === 'math' && !this.canInsertMath();
             const isDisabled =
-                (onReadOnlyObject && command !== 'settings' && command !== 'exportPdf' && command !== 'exportHtml') ||
+                (onReadOnlyObject && !documentCommands.has(command)) ||
                 disabledByTable ||
                 disabledBoldInHeading ||
                 disabledByList ||

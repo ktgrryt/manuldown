@@ -6,6 +6,9 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 
 ## [Unreleased]
 
+### Added
+- Export an editable Word document (`.docx`) from the toolbar's **…** menu.
+
 ## [2.4.2] - 2026-11-18
 
 ### Fixed

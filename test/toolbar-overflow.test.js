@@ -9,7 +9,7 @@ const source = fs.readFileSync(path.join(__dirname, '..', 'media/modules/Toolbar
 const modulePromise = import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 
 async function fixture(t, initialWidth, { withFootnote = false, withToc = false, withPdf = false, withHtml = false,
-    extraTools = false, toolbarItems } = {}) {
+    withWord = false, extraTools = false, toolbarItems } = {}) {
     const window = domino.createWindow(`
         <div class="toolbar">
             <button class="toolbar-btn" data-command="bold" title="Bold (Ctrl+B)">B</button>
@@ -22,6 +22,7 @@ async function fixture(t, initialWidth, { withFootnote = false, withToc = false,
             ${withFootnote || withToc || extraTools ? `<button class="toolbar-btn" data-command="settings" title="Settings"${extraTools ? ' data-overflow-only' : ''}>Settings</button>` : ''}
             ${withHtml ? '<button class="toolbar-btn" data-command="exportHtml" data-overflow-only title="Export as HTML…" hidden>HTML</button>' : ''}
             ${withPdf ? '<button class="toolbar-btn" data-command="exportPdf" data-overflow-only title="Export as PDF…" hidden>PDF</button>' : ''}
+            ${withWord ? '<button class="toolbar-btn" data-command="exportWord" data-overflow-only title="Export as Word…" hidden>Word</button>' : ''}
             <button class="toolbar-btn toolbar-overflow-toggle" hidden>…</button>
             <div class="toolbar-overflow-menu" hidden></div>
         </div>
@@ -332,5 +333,17 @@ test('HTML export stays in the overflow menu when disabled in preferences and de
     f.manager.onExportHtml = () => { exported++; };
     f.event('click', f.manager.overflowToggle);
     f.event('click', f.manager.overflowButtons.get('exportHtml'));
+    assert.equal(exported, 1);
+});
+
+test('Word export remains available from the overflow menu on a read-only selection', async t => {
+    const f = await fixture(t, 1000, { withWord: true, withFootnote: true });
+    f.manager.setToolbarItems({ exportWord: false });
+    f.focus(f.editor.querySelector('[data-mdw-footnote-backref]'));
+    assert.ok(f.overflow().includes('exportWord'));
+    let exported = 0;
+    f.manager.onExportWord = () => { exported++; };
+    f.event('click', f.manager.overflowToggle);
+    f.event('click', f.manager.overflowButtons.get('exportWord'));
     assert.equal(exported, 1);
 });

@@ -1806,7 +1806,8 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
         onInsertMathBlock: () => insertMathBlock(),
         onOpenSettings: () => openManulDownSettings(),
         onExportHtml: () => vscode.postMessage({ type: 'exportHtml' }),
-        onExportPdf: () => vscode.postMessage({ type: 'openPdfPreview' })
+        onExportPdf: () => vscode.postMessage({ type: 'openPdfPreview' }),
+        onExportWord: () => vscode.postMessage({ type: 'exportWord' })
     });
 
     function openManulDownSettings() {

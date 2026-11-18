@@ -438,7 +438,7 @@
               "description": "Math Block"
             }
           },
-          "markdownDescription": "Choose the buttons shown in the toolbar. Changes apply immediately. Unchecked buttons are also hidden from the **…** menu; their slash commands and keyboard shortcuts remain available. PDF export and Settings always remain in **…**."
+          "markdownDescription": "Choose the buttons shown in the toolbar. Changes apply immediately. Unchecked buttons are also hidden from the **…** menu; their slash commands and keyboard shortcuts remain available. HTML, PDF, and Word export and Settings always remain in **…**."
         },
         "manulDown.callout.defaultService": {
           "type": "string",
@@ -518,6 +518,7 @@
     "@vscode/vsce": "4.1.0",
     "esbuild": "^0.28.1",
     "eslint": "^10.0.0",
+    "fflate": "^0.8.3",
     "katex": "^0.18.2",
     "mermaid": "^11.16.0",
     "pdfjs-dist": "^6.5.438",
@@ -531,6 +532,7 @@
   },
   "dependencies": {
     "@mixmark-io/domino": "^2.2.0",
+    "docx": "^9.15.4",
     "marked": "^11.1.1",
     "pdf-lib": "^1.17.1",
     "prismjs": "^1.30.0",

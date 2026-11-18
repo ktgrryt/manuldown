@@ -22,6 +22,7 @@ import { EmphasisBoundarySerializer } from './Emphasis';
 import { protectMarkdownTocs } from './MarkdownToc';
 import { CalloutService, isCalloutFormatChange, isCalloutTypeChange, parseCallout, resolveCalloutService, serializeCallout } from './Callouts';
 import { exportHtml } from '../export/HtmlExport';
+import { exportWord } from '../export/WordExport';
 import { PdfPreviewProvider } from '../export/PdfPreviewProvider';
 import TurndownService from 'turndown';
 const { createWindow } = require('@mixmark-io/domino');
@@ -1501,6 +1502,13 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                             await exportHtml(this.context.extensionUri, document.uri, captureExport, resolveExportImage);
                         } catch (error) {
                             void vscode.window.showErrorMessage(`HTML export failed: ${error instanceof Error ? error.message : String(error)}`);
+                        }
+                        break;
+                    case 'exportWord':
+                        try {
+                            await exportWord(document.uri, captureExport, resolveExportImage);
+                        } catch (error) {
+                            void vscode.window.showErrorMessage(`Word export failed: ${error instanceof Error ? error.message : String(error)}`);
                         }
                         break;
                     case 'openPdfPreview':
@@ -5334,6 +5342,9 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         </button>
         <button class="toolbar-btn" data-command="exportPdf" data-overflow-only title="Export as PDF…" aria-label="Export as PDF…" hidden>
             PDF
+        </button>
+        <button class="toolbar-btn" data-command="exportWord" data-overflow-only title="Export as Word…" aria-label="Export as Word…" hidden>
+            Word
         </button>
         <div class="toolbar-separator"></div>
         <button class="toolbar-btn" data-command="settings" data-overflow-only title="Settings" hidden>
