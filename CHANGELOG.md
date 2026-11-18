@@ -6,6 +6,11 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 
 ## [Unreleased]
 
+## [2.4.2] - 2026-11-18
+
+### Fixed
+- Preserve image sizes set in the editor when exporting to PDF or standalone HTML.
+
 ## [2.4.1] - 2026-11-18
 
 ### Fixed
