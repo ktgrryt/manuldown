@@ -11329,7 +11329,8 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
         const element = node && (node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement);
         const pre = element && element.closest('pre');
         if (!pre || !editor.contains(pre) || element.closest('.code-block-toolbar')) return false;
-        if (pre.getAttribute('data-math-view') !== 'preview' && pre.getAttribute('data-mermaid-view') !== 'diagram') {
+        if (pre.getAttribute('data-math-view') !== 'preview' && pre.getAttribute('data-mermaid-view') !== 'diagram' &&
+            pre.getAttribute('data-html-view') !== 'preview') {
             return false;
         }
         if (pre.getAttribute('data-math-view') === 'preview' && lastCaretIntentSource === 'keyboard' &&
@@ -11358,7 +11359,8 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
         if (pre.getAttribute('data-math-view') === 'preview') {
             cursorManager.revealMathSource?.(pre);
         }
-        if (pre.getAttribute('data-mermaid-view') === 'diagram' || pre.getAttribute('data-math-view') === 'preview') {
+        if (pre.getAttribute('data-mermaid-view') === 'diagram' || pre.getAttribute('data-math-view') === 'preview' ||
+            pre.getAttribute('data-html-view') === 'preview') {
             if (codeBlockGapManager.moveToGap(pre, 'down', selection, true)) {
                 setCodeBlockLanguageNavSelection(null);
                 return true;
@@ -14295,8 +14297,8 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
         return false;
     }
 
-    // Native ArrowRight from the end of a block skips a Mermaid diagram and
-    // stops after a math preview, as their source is hidden. Custom navigation
+    // Native ArrowRight from the end of a block can skip rendered previews
+    // or stop after them, as their source is hidden. Custom navigation
     // selects their label, as it does from every other line.
     function isRangeAtEndBeforeHiddenSourceCodeBlock(range, block) {
         let next = block.nextSibling;
@@ -14305,7 +14307,8 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
         }
         if (!next || next.nodeType !== Node.ELEMENT_NODE || next.tagName !== 'PRE' ||
             (next.getAttribute('data-mermaid-view') !== 'diagram' &&
-                next.getAttribute('data-math-view') !== 'preview')) {
+                next.getAttribute('data-math-view') !== 'preview' &&
+                next.getAttribute('data-html-view') !== 'preview')) {
             return false;
         }
         const rest = document.createRange();

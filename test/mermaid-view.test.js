@@ -188,15 +188,17 @@ test('the native Preview switch keeps Enter and Space activation away from edito
     assert.equal(toggle.getAttribute('aria-checked'), 'true');
 });
 
-test('Preview retains button focus through repeated on/off keyboard activation for math and Mermaid', async t => {
-    for (const language of ['math', 'mermaid']) {
+test('Preview retains button focus through repeated on/off keyboard activation for math, Mermaid and HTML', async t => {
+    for (const language of ['math', 'mermaid', 'html']) {
         await t.test(language, async t => {
             const f = await fixture(t, `<pre><code class="language-${language}">x + y</code></pre>`);
             const toggle = f.pre.querySelector('.code-block-preview-toggle');
             const original = f.domUtils.getCleanedHTML({ historyComparable: true });
             f.dispatch(f.pre.querySelector('.code-block-language'), 'keydown', { key: 'ArrowRight' });
             assert.equal(f.focused, toggle);
-            for (const checked of [false, true, false, true]) {
+            let checked = toggle.getAttribute('aria-checked') === 'true';
+            for (let activation = 0; activation < 4; activation++) {
+                checked = !checked;
                 assert.equal(f.dispatch(toggle, 'keydown', { key: 'Enter' }).defaultPrevented, false);
                 // Domino needs the native activation click to be dispatched explicitly.
                 f.dispatch(toggle, 'click');
@@ -211,7 +213,7 @@ test('Preview retains button focus through repeated on/off keyboard activation f
 });
 
 test('toolbar arrows focus each whole action in order and return to the language label', async t => {
-    for (const language of ['javascript', 'math', 'mermaid']) {
+    for (const language of ['javascript', 'math', 'mermaid', 'html']) {
         await t.test(language, async t => {
             const f = await fixture(t, `<pre><code class="language-${language}">x + y</code></pre>`);
             const label = f.pre.querySelector('.code-block-language');
@@ -545,4 +547,110 @@ test('switching away from Mermaid removes the toggle and cancels pending renderi
     assert.equal(f.manager.mermaidRenderHandles.has(f.pre), false);
     f.manager.updateCodeBlockLanguage(f.pre, 'mermaid');
     assert.equal(f.pre.getAttribute('data-mermaid-view'), 'code');
+});
+
+test('HTML blocks open as highlighted source without creating a preview document', async t => {
+    const f = await fixture(t, '<pre><code class="language-html">&lt;h1&gt;Hello&lt;/h1&gt;</code></pre>');
+    global.Prism = prism;
+    f.manager.highlightCodeBlocks();
+    assert.equal(f.pre.getAttribute('data-html-view'), 'code');
+    assert.equal(f.pre.querySelector('.code-block-preview-toggle').getAttribute('aria-checked'), 'false');
+    assert.equal(f.pre.querySelector('code').textContent, '<h1>Hello</h1>');
+    assert.ok(f.pre.querySelector('code .token.tag'));
+    assert.ok(!f.pre.querySelector('.html-preview'));
+    assert.ok(!f.pre.querySelector('iframe'));
+    assert.equal(f.manager._hasExpectedCodeBlockControls(f.pre, 'html'), true);
+});
+
+test('HTML preview is opt-in per block, isolated, and refreshed from the latest source', async t => {
+    const f = await fixture(t, '<pre><code class="language-html">&lt;h1&gt;Hello&lt;/h1&gt;</code></pre>' +
+        '<pre><code class="language-html">&lt;p&gt;Second&lt;/p&gt;</code></pre>');
+    const code = f.pre.querySelector('code');
+    const toggle = () => f.dispatch(f.pre.querySelector('.code-block-preview-toggle'), 'click');
+    f.selectCode();
+    toggle();
+    assert.equal(f.range, null, 'no caret remains in hidden code');
+    assert.equal(f.pre.getAttribute('data-html-view'), 'preview');
+    assert.equal(f.pre.querySelector('.code-block-preview-toggle').getAttribute('aria-checked'), 'true');
+    assert.equal(f.editor.querySelectorAll('pre')[1].getAttribute('data-html-view'), 'code');
+    assert.equal(f.editor.querySelectorAll('.html-preview').length, 1);
+    const frame = f.pre.querySelector('iframe');
+    assert.equal(frame.getAttribute('sandbox'), '', 'no sandbox capabilities are granted');
+    assert.equal(frame.getAttribute('referrerpolicy'), 'no-referrer');
+    assert.equal(frame.title, 'HTML preview');
+    const previewDocument = domino.createWindow(frame.getAttribute('srcdoc')).document;
+    assert.equal(previewDocument.querySelector('h1').textContent, 'Hello');
+    assert.match(previewDocument.querySelector('meta[http-equiv]').content, /script-src 'none'/);
+    assert.ok(!f.pre.querySelector('h1'), 'rendered HTML never enters the editor DOM');
+
+    toggle();
+    assert.equal(f.pre.getAttribute('data-html-view'), 'code');
+    assert.ok(!f.pre.querySelector('iframe'), 'turning preview off unloads it');
+    code.textContent = '<style>h1 { color: red; }</style>\n<h1>Updated 日本語</h1>\n';
+    f.manager.highlightSingleCodeBlock(code);
+    assert.ok(!f.pre.querySelector('.html-preview'), 'editing does not enable preview');
+    toggle();
+    assert.ok(f.pre.querySelector('iframe').getAttribute('srcdoc').includes(code.textContent));
+    assert.equal(code.textContent, '<style>h1 { color: red; }</style>\n<h1>Updated 日本語</h1>\n');
+});
+
+test('HTML view changes preserve Markdown source and Undo/Redo across control reconstruction', async t => {
+    const f = await fixture(t, '<pre><code class="language-html">&lt;div&gt;Hello&lt;/div&gt;\n</code></pre>');
+    const cleaned = f.domUtils.getCleanedHTML();
+    f.history.seedState();
+    f.history.redoStack.push({ html: 'redo state' });
+    f.dispatch(f.pre.querySelector('.code-block-preview-toggle'), 'click');
+    f.history.commitStateAfterChange();
+    assert.equal(f.domUtils.getCleanedHTML(), cleaned);
+    assert.equal(f.history.undoStack.length, 1);
+    assert.equal(f.history.redoStack.length, 1);
+    const frame = f.pre.querySelector('iframe');
+    f.manager.addCodeBlockControls(f.pre, 'html');
+    assert.ok(f.pre.querySelector('iframe') === frame, 'rebuilding controls keeps the loaded preview');
+    assert.equal(f.pre.querySelector('.code-block-preview-toggle').getAttribute('aria-checked'), 'true');
+
+    f.editor.innerHTML = f.editor.innerHTML;
+    f.manager.highlightCodeBlocks();
+    const restored = f.editor.querySelector('pre');
+    assert.equal(restored.getAttribute('data-html-view'), 'preview');
+    assert.equal(restored.querySelectorAll('.html-preview').length, 1);
+    assert.equal(f.domUtils.getCleanedHTML(), cleaned);
+    f.dispatch(restored.querySelector('.code-block-preview-toggle'), 'click');
+    f.history.commitStateAfterChange();
+    assert.equal(f.history.undoStack.length, 1);
+    assert.equal(f.history.redoStack.length, 1);
+
+    // Reopening Markdown carries only source, so HTML defaults back to code.
+    f.editor.innerHTML = cleaned;
+    f.manager.highlightCodeBlocks();
+    assert.equal(f.editor.querySelector('pre').getAttribute('data-html-view'), 'code');
+    assert.ok(!f.editor.querySelector('iframe'));
+});
+
+test('changing HTML to another language removes its preview and switching back starts with code', async t => {
+    const f = await fixture(t, '<pre><code class="language-html">&lt;div&gt;Hello&lt;/div&gt;</code></pre>');
+    global.Prism = prism;
+    for (const language of ['plaintext', 'xml', 'mermaid', 'math']) {
+        f.dispatch(f.pre.querySelector('.code-block-preview-toggle'), 'click');
+        f.manager.updateCodeBlockLanguage(f.pre, language);
+        assert.equal(f.pre.hasAttribute('data-html-view'), false, language);
+        assert.ok(!f.pre.querySelector('.html-preview'), language);
+        if (language === 'plaintext' || language === 'xml') {
+            assert.ok(!f.pre.querySelector('.code-block-preview-toggle'), language);
+        }
+        f.manager.updateCodeBlockLanguage(f.pre, 'html');
+        assert.equal(f.pre.getAttribute('data-html-view'), 'code', language);
+        assert.equal(f.pre.querySelector('.code-block-preview-toggle').getAttribute('aria-checked'), 'false');
+        assert.equal(f.pre.querySelector('code').textContent, '<div>Hello</div>');
+    }
+});
+
+test('restoring a source selection reveals HTML without leaving it hidden behind the preview', async t => {
+    const f = await fixture(t, '<pre><code class="language-html">&lt;p&gt;Hello&lt;/p&gt;</code></pre>');
+    const code = f.pre.querySelector('code');
+    f.dispatch(f.pre.querySelector('.code-block-preview-toggle'), 'click');
+    f.manager.revealSelectionSource({ anchorNode: code.firstChild, focusNode: code.firstChild });
+    assert.equal(f.pre.getAttribute('data-html-view'), 'code');
+    assert.equal(f.pre.querySelector('.code-block-preview-toggle').getAttribute('aria-checked'), 'false');
+    assert.ok(!f.pre.querySelector('iframe'));
 });

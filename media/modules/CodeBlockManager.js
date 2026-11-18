@@ -348,6 +348,55 @@ export class CodeBlockManager {
         pre.querySelector('.code-block-preview-toggle')?.setAttribute('aria-checked', String(view === 'preview'));
     }
 
+    _isHtmlLanguage(language) {
+        return (language || '').toLowerCase() === 'html';
+    }
+
+    _getHtmlView(pre) {
+        return pre.getAttribute('data-html-view') === 'preview' ? 'preview' : 'code';
+    }
+
+    _setHtmlView(pre, view) {
+        pre.setAttribute('data-html-view', view);
+        pre.querySelector('.code-block-preview-toggle')?.setAttribute('aria-checked', String(view === 'preview'));
+        if (view === 'code') this._clearHtmlPreview(pre);
+    }
+
+    _clearHtmlPreview(pre) {
+        pre.querySelectorAll('.html-preview').forEach(preview => preview.remove());
+    }
+
+    _renderHtmlPreview(pre, codeBlock) {
+        if (this._getHtmlView(pre) !== 'preview') return;
+        let preview = pre.querySelector('.html-preview');
+        if (!preview) {
+            preview = document.createElement('div');
+            preview.className = 'html-preview';
+            preview.contentEditable = 'false';
+            preview.setAttribute('data-exclude-from-markdown', 'true');
+            pre.appendChild(preview);
+        }
+        let frame = preview.querySelector('iframe');
+        if (!frame) {
+            frame = document.createElement('iframe');
+            frame.title = 'HTML preview';
+            // No scripts, same-origin access, forms, popups or top navigation.
+            frame.setAttribute('sandbox', '');
+            frame.setAttribute('referrerpolicy', 'no-referrer');
+            preview.appendChild(frame);
+        }
+        // srcdoc also inherits the webview's CSP, including its remote-image
+        // preference. This additional policy only permits static HTML/CSS.
+        const html = '<!DOCTYPE html><html><head><meta charset="UTF-8">' +
+            '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; ' +
+            'script-src \'none\'; style-src \'unsafe-inline\'; img-src data: https: http:; ' +
+            'form-action \'none\'; base-uri \'none\'">' +
+            '<meta name="viewport" content="width=device-width, initial-scale=1.0">' +
+            '<style>html { color-scheme: light; } body { margin: 16px; }</style>' +
+            '</head><body>' + this._getCodeBlockText(codeBlock) + '</body></html>';
+        if (frame.getAttribute('srcdoc') !== html) frame.setAttribute('srcdoc', html);
+    }
+
     /** Reveal source for caret navigation without changing content or history. */
     revealMathSource(pre) {
         if (!pre || pre.tagName !== 'PRE' || !this.editor.contains(pre) ||
@@ -368,6 +417,7 @@ export class CodeBlockManager {
             const pre = code?.closest('pre');
             if (!pre || !this.editor.contains(pre)) continue;
             if (pre.getAttribute('data-mermaid-view') === 'diagram') this._setMermaidView(pre, 'code');
+            if (pre.getAttribute('data-html-view') === 'preview') this._setHtmlView(pre, 'code');
             this.revealMathSource(pre);
         }
     }
@@ -835,7 +885,7 @@ export class CodeBlockManager {
         if (!toolbar.querySelector('.code-block-copy-btn.code-block-icon-btn .code-block-toolbar-icon')) {
             return false;
         }
-        if ((this._isMermaidLanguage(language) || this._isMathLanguage(language)) &&
+        if ((this._isMermaidLanguage(language) || this._isMathLanguage(language) || this._isHtmlLanguage(language)) &&
             (toolbar.querySelectorAll('.code-block-preview-toggle[role="switch"]').length !== 1 ||
                 !toolbar.querySelector('.code-block-preview-track > .code-block-preview-thumb'))) {
             return false;
@@ -1315,6 +1365,9 @@ export class CodeBlockManager {
         if (this._isMathLanguage(language) && codeBlock.parentElement) {
             this._scheduleMathRender(codeBlock.parentElement, codeBlock);
         }
+        if (this._isHtmlLanguage(language) && codeBlock.parentElement) {
+            this._renderHtmlPreview(codeBlock.parentElement, codeBlock);
+        }
 
         if (typeof Prism === 'undefined') {
             return;
@@ -1445,6 +1498,7 @@ export class CodeBlockManager {
     addCodeBlockControls(pre, language) {
         const isMermaid = this._isMermaidLanguage(language);
         const isMath = this._isMathLanguage(language);
+        const isHtml = this._isHtmlLanguage(language);
         if (this.mermaidExportMenu?.pre === pre) this._closeMermaidExportMenu();
 
         // 既存のコントロールを削除
@@ -1464,6 +1518,10 @@ export class CodeBlockManager {
             this.transientMathSources.delete(pre);
             pre.removeAttribute('data-math-view');
             this._clearMathPreview(pre);
+        }
+        if (!isHtml) {
+            pre.removeAttribute('data-html-view');
+            this._clearHtmlPreview(pre);
         }
 
         // ツールバーを作成
@@ -1827,7 +1885,7 @@ export class CodeBlockManager {
         const actionGroup = document.createElement('div');
         actionGroup.className = 'code-block-actions';
 
-        if (isMermaid || isMath) {
+        if (isMermaid || isMath || isHtml) {
             const viewToggle = document.createElement('div');
             viewToggle.className = 'code-block-view-toggle';
             const button = document.createElement('button');
@@ -1848,15 +1906,18 @@ export class CodeBlockManager {
                 const code = pre.querySelector('code');
                 const showingPreview = isMermaid
                     ? this._getMermaidView(pre) === 'diagram'
-                    : this._getMathView(pre) === 'preview';
+                    : isMath ? this._getMathView(pre) === 'preview' : this._getHtmlView(pre) === 'preview';
                 if (isMath) this.transientMathSources.delete(pre);
                 this.focusCodeBlockAction(pre, button);
                 if (isMermaid) {
                     this._setMermaidView(pre, showingPreview ? 'code' : 'diagram');
                     if (!showingPreview && code) this._scheduleMermaidRender(pre, code, true);
-                } else {
+                } else if (isMath) {
                     this._setMathView(pre, showingPreview ? 'code' : 'preview');
                     if (!showingPreview && code) this._scheduleMathRender(pre, code, true);
+                } else {
+                    this._setHtmlView(pre, showingPreview ? 'code' : 'preview');
+                    if (!showingPreview && code) this._renderHtmlPreview(pre, code);
                 }
             });
             viewToggle.appendChild(button);
@@ -2067,6 +2128,11 @@ export class CodeBlockManager {
             if (code) {
                 this._scheduleMathRender(pre, code, true);
             }
+        }
+        if (isHtml) {
+            this._setHtmlView(pre, this._getHtmlView(pre));
+            const code = pre.querySelector('code');
+            if (code) this._renderHtmlPreview(pre, code);
         }
     }
 

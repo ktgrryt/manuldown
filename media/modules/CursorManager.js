@@ -3849,6 +3849,7 @@ export class CursorManager {
     setCodeBlockCursorOffset(codeBlock, selection, offset) {
         const pre = codeBlock?.parentElement;
         if (pre?.getAttribute('data-mermaid-view') === 'diagram' ||
+            pre?.getAttribute('data-html-view') === 'preview' ||
             (pre?.getAttribute('data-math-view') === 'preview' && !this.revealMathSource?.(pre))) {
             return this._selectCodeBlockLanguageLabel(pre, selection);
         }

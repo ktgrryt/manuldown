@@ -17,7 +17,7 @@ export class BlockObjectSelection {
             this.observer.observe(this.editor, {
                 childList: true, characterData: true, subtree: true,
                 attributes: true,
-                attributeFilter: ['data-mermaid-view', 'data-math-view', 'data-mdw-math']
+                attributeFilter: ['data-mermaid-view', 'data-math-view', 'data-html-view', 'data-mdw-math']
             });
         }
         this.update();
@@ -40,7 +40,8 @@ export class BlockObjectSelection {
             const formula = block.matches('span[data-mdw-math="display"]');
             const toc = block.getAttribute('data-mdw-toc') === 'true';
             const preview = block.getAttribute('data-mermaid-view') === 'diagram' ||
-                block.getAttribute('data-math-view') === 'preview';
+                block.getAttribute('data-math-view') === 'preview' ||
+                block.getAttribute('data-html-view') === 'preview';
             const eligible = (code || formula || toc) && !block.closest('[data-mdw-opaque-source], [data-exclude-from-markdown="true"]');
             let selected = false;
             if (eligible && ranges.length) {

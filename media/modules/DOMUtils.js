@@ -613,13 +613,16 @@ export class DOMUtils {
         codeBlocks.forEach(codeBlock => {
             codeBlock.textContent = this.getCodeBlockText(codeBlock);
         });
-        // Mermaid's display choice is presentation state, including for history
+        // Code-block display choices are presentation state, including for history
         // comparisons. Keep the source in the saved document in either view.
         clone.querySelectorAll('pre[data-mermaid-view]').forEach(pre => {
             pre.removeAttribute('data-mermaid-view');
         });
         clone.querySelectorAll('pre[data-math-view]').forEach(pre => {
             pre.removeAttribute('data-math-view');
+        });
+        clone.querySelectorAll('pre[data-html-view]').forEach(pre => {
+            pre.removeAttribute('data-html-view');
         });
 
         // テーブル選択用のクラスを削除

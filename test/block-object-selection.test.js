@@ -268,8 +268,8 @@ for (const tag of ['div', 'p']) {
     });
 }
 
-for (const kind of ['mermaid', 'math']) {
-    const attribute = kind === 'mermaid' ? 'data-mermaid-view="diagram"' : 'data-math-view="preview"';
+for (const kind of ['mermaid', 'math', 'html']) {
+    const attribute = kind === 'mermaid' ? 'data-mermaid-view="diagram"' : `data-${kind}-view="preview"`;
     const preview = kind === 'mermaid' ? '<svg><text id="rendered">Diagram text</text></svg>' : '<span id="rendered">Equation</span>';
     test(`${kind} preview is atomic: hidden source and rendered glyphs alone do not select the block`, async t => {
         const f = await fixture(t, `<pre ${attribute}><code>source text</code>` +

@@ -1763,7 +1763,7 @@ export class TableManager {
             node.getAttribute('aria-hidden') === 'true' || node.classList.contains('md-table-structure-handle') ||
             node.tagName === 'BR') return null;
         if (node.matches('img, input, textarea, select, button, hr, svg, canvas, video, audio, iframe, object, embed, ' +
-            '[data-mdw-math], pre[data-math-view="preview"], pre[data-mermaid-view="diagram"]')) {
+            '[data-mdw-math], pre[data-math-view="preview"], pre[data-mermaid-view="diagram"], pre[data-html-view="preview"]')) {
             return { node: node.parentNode,
                 offset: Array.prototype.indexOf.call(node.parentNode.childNodes, node) + (atEnd ? 1 : 0) };
         }

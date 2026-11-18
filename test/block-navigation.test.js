@@ -1805,7 +1805,7 @@ test('moving down from a Mermaid diagram label skips its hidden source', async (
 test('a caret left in a math preview or a Mermaid diagram selects the label', async () => {
     const preview = '<div class="math-preview" contenteditable="false" data-exclude-from-markdown="true"></div>';
     const names = ['normalizeCaretInHiddenSourceCodeBlock', ...CODE_BLOCK_NAVIGATION];
-    for (const view of ['data-math-view="preview"', 'data-mermaid-view="diagram"']) {
+    for (const view of ['data-math-view="preview"', 'data-mermaid-view="diagram"', 'data-html-view="preview"']) {
         const fixture = await createFixture('<p>First line</p>' +
             CODE_BLOCK.replace('<pre>', `<pre ${view}>`).replace('</pre>', `${preview}</pre>`));
         try {
@@ -1848,6 +1848,8 @@ test('ArrowRight at the end of the first line enters a hidden-source block with 
     for (const [view, expected] of [
         ['data-mermaid-view="diagram"', true],
         ['data-math-view="preview"', true],
+        ['data-html-view="preview"', true],
+        ['data-html-view="code"', false],
         ['data-math-view="code"', false],
         ['', false],
     ]) {
