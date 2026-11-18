@@ -1805,6 +1805,7 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
         canInsertMath: () => mathManager.canInsert(),
         onInsertMathBlock: () => insertMathBlock(),
         onOpenSettings: () => openManulDownSettings(),
+        onChooseExport: () => vscode.postMessage({ type: 'chooseExport' }),
         onExportHtml: () => vscode.postMessage({ type: 'exportHtml' }),
         onExportPdf: () => vscode.postMessage({ type: 'openPdfPreview' }),
         onExportWord: () => vscode.postMessage({ type: 'exportWord' })
@@ -6040,6 +6041,14 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
         { id: 'math', source: 'builtin', description: 'Insert a math block ($$…$$)', action: insertMathBlock },
         { id: 'inline-math', source: 'builtin', description: 'Insert an inline formula ($…$)', action: () => mathManager.insert() },
         { id: 'checkbox', source: 'builtin', description: 'Create a checklist item', action: insertSlashCheckbox },
+        ...[
+            ['export-pdf', 'exportPdf', 'Open the PDF export preview'],
+            ['export-html', 'exportHtml', 'Export as HTML'],
+            ['export-word', 'exportWord', 'Export as Word']
+        ].map(([id, command, description]) => ({
+            id, source: 'builtin', description, syncAfterRemoval: true,
+            action: () => toolbarManager.executeCommand(command)
+        })),
         {
             id: 'settings',
             source: 'builtin',
@@ -6472,6 +6481,7 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
         hideSlashCommandMenu();
         removeSlashCommandText(match);
         ensureSlashCommandSelectionInEditor(match.textNode, match.slashIndex);
+        if (cmd.syncAfterRemoval) notifyChangeImmediate();
         cmd.action();
         // Capture the post-command snapshot so slash execution can be redone.
         requestAnimationFrame(() => {

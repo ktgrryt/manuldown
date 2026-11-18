@@ -57,7 +57,7 @@ test('PDF preview ships browser assets and keeps its executable path in user set
     for (const asset of ['pdf.mjs', 'pdf.worker.mjs', 'pdf.renderer.mjs', 'LICENSE']) {
         assert.ok(fs.existsSync(path.join(repositoryRoot, 'media/vendor/pdfjs', asset)), asset);
     }
-    assert.match(providerSource, /data-command="exportPdf" data-overflow-only/);
+    assert.match(providerSource, /data-command="export" data-overflow-only/);
 });
 
 test('the Webview page does not load Mermaid up front', () => {

@@ -22,6 +22,7 @@ const vscodeMockState = {
     clipboardWrites: [],
     clipboardError: null,
     quickPickCalls: [],
+    saveDialogCalls: [],
     inputBoxCalls: [],
     quickPickResponses: [],
     inputBoxResponses: [],
@@ -52,6 +53,7 @@ function resetVscodeMockState() {
     vscodeMockState.clipboardWrites.length = 0;
     vscodeMockState.clipboardError = null;
     vscodeMockState.quickPickCalls.length = 0;
+    vscodeMockState.saveDialogCalls.length = 0;
     vscodeMockState.inputBoxCalls.length = 0;
     vscodeMockState.quickPickResponses.length = 0;
     vscodeMockState.inputBoxResponses.length = 0;
@@ -233,6 +235,7 @@ function loadExtensionModules() {
         },
         window: {
             get activeTextEditor() { return vscodeMockState.activeTextEditor; },
+            showSaveDialog: async options => { vscodeMockState.saveDialogCalls.push(options); },
             showQuickPick: async (items, options, token) => {
                 vscodeMockState.quickPickCalls.push({ items, options, token });
                 const response = vscodeMockState.quickPickResponses.shift();
@@ -436,6 +439,26 @@ async function createEditorSyncHarness(initialText = 'before', documentUri = nul
     await provider.resolveCustomTextEditor(document, webview.panel, {});
     return { provider, document, webview };
 }
+
+test('toolbar export offers PDF, HTML and DOCX in order and runs only the selected format', async t => {
+    const { provider, document, webview } = await createEditorSyncHarness();
+    t.after(() => webview.dispose());
+    const previews = [];
+    provider.pdfPreviewProvider = { open: async source => { previews.push(source); } };
+    const choose = () => webview.sendMessage({ type: 'chooseExport' });
+    await choose();
+    assert.deepEqual(vscodeMockState.quickPickCalls[0].items.map(item => item.label), ['PDF', 'HTML', 'DOCX']);
+    assert.deepEqual(previews, []);
+    assert.deepEqual(vscodeMockState.saveDialogCalls, []);
+    for (const label of ['PDF', 'HTML', 'DOCX']) {
+        vscodeMockState.quickPickResponses.push(items => items.find(item => item.label === label));
+        await choose();
+    }
+    assert.deepEqual(previews, [document]);
+    assert.deepEqual(vscodeMockState.saveDialogCalls.map(dialog => dialog.defaultUri.path),
+        [document.uri.path.replace(/\.md$/, '.html'), document.uri.path.replace(/\.md$/, '.docx')]);
+    assert.deepEqual(vscodeMockState.errors, []);
+});
 
 test('opening a new WYSIWYG editor restores source selection after its ready handshake', async () => {
     const source = '# Heading\n\nSecond **paragraph**.\n';

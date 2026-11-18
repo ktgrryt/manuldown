@@ -4,7 +4,7 @@
  * ツールバーボタンのイベント処理とコマンド実行を担当
  */
 
-const documentCommands = new Set(['settings', 'exportHtml', 'exportPdf', 'exportWord']);
+const documentCommands = new Set(['settings', 'export', 'exportHtml', 'exportPdf', 'exportWord']);
 
 function shouldRefocusEditor(command) {
     return command !== 'table' && command !== 'link' && command !== 'image' && command !== 'footnote' &&
@@ -28,6 +28,7 @@ export class ToolbarManager {
         this.canInsertMath = options.canInsertMath || (() => true);
         this.onInsertMathBlock = options.onInsertMathBlock || null;
         this.onOpenSettings = options.onOpenSettings || null;
+        this.onChooseExport = options.onChooseExport || null;
         this.onExportHtml = options.onExportHtml || null;
         this.onExportWord = options.onExportWord || null;
         this.onExportPdf = options.onExportPdf || null;
@@ -386,6 +387,10 @@ export class ToolbarManager {
      * @param {string} command - 実行するコマンド
      */
     executeCommand(command) {
+        if (command === 'export') {
+            this.onChooseExport?.();
+            return;
+        }
         if (command === 'exportHtml') {
             if (this.onExportHtml) this.onExportHtml();
             return;

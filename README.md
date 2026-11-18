@@ -29,7 +29,7 @@ Switch between ManulDown and the Markdown source with the code/pencil buttons in
 
 Use the toolbar to format text and insert elements. Buttons that do not fit are available in the **…** menu.
 
-Open **… → Settings** and search for `manulDown.toolbar.items` (**Toolbar: Items**) to choose the buttons with checkboxes. Changes apply immediately to open editors. H1–H6 can be selected individually. Link, Image, Footnote, Inline Math, Math Block, and H4–H6 are hidden by default. Unchecked tools are also hidden from **…**; slash commands and shortcuts remain available. HTML, PDF, and Word export and Settings always stay in **…**.
+Open **… → Settings** and search for `manulDown.toolbar.items` (**Toolbar: Items**) to choose the buttons with checkboxes. Changes apply immediately to open editors. H1–H6 can be selected individually. Link, Image, Footnote, Inline Math, Math Block, and H4–H6 are hidden by default. Unchecked tools are also hidden from **…**; slash commands and shortcuts remain available. Export and Settings always stay in **…**.
 
 | Button | Action |
 | --- | --- |
@@ -100,13 +100,15 @@ The expand icon opens the diagram across the editor. Scroll to zoom, drag or use
 
 ### Exporting HTML
 
-Choose **… → Export as HTML…** to save a standalone `.html` file. Styles, images, syntax highlighting, math fonts, and Mermaid rendering are embedded, so the file can be opened offline in a browser without installing Chrome or Edge for export. Formulas and diagrams render when opened with JavaScript enabled. The layout adapts to the browser width.
+Choose **… → Export → HTML** to save a standalone `.html` file. Styles, images, syntax highlighting, math fonts, and Mermaid rendering are embedded, so the file can be opened offline in a browser without installing Chrome or Edge for export. Formulas and diagrams render when opened with JavaScript enabled. The layout adapts to the browser width.
 
 Remote images follow `manulDown.security.allowRemoteImages`; unavailable or blocked images show alternative text. As with PDF output, external web links and document anchors are preserved; workspace file links are omitted.
 
 ### Exporting Word documents
 
-Choose **… → Export as Word…** to save the current edits as a `.docx` file. Headings, tables, lists, footnotes, and supported equations are editable in Word. Images are embedded and remote images follow the same setting as HTML and PDF export. Mermaid diagrams are saved as code blocks.
+Choose **… → Export → DOCX** to save the current edits as a `.docx` file. Headings, tables, lists, footnotes, and supported equations are editable in Word. Fractions, matrices, and multiline equations retain their structure, with display equations centered on their own lines. Tables keep their column alignment, callouts keep their colors, and code retains its indentation and syntax highlighting.
+
+Mermaid diagrams, formulas that need colors or ruled arrays, and images such as WebP use the same Chrome or Edge installation as PDF export. The resulting pictures are embedded in the document. If a diagram cannot be rendered, its source is kept and a notice appears after saving. Remote images follow the same setting as HTML and PDF export.
 
 ### Exporting PDF
 
@@ -114,7 +116,7 @@ Click a thumbnail in the left sidebar to jump to that page. The page at the top 
 
 The preview uses English labels, like the editor and Mermaid viewer, and shares its toolbar, footer, controls, and zoom styling with Mermaid. Use **+ / −, 100%, Fit** in the footer, click the zoom percentage to choose a preset, or use **+ / −, 0, F** on the keyboard. Choose **Done** to leave page break editing.
 
-Open **… → Export as PDF…** in the toolbar to preview your document as pages. Turn on **Page breaks** to see faint horizontal lines between paragraphs, headings, images, tables, lists, or code blocks. Hover or focus a line to highlight it, then click to insert a break. Blocks that already start a page have no insertion line. Manual breaks appear in the page gap with a centered **Remove page break** action. Use the confirmation's **Undo** to quickly reverse a change, or **Clear all** to remove all manual breaks. Choose **Done** to hide all editing controls. **Layout** controls paper size, orientation, margins, text size, and page numbers.
+Open **… → Export → PDF** in the toolbar to preview your document as pages. Turn on **Page breaks** to see faint horizontal lines between paragraphs, headings, images, tables, lists, or code blocks. Hover or focus a line to highlight it, then click to insert a break. Blocks that already start a page have no insertion line. Manual breaks appear in the page gap with a centered **Remove page break** action. Use the confirmation's **Undo** to quickly reverse a change, or **Clear all** to remove all manual breaks. Choose **Done** to hide all editing controls. **Layout** controls paper size, orientation, margins, text size, and page numbers.
 
 Choose **Export…** to save the PDF shown in the preview. Images, formulas, and Mermaid diagrams are included, and long tables repeat their headers on subsequent pages. Missing images or diagram errors appear as notices in the preview.
 
@@ -144,6 +146,9 @@ Type `/` at the start of a line or after whitespace to open the insert menu. Dir
 | `/math` | Insert a math block |
 | `/inline-math` | Insert an inline formula |
 | `/checkbox` | Create a task list |
+| `/export-pdf` | Open the PDF export preview |
+| `/export-html` | Save as an HTML file |
+| `/export-word` | Save as a Word document (`.docx`) |
 | `/settings` | Open ManulDown settings |
 
 A `/toc` block updates as headings are added, edited, moved, or removed. Click an item or navigate with arrows and `Tab`, then press `Enter` to jump to its heading. Its contents are read-only. Click the frame's padding to select the whole block, then press `Backspace` / `Delete` to delete it at once.
@@ -206,7 +211,7 @@ Use **… → Settings** in the toolbar or `/settings` to open ManulDown setting
 | `manulDown.list.dashStyle` | `false` | Use `-` for bullet markers |
 | `manulDown.list.indentSize` | `2` | Indentation width when the document style cannot be detected (`2` or `4` spaces) |
 | `manulDown.images.moveWithDocument` | `true` | Move images with document moves and renames |
-| `manulDown.pdf.browserPath` | Empty | Chrome, Edge, or Chromium executable for PDF export; empty detects an installed browser (user settings only) |
+| `manulDown.pdf.browserPath` | Empty | Chrome, Edge, or Chromium executable for PDF export and rendering Word illustrations. An empty value enables automatic detection (user settings only). |
 | `manulDown.security.allowRemoteImages` | `false` | Display remote HTTP/HTTPS images |
 | `manulDown.security.allowRemoteImageImport` | `false` | Download and import remote HTTP/HTTPS images |
 | `manulDown.security.allowFileLinks` | `false` | Open `file://` and local links outside the workspace |

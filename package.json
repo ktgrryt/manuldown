@@ -293,7 +293,7 @@
           "type": "string",
           "scope": "application",
           "default": "",
-          "description": "Path to the Google Chrome, Microsoft Edge, or Chromium executable used for PDF export. Leave empty to detect an installed browser automatically."
+          "description": "Path to the Google Chrome, Microsoft Edge, or Chromium executable used for PDF export and rendering illustrations in Word documents. Leave empty to detect an installed browser automatically."
         },
         "manulDown.images.moveWithDocument": {
           "type": "boolean",
@@ -438,7 +438,7 @@
               "description": "Math Block"
             }
           },
-          "markdownDescription": "Choose the buttons shown in the toolbar. Changes apply immediately. Unchecked buttons are also hidden from the **…** menu; their slash commands and keyboard shortcuts remain available. HTML, PDF, and Word export and Settings always remain in **…**."
+          "markdownDescription": "Choose the buttons shown in the toolbar. Changes apply immediately. Unchecked buttons are also hidden from the **…** menu; their slash commands and keyboard shortcuts remain available. Export and Settings always remain in **…**."
         },
         "manulDown.callout.defaultService": {
           "type": "string",

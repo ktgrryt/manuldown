@@ -8,8 +8,7 @@ const { toolbarItemDefaults } = require('../out/editor/ToolbarItems');
 const source = fs.readFileSync(path.join(__dirname, '..', 'media/modules/ToolbarManager.js'), 'utf8');
 const modulePromise = import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 
-async function fixture(t, initialWidth, { withFootnote = false, withToc = false, withPdf = false, withHtml = false,
-    withWord = false, extraTools = false, toolbarItems } = {}) {
+async function fixture(t, initialWidth, { withFootnote = false, withToc = false, withExport = false, extraTools = false, toolbarItems } = {}) {
     const window = domino.createWindow(`
         <div class="toolbar">
             <button class="toolbar-btn" data-command="bold" title="Bold (Ctrl+B)">B</button>
@@ -20,9 +19,7 @@ async function fixture(t, initialWidth, { withFootnote = false, withToc = false,
             <button class="toolbar-btn" data-command="image" title="Insert Image">Image</button>
             ${extraTools ? ['link', 'footnote', 'math', 'mathblock'].map(command => `<button class="toolbar-btn" data-command="${command}" title="${command}">${command}</button>`).join('') + '<div class="toolbar-separator"></div>' : ''}
             ${withFootnote || withToc || extraTools ? `<button class="toolbar-btn" data-command="settings" title="Settings"${extraTools ? ' data-overflow-only' : ''}>Settings</button>` : ''}
-            ${withHtml ? '<button class="toolbar-btn" data-command="exportHtml" data-overflow-only title="Export as HTML…" hidden>HTML</button>' : ''}
-            ${withPdf ? '<button class="toolbar-btn" data-command="exportPdf" data-overflow-only title="Export as PDF…" hidden>PDF</button>' : ''}
-            ${withWord ? '<button class="toolbar-btn" data-command="exportWord" data-overflow-only title="Export as Word…" hidden>Word</button>' : ''}
+            ${withExport ? '<button class="toolbar-btn" data-command="export" data-overflow-only title="Export" hidden>Export</button>' : ''}
             <button class="toolbar-btn toolbar-overflow-toggle" hidden>…</button>
             <div class="toolbar-overflow-menu" hidden></div>
         </div>
@@ -102,37 +99,37 @@ async function fixture(t, initialWidth, { withFootnote = false, withToc = false,
 }
 
 test('default preferences hide optional insertions and higher headings from the bar and overflow', async t => {
-    const f = await fixture(t, 2000, { extraTools: true, withPdf: true, toolbarItems: toolbarItemDefaults });
+    const f = await fixture(t, 2000, { extraTools: true, withExport: true, toolbarItems: toolbarItemDefaults });
     assert.deepEqual(f.visible(), ['bold', 'italic', 'h1', 'h2', 'h3']);
-    assert.deepEqual(f.overflow(), ['settings', 'exportPdf']);
+    assert.deepEqual(f.overflow(), ['settings', 'export']);
     f.resize(80);
-    assert.deepEqual(f.overflow(), ['bold', 'italic', 'h1', 'h2', 'h3', 'settings', 'exportPdf']);
+    assert.deepEqual(f.overflow(), ['bold', 'italic', 'h1', 'h2', 'h3', 'settings', 'export']);
     f.resize(2000);
     assert.deepEqual(f.visible(), ['bold', 'italic', 'h1', 'h2', 'h3']);
 });
 
 test('checkbox changes show only chosen headings and keep their narrow-width commands reachable', async t => {
     const allHidden = Object.fromEntries(Object.keys(toolbarItemDefaults).map(key => [key, false]));
-    const f = await fixture(t, 2000, { extraTools: true, withPdf: true, toolbarItems: toolbarItemDefaults });
+    const f = await fixture(t, 2000, { extraTools: true, withExport: true, toolbarItems: toolbarItemDefaults });
     const original = f.editor.innerHTML;
     f.manager.setToolbarItems({ ...allHidden, h1: true, h2: true, h3: true, h4: true });
     assert.deepEqual(f.visible(), ['h1', 'h2', 'h3', 'h4']);
     assert.equal(f.toolbar.querySelectorAll('.toolbar-separator:not([hidden])').length, 0);
     f.resize(80);
-    assert.deepEqual(f.overflow(), ['h1', 'h2', 'h3', 'h4', 'settings', 'exportPdf']);
+    assert.deepEqual(f.overflow(), ['h1', 'h2', 'h3', 'h4', 'settings', 'export']);
     f.resize(2000);
     f.manager.setToolbarItems({ ...allHidden, link: true, image: true, footnote: true, math: true, mathblock: true });
     assert.deepEqual(f.visible(), ['image', 'link', 'footnote', 'math', 'mathblock']);
-    assert.deepEqual(f.overflow(), ['settings', 'exportPdf']);
+    assert.deepEqual(f.overflow(), ['settings', 'export']);
     assert.equal(f.editor.innerHTML, original, 'Toolbar customization never changes the document');
 });
 
-test('hiding every editing tool leaves PDF and Settings available with no empty separators', async t => {
+test('hiding every editing tool leaves Export and Settings available with no empty separators', async t => {
     const allHidden = Object.fromEntries(Object.keys(toolbarItemDefaults).map(key => [key, false]));
-    const f = await fixture(t, 2000, { extraTools: true, withPdf: true });
-    f.manager.setToolbarItems({ ...allHidden, exportPdf: false, settings: false });
+    const f = await fixture(t, 2000, { extraTools: true, withExport: true });
+    f.manager.setToolbarItems({ ...allHidden, export: false, settings: false });
     assert.deepEqual(f.visible(), []);
-    assert.deepEqual(f.overflow(), ['settings', 'exportPdf']);
+    assert.deepEqual(f.overflow(), ['settings', 'export']);
     assert.equal(f.manager.overflowToggle.hidden, false);
     assert.equal(f.toolbar.querySelectorAll('.toolbar-separator:not([hidden])').length, 0);
     assert.equal(f.manager.overflowMenu.querySelectorAll('.toolbar-overflow-separator:not([hidden])').length, 0);
@@ -152,7 +149,7 @@ test('empty toolbar groups collapse to one separator on the bar and in the overf
 });
 
 test('removing the focused overflow command returns keyboard focus to the menu toggle', async t => {
-    const f = await fixture(t, 80, { extraTools: true, withPdf: true });
+    const f = await fixture(t, 80, { extraTools: true, withExport: true });
     f.manager.openOverflowMenu(true);
     assert.equal(f.focused, f.manager.overflowButtons.get('bold'));
     f.manager.setToolbarItems({ bold: false });
@@ -161,15 +158,15 @@ test('removing the focused overflow command returns keyboard focus to the menu t
     assert.ok(!f.overflow().includes('bold'));
 });
 
-test('PDF export remains in the ellipsis even when every editing button fits', async t => {
-    const f = await fixture(t, 2000, { withPdf: true });
-    assert.ok(!f.visible().includes('exportPdf'));
-    assert.deepEqual(f.overflow(), ['exportPdf']);
+test('Export remains in the ellipsis even when every editing button fits', async t => {
+    const f = await fixture(t, 2000, { withExport: true });
+    assert.ok(!f.visible().includes('export'));
+    assert.deepEqual(f.overflow(), ['export']);
     assert.equal(f.manager.overflowToggle.hidden, false);
     let opened = 0;
-    f.manager.onExportPdf = () => { opened++; };
+    f.manager.onChooseExport = () => { opened++; };
     f.event('click', f.manager.overflowToggle);
-    f.event('click', f.manager.overflowButtons.get('exportPdf'));
+    f.event('click', f.manager.overflowButtons.get('export'));
     assert.equal(opened, 1);
 });
 
@@ -324,26 +321,14 @@ test('Escape closes a mouse-opened menu while focus is still in the editor', asy
 });
 
 
-test('HTML export stays in the overflow menu when disabled in preferences and delegates its action', async t => {
-    const f = await fixture(t, 1000, { withHtml: true, withPdf: true });
-    f.manager.setToolbarItems({ exportHtml: false });
-    assert.ok(!f.visible().includes('exportHtml'));
-    assert.deepEqual(f.overflow(), ['exportHtml', 'exportPdf']);
-    let exported = 0;
-    f.manager.onExportHtml = () => { exported++; };
-    f.event('click', f.manager.overflowToggle);
-    f.event('click', f.manager.overflowButtons.get('exportHtml'));
-    assert.equal(exported, 1);
-});
-
-test('Word export remains available from the overflow menu on a read-only selection', async t => {
-    const f = await fixture(t, 1000, { withWord: true, withFootnote: true });
-    f.manager.setToolbarItems({ exportWord: false });
+test('Export remains available from the overflow menu on a read-only selection', async t => {
+    const f = await fixture(t, 1000, { withExport: true, withFootnote: true });
+    f.manager.setToolbarItems({ export: false });
     f.focus(f.editor.querySelector('[data-mdw-footnote-backref]'));
-    assert.ok(f.overflow().includes('exportWord'));
+    assert.ok(f.overflow().includes('export'));
     let exported = 0;
-    f.manager.onExportWord = () => { exported++; };
+    f.manager.onChooseExport = () => { exported++; };
     f.event('click', f.manager.overflowToggle);
-    f.event('click', f.manager.overflowButtons.get('exportWord'));
+    f.event('click', f.manager.overflowButtons.get('export'));
     assert.equal(exported, 1);
 });

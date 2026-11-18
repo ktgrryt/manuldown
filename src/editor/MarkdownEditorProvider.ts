@@ -72,7 +72,7 @@ class ImageImportError extends Error {
 
 export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     private static readonly viewType = 'manulDown.editor';
-    private static readonly builtInSlashCommandIds = new Set(['table', 'quote', 'callout', 'code', 'checkbox', 'link', 'toc', 'footnote', 'math', 'inline-math', 'settings']);
+    private static readonly builtInSlashCommandIds = new Set(['table', 'quote', 'callout', 'code', 'checkbox', 'link', 'toc', 'footnote', 'math', 'inline-math', 'export-html', 'export-pdf', 'export-word', 'settings']);
     private static readonly workspaceLinkRequestIdPattern = /^workspace-link-\d{1,16}-\d{1,10}$/;
     private static readonly workspaceLinkSuggestionRequestIdPattern =
         /^workspace-link-suggest-\d{1,16}-\d{1,10}$/;
@@ -1504,7 +1504,17 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         // Handle messages from the webview
         webviewPanel.webview.onDidReceiveMessage(
             async (message) => {
-                switch (message.type) {
+                let action = message.type;
+                if (action === 'chooseExport') {
+                    const format = await vscode.window.showQuickPick([
+                        { label: 'PDF', action: 'openPdfPreview' },
+                        { label: 'HTML', action: 'exportHtml' },
+                        { label: 'DOCX', action: 'exportWord' },
+                    ], { title: 'Export', placeHolder: 'Select a file format' });
+                    if (!format || editorDisposed) { return; }
+                    action = format.action;
+                }
+                switch (action) {
                     case 'exportHtml':
                         try {
                             await exportHtml(this.context.extensionUri, document.uri, captureExport, resolveExportImage);
@@ -1514,7 +1524,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                         break;
                     case 'exportWord':
                         try {
-                            await exportWord(document.uri, captureExport, resolveExportImage);
+                            await exportWord(this.context.extensionUri, document.uri, captureExport, resolveExportImage);
                         } catch (error) {
                             void vscode.window.showErrorMessage(`Word export failed: ${error instanceof Error ? error.message : String(error)}`);
                         }
@@ -5348,14 +5358,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             Math Block
         </button>
         <div class="toolbar-separator"></div>
-        <button class="toolbar-btn" data-command="exportHtml" data-overflow-only title="Export as HTML…" aria-label="Export as HTML…" hidden>
-            HTML
-        </button>
-        <button class="toolbar-btn" data-command="exportPdf" data-overflow-only title="Export as PDF…" aria-label="Export as PDF…" hidden>
-            PDF
-        </button>
-        <button class="toolbar-btn" data-command="exportWord" data-overflow-only title="Export as Word…" aria-label="Export as Word…" hidden>
-            Word
+        <button class="toolbar-btn" data-command="export" data-overflow-only title="Export" hidden>
+            Export
         </button>
         <div class="toolbar-separator"></div>
         <button class="toolbar-btn" data-command="settings" data-overflow-only title="Settings" hidden>

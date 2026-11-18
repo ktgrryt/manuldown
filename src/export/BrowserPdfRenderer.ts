@@ -142,7 +142,7 @@ export async function openPdfBrowser(executable: string): Promise<{ connection: 
 
 const pdfFontFamily = '-apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans CJK JP", "Noto Sans JP", "Hiragino Sans", "Yu Gothic", Meiryo, sans-serif';
 const assetCache = new Map<string, Promise<string>>();
-function readAsset(root: string, relative: string): Promise<string> {
+export function readExportAsset(root: string, relative: string): Promise<string> {
     const key = path.join(root, relative);
     if (!assetCache.has(key)) { assetCache.set(key, fs.readFile(key, 'utf8')); }
     return assetCache.get(key)!;
@@ -158,12 +158,12 @@ async function buildExportPage(
     const hasMath = /data-mdw-math=|language-math/.test(html);
     const hasMermaid = /language-mermaid/.test(html);
     const [css, script, prism, katex, mermaid] = await Promise.all([
-        readAsset(mediaRoot, 'export.css'), readAsset(mediaRoot, 'export.js'),
-        readAsset(mediaRoot, 'vendor/prism.bundle.js'),
-        hasMath ? readAsset(mediaRoot, 'vendor/katex/katex.min.js') : '',
-        hasMermaid ? readAsset(mediaRoot, 'vendor/mermaid.bundle.js') : '',
+        readExportAsset(mediaRoot, 'export.css'), readExportAsset(mediaRoot, 'export.js'),
+        readExportAsset(mediaRoot, 'vendor/prism.bundle.js'),
+        hasMath ? readExportAsset(mediaRoot, 'vendor/katex/katex.min.js') : '',
+        hasMermaid ? readExportAsset(mediaRoot, 'vendor/mermaid.bundle.js') : '',
     ]);
-    let mathCss = hasMath ? await readAsset(mediaRoot, 'vendor/katex/katex.min.css') : '';
+    let mathCss = hasMath ? await readExportAsset(mediaRoot, 'vendor/katex/katex.min.css') : '';
     const fontFiles = [...mathCss.matchAll(/url\((fonts\/[^)]+\.woff2)\)/g)];
     const fonts = await Promise.all([...new Set(fontFiles.map(match => match[1]))].map(async relative => {
         const bytes = await fs.readFile(path.join(mediaRoot, 'vendor/katex', relative));
@@ -203,6 +203,25 @@ export async function buildHtmlPage(mediaRoot: string, html: string, title: stri
     }, [], '', 'html');
 }
 
+/** Load only the embedded resources and wait for the export's fonts and illustrations. */
+export async function loadPrintPage(cdp: ChromiumConnection, html: string): Promise<{ sessionId: string; warnings: string[] }> {
+    const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank' });
+    const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
+    await cdp.send('Emulation.setEmulatedMedia', { media: 'print' }, sessionId);
+    await cdp.send('Network.enable', {}, sessionId);
+    await cdp.send('Network.setBlockedURLs', { urls: ['http://*', 'https://*', 'file://*', 'ftp://*', 'ws://*', 'wss://*'] }, sessionId);
+    const { frameTree } = await cdp.send('Page.getFrameTree', {}, sessionId);
+    await cdp.send('Page.setDocumentContent', { frameId: frameTree.frame.id, html }, sessionId);
+    const result = await cdp.send('Runtime.evaluate', {
+        expression: 'window.manulPdfReady', awaitPromise: true, returnByValue: true,
+    }, sessionId);
+    if (result.exceptionDetails) {
+        throw new Error(result.exceptionDetails.exception?.description?.split('\n')[0] || 'Print layout failed.');
+    }
+    if (!Array.isArray(result.result?.value)) { throw new Error('Print content could not be prepared.'); }
+    return { sessionId, warnings: result.result.value };
+}
+
 export async function renderPdf(options: {
     mediaRoot: string; html: string; title: string; layout: PdfLayout; breaks: string[];
     browserPath?: string; signal: AbortSignal;
@@ -218,20 +237,7 @@ export async function renderPdf(options: {
     try {
         if (options.signal.aborted) { throw new Error('PDF generation cancelled.'); }
         const cdp = browser.connection;
-        const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank' });
-        const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
-        await cdp.send('Emulation.setEmulatedMedia', { media: 'print' }, sessionId);
-        await cdp.send('Network.enable', {}, sessionId);
-        await cdp.send('Network.setBlockedURLs', { urls: ['http://*', 'https://*', 'file://*', 'ftp://*', 'ws://*', 'wss://*'] }, sessionId);
-        const { frameTree } = await cdp.send('Page.getFrameTree', {}, sessionId);
-        await cdp.send('Page.setDocumentContent', { frameId: frameTree.frame.id, html }, sessionId);
-        const result = await cdp.send('Runtime.evaluate', {
-            expression: 'window.manulPdfReady', awaitPromise: true, returnByValue: true,
-        }, sessionId);
-        if (result.exceptionDetails) {
-            throw new Error(result.exceptionDetails.exception?.description?.split('\n')[0] || 'PDF layout failed.');
-        }
-        if (!Array.isArray(result.result?.value)) { throw new Error('PDF content could not be prepared.'); }
+        const { sessionId, warnings } = await loadPrintPage(cdp, html);
         const { data } = await cdp.send('Page.printToPDF', {
             printBackground: true, preferCSSPageSize: true,
             displayHeaderFooter: options.layout.pageNumbers,
@@ -243,7 +249,7 @@ export async function renderPdf(options: {
         const { extractPdfBoundaries } = await import('./PdfBoundaryMap');
         const mapped = await extractPdfBoundaries(bytes, probePrefix);
         if (options.signal.aborted) { throw new Error('PDF generation cancelled.'); }
-        return { ...mapped, warnings: result.result.value };
+        return { ...mapped, warnings };
     } finally {
         options.signal.removeEventListener('abort', abort);
         await browser.dispose();
