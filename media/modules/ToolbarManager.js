@@ -21,6 +21,7 @@ export class ToolbarManager {
         this.canInsertMath = options.canInsertMath || (() => true);
         this.onInsertMathBlock = options.onInsertMathBlock || null;
         this.onOpenSettings = options.onOpenSettings || null;
+        this.onExportHtml = options.onExportHtml || null;
         this.onExportPdf = options.onExportPdf || null;
         this.onFormatSelectedCells = options.onFormatSelectedCells || null;
         this.getSelectedCellFormatState = options.getSelectedCellFormatState || (() => null);
@@ -96,7 +97,7 @@ export class ToolbarManager {
                 this.executeCommand(command);
                 // ダイアログを開くコマンドはダイアログ側でフォーカスを管理するため、ここではスキップ
                 if (command !== 'table' && command !== 'link' && command !== 'image' && command !== 'footnote' &&
-                    command !== 'math' && command !== 'settings' && command !== 'exportPdf') {
+                    command !== 'math' && command !== 'settings' && command !== 'exportPdf' && command !== 'exportHtml') {
                     setTimeout(() => this.editor.focus(), 0);
                 }
             });
@@ -158,7 +159,7 @@ export class ToolbarManager {
                 this.closeOverflowMenu({ restoreSelection: true });
                 this.executeCommand(command);
                 if (command !== 'table' && command !== 'link' && command !== 'image' && command !== 'footnote' &&
-                    command !== 'math' && command !== 'settings' && command !== 'exportPdf') {
+                    command !== 'math' && command !== 'settings' && command !== 'exportPdf' && command !== 'exportHtml') {
                     setTimeout(() => this.editor.focus(), 0);
                 }
             });
@@ -223,7 +224,7 @@ export class ToolbarManager {
     }
 
     isToolbarCommandEnabled(command) {
-        return command === 'settings' || command === 'exportPdf' || this.toolbarItemVisibility?.[command] !== false;
+        return command === 'settings' || command === 'exportPdf' || command === 'exportHtml' || this.toolbarItemVisibility?.[command] !== false;
     }
 
     setToolbarItems(visibility) {
@@ -379,6 +380,10 @@ export class ToolbarManager {
      * @param {string} command - 実行するコマンド
      */
     executeCommand(command) {
+        if (command === 'exportHtml') {
+            if (this.onExportHtml) this.onExportHtml();
+            return;
+        }
         if (command === 'exportPdf') {
             if (this.onExportPdf) this.onExportPdf();
             return;
@@ -565,7 +570,7 @@ export class ToolbarManager {
             const disabledFootnote = command === 'footnote' && !this.canInsertFootnote();
             const disabledMath = command === 'math' && !this.canInsertMath();
             const isDisabled =
-                (onReadOnlyObject && command !== 'settings' && command !== 'exportPdf') ||
+                (onReadOnlyObject && command !== 'settings' && command !== 'exportPdf' && command !== 'exportHtml') ||
                 disabledByTable ||
                 disabledBoldInHeading ||
                 disabledByList ||

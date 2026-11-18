@@ -38,6 +38,19 @@ test('PDF export opens without moving a read-only object selection or adding edi
     assert.equal(opened, 1);
 });
 
+test('HTML export opens without moving a read-only object selection or adding editor history', async () => {
+    const { ToolbarManager } = await toolbarManagerModulePromise;
+    let opened = 0;
+    const manager = new ToolbarManager(
+        { focus: () => assert.fail('HTML export owns its focus') },
+        { saveState: () => assert.fail('HTML export must not add an editing undo step') },
+        { onExportHtml: () => { opened++; } }
+    );
+    manager.isSelectionOnReadOnlyObject = () => true;
+    manager.executeCommand('exportHtml');
+    assert.equal(opened, 1);
+});
+
 for (const command of ['bold', 'italic', 'strikethrough', 'inlinecode']) {
     test(`${command} delegates the selected cell range before creating a native caret`, async () => {
         const { ToolbarManager } = await toolbarManagerModulePromise;

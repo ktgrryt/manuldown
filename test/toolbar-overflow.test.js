@@ -8,7 +8,7 @@ const { toolbarItemDefaults } = require('../out/editor/ToolbarItems');
 const source = fs.readFileSync(path.join(__dirname, '..', 'media/modules/ToolbarManager.js'), 'utf8');
 const modulePromise = import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 
-async function fixture(t, initialWidth, { withFootnote = false, withToc = false, withPdf = false,
+async function fixture(t, initialWidth, { withFootnote = false, withToc = false, withPdf = false, withHtml = false,
     extraTools = false, toolbarItems } = {}) {
     const window = domino.createWindow(`
         <div class="toolbar">
@@ -20,6 +20,7 @@ async function fixture(t, initialWidth, { withFootnote = false, withToc = false,
             <button class="toolbar-btn" data-command="image" title="Insert Image">Image</button>
             ${extraTools ? ['link', 'footnote', 'math', 'mathblock'].map(command => `<button class="toolbar-btn" data-command="${command}" title="${command}">${command}</button>`).join('') + '<div class="toolbar-separator"></div>' : ''}
             ${withFootnote || withToc || extraTools ? `<button class="toolbar-btn" data-command="settings" title="Settings"${extraTools ? ' data-overflow-only' : ''}>Settings</button>` : ''}
+            ${withHtml ? '<button class="toolbar-btn" data-command="exportHtml" data-overflow-only title="Export as HTML…" hidden>HTML</button>' : ''}
             ${withPdf ? '<button class="toolbar-btn" data-command="exportPdf" data-overflow-only title="Export as PDF…" hidden>PDF</button>' : ''}
             <button class="toolbar-btn toolbar-overflow-toggle" hidden>…</button>
             <div class="toolbar-overflow-menu" hidden></div>
@@ -319,4 +320,17 @@ test('Escape closes a mouse-opened menu while focus is still in the editor', asy
     assert.equal(f.manager.overflowMenu.hidden, true);
     assert.ok(f.focused === f.manager.overflowToggle);
     assert.equal(f.range.startOffset, 1);
+});
+
+
+test('HTML export stays in the overflow menu when disabled in preferences and delegates its action', async t => {
+    const f = await fixture(t, 1000, { withHtml: true, withPdf: true });
+    f.manager.setToolbarItems({ exportHtml: false });
+    assert.ok(!f.visible().includes('exportHtml'));
+    assert.deepEqual(f.overflow(), ['exportHtml', 'exportPdf']);
+    let exported = 0;
+    f.manager.onExportHtml = () => { exported++; };
+    f.event('click', f.manager.overflowToggle);
+    f.event('click', f.manager.overflowButtons.get('exportHtml'));
+    assert.equal(exported, 1);
 });

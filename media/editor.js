@@ -1805,6 +1805,7 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
         canInsertMath: () => mathManager.canInsert(),
         onInsertMathBlock: () => insertMathBlock(),
         onOpenSettings: () => openManulDownSettings(),
+        onExportHtml: () => vscode.postMessage({ type: 'exportHtml' }),
         onExportPdf: () => vscode.postMessage({ type: 'openPdfPreview' })
     });
 
@@ -25643,7 +25644,7 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
                 break;
             case 'prepareSyncSnapshot':
                 {
-                    if (message.reason === 'pdfExport' || message.reason === 'editorSwitch') {
+                    if (message.reason === 'documentExport' || message.reason === 'pdfExport' || message.reason === 'editorSwitch') {
                         if (editorLoadFailed) {
                             vscode.postMessage({ type: 'syncSnapshotFailed', requestId: message.requestId });
                             break;

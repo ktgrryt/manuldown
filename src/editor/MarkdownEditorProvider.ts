@@ -21,6 +21,7 @@ import { MarkdownSourceBlock, markdownContentMatches, preserveMarkdownSource } f
 import { EmphasisBoundarySerializer } from './Emphasis';
 import { protectMarkdownTocs } from './MarkdownToc';
 import { CalloutService, isCalloutFormatChange, isCalloutTypeChange, parseCallout, resolveCalloutService, serializeCallout } from './Callouts';
+import { exportHtml } from '../export/HtmlExport';
 import { PdfPreviewProvider } from '../export/PdfPreviewProvider';
 import TurndownService from 'turndown';
 const { createWindow } = require('@mixmark-io/domino');
@@ -1459,45 +1460,55 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         };
         this.editorSwitchHandlers.set(documentKey, prepareEditorSwitch);
 
+        const captureExport = async () => {
+            let captured: { source: string; version: number } | undefined;
+            await enqueueTerminalAction(async () => {
+                if (editorDisposed) {
+                    // Closing an editor flushes its pending edits first.
+                    if (document.isClosed) { throw new Error('Reopen the Markdown document to export it.'); }
+                    captured = { source: document.getText(), version: document.version };
+                    return;
+                }
+                if (unresolvedExternalChangeId !== 0) { throw new Error('Resolve the external edit conflict before exporting.'); }
+                const snapshot = await requestWebviewSyncSnapshot('documentExport', 15000);
+                if (!snapshot) { throw new Error('The latest edit or image import is not ready. Finish editing and try again.'); }
+                if (editorDisposed || unresolvedExternalChangeId !== 0) { throw new Error('The document changed while preparing export. Try again.'); }
+                queueWebviewUpdate(snapshot.content, snapshot.revision);
+                if (!await flushPendingWebviewUpdate() || !await flushAllPendingWebviewUpdates()) {
+                    throw new Error('The latest edit could not be synchronized. Resolve the edit before exporting.');
+                }
+                captured = { source: document.getText(), version: document.version };
+            });
+            if (!captured) { throw new Error('The Markdown document could not be captured.'); }
+            return captured;
+        };
+        const resolveExportImage = async (source: string) => {
+            if (/^https?:\/\//i.test(source)) {
+                if (!this.getBooleanSetting('security.allowRemoteImages', false) || !/^https:\/\//i.test(source)) { return null; }
+                const fetched = await this.fetchRemoteImage(vscode.Uri.parse(source), true);
+                const mime = fetched.mimeType || this.getImageMimeTypeFromPath(source);
+                return `data:${mime};base64,${Buffer.from(fetched.bytes).toString('base64')}`;
+            }
+            return this.resolveImageSrcForWebview(source, document, webviewPanel.webview);
+        };
+
         // Handle messages from the webview
         webviewPanel.webview.onDidReceiveMessage(
             async (message) => {
                 switch (message.type) {
+                    case 'exportHtml':
+                        try {
+                            await exportHtml(this.context.extensionUri, document.uri, captureExport, resolveExportImage);
+                        } catch (error) {
+                            void vscode.window.showErrorMessage(`HTML export failed: ${error instanceof Error ? error.message : String(error)}`);
+                        }
+                        break;
                     case 'openPdfPreview':
                         if (!this.pdfPreviewProvider) {
                             this.pdfPreviewProvider = new PdfPreviewProvider(this.context);
                             this.context.subscriptions.push(this.pdfPreviewProvider);
                         }
-                        await this.pdfPreviewProvider.open(document, async () => {
-                            let captured: { source: string; version: number } | undefined;
-                            await enqueueTerminalAction(async () => {
-                                if (editorDisposed) {
-                                    // Closing an editor flushes its pending edits first.
-                                    if (document.isClosed) { throw new Error('Reopen the Markdown document to refresh its PDF preview.'); }
-                                    captured = { source: document.getText(), version: document.version };
-                                    return;
-                                }
-                                if (unresolvedExternalChangeId !== 0) { throw new Error('Resolve the external edit conflict before exporting.'); }
-                                const snapshot = await requestWebviewSyncSnapshot('pdfExport', 15000);
-                                if (!snapshot) { throw new Error('The latest edit or image import is not ready. Finish editing and try again.'); }
-                                if (editorDisposed || unresolvedExternalChangeId !== 0) { throw new Error('The document changed while preparing PDF preview. Try again.'); }
-                                queueWebviewUpdate(snapshot.content, snapshot.revision);
-                                if (!await flushPendingWebviewUpdate() || !await flushAllPendingWebviewUpdates()) {
-                                    throw new Error('The latest edit could not be synchronized. Resolve the edit before exporting.');
-                                }
-                                captured = { source: document.getText(), version: document.version };
-                            });
-                            if (!captured) { throw new Error('The Markdown document could not be captured.'); }
-                            return captured;
-                        }, async (source) => {
-                            if (/^https?:\/\//i.test(source)) {
-                                if (!this.getBooleanSetting('security.allowRemoteImages', false) || !/^https:\/\//i.test(source)) { return null; }
-                                const fetched = await this.fetchRemoteImage(vscode.Uri.parse(source), true);
-                                const mime = fetched.mimeType || this.getImageMimeTypeFromPath(source);
-                                return `data:${mime};base64,${Buffer.from(fetched.bytes).toString('base64')}`;
-                            }
-                            return this.resolveImageSrcForWebview(source, document, webviewPanel.webview);
-                        });
+                        await this.pdfPreviewProvider.open(document, captureExport, resolveExportImage);
                         break;
                     case 'syncSnapshotFailed':
                         if (typeof message.requestId === 'string') { settleSyncSnapshotRequest(message.requestId, null); }
@@ -5318,6 +5329,9 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             Math Block
         </button>
         <div class="toolbar-separator"></div>
+        <button class="toolbar-btn" data-command="exportHtml" data-overflow-only title="Export as HTML…" aria-label="Export as HTML…" hidden>
+            HTML
+        </button>
         <button class="toolbar-btn" data-command="exportPdf" data-overflow-only title="Export as PDF…" aria-label="Export as PDF…" hidden>
             PDF
         </button>

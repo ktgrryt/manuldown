@@ -1,4 +1,4 @@
-// Runs only inside the isolated PDF browser, after the shared Markdown parser.
+// Renders the shared Markdown output in PDF and standalone HTML pages.
 window.manulPdfReady = (async () => {
     const root = document.getElementById('pdf-content');
     const config = window.manulPdfConfig;
@@ -77,6 +77,7 @@ window.manulPdfReady = (async () => {
         }
     }
     await deadline(document.fonts.ready, 'Font loading');
+    if (config.format === 'html') return [...new Set(warnings)];
     for (const node of root.querySelectorAll('pre, li, blockquote, .mdw-callout')) {
         if (node.getBoundingClientRect().height < config.height * .4) node.classList.add('export-keep');
     }

@@ -8,5 +8,5 @@ export async function prepareExportSnapshot({ isComposing, hasPendingImages, cre
         }
         await new Promise(resolve => setTimeout(resolve, 25));
     }
-    throw new Error('Finish the current edit or image import, then open PDF preview again.');
+    throw new Error('Finish the current edit or image import, then try again.');
 }

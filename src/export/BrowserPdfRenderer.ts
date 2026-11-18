@@ -148,8 +148,8 @@ function readAsset(root: string, relative: string): Promise<string> {
     return assetCache.get(key)!;
 }
 
-export async function buildPdfPage(
-    mediaRoot: string, html: string, title: string, layout: PdfLayout, breaks: readonly string[], probePrefix = '',
+async function buildExportPage(
+    mediaRoot: string, html: string, title: string, layout: PdfLayout, breaks: readonly string[], probePrefix = '', format: 'pdf' | 'html' = 'pdf',
 ): Promise<string> {
     const margin = { narrow: 12, standard: 18, wide: 24 }[layout.margin];
     const fontSize = { small: 9.5, standard: 10.5, large: 12 }[layout.fontSize];
@@ -170,16 +170,37 @@ export async function buildPdfPage(
         return [relative, `data:font/woff2;base64,${bytes.toString('base64')}`] as const;
     }));
     for (const [relative, data] of fonts) { mathCss = mathCss.split(`url(${relative})`).join(`url(${data})`); }
-    const config = JSON.stringify({ breaks, probePrefix, width: (width - margin * 2) * 96 / 25.4,
+    const config = JSON.stringify({ format, breaks, probePrefix, width: (width - margin * 2) * 96 / 25.4,
         height: (height - margin * 2) * 96 / 25.4 }).replace(/</g, '\\u003c');
     const scripts = [prism, katex, mermaid, `window.manulPdfConfig=${config};\n${script}`]
         .filter(Boolean).map(source => `<script nonce="manul-pdf">${source.replace(/<\/script/gi, '<\\/script')}</script>`).join('');
     return `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-manul-pdf'; style-src 'unsafe-inline'; img-src data:; font-src data:; connect-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">
 <title>${escapePdfHtml(title)}</title><style>${css}\n${mathCss}
 @page { size: ${layout.paper} ${layout.landscape ? 'landscape' : 'portrait'}; margin: ${margin}mm; }
 :root { --pdf-width: ${width - 2 * margin}mm; --pdf-height: ${height - 2 * margin}mm; --pdf-font-size: ${fontSize}pt; --pdf-font-family: ${pdfFontFamily}; }
+${format === 'html' ? `
+body { width: auto; max-width: 960px; margin: 0 auto; padding: 32px; font-size: 16px; }
+img, .export-diagram svg { max-height: none; }
+pre, .export-diagram, .katex-display { overflow-x: auto; }
+@media (max-width: 600px) { body { padding: 20px 16px; } }
+@media print { body { max-width: none; padding: 0; } }
+` : ''}
 </style></head><body><main id="pdf-content">${html}</main>${scripts}</body></html>`;
+}
+
+export async function buildPdfPage(
+    mediaRoot: string, html: string, title: string, layout: PdfLayout, breaks: readonly string[], probePrefix = '',
+): Promise<string> {
+    return buildExportPage(mediaRoot, html, title, layout, breaks, probePrefix);
+}
+
+/** A portable page with embedded styles, renderers and math fonts. */
+export async function buildHtmlPage(mediaRoot: string, html: string, title: string): Promise<string> {
+    return buildExportPage(mediaRoot, html, title, {
+        paper: 'A4', landscape: false, margin: 'standard', fontSize: 'standard', pageNumbers: false,
+    }, [], '', 'html');
 }
 
 export async function renderPdf(options: {

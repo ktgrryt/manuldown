@@ -23,6 +23,7 @@ function loadPdfModules(extra = {}) {
         return {
             ...require('../../out/export/PdfExportSession'),
             ...require('../../out/export/PdfHtmlBuilder'),
+            ...require('../../out/export/HtmlExport'),
             ...require('../../out/export/BrowserPdfRenderer'),
             ...require('../../out/export/PdfPreviewHtml'),
             ...require('../../out/export/PdfBreakAnchors'),
