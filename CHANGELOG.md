@@ -6,6 +6,12 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 
 ## [Unreleased]
 
+## [2.4.1] - 2026-11-18
+
+### Fixed
+- On macOS, make Control+K delete from the caret to the end of the current line on the first line of a new document, in paragraphs, and in table cells. Preserve following lines and retain code block indentation and blank lines.
+- Preserve line breaks when restoring deleted text with Control+Y. Keep Control+K in search and code language fields, and during IME composition, from deleting editor text.
+
 ## [2.4.0] - 2026-11-18
 
 ### Added
