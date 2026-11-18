@@ -79,10 +79,13 @@ test('callout format controls align with the title and preserve editing, history
         }
         assert.fail(`Editor timed out: ${expression}; ${JSON.stringify(await evaluate('window.editorErrors'))}`);
     };
-    const click = async (selector, atStart = false) => {
-        const point = await evaluate(`(()=>{const r=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();return {x:r.left+${atStart ? '6' : 'r.width/2'},y:r.top+r.height/2};})()`);
+    const clickPoint = async point => {
         await connection.send('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', clickCount: 1, ...point }, sessionId);
         await connection.send('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: 1, ...point }, sessionId);
+    };
+    const click = async (selector, atStart = false) => {
+        const point = await evaluate(`(()=>{const r=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();return {x:r.left+${atStart ? '6' : 'r.width/2'},y:r.top+r.height/2};})()`);
+        await clickPoint(point);
     };
     const key = async (name, code, virtualKey, modifiers = 0) => {
         await connection.send('Input.dispatchKeyEvent', { type: 'keyDown', key: name, code, windowsVirtualKeyCode: virtualKey, modifiers }, sessionId);
@@ -127,6 +130,40 @@ test('callout format controls align with the title and preserve editing, history
     await waitFor(`document.body.dataset.editorState==='ready'&&document.querySelectorAll('.mdw-callout-format-toggle').length===2`);
     assert.equal(await evaluate(`(()=>{const button=document.querySelector('.mdw-callout-format-toggle'),icon=document.querySelector('.toolbar-overflow-toggle .md-icon');return button.textContent===''&&getComputedStyle(button,'::before').maskImage===getComputedStyle(icon).maskImage;})()`), true);
     const artifacts = await fs.mkdtemp(path.join(os.tmpdir(), 'manuldown-callout-'));
+    await t.test('clicking callout header whitespace leaves an editable body caret', async () => {
+        await reset('# Before\n\n> [!CAUTION]\n> 注意事項です。\n\nAfter.\n');
+        const body = await evaluate(`document.querySelector('.mdw-callout-content').innerHTML`);
+        const updates = await evaluate(`hostMessages.filter(message=>message.type==='update').length`);
+        const points = await evaluate(`(()=>{const block=document.querySelector('.mdw-callout'),title=block.querySelector('.mdw-callout-title').getBoundingClientRect(),button=block.querySelector('.mdw-callout-format-toggle').getBoundingClientRect(),r=block.getBoundingClientRect();return [
+            {name:'between controls',x:(title.right+button.left)/2,y:button.top+button.height/2},
+            {name:'left of menu',x:button.left-2,y:button.top+button.height/2},
+            {name:'right of menu',x:button.right+2,y:button.top+button.height/2},
+            {name:'above menu',x:button.left+button.width/2,y:button.top-3},
+            {name:'below menu',x:button.left+button.width/2,y:button.bottom+2},
+            {name:'top padding',x:r.left+r.width/2,y:r.top+2}
+        ].map(p=>({...p,target:document.elementFromPoint(p.x,p.y)?.className}));})()`);
+        for (const { name, target, x, y } of points) {
+            await selectBodyStart();
+            await clickPoint({ x, y });
+            await settle();
+            const state = await evaluate(`(()=>{const s=getSelection(),node=s.anchorNode,e=node?.nodeType===1?node:node?.parentElement;return {node:node?.nodeName,element:e?.className,offset:s.anchorOffset,body:!!e?.closest('.mdw-callout-content'),focused:document.activeElement.className||document.activeElement.id,collapsed:s.isCollapsed};})()`);
+            assert.equal(state.body, true, JSON.stringify({ name, target, ...state }));
+            assert.equal(state.collapsed, true, name);
+            assert.equal(state.focused, 'editor', name);
+            assert.equal(await evaluate(`document.querySelector('.mdw-callout-content').innerHTML`), body);
+        }
+        assert.equal(await evaluate(`hostMessages.filter(message=>message.type==='update').length`), updates);
+        const { data } = await connection.send('Page.captureScreenshot', { format: 'png' }, sessionId);
+        await fs.writeFile(path.join(artifacts, 'header-caret.png'), Buffer.from(data, 'base64'));
+        await connection.send('Input.insertText', { text: '追記' }, sessionId);
+        await settle();
+        assert.equal(await evaluate(`document.querySelector('.mdw-callout-content p').textContent`), '追記注意事項です。');
+        await evaluate(`window.postMessage({type:'historyCommand',direction:'undo'},'*')`);
+        await waitFor(`document.querySelector('.mdw-callout-content p').textContent==='注意事項です。'`);
+        await evaluate(`window.postMessage({type:'historyCommand',direction:'redo'},'*')`);
+        await waitFor(`document.querySelector('.mdw-callout-content p').textContent==='追記注意事項です。'`);
+        await reset();
+    });
     for (const width of [1000, 360]) {
         await connection.send('Emulation.setDeviceMetricsOverride', { width, height: 650, deviceScaleFactor: 1, mobile: false }, sessionId);
         const geometry = await evaluate(`(()=>{const block=document.querySelector('.mdw-callout'),title=block.querySelector('.mdw-callout-title').getBoundingClientRect(),button=block.querySelector('.mdw-callout-format-toggle').getBoundingClientRect(),r=block.getBoundingClientRect();return {aligned:Math.abs(title.top-button.top)<3,separate:title.right<button.left,right:r.right-button.right};})()`);
@@ -361,7 +398,7 @@ test('callout format controls align with the title and preserve editing, history
         })()`);
         assert.ok(lines.inItem && Math.abs(lines.caretY - lines.firstY) <= 2, JSON.stringify(lines));
     });
-    await t.test('clicking callout padding keeps the next arrow in the nearby type or body', async () => {
+    await t.test('clicking callout padding places the body caret before keyboard navigation', async () => {
         await reset('Before.\n\n:::note warn\n' + 'Wrapped body text. '.repeat(12) + '\n\nLast paragraph.\n:::\n\nAfter.\n');
         const body = await evaluate(`document.querySelector('.mdw-callout-content').innerHTML`);
         const clickTopPadding = async () => {
@@ -370,7 +407,7 @@ test('callout format controls align with the title and preserve editing, history
             await connection.send('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: 1, ...point }, sessionId);
             await settle();
         };
-        await clickTopPadding(); await key('ArrowDown', 'ArrowDown', 40); await settle();
+        await clickTopPadding();
         assert.equal(await evaluate(`document.querySelector('.mdw-callout-content p').contains(getSelection().anchorNode)&&getSelection().anchorOffset===0`), true);
         await key('ArrowDown', 'ArrowDown', 40); await settle();
         assert.equal(await evaluate(`document.querySelector('.mdw-callout-content p').contains(getSelection().anchorNode)&&getSelection().anchorOffset>0`), true);

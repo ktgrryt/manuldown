@@ -24928,6 +24928,7 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
         document.addEventListener('selectionchange', () => {
             if (!isUpdating && !isComposing && !compositionUpdateGate.composing &&
                 !dragSelectionScroll?.isSelectingWithPointer) {
+                calloutManager.normalizeCaret();
                 footnoteManager.normalizeCaret();
                 mathManager.normalizeCaret();
                 normalizeCaretInHiddenSourceCodeBlock();
