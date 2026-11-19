@@ -6,6 +6,8 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 
 ## [Unreleased]
 
+## [2.4.4] - 2026-11-19
+
 ### Added
 - Insert and edit GitBook hints, MyST / Jupyter Book admonitions, and Quarto callouts in Markdown files. The GitHub / GitLab format also covers Microsoft Learn alerts.
 - Export from the slash menu with `/export-pdf`, `/export-html`, and `/export-word`.
