@@ -1,4 +1,7 @@
 // @ts-nocheck
+import { calloutDialects, fencedDescriptor, gitbookCloser, matchesFencedCloser, mystHasOptions, resolveCalloutService, supportsFencedType } from '../../src/editor/CalloutFormats';
+export { resolveCalloutService };
+
 // Loaded callouts use the host Markdown parser. These deliberately narrower
 // shortcuts only wrap complete declarations and move existing editable nodes.
 const variants = Object.assign(Object.create(null), {
@@ -11,18 +14,6 @@ const variants = Object.assign(Object.create(null), {
     missing: 'caution', bug: 'caution'
 });
 const containerTypes = new Set(['note', 'tip', 'info', 'warning', 'danger', 'important', 'caution']);
-const calloutDialects = [
-    { value: 'github', label: 'GitHub / GitLab' },
-    { value: 'qiita', label: 'Qiita' },
-    { value: 'zenn', label: 'Zenn' },
-    { value: 'obsidian', label: 'Obsidian' },
-    { value: 'container', label: 'Docusaurus / VitePress' },
-    { value: 'mkdocs', label: 'MkDocs' },
-];
-export function resolveCalloutService(value) {
-    return calloutDialects.some(option => option.value === value) ? value : 'github';
-}
-
 const metadataNames = ['source', 'header', 'footer', 'format', 'type', 'variant'];
 const elementOf = node => node?.nodeType === 1 ? node : node?.parentElement;
 const encode = (value, view) => view.btoa(Array.from(new view.TextEncoder().encode(value), byte => String.fromCharCode(byte)).join(''));
@@ -60,7 +51,10 @@ function typeDescriptor(header, format) {
             fold: header.trimStart().startsWith('???+') ? '+' : header.trimStart().startsWith('???') ? '-' : '',
             rewrite: type => match[1] + type + match[3], variant: type => variants[type] };
     }
-    if (format !== 'container') return null;
+    if (format !== 'container') {
+        const spec = fencedDescriptor(header);
+        return spec?.dialect === format ? spec : null;
+    }
     const match = /^( {0,3}:{3,}[ \t]*)([a-z]+)(.*)$/.exec(header);
     if (!match) return null;
     const [, prefix, type, tail] = match;
@@ -86,9 +80,7 @@ function typeDescriptor(header, format) {
 /** Map the visual meaning to a supported declaration in the chosen dialect. */
 function dialectDeclaration(descriptor, dialect) {
     if (!calloutDialects.some(option => option.value === dialect) || descriptor.dialect === dialect) return null;
-    // These two syntaxes have no custom-title field. Keep those choices disabled
-    // rather than silently dropping a title when converting a callout.
-    if (descriptor.custom && ['qiita', 'zenn'].includes(dialect)) return null;
+    if (descriptor.keepAttributes || (descriptor.custom && ['qiita', 'zenn', 'gitbook'].includes(dialect))) return null;
     const variant = descriptor.variant(descriptor.current), originalType = descriptor.current.toLowerCase();
     const defaults = { note: 'note', tip: 'tip', important: 'important', warning: 'warning', caution: 'caution' };
     let type = defaults[variant], header, footer = '', format;
@@ -97,6 +89,18 @@ function dialectDeclaration(descriptor, dialect) {
         const fold = dialect === 'obsidian' ? descriptor.fold || '' : '';
         header = `> [!${type}]${fold}${descriptor.custom ? ' ' + descriptor.title : ''}`;
         format = 'quote';
+    } else if (dialect === 'gitbook') {
+        type = { note: 'info', tip: 'success', important: 'info', warning: 'warning', caution: 'danger' }[variant];
+        header = `{% hint style="${type}" %}`; footer = '{% endhint %}'; format = dialect;
+    } else if (dialect === 'myst') {
+        if (supportsFencedType(dialect, originalType)) type = originalType;
+        header = ':::{' + type + '}' + (descriptor.custom ? ' ' + descriptor.title : '');
+        footer = ':::'; format = dialect;
+    } else if (dialect === 'quarto') {
+        const quote = descriptor.title?.includes('"') ? "'" : '"';
+        if (descriptor.custom && descriptor.title.includes(quote)) return null;
+        header = '::: {.callout-' + type + (descriptor.custom ? ' title=' + quote + descriptor.title + quote : '') + '}';
+        footer = ':::'; format = dialect;
     } else if (dialect === 'mkdocs') {
         if (descriptor.custom && /["\r\n]/.test(descriptor.title)) return null;
         type = variants[originalType] ? originalType : type;
@@ -151,6 +155,13 @@ function containerHeader(line) {
     return { header: line, footer: fence, format: 'container', type, variant, title, fence };
 }
 
+function fencedBlockSpec(header, footer, format) {
+    const spec = fencedDescriptor(header);
+    if (!spec || (format && spec.dialect !== format) || !matchesFencedCloser(spec, footer)) return null;
+    return { header, footer, format: spec.dialect, type: spec.current, variant: spec.variant(spec.current),
+        title: spec.title ?? spec.current };
+}
+
 /** Clipboard declarations are data, not permission to restore arbitrary source HTML. */
 function clipboardCalloutSpec(header, footer, format) {
     if (header === null || footer === null || /[\r\n]/.test(header + footer)) return null;
@@ -166,6 +177,8 @@ function clipboardCalloutSpec(header, footer, format) {
         if (match && variants[match[1]]) spec = {
             header, format, type: match[1], variant: variants[match[1]], title: match[2] ?? match[1],
         };
+    } else if (format === 'gitbook' || format === 'myst' || format === 'quarto') {
+        return fencedBlockSpec(header, footer, format);
     }
     return spec ? { ...spec, footer } : null;
 }
@@ -177,6 +190,7 @@ export class CalloutManager {
         this.beforeChange = options.beforeChange || (() => {});
         this.onChange = options.onChange || (() => {});
         this.onNavigate = options.onNavigate || (() => {});
+        this.onServiceSelected = options.onServiceSelected || (() => {});
         this.isComposing = options.isComposing || (() => false);
         this.cursorManager = options.cursorManager || null;
         this.moveToBlockGap = options.moveToBlockGap || null;
@@ -334,12 +348,17 @@ export class CalloutManager {
     changeFormat(node, dialect) {
         const block = this.getTypeBlock(node), descriptor = this.getTypeDescriptor(block);
         if (this.isComposing() || !descriptor) return false;
+        if (descriptor.dialect === dialect) {
+            this.onServiceSelected(dialect);
+            return false;
+        }
         const next = dialectDeclaration(descriptor, dialect);
         if (!next) return false;
         this.beforeChange();
         for (const name of ['header', 'footer']) block.setAttribute('data-mdw-callout-' + name, encode(next[name], this.document.defaultView));
         for (const name of ['format', 'type', 'variant']) block.setAttribute('data-mdw-callout-' + name, next[name]);
         this.pickerHeader = block.getAttribute('data-mdw-callout-header');
+        this.onServiceSelected(dialect);
         this.refresh(); this.finishChange();
         return true;
     }
@@ -395,7 +414,7 @@ export class CalloutManager {
             option.setAttribute('role', 'option'); option.setAttribute(attribute, value);
             option.setAttribute('aria-selected', value === currentValue ? 'true' : 'false');
             option.disabled = !!disabled;
-            if (disabled) { option.setAttribute('aria-disabled', 'true'); option.title = 'This format cannot preserve the custom title.'; }
+            if (disabled) { option.setAttribute('aria-disabled', 'true'); option.title = descriptor.keepAttributes ? 'This format cannot preserve the block attributes.' : 'This format cannot preserve the custom title.'; }
             option.addEventListener('mousedown', event => event.preventDefault());
             option.addEventListener('click', event => { event.preventDefault(); if (!disabled) choose(value); });
             option.addEventListener('focus', () => activateOption(index));
@@ -892,24 +911,26 @@ export class CalloutManager {
         if (!this.canRecognize(range)) return false;
         const closing = elementOf(range.startContainer)?.closest('p, div');
         const footer = this.plainLine(closing);
-        if (!footer || !/^ {0,3}:{3,}[ \t]*$/.test(footer) ||
+        const hint = footer && gitbookCloser.test(footer);
+        if (!footer || (!hint && !/^ {0,3}:{3,}[ \t]*$/.test(footer)) ||
             closing.parentElement !== this.editingRoot(closing) || !this.atEdge(range, closing, true)) return false;
         const nodes = [];
         let opening = closing.previousSibling, spec = null;
         for (; opening; opening = opening.previousSibling) {
             const line = this.plainLine(opening);
             // An intervening delimiter (including an unknown one) is ambiguous.
-            if (line !== null && /^ {0,3}:::/.test(line)) {
-                spec = containerHeader(line);
+            if (line !== null && (hint ? /^ {0,3}\{%[ \t]+(?:end)?hint\b/.test(line) : /^ {0,3}:::/.test(line))) {
+                spec = fencedBlockSpec(line, footer) || (!hint && containerHeader(line));
                 break;
             }
             nodes.unshift(opening);
         }
-        if (!spec || footer.trim().length < spec.fence.length) return false;
+        if (!spec || (spec.format === 'container' && footer.trim().length < spec.fence.length)) return false;
+        if (spec.format === 'myst' && mystHasOptions(nodes.map(node => node.textContent).join('\n'))) return false;
         // A delimiter nested in a block, or a fenced example typed as prose,
         // needs the full parser rather than this local DOM shortcut.
         if (nodes.some(node => node.nodeType === 1 &&
-            ((/^(P|DIV)$/.test(node.tagName) && /(?:^|\n) {0,3}(?::::|`{3,}|~{3,})/.test(node.textContent)) ||
+            ((/^(P|DIV)$/.test(node.tagName) && /(?:^|\n) {0,3}(?::::|\{%[ \t]+(?:end)?hint\b|`{3,}|~{3,})/.test(node.textContent)) ||
                 node.matches('[data-mdw-callout]') || node.querySelector('[data-mdw-callout]')))) return false;
         spec.footer = footer;
         const block = this.createBlock(spec), content = block.lastElementChild;
@@ -1102,7 +1123,7 @@ export class CalloutManager {
     handleInput(event = {}) {
         if (this.isComposing() || event.isComposing || event.inputType === 'insertCompositionText') return false;
         // Only a newly completed closing delimiter triggers the container shortcut.
-        if (event.inputType === 'insertText' && event.data === ':') return this.convertContainer();
+        if (event.inputType === 'insertText' && (event.data === ':' || event.data === '}')) return this.convertContainer();
         return false;
     }
 

@@ -207,3 +207,40 @@ test('standalone original-body rendering inherits document reference definitions
     const rendered = domino.createWindow(document.renderCalloutContent('[label][ref]\n')).document;
     assert.equal(rendered.querySelector('a').getAttribute('href'), 'https://example.com');
 });
+
+test('literal delimiter lines stay in a GitBook or Quarto body after saving', () => {
+    for (const [header, footer, body] of [
+        ['{% hint style="info" %}', '{% endhint %}', '{% endhint %}\n\nAfter.\n\n  {% hint style="warning" %}'],
+        ['::::: {.callout-note}', ':::', ':::\n\nAfter.\n\n::::{warning}\n:::'],
+    ]) {
+        const original = parseCallout([header, 'Original.', footer, ''].join('\n'));
+        const saved = serializeCallout(original, body);
+        const parsed = parseCallout(saved + '\nOutside.\n');
+        assert.equal(parsed.raw, saved);
+        assert.equal(parsed.header, header);
+        const document = dom(saved + '\nOutside.\n');
+        const content = document.querySelector('.mdw-callout-content').textContent;
+        for (const line of body.split('\n').filter(Boolean)) assert.ok(content.includes(line.trim()), content);
+        assert.ok(!content.includes('Outside.'));
+    }
+});
+
+test('fenced and inline code preserve closing markers without splitting a callout', () => {
+    for (const [header, footer] of [
+        ['{% hint style="info" %}', '{% endhint %}'],
+        [':::{tip}', ':::'], ['::: {.callout-tip}', ':::'],
+    ]) {
+        const body = ['An inline `example', footer, 'ends here`.', '', '```md', footer, '```', '', 'After.'].join('\n');
+        const source = [header, body, footer, ''].join('\n');
+        const parsed = parseCallout(source);
+        assert.equal(parsed.raw, source);
+        assert.equal(serializeCallout(parsed, parsed.body), source);
+        assert.match(dom(source).querySelector('.mdw-callout-content').textContent, /After\./);
+        assert.equal(dom(source.replace(/\n/g, '\r\n')).querySelectorAll('.mdw-callout').length, 1);
+    }
+    const original = parseCallout('```{note} 注意\nBody.\n```\n');
+    const body = 'Before.\n\n```js\ncode\n```\n\nAfter.';
+    const saved = serializeCallout(original, body);
+    assert.equal(saved, ['````{note} 注意', body, '````', ''].join('\n'));
+    assert.equal(parseCallout(saved).body.trimEnd(), body);
+});

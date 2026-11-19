@@ -9,7 +9,7 @@ function importModule(name) {
     const source = fs.readFileSync(path.join(__dirname, '../media/modules', name), 'utf8');
     return import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 }
-const modules = Promise.all(['CalloutManager.js', 'DOMUtils.js', 'CursorManager.js', 'StateManager.js', 'CodeBlockGapManager.js'].map(importModule));
+const modules = Promise.all(['../vendor/callout-manager.bundle.js', 'DOMUtils.js', 'CursorManager.js', 'StateManager.js', 'CodeBlockGapManager.js'].map(importModule));
 const editorSource = fs.readFileSync(path.join(__dirname, '../media/editor.js'), 'utf8');
 const deleteBlockSource = editorSource.slice(editorSource.indexOf('    function deleteCodeBlock('),
     editorSource.indexOf('    // Native block merging can move the following line into the math preview,'));
@@ -149,6 +149,9 @@ for (const [service, expected, label] of [
     ['obsidian', '> [!note]\n> Body\n', 'note'],
     ['container', ':::info\nBody\n:::\n', 'info'],
     ['mkdocs', '!!! note\n    Body\n', 'note'],
+    ['gitbook', '{% hint style="info" %}\nBody\n{% endhint %}\n', 'info'],
+    ['myst', ':::{note}\nBody\n:::\n', 'note'],
+    ['quarto', '::: {.callout-note}\nBody\n:::\n', 'note'],
 ]) {
     test(`new ${service} callouts save, reopen empty, and retain their format after typing`, async () => {
         const f = await fixture('> [!NOTE]\n> Original.\n');
@@ -182,7 +185,7 @@ test('the subtle format control opens a separate menu without changing the docum
         assert.equal(button.getAttribute('aria-expanded'), 'true');
         assert.equal(f.title.getAttribute('aria-expanded'), 'false');
         assert.deepEqual(Array.from(menu.children, option => option.textContent),
-            ['GitHub / GitLab', 'Qiita', 'Zenn', 'Obsidian', 'Docusaurus / VitePress', 'MkDocs']);
+            ['GitHub / GitLab / Microsoft Learn', 'Qiita', 'Zenn', 'Obsidian', 'Docusaurus / VitePress', 'MkDocs', 'GitBook', 'MyST / Jupyter Book', 'Quarto']);
         assert.equal(menu.querySelector('[aria-selected="true"]').getAttribute('data-callout-dialect'), 'qiita');
         popupKey(f, 'Escape');
         assert.ok(!f.document.querySelector('.mdw-callout-format-picker'));
@@ -220,6 +223,10 @@ for (const [source, dialect, expected, types] of [
     [':::note warn\n_Body_\n:::\n', 'obsidian', '> [!warn]\n> _Body_\n', null],
     [':::note warn\n_Body_\n:::\n', 'container', ':::warning\n_Body_\n:::\n', null],
     [':::note warn\n_Body_\n:::\n', 'mkdocs', '!!! warn\n    _Body_\n', null],
+    ['> [!CAUTION]\n> _Body_\n', 'gitbook', '{% hint style="danger" %}\n_Body_\n{% endhint %}\n', ['info', 'success', 'warning', 'danger']],
+    ['::: {.callout-tip title="Título"}\n_Body_\n:::\n', 'myst', ':::{tip} Título\n_Body_\n:::\n', null],
+    [':::{warning} 注意事項\n_Body_\n:::\n', 'quarto', '::: {.callout-warning title="注意事項"}\n_Body_\n:::\n', null],
+    ['{% hint style="warning" %}\n_Body_\n{% endhint %}\n', 'github', '> [!WARNING]\n> _Body_\n', null],
     [':::note info\n_Body_\n:::\n', 'container', ':::info\n_Body_\n:::\n', null],
     ['!!! warning "日本語のタイトル"\n    _Body_\n', 'obsidian', '> [!warning] 日本語のタイトル\n> _Body_\n', null],
     ['> [!warning]- Custom title\n> _Body_\n', 'mkdocs', '??? warning "Custom title"\n    _Body_\n', null],
@@ -275,6 +282,38 @@ test('format menu skips choices that cannot retain a custom title and ignores no
         assert.equal(save(f.editor.innerHTML, source), source);
         assert.equal(f.before.length, 0); assert.equal(f.after.length, 0);
     } finally { f.restore(); }
+});
+
+test('selecting the current format remembers it without creating an edit', async () => {
+    const f = await fixture(':::note warn\nOriginal.\n:::\n');
+    const selections = [];
+    f.manager.onServiceSelected = service => selections.push(service);
+    try {
+        f.manager.openFormatPicker(f.block);
+        popupKey(f, 'Escape');
+        f.manager.openFormatPicker(f.block);
+        popupKey(f, 'Enter');
+        assert.deepEqual(selections, ['qiita']);
+        assert.equal(f.before.length, 0); assert.equal(f.after.length, 0);
+        f.manager.changeType(f.block, 'alert');
+        f.manager.changeFormat(f.block, 'unknown');
+        assert.deepEqual(selections, ['qiita']);
+    } finally { f.restore(); }
+});
+
+test('format choices preserve service-specific IDs and icon attributes', async () => {
+    for (const source of [
+        '::: {#tip-cafe .callout-tip collapse="true"}\nBody.\n:::\n',
+        '{% hint style="success" icon="books" %}\nBody.\n{% endhint %}\n',
+    ]) {
+        const f = await fixture(source);
+        try {
+            f.manager.openFormatPicker(f.block);
+            assert.equal(f.document.querySelector('[data-callout-dialect="github"]').disabled, true);
+            assert.equal(f.manager.changeFormat(f.block, 'github'), false);
+            assert.equal(save(f.editor.innerHTML, source), source);
+        } finally { f.restore(); }
+    }
 });
 
 test('format conversion and its keyboard control remain usable after Undo/Redo', async () => {
@@ -422,6 +461,10 @@ for (const type of ['INFO', 'BUG', 'Warning']) {
 }
 
 for (const [source, type, expectedHeader] of [
+    ['{% hint icon="books" style="info" %}\nBody _unchanged_.\n{% endhint %}\n', 'success', '{% hint icon="books" style="success" %}'],
+    ['````{warning} تنبيه\nBody _unchanged_.\n````\n', 'tip', '````{tip} تنبيه'],
+    ['::: {#tip-example title="See .callout-tip" .callout-tip icon=false}\nBody _unchanged_.\n:::\n', 'warning',
+        '::: {#tip-example title="See .callout-tip" .callout-warning icon=false}'],
     [':::note warn\nBody _unchanged_.\n:::\n', 'alert', ':::note alert'],
     [':::note\nBody _unchanged_.\n:::\n', 'warn', ':::note warn'],
     ['::::message alert\nBody _unchanged_.\n::::\n', 'message', '::::message'],

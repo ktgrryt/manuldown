@@ -532,18 +532,22 @@ test('callout format controls align with the title and preserve editing, history
             assert.equal(result[target], true, `${name}: ${JSON.stringify(result)}`);
         }
     });
+    const insertSlashCalloutAtEnd = async () => {
+        await evaluate(`(()=>{const editor=document.getElementById('editor');editor.focus();getSelection().collapse(editor,editor.childNodes.length);})()`);
+        await connection.send('Input.insertText', { text: '/callout' }, sessionId);
+        await waitFor(`Array.from(document.querySelectorAll('.slash-command-menu:not(.insert-command-menu) .slash-command-name')).some(item=>item.textContent==='/callout')`);
+        await key('Enter', 'Enter', 13); await settle();
+    };
     for (const [service, header] of [
         ['github', '> [!NOTE]'], ['qiita', ':::note info'], ['zenn', ':::message'],
         ['obsidian', '> [!note]'], ['container', ':::info'], ['mkdocs', '!!! note'],
+        ['gitbook', '{% hint style="info" %}'], ['myst', ':::{note}'], ['quarto', '::: {.callout-note}'],
     ]) {
         await t.test(`/callout inserts the configured ${service} format with an editable body`, async () => {
             await reset('\n');
             await evaluate(`window.postMessage({type:'settings',settings:{calloutDefaultService:${JSON.stringify(service)}}},'*')`);
             await settle();
-            await evaluate(`(()=>{const editor=document.getElementById('editor'),range=document.createRange();range.selectNodeContents(editor);range.collapse(false);editor.focus();getSelection().removeAllRanges();getSelection().addRange(range);})()`);
-            await connection.send('Input.insertText', { text: '/callout' }, sessionId);
-            await waitFor(`Array.from(document.querySelectorAll('.slash-command-menu:not(.insert-command-menu) .slash-command-name')).some(item=>item.textContent==='/callout')`);
-            await key('Enter', 'Enter', 13); await settle();
+            await insertSlashCalloutAtEnd();
             const state = await evaluate(`(()=>{const block=document.querySelector('.mdw-callout'),selection=getSelection(),node=selection.anchorNode,element=node?.nodeType===1?node:node?.parentElement;return {header:block?atob(block.dataset.mdwCalloutHeader):null,editable:document.activeElement.id==='editor'&&selection.isCollapsed&&!!element?.closest('.mdw-callout-content'),text:document.getElementById('editor').textContent};})()`);
             assert.equal(state.header, header, JSON.stringify(state));
             assert.equal(state.editable, true, JSON.stringify(state));
@@ -552,6 +556,21 @@ test('callout format controls align with the title and preserve editing, history
             assert.equal(await evaluate(`document.querySelector('.mdw-callout-content').textContent`), 'New body.');
         });
     }
+    await t.test('the last confirmed service is used by /callout after undoing the format change', async () => {
+        await reset(':::note warn\nExisting body.\n:::\n');
+        await evaluate(`window.postMessage({type:'settings',settings:{calloutDefaultService:'zenn'}},'*')`);
+        await settle();
+        await click('.mdw-callout-format-toggle');
+        await key('End', 'End', 35);
+        await key('Enter', 'Enter', 13);
+        await waitFor(`document.querySelector('.mdw-callout')?.dataset.mdwCalloutFormat==='quarto'`);
+        assert.equal(await evaluate(`hostMessages.filter(message=>message.type==='calloutServiceSelected').at(-1)?.service`), 'quarto');
+        await evaluate(`window.postMessage({type:'historyCommand',direction:'undo'},'*')`);
+        await waitFor(`document.querySelector('.mdw-callout')?.dataset.mdwCalloutFormat==='container'`);
+        await reset('\n');
+        await insertSlashCalloutAtEnd();
+        assert.equal(await evaluate(`atob(document.querySelector('.mdw-callout').dataset.mdwCalloutHeader)`), '::: {.callout-note}');
+    });
     await t.test('arrows reach the empty first line of a newly inserted callout', async () => {
         await reset('\n');
         await evaluate(`(() => {

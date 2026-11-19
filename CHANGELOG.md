@@ -6,6 +6,14 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 
 ## [Unreleased]
 
+### Added
+- Insert and edit GitBook hints, MyST / Jupyter Book admonitions, and Quarto callouts in Markdown files. The GitHub / GitLab format also covers Microsoft Learn alerts.
+- Export from the slash menu with `/export-pdf`, `/export-html`, and `/export-word`.
+
+### Changed
+- Start each VS Code window with the configured callout service. Choosing a service in a callout's **…** menu sets it for subsequent insertions across that window.
+- Choose PDF, HTML, or DOCX from a single toolbar export menu. Word exports preserve editable equations and more of the document's formatting.
+
 ## [2.4.3] - 2026-11-18
 
 ### Added

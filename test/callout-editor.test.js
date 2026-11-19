@@ -8,7 +8,7 @@ function importModule(name) {
     const source = fs.readFileSync(path.join(__dirname, '../media/modules', name), 'utf8');
     return import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 }
-const managerModule = importModule('CalloutManager.js');
+const managerModule = importModule('../vendor/callout-manager.bundle.js');
 const domUtilsModule = importModule('DOMUtils.js');
 
 class TestRange {
@@ -94,19 +94,21 @@ test('typing a quote declaration leaves room for a custom title until Enter', as
     assert.equal(f.editor.querySelectorAll('[data-mdw-callout]').length, 0);
 });
 
-test('closed Qiita, Zenn and generic containers share variants and retain source labels and headers', async () => {
-    for (const [header, variant, label] of [
+test('closing a supported callout keeps its source label, delimiters and editable body', async () => {
+    for (const [header, variant, label, footer = ':::'] of [
+        ['{% hint style="danger" %}', 'caution', 'danger', '{% endhint %}'],
+        [':::{seealso}', 'note', 'seealso'], ['::: {.callout-warning title="注意"}', 'warning', '注意'],
         [':::note info', 'note', 'info'], [':::note warn', 'warning', 'warn'],
         [':::note alert', 'caution', 'alert'], [':::message alert', 'caution', 'alert'],
         [':::message', 'note', 'message'], [':::warning Custom title', 'warning', 'Custom title'], ['::: tip', 'tip', 'tip'],
     ]) {
-        const f = await fixture(`<p>${header}</p><p><em>Body</em></p><p>:::</p>`);
+        const f = await fixture(`<p>${header}</p><p><em>Body</em></p><p>${footer}</p>`);
         const body = f.editor.querySelector('em');
         f.caret(f.editor.lastElementChild.firstChild);
-        assert.equal(f.manager.handleInput(input('insertText', ':')), true, header);
+        assert.equal(f.manager.handleInput(input('insertText', footer.at(-1))), true, header);
         const block = f.editor.querySelector('[data-mdw-callout]');
         assert.equal(decode(block, 'header'), header);
-        assert.equal(decode(block, 'footer'), ':::');
+        assert.equal(decode(block, 'footer'), footer);
         assert.equal(block.getAttribute('data-mdw-callout-variant'), variant);
         assert.equal(block.querySelector('.mdw-callout-title').textContent, label);
         assert.equal(block.querySelector('em'), body);

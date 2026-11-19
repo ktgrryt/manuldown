@@ -54,7 +54,7 @@ const {
 } = await import(`./modules/MarkdownHeadingSlug.js${new URL(import.meta.url).search}`);
 const { InlineTocManager } = await import(`./modules/InlineTocManager.js${new URL(import.meta.url).search}`);
 const { FootnoteManager } = await import(`./modules/FootnoteManager.js${new URL(import.meta.url).search}`);
-const { CalloutManager, resolveCalloutService } = await import(`./modules/CalloutManager.js${new URL(import.meta.url).search}`);
+const { CalloutManager, resolveCalloutService } = await import(`./vendor/callout-manager.bundle.js${new URL(import.meta.url).search}`);
 const { MathManager } = await import(`./modules/MathManager.js${new URL(import.meta.url).search}`);
 const { DragSelectionScroll } = await import(`./modules/DragSelectionScroll.js${new URL(import.meta.url).search}`);
 const { TableOfContentsManager } = await import(`./modules/TableOfContentsManager.js${new URL(import.meta.url).search}`);
@@ -1775,6 +1775,10 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
             (lastCompositionEndTs > 0 && Date.now() - lastCompositionEndTs <= IME_ENTER_CONFIRM_GRACE_MS),
         beforeChange: () => { typingUndoGroup.break(); stateManager.saveState(); },
         onChange: (options) => { notifyChange(); stateManager.commitStateAfterChange(options); },
+        onServiceSelected: service => {
+            settingsState.calloutDefaultService = service;
+            vscode.postMessage({ type: 'calloutServiceSelected', service });
+        },
         onNavigate: () => revealCaretAfterKeyboardNavigation()
     });
     cursorManager.moveAcrossCalloutType = (selection, direction) =>
@@ -24785,6 +24789,7 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
 
         switch (message.type) {
             case 'init':
+                applySettings(message.settings);
                 pendingInitialSelection = message.selection || null;
                 setEditorLoadFailureState(false);
                 temporarilySuppressImageRemovalSync();

@@ -208,7 +208,7 @@ PDF出力はVS Code Desktopのローカル環境に対応し、Google Chromeま�
 | `manulDown.toolbar.visible` | `true` | ツールバーを表示 |
 | `manulDown.toolbar.items` | 項目ごとの初期値 | チェックボックスで表示項目を選択。H1〜H6に対応 |
 | `manulDown.toc.enabled` | `true` | 見出しがある場合に目次を自動表示 |
-| `manulDown.callout.defaultService` | `github` | `/callout` で挿入する記法。GitHub / GitLab・Qiita・Zenn・Obsidian・Docusaurus / VitePress・MkDocsから選択。変更は次の挿入から即時反映 |
+| `manulDown.callout.defaultService` | `github` | 起動時に `/callout` で使う形式。コールアウトの **…** でサービスを選ぶと、VS Codeのウィンドウを再起動・再読み込みするまで、そのウィンドウ内の新しいコールアウトに使われます。[対応サービス](docs/callouts.md) |
 | `manulDown.openByDefault` | `true` | Markdownを既定でManulDownで開く |
 | `manulDown.list.dashStyle` | `false` | 箇条書きのマーカーに `-` を使用 |
 | `manulDown.list.indentSize` | `2` | 文書のスタイルを検出できない場合のインデント幅（`2` / `4` スペース） |

@@ -9,7 +9,7 @@ const moduleUrl = source => `data:text/javascript;base64,${Buffer.from(source).t
 const clipboardModule = import(moduleUrl(moduleSource('MarkdownClipboard.js')
     .replace("'./DOMUtils.js'", JSON.stringify(moduleUrl(moduleSource('DOMUtils.js'))))));
 const footnoteModule = import(moduleUrl(moduleSource('FootnoteManager.js')));
-const calloutModule = import(moduleUrl(moduleSource('CalloutManager.js')));
+const calloutModule = import(moduleUrl(moduleSource('../vendor/callout-manager.bundle.js')));
 const historyModule = import(moduleUrl(moduleSource('StateManager.js')));
 const domUtilsModule = import(moduleUrl(moduleSource('DOMUtils.js')));
 const cursorModule = import(moduleUrl(moduleSource('CursorManager.js')));
@@ -1203,6 +1203,9 @@ for (const spec of [
     { header: '> [!warning]- 日本語のタイトル', footer: '', format: 'quote', type: 'warning', variant: 'warning', title: '日本語のタイトル' },
     { header: ':::message alert', footer: ':::', format: 'container', type: 'alert', variant: 'caution', title: 'alert' },
     { header: '::::danger[Custom title]', footer: '::::', format: 'container', type: 'danger', variant: 'caution', title: 'Custom title' },
+    { header: '{% hint style="danger" %}', footer: '{% endhint %}', format: 'gitbook', type: 'danger', variant: 'caution', title: 'danger' },
+    { header: '```{tip} 提示', footer: '```', format: 'myst', type: 'tip', variant: 'tip', title: '提示' },
+    { header: '::: {.callout-warning title="Attention"}', footer: ':::', format: 'quarto', type: 'warning', variant: 'warning', title: 'Attention' },
     { header: '???+ warning "Custom title"', footer: '', format: 'mkdocs', type: 'warning', variant: 'warning', title: 'Custom title' },
 ]) {
     test(`copying a callout into another document retains its syntax and literal rich text: ${spec.header}`, async () => {

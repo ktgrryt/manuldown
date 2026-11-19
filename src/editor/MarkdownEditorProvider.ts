@@ -20,7 +20,7 @@ import { MAX_EDITABLE_FOOTNOTE_DEPTH, decodeFootnoteLabel, deduplicateFootnotes,
 import { MarkdownSourceBlock, markdownContentMatches, preserveMarkdownSource } from './MarkdownSource';
 import { EmphasisBoundarySerializer } from './Emphasis';
 import { protectMarkdownTocs } from './MarkdownToc';
-import { CalloutService, isCalloutFormatChange, isCalloutTypeChange, parseCallout, resolveCalloutService, serializeCallout } from './Callouts';
+import { CalloutService, isCalloutFormatChange, isCalloutService, isCalloutTypeChange, parseCallout, resolveCalloutService, serializeCallout } from './Callouts';
 import { exportHtml } from '../export/HtmlExport';
 import { exportWord } from '../export/WordExport';
 import { PdfPreviewProvider } from '../export/PdfPreviewProvider';
@@ -106,6 +106,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
     private markdownCopyFocusedPanel: vscode.WebviewPanel | null = null;
     private customSlashCommandCache: { loadedAt: number; items: CustomSlashCommandTemplate[] } | null = null;
     private tocPanelWidthPx = MarkdownEditorProvider.defaultTocPanelWidthPx;
+    private lastCalloutService?: CalloutService;
     private currentEmptyListItemMarker: string | null = null;
     private currentMathBlockFenceInfo: string | null = null;
     // Text of the document being converted by htmlToMarkdown (see escapeHtmlLikeText).
@@ -1630,6 +1631,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                                 type: 'init',
                                 content: initialHtml,
                                 selection: this.takePendingSourceSelection(document, markdownDocument),
+                                settings: this.getWebviewSettings(),
                             });
                             this.initializedPanels.add(webviewPanel);
                         }
@@ -2080,6 +2082,12 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                         break;
                     case 'tocPanelWidthChanged':
                         this.updateSharedTocPanelWidth(message.width);
+                        break;
+                    case 'calloutServiceSelected':
+                        if (!editorDisposed && isCalloutService(message.service) && message.service !== this.lastCalloutService) {
+                            this.lastCalloutService = message.service;
+                            this.postSettingsToAllPanels();
+                        }
                         break;
                     case 'switchEditorTab':
                         if (message.direction === 'next') {
@@ -3525,8 +3533,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
                 continue;
             }
             const sample = format === 'quote' ? `${header}\n> body\n`
-                : format === 'container' ? `${header}\nbody\n${footer}\n`
-                : format === 'mkdocs' ? `${header}\n${header.match(/^ */)![0]}    body\n` : '';
+                : format === 'mkdocs' ? `${header}\n${header.match(/^ */)![0]}    body\n`
+                : `${header}\nbody\n${footer}\n`;
             const parsed = parseCallout(sample);
             if (!parsed || parsed.header !== header || parsed.footer !== footer || parsed.format !== format) {
                 continue;
@@ -5152,7 +5160,8 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
             tocPanelWidth: this.tocPanelWidthPx,
             useVsCodeCtrlP: true,
             listDashStyle: this.getBooleanSetting('list.dashStyle', false),
-            calloutDefaultService: resolveCalloutService(vscode.workspace.getConfiguration('manulDown').get<unknown>('callout.defaultService')),
+            calloutDefaultService: this.lastCalloutService ??
+                resolveCalloutService(vscode.workspace.getConfiguration('manulDown').get<unknown>('callout.defaultService')),
             allowRemoteImages: this.getBooleanSetting('security.allowRemoteImages', false),
             allowRemoteImageImport: this.getBooleanSetting('security.allowRemoteImageImport', false),
             allowFileLinks: this.getBooleanSetting('security.allowFileLinks', false),

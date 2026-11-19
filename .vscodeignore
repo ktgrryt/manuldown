@@ -11,6 +11,7 @@ eslint.config.cjs
 tsconfig.json
 package-lock.json
 media/vendor/*-entry.js
+media/modules/CalloutManager.js
 
 # Runtime dependencies are bundled into out/extension.js (scripts/bundle-host.js)
 # and media/vendor/ (npm run bundle:webview). The rest of out/ is the unbundled

@@ -7,6 +7,7 @@ const path = require('node:path');
 const { marked } = require('marked');
 
 const vscodeMockState = {
+    configuration: new Map(),
     errors: [],
     information: [],
     writes: [],
@@ -38,6 +39,7 @@ const vscodeMockState = {
 };
 
 function resetVscodeMockState() {
+    vscodeMockState.configuration.clear();
     vscodeMockState.errors.length = 0;
     vscodeMockState.information.length = 0;
     vscodeMockState.writes.length = 0;
@@ -181,7 +183,7 @@ function loadExtensionModules() {
                     : (response || []);
             },
             getConfiguration: () => ({
-                get: (_key, defaultValue) => defaultValue,
+                get: (key, defaultValue) => vscodeMockState.configuration.get(key) ?? defaultValue,
             }),
             onDidChangeTextDocument: (listener) => addMockListener(
                 vscodeMockState.documentChangeListeners,
@@ -439,6 +441,45 @@ async function createEditorSyncHarness(initialText = 'before', documentUri = nul
     await provider.resolveCustomTextEditor(document, webview.panel, {});
     return { provider, document, webview };
 }
+
+test('callout service selections are shared across documents for one window session', async t => {
+    const { provider, document, webview } = await createEditorSyncHarness();
+    const other = createWebviewPanelHarness();
+    const otherDocument = createMutableTextDocument('Other.');
+    otherDocument.uri = createMockUri('/workspace/other.md');
+    await provider.resolveCustomTextEditor(otherDocument, other.panel, {});
+    const readyService = async view => {
+        await view.sendMessage({ type: 'ready' });
+        return view.postedMessages.findLast(message => message.type === 'init').settings.calloutDefaultService;
+    };
+    const latestService = view => view.postedMessages.findLast(message => message.type === 'settings').settings.calloutDefaultService;
+    const setDefault = service => {
+        vscodeMockState.configuration.set('callout.defaultService', service);
+        for (const listener of vscodeMockState.configurationChangeListeners) {
+            listener({ affectsConfiguration: key => key === 'manulDown' });
+        }
+    };
+    setDefault('mkdocs');
+    assert.equal(await readyService(webview), 'mkdocs');
+    setDefault('myst');
+    assert.equal(latestService(webview), 'myst');
+    await webview.sendMessage({ type: 'calloutServiceSelected', service: 'quarto' });
+    assert.equal(latestService(webview), 'quarto');
+    assert.equal(latestService(other), 'quarto');
+    assert.equal(await readyService(other), 'quarto');
+    await other.sendMessage({ type: 'calloutServiceSelected', service: 'gitbook' });
+    await webview.sendMessage({ type: 'calloutServiceSelected', service: 'invalid' });
+    setDefault('qiita');
+    assert.equal(latestService(webview), 'gitbook');
+    webview.dispose();
+    other.dispose();
+    await other.sendMessage({ type: 'calloutServiceSelected', service: 'zenn' });
+    const reopened = createWebviewPanelHarness();
+    t.after(() => reopened.dispose());
+    await provider.resolveCustomTextEditor(document, reopened.panel, {});
+    assert.equal(await readyService(reopened), 'gitbook');
+    assert.equal(new MarkdownEditorProvider({}).getWebviewSettings().calloutDefaultService, 'qiita');
+});
 
 test('toolbar export offers PDF, HTML and DOCX in order and runs only the selected format', async t => {
     const { provider, document, webview } = await createEditorSyncHarness();

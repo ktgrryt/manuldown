@@ -1,20 +1,15 @@
+import { CalloutVariant, fencedDescriptor, FencedService, gitbookCloser, gitbookOpener, mystHasOptions } from './CalloutFormats';
 import { marked } from 'marked';
 import { createBoundedTokenizer } from './MarkdownNesting';
 
-export type CalloutVariant = 'note' | 'tip' | 'important' | 'warning' | 'caution';
-export type CalloutService = 'github' | 'qiita' | 'zenn' | 'obsidian' | 'container' | 'mkdocs';
-
-export function resolveCalloutService(value: unknown): CalloutService {
-    return typeof value === 'string' && ['github', 'qiita', 'zenn', 'obsidian', 'container', 'mkdocs'].includes(value)
-        ? value as CalloutService : 'github';
-}
+export { CalloutService, CalloutVariant, isCalloutService, resolveCalloutService } from './CalloutFormats';
 
 export type Callout = {
     raw: string;
     body: string;
     header: string;
     footer: string;
-    format: 'quote' | 'container' | 'mkdocs';
+    format: 'quote' | 'container' | 'mkdocs' | FencedService;
     sourceType: string;
     variant: CalloutVariant;
     title: string;
@@ -43,6 +38,12 @@ export function calloutDeclaration(header: string, format: Callout['format']): O
     let sourceType: string;
     let title: string | undefined;
     let indent = '';
+    if (format === 'gitbook' || format === 'myst' || format === 'quarto') {
+        const spec = fencedDescriptor(header);
+        if (!spec || spec.dialect !== format) { return null; }
+        return { header, format, sourceType: spec.current, variant: spec.variant(spec.current),
+            title: spec.title ?? spec.current, indent: header.match(/^ */)![0] };
+    }
     if (format === 'quote') {
         match = header.match(/^( {0,3})>[ \t]?\[!([A-Za-z][A-Za-z0-9-]*)\]([+-]?)(?:[ \t]+(.*))?[ \t]*$/);
         if (!match || !variants[match[2].toLowerCase()]) {return null;}
@@ -87,6 +88,10 @@ export function calloutDeclaration(header: string, format: Callout['format']): O
 export function isCalloutTypeChange(original: Callout, updated: Callout): boolean {
     if (original.format !== updated.format || original.footer !== updated.footer) {
         return false;
+    }
+    const fenced = fencedDescriptor(original.header);
+    if (fenced) {
+        return fenced.options.includes(updated.sourceType) && fenced.rewrite(updated.sourceType) === updated.header;
     }
     const descriptor = (callout: Callout, expectedDialect?: string): { dialect: string; prefix: string; suffix: string } | null => {
         const { header, format } = callout;
@@ -146,7 +151,8 @@ function literalMarkdownRanges(source: string): Array<{ start: number; end: numb
             // only those structural prefixes between lines. Delimiters inside
             // a list's fenced example must not close the surrounding callout.
             marked.walkTokens([token], child => {
-                if (child.type !== 'code' && child.type !== 'html') {return;}
+                if (child.type !== 'code' && child.type !== 'html' &&
+                    !(child.type === 'codespan' && child.raw.includes('\n'))) {return;}
                 const trailing = child.raw.endsWith('\n');
                 const parts = child.raw.replace(/\n$/, '').split('\n');
                 const escaped = parts.map(line => line.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
@@ -155,71 +161,98 @@ function literalMarkdownRanges(source: string): Array<{ start: number; end: numb
                     ranges.push({ start: start + match.index!, end: start + match.index! + match[0].length });
                 }
             });
+        } else if (token.raw.includes('`') && token.raw.includes('\n')) {
+            let inlineCursor = 0;
+            marked.walkTokens([token], child => {
+                if (child.type !== 'codespan' || !child.raw.includes('\n')) { return; }
+                const offset = token.raw.indexOf(child.raw, inlineCursor);
+                if (offset >= 0) {
+                    inlineCursor = offset + child.raw.length;
+                    ranges.push({ start: start + offset, end: start + inlineCursor });
+                }
+            });
         }
     }
     return ranges.sort((a, b) => a.start - b.start);
 }
 
-/**
- * Scan colon delimiters line by line, with code blocks recognized by Marked.
- * Unknown nested directives are retained as source rather than guessed.
- */
-function containerExtent(source: string): { raw: string; body: string; footer: string; unsupported: boolean } | null {
-    const first = lineText(source.slice(0, source.indexOf('\n') < 0 ? source.length : source.indexOf('\n') + 1));
-    const opening = first.match(/^ {0,3}(:{3,})/);
-    if (!opening || !/^ {0,3}:{3,}[ \t]*[a-z]+(?:[ \t\[].*)?$/.test(first) || !source.includes('\n')) {return null;}
-    // Incomplete declarations are common while typing. Avoid lexing every
-    // suffix of a malformed document when no closing delimiter even exists.
-    if (!/^ {0,3}:{3,}[ \t]*(?:\r?\n|$)/m.test(source.slice(first.length + 1))) {return null;}
-    const segments = lines(source);
-    const widths = [opening[1].length];
-    let unsupported = !calloutDeclaration(first, 'container');
-    let bodyEnd = -1;
-    // Lex body code/HTML as Markdown so delimiter examples remain literal.
-    // Token raw ranges give context without interpreting Markdown with a regex.
-    const bodySource = segments.slice(1).join('');
-    const literalRanges = literalMarkdownRanges(bodySource);
-    let bodyOffset = 0;
+/** The reader and writer must agree on which body lines can end a block. */
+function* bodyDelimiters(source: string, gitbook: boolean) {
+    const candidates = gitbook ? /^ {0,3}\{%[^\r\n]*%\}[ \t]*\r?$/gm
+        : /^ {0,3}(:{3,})[ \t]*([A-Za-z{][^\r\n]*)?\r?$/gm;
+    let literalRanges: ReturnType<typeof literalMarkdownRanges> | undefined;
     let literalIndex = 0;
-    for (let index = 1; index < segments.length; index++) {
-        while (literalIndex < literalRanges.length && literalRanges[literalIndex].end <= bodyOffset) {literalIndex++;}
-        const literal = literalRanges[literalIndex];
-        const protectedLine = literal && bodyOffset >= literal.start && bodyOffset < literal.end;
-        const line = lineText(segments[index]);
-        if (!protectedLine) {
-            const close = line.match(/^ {0,3}(:{3,})[ \t]*$/);
-            const nested = line.match(/^ {0,3}(:{3,})[ \t]*[A-Za-z][^\r\n]*$/);
-            if (close) {
-                if (close[1].length >= widths[widths.length - 1]) {
-                    widths.pop();
-                    if (widths.length === 0) { bodyEnd = index; break; }
-                }
-            } else if (nested) {
-                if (!calloutDeclaration(line, 'container')) {unsupported = true;}
-                widths.push(nested[1].length);
+    for (const match of source.matchAll(candidates)) {
+        const line = match[0].replace(/\r$/, '');
+        const closing = gitbook ? gitbookCloser.test(line) : !match[2];
+        if (gitbook && !closing && !gitbookOpener.test(line)) { continue; }
+        const offset = match.index!;
+        literalRanges ??= literalMarkdownRanges(source);
+        while (literalIndex < literalRanges.length && literalRanges[literalIndex].end <= offset) { literalIndex++; }
+        if (literalIndex < literalRanges.length && literalRanges[literalIndex].start <= offset) { continue; }
+        const spec = closing ? null : fencedDescriptor(line);
+        const width = gitbook ? 0 : spec?.dialect === 'quarto' ? 3 : match[1].length;
+        const supported = closing || !!spec || !!calloutDeclaration(line, 'container');
+        yield { offset, line, closing, width, supported };
+    }
+}
+
+function containerExtent(source: string): { raw: string; body: string; footer: string; unsupported: boolean } | null {
+    const firstEnd = source.indexOf('\n');
+    if (firstEnd < 0) { return null; }
+    const first = source.slice(0, firstEnd).replace(/\r$/, '');
+    const spec = fencedDescriptor(first);
+    if (spec?.fence.startsWith('`')) {
+        // MyST backtick directives follow Markdown's closing-fence length rule.
+        const close = /^ {0,3}(`{3,})[ \t]*\r?$/gm;
+        close.lastIndex = firstEnd + 1;
+        let match: RegExpExecArray | null;
+        while ((match = close.exec(source))) {
+            if (match[1].length < spec.fence.length) { continue; }
+            const body = source.slice(firstEnd + 1, match.index);
+            return { raw: source.slice(0, close.lastIndex + (source[close.lastIndex] === '\n' ? 1 : 0)),
+                body, footer: match[0].replace(/\r$/, ''), unsupported: mystHasOptions(body) };
+        }
+        return null;
+    }
+
+    const hint = gitbookOpener.test(first);
+    const opening = /^ {0,3}(:{3,})[ \t]*[a-z]+(?:[ \t\[].*)?$/.exec(first);
+    const quarto = spec?.dialect === 'quarto' || (!spec && /^ {0,3}:{3,}[ \t]*(?:\{[^}\n]*\.callout-|callout-)/.test(first));
+    const myst = /^ {0,3}:{3,}[ \t]*\{[\w-]+\}/.test(first);
+    if (!hint && !opening && !spec && !quarto && !myst) { return null; }
+    const bodySource = source.slice(firstEnd + 1);
+    if (hint ? !bodySource.includes('endhint') : !/^ {0,3}:{3,}[ \t]*\r?$/m.test(bodySource)) { return null; }
+    const widths = [quarto ? 3 : (spec?.fence.length ?? first.match(/:{3,}/)?.[0].length ?? 0)];
+    let unsupported = !spec && !calloutDeclaration(first, 'container');
+    for (const marker of bodyDelimiters(bodySource, hint)) {
+        if (!marker.closing) {
+            widths.push(marker.width);
+            if (!marker.supported) { unsupported = true; }
+        } else if (marker.width >= widths[widths.length - 1]) {
+            widths.pop();
+            if (!widths.length) {
+                const body = bodySource.slice(0, marker.offset);
+                const end = firstEnd + 1 + marker.offset + marker.line.length;
+                return { raw: source.slice(0, end + (source[end] === '\r' ? 2 : source[end] === '\n' ? 1 : 0)),
+                    body, footer: marker.line, unsupported: unsupported || (spec?.dialect === 'myst' && mystHasOptions(body)) };
             }
         }
-        bodyOffset += segments[index].length;
     }
-    if (bodyEnd < 0) {return null;}
-    return {
-        raw: segments.slice(0, bodyEnd + 1).join(''),
-        body: segments.slice(1, bodyEnd).join(''),
-        footer: lineText(segments[bodyEnd]), unsupported,
-    };
+    return null;
 }
 
 /** Return one complete, explicitly supported callout at the start of source. */
 export function parseCallout(source: string): Callout | null {
     const firstEnd = source.indexOf('\n');
     const header = source.slice(0, firstEnd < 0 ? source.length : firstEnd).replace(/\r$/, '');
-    const format: Callout['format'] | null = /^ {0,3}>/.test(header) ? 'quote'
-        : /^ {0,3}:/.test(header) ? 'container' : /^ {0,3}(?:!!!|\?\?\?)/.test(header) ? 'mkdocs' : null;
+    const format = fencedDescriptor(header)?.dialect ?? (/^ {0,3}>/.test(header) ? 'quote'
+        : /^ {0,3}:/.test(header) ? 'container' : /^ {0,3}(?:!!!|\?\?\?)/.test(header) ? 'mkdocs' : null);
     if (!format) {return null;}
     const declaration = calloutDeclaration(header, format);
     if (!declaration) {return null;}
     source = source.replace(/\r\n?/g, '\n');
-    if (format === 'container') {
+    if (format !== 'quote' && format !== 'mkdocs') {
         const extent = containerExtent(source);
         if (!extent || extent.unsupported) {return null;}
         return { ...declaration, ...extent };
@@ -286,7 +319,7 @@ export function calloutRanges(source: string): Array<{ start: number; end: numbe
 
 /** Rebuild only the delimiters; inline/body Markdown uses the normal serializer. */
 export function serializeCallout(callout: Callout, bodyMarkdown: string): string {
-    const body = bodyMarkdown.replace(/\r\n?/g, '\n').replace(/\n+$/, '');
+    let body = bodyMarkdown.replace(/\r\n?/g, '\n').replace(/\n+$/, '');
     if (callout.format === 'quote') {
         return callout.header + (body ? '\n' + body.split('\n').map(line => callout.indent + (line ? '> ' + line : '>')).join('\n') : '') + '\n';
     }
@@ -295,20 +328,46 @@ export function serializeCallout(callout: Callout, bodyMarkdown: string): string
     }
     let header = callout.header;
     let footer = callout.footer;
-    // A literal delimiter typed into the body must never close the outer block.
-    const literalRanges = literalMarkdownRanges(body);
-    const nestedWidths: number[] = [];
-    const bodyWidths: number[] = [];
-    for (const match of body.matchAll(/^ {0,3}(:{3,})([^\n]*)$/gm)) {
-        if (literalRanges.some(range => match.index! >= range.start && match.index! < range.end)) {continue;}
-        if (/^[ \t]*[A-Za-z]/.test(match[2])) {nestedWidths.push(match[1].length);}
-        else if (/^[ \t]*$/.test(match[2])) {
-            if (nestedWidths.length && match[1].length >= nestedWidths[nestedWidths.length - 1]) {nestedWidths.pop();}
-            else if (!nestedWidths.length) {bodyWidths.push(match[1].length);}
+    if (callout.format === 'myst' && header.trimStart().startsWith('`')) {
+        const opening = header.match(/`+/)![0].length;
+        let width = opening;
+        for (const match of body.matchAll(/^ {0,3}(`{3,})[ \t]*$/gm)) { width = Math.max(width, match[1].length + 1); }
+        if (width > opening) {
+            header = header.replace(/`+/, '`'.repeat(width));
+            footer = footer.replace(/`+/, run => '`'.repeat(Math.max(width, run.length)));
+        }
+        return header + '\n' + body + '\n' + footer + '\n';
+    }
+    const gitbook = callout.format === 'gitbook';
+    const canWiden = !gitbook && callout.format !== 'quarto';
+    const originalWidth = gitbook ? 0 : header.match(/:{3,}/)![0].length;
+    let width = originalWidth;
+    type BodyMarker = { width: number; offset: number };
+    const nested: { opener: BodyMarker; shorterClosers: BodyMarker[] }[] = [];
+    const escapes = new Set<number>();
+    const protectCloser = (marker: BodyMarker) => {
+        if (canWiden) { width = Math.max(width, marker.width + 1); }
+        else { escapes.add(marker.offset); }
+    };
+    for (const marker of bodyDelimiters(body, gitbook)) {
+        if (!marker.closing) {
+            nested.push({ opener: marker, shorterClosers: [] });
+        } else if (nested.length) {
+            const inner = nested[nested.length - 1];
+            if (marker.width >= inner.opener.width) { nested.pop(); }
+            else { inner.shorterClosers.push(marker); }
+        } else {
+            protectCloser(marker);
         }
     }
-    const originalWidth = header.match(/^ {0,3}(:{3,})/)![1].length;
-    const width = Math.max(originalWidth, ...bodyWidths.map(value => value + 1));
+    // Fixed closing markers (and unpaired openers) must stay visible as literal text.
+    for (const { opener, shorterClosers } of nested) {
+        escapes.add(opener.offset);
+        shorterClosers.forEach(protectCloser);
+    }
+    if (escapes.size) {
+        body = body.replace(/^ */gm, (indent, offset) => escapes.has(offset) ? indent + '\\' : indent);
+    }
     if (width !== originalWidth) {
         header = header.replace(/:{3,}/, ':'.repeat(width));
         footer = footer.replace(/:{3,}/, ':'.repeat(width));

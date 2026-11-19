@@ -71,6 +71,11 @@ const examples = [
         variant: { note: 'note', tip: 'tip', info: 'note', warning: 'warning', danger: 'caution' }[type],
     })),
     { name: 'VitePress spaced directive', source: '::: warning\nOriginal.\n:::\n', variant: 'warning' },
+    { name: 'GitBook hint', source: '{% hint style="success" icon="books" %}\nOriginal.\n{% endhint %}\n', variant: 'tip' },
+    { name: 'MyST backtick directive', source: '```{seealso} Más información\nOriginal.\n```\n', variant: 'note' },
+    { name: 'MyST colon directive', source: '::::{danger} 注意事項\nOriginal.\n::::\n', variant: 'caution' },
+    { name: 'Quarto callout', source: '::::: {#imp-demo .callout-important title="重要" collapse="true"}\nOriginal.\n:::\n', variant: 'important' },
+    { name: 'Quarto single class', source: ':::: callout-tip :::::\nOriginal.\n:::\n', variant: 'tip' },
     { name: 'MkDocs note', source: '!!! note\n    Original.\n', variant: 'note' },
     { name: 'MkDocs warning', source: '!!! warning\n    Original.\n', variant: 'warning' },
 ];
@@ -161,6 +166,9 @@ test('nested callouts preserve their source when the editable outer body changes
         '> [!info] Outer\n> Outer body.\n>\n> > [!warning]- Inner\n> > Original.\n',
         '::::info[Outer]\nOuter body.\n\n:::warning[Inner]\nOriginal.\n:::\n::::\n',
         '!!! note "Outer"\n    Outer body.\n\n    !!! warning "Inner"\n        Original.\n',
+        '{% hint style="info" %}\nOuter body.\n\n{% hint style="danger" %}\nOriginal.\n{% endhint %}\n{% endhint %}\n',
+        ':::::{note}\nOuter body.\n\n::: {.callout-tip}\nOriginal.\n:::\n:::::\n',
+        '::: {.callout-note}\nOuter body.\n\n:::: {.callout-tip}\nOriginal.\n:::\n:::\n',
     ]) {
         const editor = dom(render(source));
         assert.equal(editor.querySelectorAll('.mdw-callout').length, 1, source);
@@ -337,6 +345,14 @@ test('unknown and incomplete declarations stay literal and preserve source aroun
         '!!! constructor\n    Original.',
         '!!! warning\nOriginal without indentation.',
         ':::note[Unclosed title\nOriginal.\n:::',
+        '{% hint style="unknown" %}\nOriginal.\n{% endhint %}',
+        '{% hint style="danger" extra="value" %}\nOriginal.\n{% endhint %}',
+        '{% hint style="info" %}\nOriginal.',
+        ':::{note}\n:class: dropdown\n\nOriginal.\n:::',
+        '```{warning}\n---\nclass: dropdown\n---\nOriginal.\n```',
+        '::::{admonition} Custom\n:class: tip\n\n:::{note}\nOriginal.\n:::\n::::',
+        ':::: {.callout-danger}\nOriginal.\n:::',
+        '::: {.callout-tip custom="value"}\nOriginal.\n:::',
     ]) {
         const source = `${fragment}\n\nAdjacent.\n`;
         const editor = dom(render(source));

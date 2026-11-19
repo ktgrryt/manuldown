@@ -206,7 +206,7 @@ Use **… → Settings** in the toolbar or `/settings` to open ManulDown setting
 | `manulDown.toolbar.visible` | `true` | Show the toolbar |
 | `manulDown.toolbar.items` | Per-button defaults | Select toolbar buttons with checkboxes; H1–H6 are available |
 | `manulDown.toc.enabled` | `true` | Automatically show a table of contents when headings exist |
-| `manulDown.callout.defaultService` | `github` | Format for `/callout`: GitHub / GitLab, Qiita, Zenn, Obsidian, Docusaurus / VitePress, or MkDocs. Changes apply to new callouts immediately |
+| `manulDown.callout.defaultService` | `github` | Initial format for `/callout`. New callouts use the last service chosen in a callout’s **…** menu until the VS Code window restarts or reloads. [Supported services](docs/callouts.md) |
 | `manulDown.openByDefault` | `true` | Open Markdown with ManulDown by default |
 | `manulDown.list.dashStyle` | `false` | Use `-` for bullet markers |
 | `manulDown.list.indentSize` | `2` | Indentation width when the document style cannot be detected (`2` or `4` spaces) |
