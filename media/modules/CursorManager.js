@@ -870,6 +870,24 @@ export class CursorManager {
         return true;
     }
 
+    normalizeInlineCodeLineEnd(selection) {
+        if (!selection?.rangeCount || !selection.isCollapsed) return;
+        const range = selection.getRangeAt(0);
+        const node = range.startContainer;
+        const insideCode = this.domUtils.getParentElement(node, 'CODE');
+        const previous = node.childNodes[range.startOffset - 1];
+        const code = insideCode || (previous?.tagName === 'CODE' ? previous : null);
+        if (!code || this.domUtils.getParentElement(code, 'PRE')) return;
+
+        if (insideCode) {
+            const position = this._getInlineCodeCursorInfo(range, code);
+            if (!position || position.offset < position.total) return;
+        }
+
+        // Even a DOM position immediately after <code> can type into it in Chromium.
+        this._placeCursorAfterInlineCodeElement(code, selection);
+    }
+
     _getNestedListContainer(listItem) {
         if (!listItem) {
             return null;
@@ -9591,10 +9609,16 @@ export class CursorManager {
     /**
      * カーソルを行末に移動
      */
-    moveCursorToLineEnd() {
+    moveCursorToLineEnd({ exitInlineCode = true } = {}) {
         this.resetCodeVerticalNavigation?.();
         const selection = window.getSelection();
         if (!selection || !selection.rangeCount) return;
+
+        this._moveToLogicalLineEnd(selection);
+        if (exitInlineCode) this.normalizeInlineCodeLineEnd(selection);
+    }
+
+    _moveToLogicalLineEnd(selection) {
         if (this._moveToMathLineBoundary(selection, false)) return;
         if (this._moveToCodeLineBoundary(selection, false)) return;
 

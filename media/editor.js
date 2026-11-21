@@ -16611,7 +16611,7 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
         let endRange = startRange.cloneRange();
 
         if (typeof cursorManager.moveCursorToLineEnd === 'function') {
-            cursorManager.moveCursorToLineEnd();
+            cursorManager.moveCursorToLineEnd({ exitInlineCode: false });
             if (selection.rangeCount) {
                 endRange = selection.getRangeAt(0).cloneRange();
                 endRange.collapse(true);
@@ -16707,7 +16707,7 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
             lineStartRange.collapse(true);
 
             applySelectionRange(selection, originalRange.cloneRange());
-            cursorManager.moveCursorToLineEnd();
+            cursorManager.moveCursorToLineEnd({ exitInlineCode: false });
             if (!selection.rangeCount) {
                 applySelectionRange(selection, originalRange);
                 return false;
@@ -17705,12 +17705,15 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
     }
 
     function handleLineBoundaryKeydown(e) {
-        const isCtrlA = isMac && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey &&
-            typeof e.key === 'string' && e.key.toLowerCase() === 'a';
+        const isMacCtrl = isMac && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
+        const key = isMacCtrl && typeof e.key === 'string' ? e.key.toLowerCase() : '';
+        const isCtrlA = key === 'a';
+        const isCtrlE = key === 'e';
         if (isCtrlA && moveCaretToCheckboxFromTextStart(e)) {
             return true;
         }
         if (tableManager.handleLineBoundaryKeydown(e)) {
+            if (isCtrlE) cursorManager.normalizeInlineCodeLineEnd(window.getSelection());
             return true;
         }
 
@@ -17726,7 +17729,7 @@ const { captureEditorSelection, restoreEditorSelection } = await import(`./vendo
         }
 
         // Ctrl+E (行末) - macOS Emacsキーバインド
-        if (isMac && e.ctrlKey && !e.metaKey && e.key === 'e' && !e.shiftKey) {
+        if (isCtrlE) {
             e.preventDefault();
             // チェックボックス上にカーソルがある場合はそのテキストの末尾に移動
             const cbForEnd = isCursorOnCheckbox();

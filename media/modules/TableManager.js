@@ -834,6 +834,9 @@ export class TableManager {
                         this._setCursorToCellStart(cell);
                     }
                 } else {
+                    if (key === 'e' && this._moveToVisualLineEndFromInlineCode(cell, range, selection)) {
+                        return true;
+                    }
                     if (range.collapsed && this._isAtCurrentVisualLineEndInCell(cell, range)) {
                         const info = this._getCellInfo(cell);
                         const rightEdge = info ? this._getTableEdge(info.table, 'right') : null;
@@ -886,6 +889,22 @@ export class TableManager {
             return true;
         }
 
+        return false;
+    }
+
+    _moveToVisualLineEndFromInlineCode(cell, range, selection) {
+        if (!range.collapsed || typeof selection.modify !== 'function') return false;
+        const code = this._getParentElementByTag(range.startContainer, 'CODE');
+        if (!code || !cell.contains(code) || this._getParentElementByTag(code, 'PRE')) return false;
+
+        // Inline code and ordinary text have different font metrics on the same line.
+        const original = range.cloneRange();
+        selection.modify('move', 'forward', 'lineboundary');
+        const target = selection.anchorNode;
+        if (cell.contains(target) && !this._isExcludedCaretTarget(target, cell)) return true;
+
+        selection.removeAllRanges();
+        selection.addRange(original);
         return false;
     }
 
