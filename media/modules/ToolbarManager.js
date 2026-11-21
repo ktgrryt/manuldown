@@ -45,6 +45,7 @@ export class ToolbarManager {
         this.focusedFootnoteNumber = null;
         this.focusedTocBlock = null;
         this.overflowLayoutFrame = null;
+        this.exportMenuCloseTimer = null;
         this.activeStateCommands = new Map([
             ['bold', 'bold'],
             ['italic', 'italic'],
@@ -176,6 +177,21 @@ export class ToolbarManager {
                     this.exportMenu.appendChild(this.createOverflowItem(format, label));
                 }
                 this.overflowMenu.appendChild(this.exportMenu);
+
+                const scheduleClose = (event) => {
+                    if (event.pointerType === 'touch' || this.exportMenu.hidden) return;
+                    // Give the pointer time to cross the menu edges.
+                    clearTimeout(this.exportMenuCloseTimer);
+                    this.exportMenuCloseTimer = setTimeout(() => {
+                        if (!this.exportMenu.contains(document.activeElement)) this.setExportMenuOpen(false);
+                    }, 150);
+                };
+                menuItem.addEventListener('pointerenter', (event) => {
+                    if (event.pointerType !== 'touch' && !menuItem.disabled) this.setExportMenuOpen(true);
+                });
+                menuItem.addEventListener('pointerleave', scheduleClose);
+                this.exportMenu.addEventListener('pointerenter', () => clearTimeout(this.exportMenuCloseTimer));
+                this.exportMenu.addEventListener('pointerleave', scheduleClose);
             }
         });
 
@@ -418,14 +434,15 @@ export class ToolbarManager {
         }
 
         const margin = 8;
-        const gap = 4;
+        const overlap = 6;
         menu.style.maxHeight = '';
         const { width, height } = menu.getBoundingClientRect();
-        const right = parent.right + gap;
-        let left = right + width <= window.innerWidth - margin ? right : parent.left - gap - width;
+        const right = parent.right - overlap;
+        let left = right + width <= window.innerWidth - margin ? right : parent.left + overlap - width;
         let top = Math.min(Math.max(parent.top, anchor.top), window.innerHeight - margin - height);
 
         if (left < margin) {
+            const gap = 4;
             left = anchor.left;
             const below = window.innerHeight - margin - anchor.bottom - gap;
             const above = anchor.top - gap - margin;
@@ -441,11 +458,12 @@ export class ToolbarManager {
 
     setExportMenuOpen(open, { focus = false } = {}) {
         if (!this.exportMenu) return;
+        clearTimeout(this.exportMenuCloseTimer);
         const trigger = this.overflowButtons.get('export');
         trigger.setAttribute('aria-expanded', String(open));
         this.exportMenu.hidden = !open;
         if (open) {
-            trigger.scrollIntoView({ block: 'nearest' });
+            if (focus) trigger.scrollIntoView({ block: 'nearest' });
             this.positionExportMenu();
         }
         if (focus) {
@@ -471,7 +489,9 @@ export class ToolbarManager {
     executeCommand(command) {
         if (command === 'export') {
             if (this.overflowMenu?.hidden) this.openOverflowMenu();
-            this.setExportMenuOpen(this.exportMenu?.hidden, { focus: true });
+            // Clicking Export moves focus into the submenu if it opened on hover.
+            const open = this.exportMenu?.hidden || !this.exportMenu?.contains(document.activeElement);
+            this.setExportMenuOpen(open, { focus: true });
             return;
         }
         if (command === 'exportHtml') {

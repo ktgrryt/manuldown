@@ -2,20 +2,26 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const { openEditor } = require('../helpers/browser-editor');
 
-test('the toolbar opens the format menu beside Export without expanding the tools menu', async t => {
-    const { evaluate, key, connection, sessionId, settle } = await openEditor(t, '本文');
+test('hovering over Export opens the format menu over the edge of the tools menu', async t => {
+    const { evaluate, waitFor, key, connection, sessionId, settle, select } = await openEditor(t, '本文');
+    await select("[document.querySelector('#editor p').firstChild, 2]");
     const toggle = "document.querySelector('.toolbar-overflow-toggle')";
     const overflow = "document.querySelector('.toolbar-overflow-menu')";
     const trigger = `${overflow}.querySelector('[data-command="export"]')`;
     const formats = "document.getElementById('toolbar-export-menu')";
     const actions = () => evaluate("hostMessages.map(m => m.type).filter(type => ['chooseExport', 'openPdfPreview', 'exportHtml', 'exportWord'].includes(type))");
+    const getPoint = element => evaluate(`(() => {
+        const button = ${element};
+        button.scrollIntoView({ block: 'nearest' });
+        const rect = button.getBoundingClientRect();
+        return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    })()`);
+    const hover = async element => {
+        const point = await getPoint(element);
+        await connection.send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...point }, sessionId);
+    };
     const click = async element => {
-        const point = await evaluate(`(() => {
-            const button = ${element};
-            button.scrollIntoView({ block: 'nearest' });
-            const rect = button.getBoundingClientRect();
-            return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
-        })()`);
+        const point = await getPoint(element);
         await connection.send('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', clickCount: 1, ...point }, sessionId);
         await connection.send('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: 1, ...point }, sessionId);
     };
@@ -27,15 +33,17 @@ test('the toolbar opens the format menu beside Export without expanding the tool
     const openFormats = async side => {
         await click(toggle);
         const height = await evaluate(`${overflow}.scrollHeight`);
-        await click(trigger);
+        await hover(trigger);
+        assert.equal(await evaluate(`${trigger}.getAttribute('aria-expanded')`), 'true');
+        assert.equal(await evaluate('document.activeElement.id'), 'editor', 'Hover preserves editor focus');
         const { button, menu, parent, viewport } = await evaluate(`({
             button: ${trigger}.getBoundingClientRect().toJSON(),
             menu: ${formats}.getBoundingClientRect().toJSON(),
             parent: ${overflow}.getBoundingClientRect().toJSON(),
             viewport: { width: innerWidth, height: innerHeight }
         })`);
-        const gap = side === 'right' ? menu.left - parent.right : parent.left - menu.right;
-        assert.ok(gap >= 3 && gap <= 5, `The format menu opens on the ${side} of the tools menu`);
+        const overlap = side === 'right' ? parent.right - menu.left : menu.right - parent.left;
+        assert.ok(overlap >= 5 && overlap <= 7, `The format menu slightly overlaps the ${side} edge`);
         const top = Math.min(Math.max(parent.top, button.top), viewport.height - 8 - menu.height);
         assert.ok(Math.abs(menu.top - top) < 1, 'The menu lines up with Export when space permits');
         assert.ok(menu.left >= 0 && menu.top >= 0 && menu.right <= viewport.width && menu.bottom <= viewport.height);
@@ -43,6 +51,15 @@ test('the toolbar opens the format menu beside Export without expanding the tool
     };
     await openFormats('right');
     assert.deepEqual(await evaluate(`Array.from(${formats}.children, item => item.textContent)`), ['PDF', 'HTML', 'DOCX']);
+    await hover(`${formats}.querySelector('[data-command="exportPdf"]')`);
+    await evaluate('new Promise(resolve => setTimeout(resolve, 200))');
+    assert.ok(await evaluate(`!${formats}.hidden && ${formats}.matches(':hover')`));
+    await hover(`${overflow}.querySelector('[data-command="settings"]')`);
+    await waitFor(`${formats}.hidden && !${overflow}.hidden`);
+
+    await hover(trigger);
+    await click(trigger);
+    assert.equal(await evaluate('document.activeElement.textContent'), 'PDF');
     await key('Escape', 'Escape', 27);
     assert.ok(await evaluate(`${formats}.hidden && !${overflow}.hidden && document.activeElement === ${trigger}`));
     assert.deepEqual(await actions(), []);
@@ -55,10 +72,12 @@ test('the toolbar opens the format menu beside Export without expanding the tool
     await connection.send('Emulation.setDeviceMetricsOverride', { width: 320, height: 240, deviceScaleFactor: 1, mobile: false }, sessionId);
     await settle();
     await openFormats('left');
+    await click(trigger);
     await key('ArrowDown', 'ArrowDown', 40);
     await pressEnter();
     assert.deepEqual(await actions(), ['openPdfPreview', 'exportHtml']);
     await openFormats('left');
+    await hover(`${formats}.querySelector('[data-command="exportWord"]')`);
     await click(`${formats}.querySelector('[data-command="exportWord"]')`);
     assert.deepEqual(await actions(), ['openPdfPreview', 'exportHtml', 'exportWord']);
     assert.ok(await evaluate(`${formats}.hidden && ${overflow}.hidden`));
