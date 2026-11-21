@@ -6,6 +6,14 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 
 ## [Unreleased]
 
+## [2.4.5] - 2026-11-21
+
+### Changed
+- Show export formats beside the toolbar menu and open the submenu on hover.
+
+### Fixed
+- On macOS, move the caret to the end of the current line when pressing Control+E inside inline code. Place the caret outside the code when it ends the line.
+
 ## [2.4.4] - 2026-11-19
 
 ### Added
