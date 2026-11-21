@@ -1505,17 +1505,7 @@ export class MarkdownEditorProvider implements vscode.CustomTextEditorProvider {
         // Handle messages from the webview
         webviewPanel.webview.onDidReceiveMessage(
             async (message) => {
-                let action = message.type;
-                if (action === 'chooseExport') {
-                    const format = await vscode.window.showQuickPick([
-                        { label: 'PDF', action: 'openPdfPreview' },
-                        { label: 'HTML', action: 'exportHtml' },
-                        { label: 'DOCX', action: 'exportWord' },
-                    ], { title: 'Export', placeHolder: 'Select a file format' });
-                    if (!format || editorDisposed) { return; }
-                    action = format.action;
-                }
-                switch (action) {
+                switch (message.type) {
                     case 'exportHtml':
                         try {
                             await exportHtml(this.context.extensionUri, document.uri, captureExport, resolveExportImage);

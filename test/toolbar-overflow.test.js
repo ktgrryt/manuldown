@@ -70,9 +70,18 @@ async function fixture(t, initialWidth, { withFootnote = false, withToc = false,
     const { ToolbarManager } = await modulePromise;
     const manager = new ToolbarManager(editor, { saveState() {} }, { toolbarItems });
     manager.setup();
-    for (const button of [manager.overflowToggle, ...manager.overflowButtons.values()]) {
+    for (const button of [manager.overflowToggle, ...Array.from(manager.overflowMenu.querySelectorAll('button'))]) {
         Object.defineProperty(button, 'focus', { value: () => { activeElement = button; } });
         button.scrollIntoView = () => {};
+    }
+    if (manager.exportMenu) {
+        manager.overflowMenu.getBoundingClientRect = () => ({
+            width: 220, left: 8, right: 228, top: 44, bottom: 240,
+        });
+        manager.overflowButtons.get('export').getBoundingClientRect = () => ({
+            left: 12, right: 224, top: 48, bottom: 76,
+        });
+        manager.exportMenu.getBoundingClientRect = () => ({ width: 96, height: 94 });
     }
     const event = (type, target, key) => {
         const e = document.createEvent('Event');
@@ -163,11 +172,13 @@ test('Export remains in the ellipsis even when every editing button fits', async
     assert.ok(!f.visible().includes('export'));
     assert.deepEqual(f.overflow(), ['export']);
     assert.equal(f.manager.overflowToggle.hidden, false);
-    let opened = 0;
-    f.manager.onChooseExport = () => { opened++; };
+    const trigger = f.manager.overflowButtons.get('export');
     f.event('click', f.manager.overflowToggle);
-    f.event('click', f.manager.overflowButtons.get('export'));
-    assert.equal(opened, 1);
+    f.event('click', trigger);
+    assert.equal(trigger.getAttribute('aria-expanded'), 'true');
+    assert.equal(trigger.nextElementSibling, f.manager.exportMenu);
+    assert.equal(f.manager.exportMenu.hidden, false);
+    assert.deepEqual(Array.from(f.manager.exportMenu.children, item => item.textContent), ['PDF', 'HTML', 'DOCX']);
 });
 
 test('footnote numbers keep editing tools disabled in the overflow menu while Settings remains available', async (t) => {
@@ -327,8 +338,11 @@ test('Export remains available from the overflow menu on a read-only selection',
     f.focus(f.editor.querySelector('[data-mdw-footnote-backref]'));
     assert.ok(f.overflow().includes('export'));
     let exported = 0;
-    f.manager.onChooseExport = () => { exported++; };
+    f.manager.onExportPdf = () => { exported++; };
     f.event('click', f.manager.overflowToggle);
     f.event('click', f.manager.overflowButtons.get('export'));
+    assert.equal(exported, 0);
+    f.event('click', f.manager.exportMenu.querySelector('[data-command="exportPdf"]'));
     assert.equal(exported, 1);
+    assert.equal(f.manager.overflowMenu.hidden, true);
 });

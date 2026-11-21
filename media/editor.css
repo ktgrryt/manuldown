@@ -85,6 +85,7 @@ body.toc-resizing {
 
 /* Floating surfaces share one material; only their placement and width vary. */
 .toolbar-overflow-menu,
+.toolbar-export-menu,
 .code-block-export-menu,
 .language-suggestions,
 .mdw-callout-type-picker,
@@ -159,14 +160,23 @@ body.toc-resizing {
     padding: 6px;
 }
 
-.toolbar-overflow-menu {
+.toolbar-overflow-menu,
+.toolbar-export-menu {
     position: fixed;
     z-index: 1201;
     width: max-content;
-    min-width: min(120px, calc(100vw - 16px));
     max-width: calc(100vw - 16px);
     padding: 4px;
     overflow-y: auto;
+}
+
+.toolbar-overflow-menu {
+    min-width: min(120px, calc(100vw - 16px));
+}
+
+.toolbar-export-menu {
+    min-width: min(96px, calc(100vw - 16px));
+    max-height: calc(100vh - 16px);
 }
 
 .toolbar-overflow-item {
@@ -186,10 +196,27 @@ body.toc-resizing {
 }
 
 .toolbar-overflow-item:hover,
-.toolbar-overflow-item:focus-visible {
+.toolbar-overflow-item:focus-visible,
+.toolbar-overflow-item[aria-expanded="true"] {
     outline: none;
     background: var(--md-ui-hover);
     color: var(--md-ui-foreground);
+}
+
+.toolbar-overflow-item[aria-haspopup="menu"] {
+    padding-right: 28px;
+}
+
+.toolbar-overflow-item[aria-haspopup="menu"]::after {
+    content: '';
+    position: absolute;
+    right: 8px;
+    top: 50%;
+    width: 14px;
+    height: 14px;
+    transform: translateY(-50%);
+    background: currentColor;
+    mask: var(--md-icon-chevron--right) center / contain no-repeat;
 }
 
 .toolbar-overflow-item.is-active::before {
@@ -198,7 +225,7 @@ body.toc-resizing {
     left: 9px;
 }
 
-.toolbar-overflow-menu.has-checkable-items .toolbar-overflow-item {
+.toolbar-overflow-menu.has-checkable-items > .toolbar-overflow-item {
     padding-left: 28px;
 }
 

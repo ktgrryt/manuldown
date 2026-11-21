@@ -25,7 +25,6 @@ const vscodeMockState = {
     quickPickCalls: [],
     saveDialogCalls: [],
     inputBoxCalls: [],
-    quickPickResponses: [],
     inputBoxResponses: [],
     findFilesCalls: [],
     findFilesResponses: [],
@@ -57,7 +56,6 @@ function resetVscodeMockState() {
     vscodeMockState.quickPickCalls.length = 0;
     vscodeMockState.saveDialogCalls.length = 0;
     vscodeMockState.inputBoxCalls.length = 0;
-    vscodeMockState.quickPickResponses.length = 0;
     vscodeMockState.inputBoxResponses.length = 0;
     vscodeMockState.findFilesCalls.length = 0;
     vscodeMockState.findFilesResponses.length = 0;
@@ -240,10 +238,6 @@ function loadExtensionModules() {
             showSaveDialog: async options => { vscodeMockState.saveDialogCalls.push(options); },
             showQuickPick: async (items, options, token) => {
                 vscodeMockState.quickPickCalls.push({ items, options, token });
-                const response = vscodeMockState.quickPickResponses.shift();
-                return typeof response === 'function'
-                    ? response(items, options, token)
-                    : response;
             },
             showInputBox: async (options, token) => {
                 vscodeMockState.inputBoxCalls.push({ options, token });
@@ -481,21 +475,17 @@ test('callout service selections are shared across documents for one window sess
     assert.equal(new MarkdownEditorProvider({}).getWebviewSettings().calloutDefaultService, 'qiita');
 });
 
-test('toolbar export offers PDF, HTML and DOCX in order and runs only the selected format', async t => {
+test('editor export messages open the PDF preview or the save dialog for HTML and DOCX', async t => {
     const { provider, document, webview } = await createEditorSyncHarness();
     t.after(() => webview.dispose());
     const previews = [];
     provider.pdfPreviewProvider = { open: async source => { previews.push(source); } };
-    const choose = () => webview.sendMessage({ type: 'chooseExport' });
-    await choose();
-    assert.deepEqual(vscodeMockState.quickPickCalls[0].items.map(item => item.label), ['PDF', 'HTML', 'DOCX']);
-    assert.deepEqual(previews, []);
-    assert.deepEqual(vscodeMockState.saveDialogCalls, []);
-    for (const label of ['PDF', 'HTML', 'DOCX']) {
-        vscodeMockState.quickPickResponses.push(items => items.find(item => item.label === label));
-        await choose();
-    }
+    await webview.sendMessage({ type: 'openPdfPreview' });
     assert.deepEqual(previews, [document]);
+    assert.deepEqual(vscodeMockState.saveDialogCalls, []);
+    await webview.sendMessage({ type: 'exportHtml' });
+    await webview.sendMessage({ type: 'exportWord' });
+    assert.deepEqual(vscodeMockState.quickPickCalls, []);
     assert.deepEqual(vscodeMockState.saveDialogCalls.map(dialog => dialog.defaultUri.path),
         [document.uri.path.replace(/\.md$/, '.html'), document.uri.path.replace(/\.md$/, '.docx')]);
     assert.deepEqual(vscodeMockState.errors, []);

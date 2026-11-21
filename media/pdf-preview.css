@@ -75,14 +75,14 @@ input[type=checkbox] { min-height: 0; accent-color: var(--vscode-focusBorder, #0
 .break-overlay { display: none; position: absolute; inset: 0; z-index: 2; pointer-events: none; }
 .editing-breaks .page-rendered .break-overlay { display: block; }
 .break-guide { position: absolute; height: 12px; transform: translateY(-50%); outline: none; pointer-events: none; }
-.break-guide::before { content: ''; position: absolute; top: 50%; left: 0; right: 0; border-top: 1px solid #a8b1bb; opacity: .55; }
+.break-guide::before { content: ''; position: absolute; top: 50%; left: 0; right: 0; transform: translateY(-50%); border-top: 1px solid #a8b1bb; opacity: .35; }
 .pdf-preview .break-insert { position: absolute; inset: 0; width: 100%; min-height: 0; height: 100%; padding: 0; border: 0; border-radius: 0; background: transparent; pointer-events: auto; }
 .pdf-preview .break-insert:hover { background: transparent; }
 .pdf-preview .break-insert:focus-visible { outline: none; }
 .break-guide:hover, .break-guide:focus-within, .break-guide.is-pending { z-index: 3; }
-.break-guide:hover::before, .break-guide:focus-within::before, .break-guide.is-pending::before, .manual-break::before { border-top-color: var(--vscode-focusBorder, #007fd4); opacity: 1; }
+.break-guide:where(:hover, :focus-visible, :has(> :focus-visible))::before { border-top: 2px solid var(--vscode-focusBorder, #007fd4); opacity: 1; }
 .manual-break { display: flex; align-items: center; justify-content: center; height: var(--md-ui-control-size); }
-.manual-break::before { border-top-style: dashed; }
+.manual-break::before { border-top: 1px dashed var(--vscode-focusBorder, #007fd4); opacity: 1; }
 .pdf-preview .break-remove { position: relative; max-width: 100%; background: var(--pdf-workspace-background); pointer-events: auto; }
 .break-remove span:not(.md-icon) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .editing-breaks .has-manual-break .page-caption { left: auto; right: 0; }

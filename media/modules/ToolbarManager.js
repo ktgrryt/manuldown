@@ -4,7 +4,12 @@
  * ツールバーボタンのイベント処理とコマンド実行を担当
  */
 
-const documentCommands = new Set(['settings', 'export', 'exportHtml', 'exportPdf', 'exportWord']);
+const exportFormats = new Map([
+    ['exportPdf', 'PDF'],
+    ['exportHtml', 'HTML'],
+    ['exportWord', 'DOCX'],
+]);
+const documentCommands = new Set(['settings', 'export', ...exportFormats.keys()]);
 
 function shouldRefocusEditor(command) {
     return command !== 'table' && command !== 'link' && command !== 'image' && command !== 'footnote' &&
@@ -28,7 +33,6 @@ export class ToolbarManager {
         this.canInsertMath = options.canInsertMath || (() => true);
         this.onInsertMathBlock = options.onInsertMathBlock || null;
         this.onOpenSettings = options.onOpenSettings || null;
-        this.onChooseExport = options.onChooseExport || null;
         this.onExportHtml = options.onExportHtml || null;
         this.onExportWord = options.onExportWord || null;
         this.onExportPdf = options.onExportPdf || null;
@@ -155,23 +159,24 @@ export class ToolbarManager {
                 return;
             }
             const command = item.getAttribute('data-command');
-            const menuItem = document.createElement('button');
-            menuItem.type = 'button';
-            menuItem.className = 'toolbar-overflow-item';
-            menuItem.setAttribute('data-command', command);
-            menuItem.tabIndex = -1;
-            menuItem.addEventListener('mousedown', (event) => event.preventDefault());
-            menuItem.addEventListener('click', (event) => {
-                event.preventDefault();
-                if (menuItem.disabled) return;
-                this.closeOverflowMenu({ restoreSelection: true });
-                this.executeCommand(command);
-                if (shouldRefocusEditor(command)) {
-                    setTimeout(() => this.editor.focus(), 0);
-                }
-            });
+            const menuItem = this.createOverflowItem(command);
             this.overflowMenu.appendChild(menuItem);
             this.overflowButtons.set(command, menuItem);
+            if (command === 'export') {
+                this.exportMenu = document.createElement('div');
+                this.exportMenu.id = 'toolbar-export-menu';
+                this.exportMenu.className = 'toolbar-export-menu';
+                this.exportMenu.setAttribute('role', 'menu');
+                this.exportMenu.setAttribute('aria-label', 'Export format');
+                this.exportMenu.hidden = true;
+                menuItem.setAttribute('aria-haspopup', 'menu');
+                menuItem.setAttribute('aria-controls', this.exportMenu.id);
+                menuItem.setAttribute('aria-expanded', 'false');
+                for (const [format, label] of exportFormats) {
+                    this.exportMenu.appendChild(this.createOverflowItem(format, label));
+                }
+                this.overflowMenu.appendChild(this.exportMenu);
+            }
         });
 
         this.overflowToggle.addEventListener('mousedown', (event) => event.preventDefault());
@@ -187,7 +192,15 @@ export class ToolbarManager {
             this.focusOverflowItem(event.key === 'ArrowUp' ? -1 : 0);
         });
         this.overflowMenu.addEventListener('keydown', (event) => {
-            if (event.key === 'Escape') {
+            const inExportMenu = this.exportMenu?.contains(event.target);
+            if (event.key === 'ArrowRight' && event.target === this.overflowButtons.get('export')) {
+                event.preventDefault();
+                this.setExportMenuOpen(true, { focus: true });
+            } else if (inExportMenu && (event.key === 'ArrowLeft' || event.key === 'Escape')) {
+                event.preventDefault();
+                event.stopPropagation();
+                this.setExportMenuOpen(false, { focus: true });
+            } else if (event.key === 'Escape') {
                 event.preventDefault();
                 event.stopPropagation();
                 this.closeOverflowMenu({ restoreSelection: true, focusToggle: true });
@@ -195,13 +208,14 @@ export class ToolbarManager {
                 this.closeOverflowMenu({ focusToggle: true });
             } else if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
                 event.preventDefault();
-                const items = this.getEnabledOverflowItems();
+                const items = this.getEnabledOverflowItems(inExportMenu ? this.exportMenu : this.overflowMenu);
                 const current = items.indexOf(document.activeElement);
                 const index = event.key === 'Home' ? 0 : event.key === 'End' ? -1 :
                     (current + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
-                this.focusOverflowItem(index);
+                this.focusOverflowItem(index, items);
             }
         });
+        this.overflowMenu.addEventListener('scroll', () => this.positionExportMenu());
         document.addEventListener('mousedown', (event) => {
             if (!this.overflowMenu.hidden && !this.overflowMenu.contains(event.target) &&
                 !this.overflowToggle.contains(event.target)) {
@@ -228,6 +242,25 @@ export class ToolbarManager {
         }
         window.addEventListener('resize', scheduleLayout);
         this.updateOverflowLayout();
+    }
+
+    createOverflowItem(command, label = '') {
+        const item = document.createElement('button');
+        item.type = 'button';
+        item.className = 'toolbar-overflow-item';
+        item.setAttribute('data-command', command);
+        item.setAttribute('role', 'menuitem');
+        item.tabIndex = -1;
+        item.textContent = label;
+        item.addEventListener('mousedown', event => event.preventDefault());
+        item.addEventListener('click', event => {
+            event.preventDefault();
+            if (item.disabled) return;
+            if (command !== 'export') this.closeOverflowMenu({ restoreSelection: true });
+            this.executeCommand(command);
+            if (shouldRefocusEditor(command)) setTimeout(() => this.editor.focus(), 0);
+        });
+        return item;
     }
 
     isToolbarCommandEnabled(command) {
@@ -349,6 +382,7 @@ export class ToolbarManager {
 
     closeOverflowMenu({ restoreSelection = false, focusToggle = false } = {}) {
         if (!this.overflowMenu) return;
+        this.setExportMenuOpen(false);
         this.overflowMenu.hidden = true;
         this.overflowToggle.setAttribute('aria-expanded', 'false');
         const range = this.overflowSelection;
@@ -369,14 +403,62 @@ export class ToolbarManager {
         this.overflowMenu.style.left = `${Math.max(8, Math.min(anchor.right - width, window.innerWidth - width - 8))}px`;
         this.overflowMenu.style.top = `${Math.max(8, top)}px`;
         this.overflowMenu.style.maxHeight = `${Math.max(40, window.innerHeight - Math.max(8, top) - 8)}px`;
+        this.positionExportMenu();
     }
 
-    getEnabledOverflowItems() {
-        return Array.from(this.overflowButtons.values()).filter((item) => !item.hidden && !item.disabled);
+    positionExportMenu() {
+        const menu = this.exportMenu;
+        if (!menu || menu.hidden) return;
+
+        const parent = this.overflowMenu.getBoundingClientRect();
+        const anchor = this.overflowButtons.get('export').getBoundingClientRect();
+        if (anchor.bottom <= parent.top || anchor.top >= parent.bottom) {
+            this.setExportMenuOpen(false, { focus: menu.contains(document.activeElement) });
+            return;
+        }
+
+        const margin = 8;
+        const gap = 4;
+        menu.style.maxHeight = '';
+        const { width, height } = menu.getBoundingClientRect();
+        const right = parent.right + gap;
+        let left = right + width <= window.innerWidth - margin ? right : parent.left - gap - width;
+        let top = Math.min(Math.max(parent.top, anchor.top), window.innerHeight - margin - height);
+
+        if (left < margin) {
+            left = anchor.left;
+            const below = window.innerHeight - margin - anchor.bottom - gap;
+            const above = anchor.top - gap - margin;
+            const openBelow = below >= height || below >= above;
+            const availableHeight = Math.max(0, openBelow ? below : above);
+            menu.style.maxHeight = `${availableHeight}px`;
+            top = openBelow ? anchor.bottom + gap : anchor.top - gap - Math.min(height, availableHeight);
+        }
+
+        menu.style.left = `${Math.max(margin, Math.min(left, window.innerWidth - margin - width))}px`;
+        menu.style.top = `${Math.max(margin, top)}px`;
     }
 
-    focusOverflowItem(index) {
-        const items = this.getEnabledOverflowItems();
+    setExportMenuOpen(open, { focus = false } = {}) {
+        if (!this.exportMenu) return;
+        const trigger = this.overflowButtons.get('export');
+        trigger.setAttribute('aria-expanded', String(open));
+        this.exportMenu.hidden = !open;
+        if (open) {
+            trigger.scrollIntoView({ block: 'nearest' });
+            this.positionExportMenu();
+        }
+        if (focus) {
+            const target = this.exportMenu.hidden ? trigger : this.exportMenu.firstElementChild;
+            target.focus({ preventScroll: true });
+        }
+    }
+
+    getEnabledOverflowItems(menu = this.overflowMenu) {
+        return Array.from(menu.children).filter(item => item.tagName === 'BUTTON' && !item.hidden && !item.disabled);
+    }
+
+    focusOverflowItem(index, items = this.getEnabledOverflowItems()) {
         const item = items[index < 0 ? items.length - 1 : index];
         item?.focus({ preventScroll: true });
         item?.scrollIntoView({ block: 'nearest' });
@@ -388,7 +470,8 @@ export class ToolbarManager {
      */
     executeCommand(command) {
         if (command === 'export') {
-            this.onChooseExport?.();
+            if (this.overflowMenu?.hidden) this.openOverflowMenu();
+            this.setExportMenuOpen(this.exportMenu?.hidden, { focus: true });
             return;
         }
         if (command === 'exportHtml') {

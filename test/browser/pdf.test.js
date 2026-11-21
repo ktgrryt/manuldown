@@ -412,11 +412,24 @@ test('PDF preview displays actual pages with its CSP and accepts layout and brea
     for (const boundary of automaticStarts) assert.equal(await evaluate(`!!document.querySelector('[data-boundary="${boundary.id}"]')`), false, 'No insertion line before a block already at the page start');
     await connection.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 20, y: 20 }, sessionId);
     assert.equal(await evaluate('Array.from(document.querySelectorAll(".break-insert")).every(button=>!button.textContent&&!button.children.length&&!button.hasAttribute("title"))'), true, 'Insertion positions show only a line, without icons, labels or tooltips');
-    assert.equal(await evaluate('Array.from(document.querySelectorAll(".break-guide")).every(guide=>getComputedStyle(guide,"::before").opacity==="0.55")'), true, 'Available positions use faint horizontal lines');
+    const readLines = () => evaluate(`Array.from(document.querySelectorAll('.break-guide'), guide => {
+        const style = getComputedStyle(guide, '::before');
+        return { id: guide.dataset.boundaryFocus, width: style.borderTopWidth, opacity: Number(style.opacity) };
+    })`);
+    const idleLines = await readLines();
+    assert.ok(idleLines.every(line => line.width === '1px' && line.opacity > 0 && line.opacity < 0.5), 'Each insertion position has a faint 1px line');
+    const highlightedLines = idleLines.map(line => line.id === section.id ? { ...line, width: '2px', opacity: 1 } : line);
     assert.equal(await evaluate('document.getElementById("reset-breaks").textContent'), 'Clear all');
+    await evaluate(`document.querySelector('[data-boundary-focus="${section.id}"]').focus({preventScroll:true})`);
+    const tabKey = { key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 };
+    await connection.send('Input.dispatchKeyEvent', { type: 'keyDown', ...tabKey }, sessionId);
+    await connection.send('Input.dispatchKeyEvent', { type: 'keyUp', ...tabKey }, sessionId);
+    assert.equal(await evaluate('document.activeElement.dataset.boundary'), section.id);
+    assert.deepEqual(await readLines(), highlightedLines, 'Tab emphasizes only the focused insertion position');
+    await evaluate('document.activeElement.blur()');
     const targetBox = await evaluate(`(() => {const guide=document.querySelector('[data-boundary-focus="${section.id}"]');const r=guide.getBoundingClientRect();window.targetOffset=guide.closest('.pdf-page').getBoundingClientRect().top+Number(guide.dataset.sourceTop);return {x:r.left+r.width*.75,y:r.top+r.height/2};})()`);
     await connection.send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...targetBox }, sessionId);
-    assert.equal(await evaluate('Array.from(document.querySelectorAll(".break-guide")).filter(guide=>getComputedStyle(guide,"::before").opacity==="1").length'), 1, 'Only the hovered insertion line is emphasized');
+    assert.deepEqual(await readLines(), highlightedLines, 'Hover emphasizes only the targeted insertion line');
     assert.match(await evaluate(`document.querySelector('[data-boundary="${section.id}"]').getAttribute('aria-label')`), /Insert page break before Next section/);
     assert.equal(await evaluate(`document.elementFromPoint(${targetBox.x},${targetBox.y + 35}).tagName`), 'CANVAS', 'The editing overlay does not intercept document interaction outside block gaps');
     const insertScreenshot = await connection.send('Page.captureScreenshot', { format: 'png' }, sessionId);
@@ -427,6 +440,8 @@ test('PDF preview displays actual pages with its CSP and accepts layout and brea
     assert.equal(await evaluate('document.getElementById("break-feedback-text").textContent'), 'Updating preview…');
     assert.equal(await evaluate('document.getElementById("break-feedback").hidden'), true, 'Pending edits use the shared loading feedback before showing the Undo confirmation');
     assert.equal(await evaluate(`document.querySelector('[data-boundary="${section.id}"]').disabled`), true, 'Repeated edits are disabled while repaginating');
+    await connection.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 20, y: 20 }, sessionId);
+    assert.deepEqual(await readLines(), idleLines, 'Moving away restores the faint lines even while repaginating');
     await evaluate(`window.hostState={...window.hostState,revision:2,breaks:[${JSON.stringify(section.id)}],busy:true,canExport:false};window.postMessage(window.hostState,'*')`);
     await waitFor('document.getElementById("pages").getAttribute("aria-busy")==="true"');
     assert.equal(await evaluate('!document.getElementById("preview-loading").hidden&&document.getElementById("preview-loading").classList.contains("is-refreshing")'), true, 'Regeneration shows a compact loading indicator alongside the existing PDF');
